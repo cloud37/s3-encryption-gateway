@@ -1962,6 +1962,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("prefix")
 	delimiter := r.URL.Query().Get("delimiter")
 	continuationToken := r.URL.Query().Get("continuation-token")
+	marker := r.URL.Query().Get("marker")
 	maxKeys := int32(1000) // Default
 	if mk := r.URL.Query().Get("max-keys"); mk != "" {
 		if v, err := strconv.ParseInt(mk, 10, 32); err == nil {
@@ -1972,6 +1973,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	opts := s3.ListOptions{
 		Delimiter:         delimiter,
 		ContinuationToken: continuationToken,
+		StartAfter:        marker,
 		MaxKeys:           maxKeys,
 	}
 
@@ -1988,49 +1990,23 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Translate metadata for encrypted objects
-	translatedObjects := make([]s3.ObjectInfo, len(listResult.Objects))
+	// NOTE: ListObjects returns backend (ciphertext) sizes and ETags.
+	// Per-object HEAD translation was removed because it caused an
+	// N-fold latency explosion (one HEAD per listed object).
+	// Accurate plaintext size and ETag are available via HeadObject
+	// and GetObject, which decrypt the metadata on a per-object basis.
+	// See docs/limitations.md (or README) for details.
 
-	// Get encryption engine for this bucket to check if encryption is enabled/configured
-	engine, err := h.getEncryptionEngine(bucket)
-	isEncryptionEnabled := false
-	if err == nil {
-		// Check if this engine has encryption enabled/configured
-		// Using the IsEncrypted with empty map check pattern from existing code
-		// Note: Ideally we should check policy configuration, but engine doesn't expose it directly
-		// For now, assuming all engines support encryption
-		isEncryptionEnabled = true
-	}
-
-	for i, obj := range listResult.Objects {
-		translatedObjects[i] = obj
-		// If object is encrypted, translate size and ETag
-		if isEncryptionEnabled {
-			// We need to fetch HEAD metadata for each object to get encryption info
-			// This is expensive but necessary for accurate listings
-			if headMeta, headErr := s3Client.HeadObject(ctx, bucket, obj.Key, nil); headErr == nil {
-				if engine.IsEncrypted(headMeta) {
-					// Restore original size
-					if originalSize, ok := headMeta["x-amz-meta-encryption-original-size"]; ok {
-						if parsedSize, err := strconv.ParseInt(originalSize, 10, 64); err == nil {
-							translatedObjects[i].Size = parsedSize
-						}
-					} else if originalSize, ok := headMeta["x-amz-meta-original-content-length"]; ok {
-						if parsedSize, err := strconv.ParseInt(originalSize, 10, 64); err == nil {
-							translatedObjects[i].Size = parsedSize
-						}
-					}
-					// Restore original ETag
-					if originalETag, ok := headMeta["x-amz-meta-encryption-original-etag"]; ok {
-						translatedObjects[i].ETag = originalETag
-					}
-				}
-			}
-		}
+	// Compute NextMarker for S3 API v1 clients.  When the response is
+	// truncated, v1 clients need a key name to send as the next marker.
+	// (v2 clients use the opaque NextContinuationToken instead.)
+	nextMarker := ""
+	if listResult.IsTruncated && len(listResult.Objects) > 0 {
+		nextMarker = listResult.Objects[len(listResult.Objects)-1].Key
 	}
 
 	// Generate proper S3 ListBucketResult XML response
-	xmlResponse := generateListObjectsXML(bucket, prefix, delimiter, translatedObjects, listResult.CommonPrefixes, listResult.NextContinuationToken, listResult.IsTruncated)
+	xmlResponse := generateListObjectsXML(bucket, prefix, delimiter, listResult.Objects, listResult.CommonPrefixes, listResult.NextContinuationToken, nextMarker, listResult.IsTruncated, int(maxKeys))
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
@@ -2253,7 +2229,9 @@ func applyRangeRequest(data []byte, rangeHeader string) ([]byte, error) {
 }
 
 // generateListObjectsXML generates S3-compatible ListBucketResult XML.
-func generateListObjectsXML(bucket, prefix, delimiter string, objects []s3.ObjectInfo, commonPrefixes []string, nextContinuationToken string, isTruncated bool) string {
+// maxKeys must be the requested page limit (not the number of returned
+// objects) so that <MaxKeys> matches the S3 API contract.
+func generateListObjectsXML(bucket, prefix, delimiter string, objects []s3.ObjectInfo, commonPrefixes []string, nextContinuationToken string, nextMarker string, isTruncated bool, maxKeys int) string {
 	type xmlContents struct {
 		Key          string `xml:"Key"`
 		LastModified string `xml:"LastModified"`
@@ -2273,6 +2251,7 @@ func generateListObjectsXML(bucket, prefix, delimiter string, objects []s3.Objec
 		MaxKeys               int               `xml:"MaxKeys"`
 		IsTruncated           bool              `xml:"IsTruncated"`
 		NextContinuationToken string            `xml:"NextContinuationToken,omitempty"`
+		NextMarker            string            `xml:"NextMarker,omitempty"`
 		Contents              []xmlContents     `xml:"Contents"`
 		CommonPrefixes        []xmlCommonPrefix `xml:"CommonPrefixes"`
 	}
@@ -2282,9 +2261,10 @@ func generateListObjectsXML(bucket, prefix, delimiter string, objects []s3.Objec
 		Name:                  bucket,
 		Prefix:                prefix,
 		Delimiter:             delimiter,
-		MaxKeys:               len(objects),
+		MaxKeys:               maxKeys,
 		IsTruncated:           isTruncated,
 		NextContinuationToken: nextContinuationToken,
+		NextMarker:            nextMarker,
 	}
 
 	for _, obj := range objects {

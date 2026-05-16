@@ -100,6 +100,7 @@ type DefaultRetention struct {
 type ListOptions struct {
 	Delimiter         string
 	ContinuationToken string
+	StartAfter        string
 	MaxKeys           int32
 }
 
@@ -643,6 +644,9 @@ func (c *s3Client) ListObjects(ctx context.Context, bucket, prefix string, opts 
 	}
 	if opts.ContinuationToken != "" {
 		input.ContinuationToken = aws.String(opts.ContinuationToken)
+	}
+	if opts.StartAfter != "" {
+		input.StartAfter = aws.String(opts.StartAfter)
 	}
 	if opts.MaxKeys > 0 {
 		input.MaxKeys = aws.Int32(opts.MaxKeys)

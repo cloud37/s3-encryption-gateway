@@ -202,6 +202,7 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
 |---|---|
 | `SelectObjectContent` | Requires server-side SQL evaluation on encrypted data — not feasible in a proxy model |
 | `WriteGetObjectResponse` | S3 Object Lambda integration — proxy model incompatible |
+| `ListObjects` / `ListObjectsV2` sizes & ETags | Returns **backend (ciphertext) sizes and ETags**. Accurate plaintext size and ETag are available via `HeadObject` and `GetObject`, which decrypt metadata on a per-object basis. Per-object HEAD translation in listings was removed because it caused an N-fold latency explosion (one HEAD request per listed object), making large bucket listings unusable. |
 
 ### Helper Infrastructure (V1.0-S3-2)
 

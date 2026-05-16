@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -154,11 +155,11 @@ func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, o
 					commonPrefixesMap[commonPrefix] = true
 				} else {
 					// This is a regular object
-					allObjects = append(allObjects, s3.ObjectInfo{Key: objKey})
+					allObjects = append(allObjects, s3.ObjectInfo{Key: objKey, Size: int64(len(m.objects[key]))})
 				}
 			} else {
 				// No delimiter, just add all objects
-				allObjects = append(allObjects, s3.ObjectInfo{Key: objKey})
+				allObjects = append(allObjects, s3.ObjectInfo{Key: objKey, Size: int64(len(m.objects[key]))})
 			}
 		}
 	}
@@ -168,6 +169,22 @@ func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, o
 	for cp := range commonPrefixesMap {
 		commonPrefixes = append(commonPrefixes, cp)
 	}
+
+	// Apply StartAfter filter (v1 marker semantics)
+	if opts.StartAfter != "" {
+		var filtered []s3.ObjectInfo
+		for _, obj := range allObjects {
+			if obj.Key > opts.StartAfter {
+				filtered = append(filtered, obj)
+			}
+		}
+		allObjects = filtered
+	}
+
+	// Sort for deterministic pagination
+	 sort.Slice(allObjects, func(i, j int) bool {
+		return allObjects[i].Key < allObjects[j].Key
+	})
 
 	// Apply MaxKeys limit and pagination
 	maxKeys := int(opts.MaxKeys)
@@ -179,11 +196,9 @@ func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, o
 	isTruncated := false
 	nextToken := ""
 
-	// Simple mock pagination - just limit the number of objects returned
 	totalItems := len(allObjects) + len(commonPrefixes)
 	if totalItems > maxKeys {
 		isTruncated = true
-		// For simplicity, just return maxKeys objects
 		if len(allObjects) > maxKeys {
 			objects = allObjects[:maxKeys]
 		} else {
@@ -838,6 +853,116 @@ func TestHandler_HandleListObjects_MaxKeys(t *testing.T) {
 	// Should be truncated
 	if !strings.Contains(body, "<IsTruncated>true</IsTruncated>") {
 		t.Errorf("expected response to be truncated, but it wasn't.\nResponse: %s", body)
+	}
+}
+
+// TestHandler_HandleListObjects_Marker verifies that the v1 marker query
+// parameter is respected and that NextMarker is emitted when truncated.
+func TestHandler_HandleListObjects_Marker(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+
+	keys := []string{"aaa.txt", "bbb.txt", "ccc.txt"}
+	for _, k := range keys {
+		mockClient.PutObject(context.Background(), "test-bucket", k, strings.NewReader("data"), nil, nil, "", nil)
+	}
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	// First page: max-keys=1, no marker
+	req1 := httptest.NewRequest("GET", "/test-bucket?max-keys=1", nil)
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("page 1: expected 200, got %d", w1.Code)
+	}
+	body1 := w1.Body.String()
+	if !strings.Contains(body1, "<Key>aaa.txt</Key>") {
+		t.Errorf("page 1: expected aaa.txt, got:\n%s", body1)
+	}
+	if strings.Contains(body1, "<Key>bbb.txt</Key>") {
+		t.Errorf("page 1: bbb.txt should not appear")
+	}
+	if !strings.Contains(body1, "<IsTruncated>true</IsTruncated>") {
+		t.Errorf("page 1: expected truncated")
+	}
+	if !strings.Contains(body1, "<NextMarker>aaa.txt</NextMarker>") {
+		t.Errorf("page 1: expected NextMarker = aaa.txt, got:\n%s", body1)
+	}
+
+	// Second page: use marker from first page
+	req2 := httptest.NewRequest("GET", "/test-bucket?max-keys=1&marker=aaa.txt", nil)
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("page 2: expected 200, got %d", w2.Code)
+	}
+	body2 := w2.Body.String()
+	if !strings.Contains(body2, "<Key>bbb.txt</Key>") {
+		t.Errorf("page 2: expected bbb.txt, got:\n%s", body2)
+	}
+	if strings.Contains(body2, "<Key>aaa.txt</Key>") {
+		t.Errorf("page 2: aaa.txt should not appear (marker filtered it)")
+	}
+	if !strings.Contains(body2, "<NextMarker>bbb.txt</NextMarker>") {
+		t.Errorf("page 2: expected NextMarker = bbb.txt, got:\n%s", body2)
+	}
+
+	// Third page
+	req3 := httptest.NewRequest("GET", "/test-bucket?max-keys=1&marker=bbb.txt", nil)
+	w3 := httptest.NewRecorder()
+	router.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("page 3: expected 200, got %d", w3.Code)
+	}
+	body3 := w3.Body.String()
+	if !strings.Contains(body3, "<Key>ccc.txt</Key>") {
+		t.Errorf("page 3: expected ccc.txt, got:\n%s", body3)
+	}
+	if strings.Contains(body3, "<IsTruncated>true</IsTruncated>") {
+		t.Errorf("page 3: should not be truncated")
+	}
+	if strings.Contains(body3, "<NextMarker>") {
+		t.Errorf("page 3: NextMarker should be absent when not truncated")
+	}
+}
+
+// TestHandler_HandleListObjects_MarkerNotDuplicated verifies that when
+// marker is supplied the gateway does NOT return the same first page again.
+// This is the exact bug that caused AWS CLI v1 to abort with
+// "Same token was used...".
+func TestHandler_HandleListObjects_MarkerNotDuplicated(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+
+	mockClient.PutObject(context.Background(), "test-bucket", "first.txt", strings.NewReader("1"), nil, nil, "", nil)
+	mockClient.PutObject(context.Background(), "test-bucket", "second.txt", strings.NewReader("2"), nil, nil, "", nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	// Request with marker=first.txt
+	req := httptest.NewRequest("GET", "/test-bucket?marker=first.txt", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+
+	// first.txt must NOT appear because marker excludes it
+	if strings.Contains(body, "<Key>first.txt</Key>") {
+		t.Errorf("marker=first.txt should exclude first.txt, but it appeared:\n%s", body)
+	}
+	if !strings.Contains(body, "<Key>second.txt</Key>") {
+		t.Errorf("marker=first.txt should include second.txt, but it didn't:\n%s", body)
 	}
 }
 
@@ -1996,5 +2121,172 @@ func TestObjectKeyPassthrough_RoutingVars(t *testing.T) {
 				t.Errorf("backend query: want %q, got %q", tc.wantQuery, gotQuery)
 			}
 		})
+	}
+}
+
+// TestHandler_ListObjects_ReturnsCiphertextSize verifies that ListObjects
+// returns backend (ciphertext) sizes without per-object HEAD translation.
+// HeadObject and GetObject are responsible for returning decrypted sizes.
+func TestHandler_ListObjects_ReturnsCiphertextSize(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+
+	plaintext := "hello world this is some plaintext"
+	originalSize := int64(len(plaintext))
+
+	// Encrypt data inline
+	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), strings.NewReader(plaintext), map[string]string{
+		"Content-Type": "text/plain",
+	})
+	if err != nil {
+		t.Fatalf("Encrypt failed: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("ReadAll encrypted: %v", err)
+	}
+	ciphertextSize := int64(len(encData))
+
+	// Store encrypted object in mock
+	mockClient.PutObject(context.Background(), "test-bucket", "encrypted-key", bytes.NewReader(encData), encMeta, nil, "", nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/test-bucket", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+
+	// Verify the listed size is the ciphertext size, not plaintext size
+	var result struct {
+		Contents []struct {
+			Key  string `xml:"Key"`
+			Size int64  `xml:"Size"`
+		} `xml:"Contents"`
+	}
+	if err := xml.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	if len(result.Contents) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(result.Contents))
+	}
+	listedSize := result.Contents[0].Size
+	if listedSize != ciphertextSize {
+		t.Errorf("ListObjects size mismatch: expected ciphertext size %d, got %d (would be plaintext size %d)", ciphertextSize, listedSize, originalSize)
+	}
+	if listedSize == originalSize {
+		t.Errorf("ListObjects returned plaintext size %d — HEAD translation may still be active", originalSize)
+	}
+}
+
+// TestHandler_HeadObject_ReturnsDecryptedSize verifies that HeadObject
+// restores the original plaintext Content-Length for encrypted objects.
+func TestHandler_HeadObject_ReturnsDecryptedSize(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+
+	plaintext := "hello world this is some plaintext for headobject test"
+	originalSize := int64(len(plaintext))
+
+	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), strings.NewReader(plaintext), map[string]string{
+		"Content-Type": "text/plain",
+	})
+	if err != nil {
+		t.Fatalf("Encrypt failed: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("ReadAll encrypted: %v", err)
+	}
+
+	mockClient.PutObject(context.Background(), "test-bucket", "enc-key", bytes.NewReader(encData), encMeta, nil, "", nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("HEAD", "/test-bucket/enc-key", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	cl := w.Header().Get("Content-Length")
+	if cl == "" {
+		t.Fatalf("missing Content-Length header in HeadObject response")
+	}
+	var headSize int64
+	if _, err := fmt.Sscanf(cl, "%d", &headSize); err != nil {
+		t.Fatalf("invalid Content-Length %q: %v", cl, err)
+	}
+	if headSize != originalSize {
+		t.Errorf("HeadObject Content-Length mismatch: expected decrypted size %d, got %d", originalSize, headSize)
+	}
+}
+
+// TestHandler_GetObject_ReturnsDecryptedContentLength verifies that GetObject
+// returns Content-Length equal to the original plaintext size for encrypted objects.
+func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+
+	plaintext := "hello world this is plaintext for getobject test"
+	originalSize := int64(len(plaintext))
+
+	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), strings.NewReader(plaintext), map[string]string{
+		"Content-Type": "text/plain",
+	})
+	if err != nil {
+		t.Fatalf("Encrypt failed: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("ReadAll encrypted: %v", err)
+	}
+
+	mockClient.PutObject(context.Background(), "test-bucket", "enc-key", bytes.NewReader(encData), encMeta, nil, "", nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/test-bucket/enc-key", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	cl := w.Header().Get("Content-Length")
+	if cl == "" {
+		t.Fatalf("missing Content-Length header in GetObject response")
+	}
+	var getSize int64
+	if _, err := fmt.Sscanf(cl, "%d", &getSize); err != nil {
+		t.Fatalf("invalid Content-Length %q: %v", cl, err)
+	}
+	if getSize != originalSize {
+		t.Errorf("GetObject Content-Length mismatch: expected decrypted size %d, got %d", originalSize, getSize)
+	}
+
+	// Verify body is the original plaintext
+	if w.Body.String() != plaintext {
+		t.Errorf("GetObject body mismatch: expected %q, got %q", plaintext, w.Body.String())
 	}
 }
