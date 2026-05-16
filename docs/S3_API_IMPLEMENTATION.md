@@ -284,7 +284,7 @@ backendClient := s3.New(session.Must(session.NewSession(&aws.Config{
 - `x-amz-meta-encrypted`: "true"
 - `x-amz-meta-encryption-algorithm`: "AES256-GCM" or "ChaCha20-Poly1305"
 - `x-amz-meta-encryption-key-salt`: base64-encoded salt
-- `x-amz-meta-original-content-length`: original size
+- `x-amz-meta-encryption-original-size`: original size (canonical key)
 - `x-amz-meta-original-etag`: original ETag
 
 ### Hidden Headers

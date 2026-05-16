@@ -70,6 +70,6 @@ func TestReproChunkedUploadIssue(t *testing.T) {
 
 	// Check Original Content Length metadata (Regression check 2)
 	// It SHOULD be 11, not the chunked size
-	storedLen := storedMeta["x-amz-meta-original-content-length"]
+	storedLen := storedMeta[crypto.MetaOriginalSize]
 	assert.Equal(t, strconv.Itoa(realDataSize), storedLen, "Stored original content length should match decoded size")
 }

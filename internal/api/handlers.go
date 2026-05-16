@@ -1452,18 +1452,22 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Store original content length if available (as x-amz-meta- header)
-	// For AWS Chunked Uploads, we should use x-amz-decoded-content-length if present
-	// as that represents the actual object size, while Content-Length includes chunk overhead.
+	// Pass the original content length to the encryption engine via
+	// Content-Length in the metadata map.  The engine reads this to
+	// compute x-amz-meta-encryption-original-size, then
+	// filterS3Metadata strips Content-Length (standard header) before
+	// sending to S3.  For AWS Chunked Uploads we use
+	// x-amz-decoded-content-length as that represents the actual object
+	// size, while the HTTP Content-Length includes chunk overhead.
 	var originalBytes int64
 	decodedLen := r.Header.Get("x-amz-decoded-content-length")
 	if decodedLen != "" {
-		metadata["x-amz-meta-original-content-length"] = decodedLen
+		metadata["Content-Length"] = decodedLen
 		if v, err := strconv.ParseInt(decodedLen, 10, 64); err == nil {
 			originalBytes = v
 		}
 	} else if contentLength := r.Header.Get("Content-Length"); contentLength != "" {
-		metadata["x-amz-meta-original-content-length"] = contentLength
+		metadata["Content-Length"] = contentLength
 		if v, err := strconv.ParseInt(contentLength, 10, 64); err == nil {
 			originalBytes = v
 		}
@@ -1889,12 +1893,14 @@ func decryptedSizeForMPU(metadata map[string]string) int64 {
 	if metadata == nil {
 		return 0
 	}
-	if sizeStr, ok := metadata["x-amz-meta-original-content-length"]; ok && sizeStr != "" {
+	// Prefer the canonical key written by the crypto engine.
+	if sizeStr, ok := metadata[crypto.MetaOriginalSize]; ok && sizeStr != "" {
 		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && size >= 0 {
 			return size
 		}
 	}
-	if sizeStr, ok := metadata[crypto.MetaOriginalSize]; ok && sizeStr != "" {
+	// Fall back to the legacy key for objects written before this cleanup.
+	if sizeStr, ok := metadata["x-amz-meta-original-content-length"]; ok && sizeStr != "" {
 		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && size >= 0 {
 			return size
 		}

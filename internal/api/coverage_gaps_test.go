@@ -138,6 +138,14 @@ func TestDecryptedSizeForMPU(t *testing.T) {
 			meta: map[string]string{"x-amz-meta-original-content-length": "-1"},
 			want: 0,
 		},
+		{
+			name: "prefers crypto.MetaOriginalSize over legacy key",
+			meta: map[string]string{
+				crypto.MetaOriginalSize:              "11111",
+				"x-amz-meta-original-content-length": "22222",
+			},
+			want: 11111,
+		},
 	}
 
 	for _, tt := range tests {
@@ -591,9 +599,9 @@ func TestHandleHeadObject_WithEncryptionMeta(t *testing.T) {
 	// Pre-populate object with encryption metadata.
 	mockClient.objects["testbucket/enchead"] = []byte("encrypted content")
 	mockClient.metadata["testbucket/enchead"] = map[string]string{
-		"x-amz-meta-encrypted":              "true",
-		"x-amz-meta-encryption-algorithm":   "AES256-GCM",
-		"x-amz-meta-original-content-length": "100",
+		"x-amz-meta-encrypted":                "true",
+		"x-amz-meta-encryption-algorithm":     "AES256-GCM",
+		"x-amz-meta-encryption-original-size": "100",
 	}
 
 	req := httptest.NewRequest("HEAD", "/testbucket/enchead", nil)
