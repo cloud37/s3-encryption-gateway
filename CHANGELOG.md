@@ -6,7 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-05-13
+## [0.8.0] — 2026-05-18
+
+### ⚠️ Breaking ⚠️
+
+- **Unified credential store replacing `use_client_credentials`** (V1.0-AUTH-1):
+  the legacy `use_client_credentials` boolean passthrough has been removed. A
+  new `auth.credentials` configuration block supports multiple named
+  `GatewayCredential` entries. A `CredentialStore` interface and
+  `StaticCredentialStore` handle per-credential S3 client construction;
+  `AuthMiddleware` dispatches SigV4 and SigV2 validation against the
+  configured credential set. The Helm chart removes `useClientCredentials` in
+  favour of `auth.credentials`.
+
+  **Migration**: replace `backend.use_client_credentials: true` with
+  `auth.credentials` entries matching your S3-compatible backend credentials.
+  See `config.yaml.example` and ADR-0012 for the new format.
 
 ### Security
 
@@ -177,21 +192,6 @@ run before this release; these changes raise the security floor further.
   security warning. Methods 2 (presigned URL) and 3 (Authorization header)
   set `FromQueryParam=false`.
 
-### Breaking
-
-- **Unified credential store replacing `use_client_credentials`** (V1.0-AUTH-1):
-  the legacy `use_client_credentials` boolean passthrough has been removed. A
-  new `auth.credentials` configuration block supports multiple named
-  `GatewayCredential` entries. A `CredentialStore` interface and
-  `StaticCredentialStore` handle per-credential S3 client construction;
-  `AuthMiddleware` dispatches SigV4 and SigV2 validation against the
-  configured credential set. The Helm chart removes `useClientCredentials` in
-  favour of `auth.credentials`.
-
-  **Migration**: replace `backend.use_client_credentials: true` with
-  `auth.credentials` entries matching your S3-compatible backend credentials.
-  See `config.yaml.example` and ADR-0012 for the new format.
-
 ### Added
 
 - **Dedicated unauthenticated metrics listener** (V1.0-OBS-2): a new
@@ -202,6 +202,16 @@ run before this release; these changes raise the security floor further.
   the admin port; if admin is also disabled, it falls back to the S3 port.
   Helm chart templates (service, ServiceMonitor, PodMonitor, NetworkPolicy)
   are updated for the dedicated listener.
+
+- **S3 passthrough handlers for bucket/object subresources** (V1.0-S3-2):
+  generic passthrough (`handlePassthrough` + `forwardToBackend`) proxies S3
+  subresource requests to the upstream backend with hop-by-hop header stripping
+  and SigV4 signing. New routes include `ListBuckets`, `DeleteBucket`, bucket
+  subresources (location, versioning, ACL, policy, CORS, lifecycle, encryption,
+  notification, replication, logging, requestPayment, website, inventory,
+  analytics, intelligent-tiering, uploads), object subresources (tagging get/put/delete,
+  ACL get/put, restore), `POST /{bucket}/{key}?select` (`501 NotImplemented`),
+  and `OPTIONS` CORS preflight. See `docs/S3_API_IMPLEMENTATION.md`.
 
 ### Changed
 
@@ -237,6 +247,31 @@ run before this release; these changes raise the security floor further.
   preventing unbounded backend internals (stack traces, infrastructure URLs)
   from leaking into application logs.
 
+- **BoundedQueue context-cancellation hang** (V1.0-S3-2): blocked `Read`/`Write`
+  callers in `BoundedQueue` are now broadcast-woken when the queue's context is
+  cancelled, preventing indefinite hangs during server shutdown.
+
+- **ListObjects performance and v1 pagination correctness** (V1.0-S3-2): removed
+  the serial per-object `HeadObject` loop that caused N-fold latency explosion
+  for large listings. `ListObjects` now returns backend ciphertext sizes directly;
+  accurate plaintext sizes remain available via `HeadObject` and `GetObject`.
+  Fixed `<MaxKeys>` XML element to emit the requested limit instead of the
+  returned count. Fixed v1 marker query parameter being ignored; mapped to
+  `StartAfter` with `<NextMarker>` in the XML response.
+
+- **Canonical original-size metadata key** (V1.0-S3-2): removed duplicate
+  `x-amz-meta-original-content-length` metadata key in favour of the canonical
+  `x-amz-meta-encryption-original-size`. `handlePutObject` now passes the
+  original size as `Content-Length`, which the engine already reads;
+  `filterS3Metadata` strips the standard header before sending to S3.
+  Backward-compatible fallback to `original-content-length` retained for
+  existing objects.
+
+- **Hot-reload gracefully disabled when config file is absent**: when running
+  with environment-variable-only configuration (e.g. Helm deployments), the
+  server now detects the missing config file and disables hot-reload instead
+  of failing.
+
 ### Dependencies
 
 - Updated `golang.org/x/crypto` to v0.51.0
@@ -251,6 +286,8 @@ run before this release; these changes raise the security floor further.
 - Added CRYPTO-2 issue tracking Valkey at-rest encryption for a future release.
 - Added prominent production warning to `InsecureAllowPlaintext` in config
   example and Helm chart values.
+- Added `SECURITY.md` with security policy and vulnerability reporting
+  procedures.
 
 ## [0.7.2] — 2026-05-07
 
