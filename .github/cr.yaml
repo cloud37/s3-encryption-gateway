@@ -17,5 +17,5 @@ charts-repo-url: https://github.com/kenchrcum/s3-encryption-gateway/releases/dow
 release-name-template: "{{ .Name }}-{{ .Version }}"
 
 # Options
-prerelease: true
+prerelease: false
 debug: true
