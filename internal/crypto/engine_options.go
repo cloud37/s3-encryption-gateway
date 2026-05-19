@@ -26,6 +26,33 @@ func WithPBKDF2Iterations(n int) Option {
 	}
 }
 
+// WithKDFAlgorithm sets the KDF algorithm for new object encryption.
+// Valid values: "pbkdf2-sha256" (default) or "argon2id" (non-FIPS only).
+// An empty string is a no-op.
+func WithKDFAlgorithm(alg string) Option {
+	return func(e *engine) {
+		if alg != "" {
+			e.kdfAlgorithm = KDFAlgorithm(alg)
+		}
+	}
+}
+
+// WithArgon2idParams sets the argon2id key derivation parameters.
+// These are only used when the KDF algorithm is set to "argon2id".
+// If time, memory, and threads are all zero, the option is a no-op
+// (keeps engine defaults: t=2, m=19456, p=1).
+func WithArgon2idParams(time, memory uint32, threads uint8) Option {
+	return func(e *engine) {
+		if time > 0 && memory > 0 && threads > 0 {
+			e.argon2idParams = Argon2idConfig{
+				Time:    time,
+				Memory:  memory,
+				Threads: threads,
+			}
+		}
+	}
+}
+
 // WithPreferredAlgorithm sets the preferred encryption algorithm for new objects.
 func WithPreferredAlgorithm(alg string) Option {
 	return func(e *engine) {

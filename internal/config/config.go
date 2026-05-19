@@ -224,7 +224,30 @@ func (r *BackendRetryConfig) Validate() error {
 
 // KDFConfig is the top-level key-derivation configuration block.
 type KDFConfig struct {
-    PBKDF2 PBKDF2Config `yaml:"pbkdf2"`
+	// Algorithm selects the KDF for new objects.
+	//   "pbkdf2-sha256" (default) — FIPS-compliant
+	//   "argon2id"                — memory-hard, non-FIPS only
+	Algorithm string `yaml:"algorithm" env:"ENCRYPTION_KDF_ALGORITHM"`
+
+	// PBKDF2 holds PBKDF2-SHA256 parameters (active when Algorithm == "pbkdf2-sha256").
+	PBKDF2 PBKDF2Config `yaml:"pbkdf2"`
+
+	// Argon2id holds argon2id parameters (active when Algorithm == "argon2id").
+	Argon2id Argon2idConfig `yaml:"argon2id"`
+}
+
+// Argon2idConfig holds operator-tunable argon2id parameters.
+//
+// Recommended production values (OWASP 2024):
+//   Time    = 2
+//   Memory  = 19456  (19 MiB)
+//   Threads = 1
+//
+// These are the minimums; operators may raise them for higher attack cost.
+type Argon2idConfig struct {
+	Time    uint32 `yaml:"time"    env:"ENCRYPTION_KDF_ARGON2ID_TIME"`
+	Memory  uint32 `yaml:"memory"  env:"ENCRYPTION_KDF_ARGON2ID_MEMORY"`
+	Threads uint8  `yaml:"threads" env:"ENCRYPTION_KDF_ARGON2ID_THREADS"`
 }
 
 // PBKDF2Config holds parameters specific to PBKDF2-SHA256 key derivation.
@@ -701,8 +724,14 @@ func LoadConfig(path string) (*Config, error) {
 				EnableARMv8AES: true,
 			},
 			KDF: KDFConfig{
+				Algorithm: "pbkdf2-sha256",
 				PBKDF2: PBKDF2Config{
 					Iterations: 600000,
+				},
+				Argon2id: Argon2idConfig{
+					Time:    2,
+					Memory:  19456,
+					Threads: 1,
 				},
 			},
 		},
@@ -923,6 +952,24 @@ func loadFromEnv(config *Config) {
 	if v := os.Getenv("ENCRYPTION_KDF_PBKDF2_ITERATIONS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 100000 {
 			config.Encryption.KDF.PBKDF2.Iterations = n
+		}
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_ALGORITHM"); v != "" {
+		config.Encryption.KDF.Algorithm = v
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_ARGON2ID_TIME"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			config.Encryption.KDF.Argon2id.Time = uint32(n)
+		}
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_ARGON2ID_MEMORY"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+			config.Encryption.KDF.Argon2id.Memory = uint32(n)
+		}
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_ARGON2ID_THREADS"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 8); err == nil {
+			config.Encryption.KDF.Argon2id.Threads = uint8(n)
 		}
 	}
 	if v := os.Getenv("KEY_MANAGER_ENABLED"); v != "" {
@@ -1491,6 +1538,31 @@ func (c *Config) Validate() error {
 	if c.Encryption.KDF.PBKDF2.Iterations < 600000 {
 		slog.Warn("encryption.kdf.pbkdf2.iterations is below NIST SP 800-132 (2023) recommendation of 600,000",
 			"iterations", c.Encryption.KDF.PBKDF2.Iterations)
+	}
+
+	// Validate KDF algorithm selection
+	switch c.Encryption.KDF.Algorithm {
+	case "", "pbkdf2-sha256":
+		// Valid, PBKDF2 is default
+	case "argon2id":
+		if isFIPS() {
+			return fmt.Errorf("encryption.kdf.algorithm: argon2id is not approved in FIPS builds; use pbkdf2-sha256")
+		}
+		if c.Encryption.KDF.Argon2id.Time < 1 {
+			return fmt.Errorf("encryption.kdf.argon2id.time must be >= 1 (got %d)", c.Encryption.KDF.Argon2id.Time)
+		}
+		if c.Encryption.KDF.Argon2id.Memory == 0 {
+			return fmt.Errorf("encryption.kdf.argon2id.memory must be > 0 (got %d)", c.Encryption.KDF.Argon2id.Memory)
+		}
+		if c.Encryption.KDF.Argon2id.Memory < 19456 {
+			slog.Warn("encryption.kdf.argon2id.memory is below OWASP 2024 minimum of 19456 KiB (19 MiB)",
+				"memory", c.Encryption.KDF.Argon2id.Memory)
+		}
+		if c.Encryption.KDF.Argon2id.Threads < 1 {
+			return fmt.Errorf("encryption.kdf.argon2id.threads must be >= 1 (got %d)", c.Encryption.KDF.Argon2id.Threads)
+		}
+	default:
+		return fmt.Errorf("encryption.kdf.algorithm must be \"pbkdf2-sha256\" or \"argon2id\" (got %q)", c.Encryption.KDF.Algorithm)
 	}
 
 	if c.Encryption.KeyManager.Enabled {

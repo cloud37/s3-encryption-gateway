@@ -538,15 +538,30 @@ func main() {
 		chunkSize = crypto.DefaultChunkSize
 	}
 
-	encryptionEngine, err = crypto.NewEngineWithOpts(
-		activePassword,
-		compressionEngine,
+	// Build engine options
+	engineOpts := []crypto.Option{
 		crypto.WithPreferredAlgorithm(cfg.Encryption.PreferredAlgorithm),
 		crypto.WithSupportedAlgorithms(cfg.Encryption.SupportedAlgorithms),
 		crypto.WithChunking(chunkedMode),
 		crypto.WithChunkSize(chunkSize),
 		crypto.WithProvider("default"),
 		crypto.WithPBKDF2Iterations(cfg.Encryption.KDF.PBKDF2.Iterations),
+		crypto.WithKDFAlgorithm(cfg.Encryption.KDF.Algorithm),
+	}
+	if cfg.Encryption.KDF.Algorithm == "argon2id" {
+		engineOpts = append(engineOpts,
+			crypto.WithArgon2idParams(
+				cfg.Encryption.KDF.Argon2id.Time,
+				cfg.Encryption.KDF.Argon2id.Memory,
+				cfg.Encryption.KDF.Argon2id.Threads,
+			),
+		)
+	}
+
+	encryptionEngine, err = crypto.NewEngineWithOpts(
+		activePassword,
+		compressionEngine,
+		engineOpts...,
 	)
 	// Zero the upstream password copy now that the engine owns its own defensive copy.
 	zeroBytes(activePassword)
@@ -558,11 +573,15 @@ func main() {
 	}
 
 	logger.WithFields(logrus.Fields{
-		"preferred_algorithm":   cfg.Encryption.PreferredAlgorithm,
-		"supported_algorithms":  cfg.Encryption.SupportedAlgorithms,
-		"chunked_mode":          chunkedMode,
-		"chunk_size":            chunkSize,
-		"kdf_pbkdf2_iterations": cfg.Encryption.KDF.PBKDF2.Iterations,
+		"preferred_algorithm":       cfg.Encryption.PreferredAlgorithm,
+		"supported_algorithms":      cfg.Encryption.SupportedAlgorithms,
+		"chunked_mode":              chunkedMode,
+		"chunk_size":                chunkSize,
+		"kdf_algorithm":             cfg.Encryption.KDF.Algorithm,
+		"kdf_pbkdf2_iterations":     cfg.Encryption.KDF.PBKDF2.Iterations,
+		"kdf_argon2id_time":         cfg.Encryption.KDF.Argon2id.Time,
+		"kdf_argon2id_memory":       cfg.Encryption.KDF.Argon2id.Memory,
+		"kdf_argon2id_threads":      cfg.Encryption.KDF.Argon2id.Threads,
 	}).Info("Encryption configuration")
 
 	// Initialize cache if enabled (Phase 5 feature)
