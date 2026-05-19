@@ -263,6 +263,8 @@ type HardwareConfig struct {
 //     tests, and local development without an external KMS (v0.6)
 //   - "hsm": PKCS#11 Hardware Security Module (skeleton in v0.6; functional in v1.0;
 //     requires -tags hsm build flag — see docs/adr/0004-hsm-adapter-contract.md)
+//   - "self_contained": Self-contained AES-256-GCM or RSA-OAEP KEK wrapping;
+//     no external KMS required (v1.0, see V1.0-KMS-4)
 //
 // Planned providers (v1.0):
 //   - "aws" or "aws-kms": AWS KMS (see V1.0-KMS-2)
@@ -276,7 +278,7 @@ type KeyManagerConfig struct {
 	RotationPolicy RotationPolicyConfig `yaml:"rotation_policy"`
 	Cosmian        CosmianConfig        `yaml:"cosmian"`
 	Memory         MemoryKMConfig       `yaml:"memory"`
-	// TODO(v1.0): Add AWS and Vault config fields when adapters are implemented
+	SelfContained  SelfContainedKMConfig `yaml:"self_contained"`
 	// AWS        AWSKMSConfig  `yaml:"aws"`
 	// Vault      VaultConfig   `yaml:"vault"`
 }
@@ -294,6 +296,38 @@ type KeyManagerConfig struct {
 type MemoryKMConfig struct {
 	// MasterKeySource is a secret reference or empty string (auto-generate).
 	MasterKeySource string `yaml:"master_key_source" env:"MEMORY_KM_MASTER_KEY_SOURCE"`
+}
+
+// SelfContainedKMConfig captures settings for the self-contained KEK adapter.
+type SelfContainedKMConfig struct {
+	// Type selects the wrapping algorithm: "aes" or "rsa".
+	Type string `yaml:"type" env:"SELF_CONTAINED_TYPE"`
+
+	// AES holds settings for AES-256-GCM KEK wrapping.
+	AES SelfContainedAESConfig `yaml:"aes"`
+
+	// RSA holds settings for RSA-OAEP KEK wrapping.
+	RSA SelfContainedRSAConfig `yaml:"rsa"`
+}
+
+// SelfContainedAESConfig holds AES-256-GCM KEK settings.
+type SelfContainedAESConfig struct {
+	// Keys is the list of versioned KEK entries.
+	Keys []SelfContainedAESKeyEntry `yaml:"keys"`
+	// ActiveVersion selects the wrapping version (default: highest).
+	ActiveVersion int `yaml:"active_version" env:"SELF_CONTAINED_AES_ACTIVE_VERSION"`
+}
+
+// SelfContainedAESKeyEntry is a single versioned AES KEK reference.
+type SelfContainedAESKeyEntry struct {
+	Version   int    `yaml:"version"`
+	KeySource string `yaml:"key_source"` // "env:VAR", "base64:...", "file:PATH"
+}
+
+// SelfContainedRSAConfig holds RSA-OAEP KEK settings.
+type SelfContainedRSAConfig struct {
+	PrivateKeySource string `yaml:"private_key_source" env:"SELF_CONTAINED_RSA_PRIVATE_KEY_SOURCE"`
+	KeyVersion       int    `yaml:"key_version" env:"SELF_CONTAINED_RSA_KEY_VERSION"`
 }
 
 // RotationPolicyConfig holds key rotation policy configuration.
@@ -921,6 +955,24 @@ func loadFromEnv(config *Config) {
 	if v := os.Getenv("COSMIAN_KMS_KEYS"); v != "" {
 		config.Encryption.KeyManager.Cosmian.Keys = parseCosmianKeyRefs(v)
 	}
+
+	if v := os.Getenv("SELF_CONTAINED_TYPE"); v != "" {
+		config.Encryption.KeyManager.SelfContained.Type = v
+	}
+	if v := os.Getenv("SELF_CONTAINED_AES_ACTIVE_VERSION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			config.Encryption.KeyManager.SelfContained.AES.ActiveVersion = n
+		}
+	}
+	if v := os.Getenv("SELF_CONTAINED_RSA_PRIVATE_KEY_SOURCE"); v != "" {
+		config.Encryption.KeyManager.SelfContained.RSA.PrivateKeySource = v
+	}
+	if v := os.Getenv("SELF_CONTAINED_RSA_KEY_VERSION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			config.Encryption.KeyManager.SelfContained.RSA.KeyVersion = n
+		}
+	}
+
 	if v := os.Getenv("TLS_ENABLED"); v != "" {
 		config.TLS.Enabled = v == "true" || v == "1"
 	}
@@ -1437,8 +1489,30 @@ func (c *Config) Validate() error {
 			// No mandatory fields; master_key_source is optional (auto-generate if empty)
 		case "hsm":
 			// Validated at runtime by the HSM adapter; build-tag check not possible here
+		case "self_contained":
+			sc := c.Encryption.KeyManager.SelfContained
+			if sc.Type == "" {
+				return fmt.Errorf("encryption.key_manager.self_contained.type is required (must be \"aes\" or \"rsa\")")
+			}
+			switch sc.Type {
+			case "aes":
+				if len(sc.AES.Keys) == 0 {
+					return fmt.Errorf("encryption.key_manager.self_contained.aes.keys must include at least one entry")
+				}
+				for i, k := range sc.AES.Keys {
+					if k.KeySource == "" {
+						return fmt.Errorf("encryption.key_manager.self_contained.aes.keys[%d].key_source is required", i)
+					}
+				}
+			case "rsa":
+				if sc.RSA.PrivateKeySource == "" {
+					return fmt.Errorf("encryption.key_manager.self_contained.rsa.private_key_source is required")
+				}
+			default:
+				return fmt.Errorf("encryption.key_manager.self_contained.type must be \"aes\" or \"rsa\" (got %q)", sc.Type)
+			}
 		default:
-			return fmt.Errorf("unsupported key manager provider: %s (supported: cosmian, kmip, memory, hsm)", c.Encryption.KeyManager.Provider)
+			return fmt.Errorf("unsupported key manager provider: %s (supported: cosmian, kmip, memory, hsm, self_contained)", c.Encryption.KeyManager.Provider)
 		}
 	}
 
