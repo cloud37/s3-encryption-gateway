@@ -2,6 +2,6 @@
 
 package crypto
 
-func deriveKeyArgon2id(_ []byte, _ KDFParams) ([]byte, error) {
+func deriveKeyArgon2id(password, salt []byte, params KDFParams) ([]byte, error) {
 	return nil, ErrAlgorithmNotApproved
 }

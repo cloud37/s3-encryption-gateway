@@ -91,9 +91,25 @@ type EncryptionEngine interface {
 }
 
 // engine implements the EncryptionEngine interface.
+// Argon2idConfig holds operator-tunable argon2id KDF parameters.
+//
+// Recommended production values (OWASP 2024):
+//   Time    = 2
+//   Memory  = 19456  (19 MiB)
+//   Threads = 1
+//
+// These are the minimums; operators may raise them for higher attack cost.
+type Argon2idConfig struct {
+	Time    uint32
+	Memory  uint32 // KiB
+	Threads uint8
+}
+
 type engine struct {
 	password         []byte
 	pbkdf2Iterations int // configurable, default DefaultPBKDF2Iterations
+	kdfAlgorithm     KDFAlgorithm // selected KDF for new objects, default KDFAlgPBKDF2SHA256
+	argon2idParams   Argon2idConfig
 	compressionEngine   CompressionEngine
 	preferredAlgorithm  string
 	supportedAlgorithms []string
@@ -194,6 +210,12 @@ func NewEngineWithChunkingAndProvider(password []byte, compressionEngine Compres
 	return &engine{
 		password:            passwordBytes,
 		pbkdf2Iterations:    pbkdf2Iterations,
+		kdfAlgorithm:        KDFAlgPBKDF2SHA256,
+		argon2idParams: Argon2idConfig{
+			Time:    2,
+			Memory:  19456,
+			Threads: 1,
+		},
 		compressionEngine:   compressionEngine,
 		preferredAlgorithm:  preferredAlgorithm,
 		supportedAlgorithms: supportedAlgorithms,
@@ -251,15 +273,41 @@ func (e *engine) deriveKeyWithParams(salt []byte, params KDFParams) ([]byte, err
 		}
 		return key, nil
 	case KDFAlgArgon2id:
-		return deriveKeyArgon2id(salt, params)
+		return deriveKeyArgon2id(e.password, salt, params)
 	default:
 		return nil, fmt.Errorf("unsupported KDF algorithm: %s", params.Algorithm)
 	}
 }
 
-// deriveKey derives a key for new objects using the engine's configured iterations.
+// deriveKey derives a key for new objects using the engine's configured algorithm.
 func (e *engine) deriveKey(salt []byte) ([]byte, error) {
-	return e.deriveKeyWithParams(salt, DefaultKDFParams(e.pbkdf2Iterations))
+	switch e.kdfAlgorithm {
+	case KDFAlgArgon2id:
+		return e.deriveKeyWithParams(salt, KDFParams{
+			Algorithm: KDFAlgArgon2id,
+			Time:      e.argon2idParams.Time,
+			Memory:    e.argon2idParams.Memory,
+			Threads:   e.argon2idParams.Threads,
+		})
+	default:
+		return e.deriveKeyWithParams(salt, DefaultKDFParams(e.pbkdf2Iterations))
+	}
+}
+
+// defaultKDFParams returns the KDFParams for newly written objects based on the
+// engine's configured algorithm.
+func (e *engine) defaultKDFParams() KDFParams {
+	switch e.kdfAlgorithm {
+	case KDFAlgArgon2id:
+		return KDFParams{
+			Algorithm: KDFAlgArgon2id,
+			Time:      e.argon2idParams.Time,
+			Memory:    e.argon2idParams.Memory,
+			Threads:   e.argon2idParams.Threads,
+		}
+	default:
+		return DefaultKDFParams(e.pbkdf2Iterations)
+	}
 }
 
 // generateSalt generates a cryptographically secure random salt.
@@ -469,7 +517,7 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	encMetadata[MetaIV] = encodeBase64(nonce)
 	encMetadata[MetaOriginalSize] = fmt.Sprintf("%d", originalSize)
 	encMetadata[MetaOriginalETag] = originalETag
-	encMetadata[MetaKDFParams] = FormatKDFParams(DefaultKDFParams(e.pbkdf2Iterations))
+	encMetadata[MetaKDFParams] = FormatKDFParams(e.defaultKDFParams())
 	if contentType != "" {
 		encMetadata[MetaContentType] = contentType
 	}
@@ -928,7 +976,7 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	encMetadata[MetaChunkSize] = fmt.Sprintf("%d", e.chunkSize)
 	encMetadata[MetaManifest] = manifestEncoded
 	encMetadata[MetaIVDerivation] = "hkdf-sha256"
-	encMetadata[MetaKDFParams] = FormatKDFParams(DefaultKDFParams(e.pbkdf2Iterations))
+	encMetadata[MetaKDFParams] = FormatKDFParams(e.defaultKDFParams())
 	if originalETag != "" {
 		encMetadata[MetaOriginalETag] = originalETag
 	}
@@ -1051,7 +1099,7 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 	fullMetadata[MetaChunkSize] = fmt.Sprintf("%d", e.chunkSize)
 	fullMetadata[MetaManifest] = manifestEncoded
 	fullMetadata[MetaIVDerivation] = "hkdf-sha256"
-	fullMetadata[MetaKDFParams] = FormatKDFParams(DefaultKDFParams(e.pbkdf2Iterations))
+	fullMetadata[MetaKDFParams] = FormatKDFParams(e.defaultKDFParams())
 	if originalETag != "" {
 		fullMetadata[MetaOriginalETag] = originalETag
 	}
@@ -1527,7 +1575,7 @@ func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[
 		MetaIV:           encodeBase64(nonce),
 		MetaOriginalSize: fmt.Sprintf("%d", originalSize),
 		MetaOriginalETag: originalETag,
-		MetaKDFParams:    FormatKDFParams(DefaultKDFParams(e.pbkdf2Iterations)),
+		MetaKDFParams:    FormatKDFParams(e.defaultKDFParams()),
 	}
 
 	// Copy original user metadata
