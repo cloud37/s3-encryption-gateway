@@ -1238,6 +1238,61 @@ func TestValidate_KeyManagerUnsupportedProvider(t *testing.T) {
 	}
 }
 
+func TestConfig_SelfContained_MissingType_Invalid(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "self_contained"
+	cfg.Encryption.KeyManager.SelfContained.Type = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "type") {
+		t.Errorf("expected type error for empty self_contained.type, got %v", err)
+	}
+}
+
+func TestConfig_SelfContained_AES_NoKeys_Invalid(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "self_contained"
+	cfg.Encryption.KeyManager.SelfContained.Type = "aes"
+	cfg.Encryption.KeyManager.SelfContained.AES.Keys = nil
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "keys") {
+		t.Errorf("expected keys error for empty aes.keys, got %v", err)
+	}
+}
+
+func TestConfig_SelfContained_AES_MissingKeySource_Invalid(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "self_contained"
+	cfg.Encryption.KeyManager.SelfContained.Type = "aes"
+	cfg.Encryption.KeyManager.SelfContained.AES.Keys = []SelfContainedAESKeyEntry{
+		{Version: 1, KeySource: ""},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "key_source") {
+		t.Errorf("expected key_source error for missing aes.keys[0].key_source, got %v", err)
+	}
+}
+
+func TestConfig_SelfContained_RSA_MissingPrivateKey_Invalid(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "self_contained"
+	cfg.Encryption.KeyManager.SelfContained.Type = "rsa"
+	cfg.Encryption.KeyManager.SelfContained.RSA.PrivateKeySource = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "private_key_source") {
+		t.Errorf("expected private_key_source error for empty rsa.private_key_source, got %v", err)
+	}
+}
+
+func TestConfig_SelfContained_InvalidType_Invalid(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "self_contained"
+	cfg.Encryption.KeyManager.SelfContained.Type = "ecdsa"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "aes") {
+		t.Errorf("expected aes/rsa type error for unsupported self_contained.type, got %v", err)
+	}
+}
+
 func TestValidate_TracingConfig(t *testing.T) {
 	base := minValidConfig()
 
