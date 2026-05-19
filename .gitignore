@@ -51,3 +51,4 @@ logs/server
 .serena
 .claude
 */__pycache__
+.opencode

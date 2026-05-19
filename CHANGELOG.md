@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Self-contained envelope encryption provider** (V1.0-KMS-4): New
+  `"self_contained"` `KeyManager` adapter supporting AES-256-GCM (symmetric)
+  and RSA-OAEP/SHA-256 (asymmetric) DEK wrapping with no external KMS
+  dependencies. Includes `AESKEKManager` (with `RotatableKeyManager` for key
+  rotation), `RSAKEKManager`, factory registration, env-var injection, YAML
+  config schema, ADR-0013, and full test suite (unit, conformance, fuzz,
+  integration). See `docs/KMS_COMPATIBILITY.md` for configuration examples.
+
 ## [0.8.0] — 2026-05-18
 
 ### ⚠️ Breaking ⚠️
