@@ -114,6 +114,26 @@ encryption:
     #                          # local development or tests.
     #                          # Set via MEMORY_KM_MASTER_KEY_SOURCE env var
 
+    # ---------------------------------------------------------------------------
+    # self_contained provider — AES-256-GCM KEK wrap (no external KMS required)
+    # ---------------------------------------------------------------------------
+    # self_contained:
+    #   type: aes
+    #   aes:
+    #     active_version: 1
+    #     keys:
+    #       - version: 1
+    #         key_source: "env:AES_KEK_V1"  # base64-encoded 32-byte key
+    #
+    # ---------------------------------------------------------------------------
+    # self_contained provider — RSA-OAEP KEK wrap
+    # ---------------------------------------------------------------------------
+    # self_contained:
+    #   type: rsa
+    #   rsa:
+    #     private_key_source: "file:/run/secrets/kek_rsa.pem"
+    #     key_version: 1
+
     cosmian:
       # Cosmian KMIP endpoint (supports both binary and JSON protocols)
       # RECOMMENDED: JSON/HTTP endpoint (tested and verified)

@@ -232,6 +232,57 @@ export COSMIAN_KMS_KEYS="your-key-id:1"  # Format: "key1:version1,key2:version2"
 - Requires `ca_cert`, `client_cert`, and `client_key`
 - Not fully tested in CI — use with caution
 
+#### Self-contained KEK adapter (no external KMS required)
+
+The `self_contained` adapter provides envelope encryption without any external
+KMS. It supports AES-256-GCM (symmetric) and RSA-OAEP (asymmetric) wrapping
+using only local key material. This is ideal for air-gapped deployments,
+testing, and operators who want to use existing PKI infrastructure.
+
+Generate a 32-byte base64 AES KEK:
+
+```bash
+openssl rand -base64 32
+```
+
+Minimal YAML configuration:
+
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: self_contained
+    self_contained:
+      type: aes
+      aes:
+        keys:
+          - version: 1
+            key_source: "env:AES_KEK_V1"
+```
+
+Or via environment variables:
+
+```bash
+export KEY_MANAGER_ENABLED=true
+export KEY_MANAGER_PROVIDER=self_contained
+export SELF_CONTAINED_TYPE=aes
+# AES_KEK_V1 must contain the base64-encoded 32-byte key
+```
+
+For RSA-OAEP:
+
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: self_contained
+    self_contained:
+      type: rsa
+      rsa:
+        private_key_source: "file:/run/secrets/kek_rsa.pem"
+        key_version: 1
+```
+
 See [`docs/KMS_COMPATIBILITY.md`](docs/KMS_COMPATIBILITY.md) for detailed documentation. AWS KMS and Vault Transit adapters are on the roadmap (see Roadmap section below).
 
 ### Compression

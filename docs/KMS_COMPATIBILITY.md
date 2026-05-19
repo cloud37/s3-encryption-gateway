@@ -28,6 +28,7 @@ and can be selected via `encryption.key_manager.provider` in configuration.
 | `cosmian` / `kmip` | ✅ Production-ready (v0.5+) | Cosmian KMIP — JSON/HTTP and binary |
 | `memory` | ✅ Stable (v0.6) | In-process AES-256 key-wrap; no external deps |
 | `hsm` | 🚧 Skeleton (v0.6) | PKCS#11 stub; functional in v1.0 (needs `-tags hsm`) |
+| `self_contained` | ✅ Stable (v1.0) | AES-256-GCM or RSA-OAEP KEK; no external deps |
 
 #### `cosmian` / `kmip` adapter
 
@@ -66,6 +67,80 @@ PKCS#11 skeleton. Compile with `-tags hsm` to include it. All methods return
 `ErrProviderUnavailable` until the functional implementation ships in v1.0.
 See [docs/adr/0004-hsm-adapter-contract.md](adr/0004-hsm-adapter-contract.md) for the
 full integration contract.
+
+#### `self_contained` adapter
+
+Self-contained envelope encryption with no external KMS dependencies. Supports
+two wrapping modes selected via the `type` field:
+
+- **AES-256-GCM** (`type: aes`): authenticated encryption using AES-GCM with a
+  12-byte random nonce per wrap call. Tamper-resistant: modified ciphertext is
+  rejected on unwrap. Multiple versioned KEKs are supported for dual-read
+  rotation.
+
+- **RSA-OAEP** (`type: rsa`): asymmetric wrapping using RSA-OAEP with SHA-256.
+  Minimum key size is 2048 bits. Operators can use existing PKI infrastructure
+  to control DEK access without a network KMS call.
+
+Configuration (AES):
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: self_contained
+    self_contained:
+      type: aes
+      aes:
+        active_version: 2
+        keys:
+          - version: 1
+            key_source: "env:AES_KEK_V1"   # base64-encoded 32-byte key
+          - version: 2
+            key_source: "env:AES_KEK_V2"
+```
+
+Configuration (RSA):
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: self_contained
+    self_contained:
+      type: rsa
+      rsa:
+        private_key_source: "file:/run/secrets/kek_rsa.pem"
+        key_version: 1
+```
+
+Key source formats for AES KEKs:
+- `"env:VAR"` — base64-decode the environment variable `VAR`
+- `"base64:DATA"` — decode the literal base64 string
+- `"file:PATH"` — read and base64-decode file at `PATH`
+
+Key source formats for RSA private keys:
+- `"env:VAR"` — PEM-encoded key from environment variable `VAR`
+- `"file:PATH"` — PEM-encoded key from file at `PATH`
+- Literal PEM — inline PEM block in configuration
+
+**Security properties:**
+- AES-GCM: unique 96-bit nonce per wrap; AEAD authentication prevents
+  ciphertext tampering; maximum safe object count per KEK is ~2^32.
+- RSA-OAEP: SHA-256 hash; minimum 2048-bit key enforced at construction.
+- All key material zeroized on `Close()`.
+- No KEK material appears in log output or error messages.
+
+**Rotation:** `AESKEKManager` implements `RotatableKeyManager` with
+`AddVersion` / `PrepareRotation` / `PromoteActiveVersion`. RSA key rotation
+requires manual key pair replacement and re-instantiation.
+
+**Known limitations:**
+- KEK loss = permanent DEK irrecoverability. Operators must maintain secure
+  key backups (e.g., split-key backup with Shamir Secret Sharing or stored in
+  Vault).
+- RSA private key zeroization is best-effort (Go's `big.Int` may retain
+  internal copies). For higher-assurance deployments, use the HSM adapter.
+- No automatic lazy re-wrapping of historical DEKs after rotation; re-wrapping
+  happens on the next write.
 
 ### Planned for v1.0
 
