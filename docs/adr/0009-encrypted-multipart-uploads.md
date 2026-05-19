@@ -640,10 +640,20 @@ plaintext-parts path. This ADR extends it:
   compromising the `KeyManager` (Cosmian KMIP, HSM). An attacker
   who substitutes part records to redirect IV derivation
   produces wrong IVs → AEAD tag failure on GET → fail closed.
-- **Valkey read disclosure.** An attacker with read-only Valkey
-  access sees wrapped DEKs, IV prefixes, and per-part
-  `enc_len`/`chunks`/`etag` — metadata, no plaintext. Recovering
-  plaintext still requires the `KeyManager`.
+- **Valkey read disclosure.** *(Risk mitigated in v1.0 by
+  V1.0-CRYPTO-2.)* An attacker with read-only Valkey access
+  previously saw wrapped DEKs, IV prefixes, bucket names, object
+  keys, and per-part `enc_len`/`chunks`/`etag` — metadata, no
+  plaintext. As of v1.0, when `valkey.encrypt_state=true`
+  (default), the entire `UploadState` blob is sealed with
+  AES-256-GCM (key derived via HKDF-SHA256 from
+  `VALKEY_ENCRYPTION_PASSWORD` or the main gateway password with a
+  distinct salt `"s3eg-mpu-state-v1"`). A read-only attacker sees
+  only opaque ciphertext. Recovering any metadata still requires
+  both the encryption key and the `KeyManager`. The
+  `gateway_mpu_state_encrypted_writes_total` Prometheus counter
+  confirms active encryption; `gateway_mpu_state_legacy_reads_total`
+  tracks legacy unencrypted blobs still present during migration.
 - **Valkey in-transit.** TLS 1.3 required in production; gateway
   refuses to start with plaintext Valkey + encrypted MPU
   enabled unless the operator explicitly sets
