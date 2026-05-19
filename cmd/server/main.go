@@ -636,7 +636,7 @@ func main() {
 	var mpuStore mpupkg.StateStore
 	if cfg.MultipartState.Valkey.Addr != "" {
 		var err error
-		mpuStore, err = mpupkg.NewValkeyStateStore(context.Background(), cfg.MultipartState.Valkey)
+		mpuStore, err = mpupkg.NewValkeyStateStore(context.Background(), cfg.MultipartState.Valkey, cfg.Encryption.Password)
 		if err != nil {
 			logger.WithError(err).Fatal("Failed to initialise MPU Valkey state store")
 		}

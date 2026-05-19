@@ -653,6 +653,17 @@ type ValkeyConfig struct {
 	WriteTimeout           time.Duration `yaml:"write_timeout" env:"VALKEY_WRITE_TIMEOUT"`
 	PoolSize               int           `yaml:"pool_size" env:"VALKEY_POOL_SIZE"`
 	MinIdleConns           int           `yaml:"min_idle_conns" env:"VALKEY_MIN_IDLE_CONNS"`
+	// EncryptionPasswordEnv is the name of the environment variable holding the
+	// dedicated password for at-rest encryption of multipart-upload state in
+	// Valkey. If unset, falls back to the gateway's main encryption password
+	// (encryption.password) with a distinct HKDF info string.
+	// V1.0-CRYPTO-2.
+	EncryptionPasswordEnv string `yaml:"encryption_password_env" env:"VALKEY_ENCRYPTION_PASSWORD_ENV"`
+	// EncryptState enables at-rest encryption of the meta field in Valkey hash
+	// entries. Defaults to true (nil → true). When true, EncyptionPasswordEnv
+	// or the main encryption.password is used to derive an AES-256-GCM key.
+	// V1.0-CRYPTO-2.
+	EncryptState *bool `yaml:"encrypt_state" env:"VALKEY_ENCRYPT_STATE"`
 }
 
 // ValkeyTLSConfig holds TLS settings for the Valkey connection.
@@ -782,6 +793,7 @@ func LoadConfig(path string) (*Config, error) {
 				WriteTimeout: 1 * time.Second,
 				PoolSize:     16,
 				MinIdleConns: 2,
+				EncryptState: BoolPtr(true),
 				TLS: ValkeyTLSConfig{
 					Enabled:    true,
 					MinVersion: "1.3",
@@ -1355,6 +1367,14 @@ func loadFromEnv(config *Config) {
 			config.MultipartState.Valkey.PoolSize = n
 		}
 	}
+	// V1.0-CRYPTO-2 — at-rest encryption for Valkey multipart state.
+	if v := os.Getenv("VALKEY_ENCRYPTION_PASSWORD_ENV"); v != "" {
+		config.MultipartState.Valkey.EncryptionPasswordEnv = v
+	}
+	if v := os.Getenv("VALKEY_ENCRYPT_STATE"); v != "" {
+		b := v == "true" || v == "1"
+		config.MultipartState.Valkey.EncryptState = &b
+	}
 }
 
 func parseCosmianKeyRefs(value string) []CosmianKeyReference {
@@ -1579,6 +1599,18 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("invalid multipart_state.valkey.tls.min_version: %q (must be 1.2 or 1.3)", c.MultipartState.Valkey.TLS.MinVersion)
 		}
+
+		// V1.0-CRYPTO-2 — validate Valkey at-rest encryption config.
+		encryptState := c.MultipartState.Valkey.EncryptState == nil || *c.MultipartState.Valkey.EncryptState
+		if !encryptState {
+			slog.Warn("multipart_state.valkey.encrypt_state is false — at-rest encryption is disabled for Valkey multipart state (deprecated, will be removed in v2.0)")
+		} else if c.MultipartState.Valkey.EncryptionPasswordEnv != "" {
+			if v := os.Getenv(c.MultipartState.Valkey.EncryptionPasswordEnv); v == "" {
+				return fmt.Errorf("multipart_state.valkey.encryption_password_env is set to %q but the environment variable is empty or unset", c.MultipartState.Valkey.EncryptionPasswordEnv)
+			}
+		} else if c.Encryption.Password == "" {
+			slog.Warn("multipart_state.valkey.encryption_password_env is not set and encryption.password is empty — at-rest encryption will fail at runtime if enabled")
+		}
 	}
 
 	// Validate backend retry configuration (V0.6-PERF-2).
@@ -1729,6 +1761,11 @@ func validateAdminTokenLength(token string) error {
 		return fmt.Errorf("token too short: %d characters, minimum 32", len(token))
 	}
 	return nil
+}
+
+// boolPtr returns a pointer to the given bool value.
+func BoolPtr(v bool) *bool {
+	return &v
 }
 
 // ConfigReloader handles hot-reloading of non-crypto configuration settings.

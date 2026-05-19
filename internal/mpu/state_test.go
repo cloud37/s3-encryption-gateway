@@ -213,11 +213,12 @@ func TestNewValkeyStateStore_TLSRequired(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.ValkeyConfig{
 		Addr:                   "127.0.0.1:6379",
+		EncryptState:           config.BoolPtr(false),
 		InsecureAllowPlaintext: false,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
 		TTLSeconds:             604800,
 	}
-	_, err := NewValkeyStateStore(ctx, cfg)
+	_, err := NewValkeyStateStore(ctx, cfg, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStateUnavailable)
 	assert.Contains(t, err.Error(), "TLS is required")
@@ -252,6 +253,7 @@ func TestNewValkeyStateStore_InsecurePlaintext(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.ValkeyConfig{
 		Addr:                   mr.Addr(),
+		EncryptState:           config.BoolPtr(false),
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
 		TTLSeconds:             60,
@@ -260,7 +262,7 @@ func TestNewValkeyStateStore_InsecurePlaintext(t *testing.T) {
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
 	}
-	store, err := NewValkeyStateStore(ctx, cfg)
+	store, err := NewValkeyStateStore(ctx, cfg, "")
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	assert.NoError(t, store.Close())
@@ -271,6 +273,7 @@ func TestNewValkeyStateStore_UnreachableAddr(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.ValkeyConfig{
 		Addr:                   "127.0.0.1:19999", // nothing listening here
+		EncryptState:           config.BoolPtr(false),
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
 		TTLSeconds:             60,
@@ -279,7 +282,7 @@ func TestNewValkeyStateStore_UnreachableAddr(t *testing.T) {
 		WriteTimeout:           200 * time.Millisecond,
 		PoolSize:               1,
 	}
-	_, err := NewValkeyStateStore(ctx, cfg)
+	_, err := NewValkeyStateStore(ctx, cfg, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStateUnavailable)
 }
@@ -375,6 +378,7 @@ func TestNewValkeyStateStore_PasswordEnv(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.ValkeyConfig{
 		Addr:                   mr.Addr(),
+		EncryptState:           config.BoolPtr(false),
 		PasswordEnv:            "TEST_VALKEY_PASS",
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
@@ -385,7 +389,7 @@ func TestNewValkeyStateStore_PasswordEnv(t *testing.T) {
 		PoolSize:               2,
 	}
 	// miniredis doesn't enforce passwords, so the connection succeeds.
-	store, err := NewValkeyStateStore(ctx, cfg)
+	store, err := NewValkeyStateStore(ctx, cfg, "")
 	require.NoError(t, err)
 	assert.NoError(t, store.Close())
 }

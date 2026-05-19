@@ -5,6 +5,9 @@ package mpu
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,19 +16,32 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/kenneth/s3-encryption-gateway/internal/config"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/crypto/hkdf"
 )
 
 // Sentinel errors — use errors.Is for matching.
 var (
-	ErrUploadNotFound     = errors.New("mpu: upload not found")
+	ErrUploadNotFound      = errors.New("mpu: upload not found")
 	ErrUploadAlreadyExists = errors.New("mpu: upload already exists")
-	ErrStateUnavailable   = errors.New("mpu: state store unavailable")
+	ErrStateUnavailable    = errors.New("mpu: state store unavailable")
+	ErrStateDecryptFailed  = errors.New("mpu: state decrypt failed")
+)
+
+// Versioned ciphertext format for at-rest encryption of state blobs.
+// Layout: version(1 byte) || nonce(12 bytes) || ciphertext(...) || tag(16 bytes)
+const (
+	stateEncryptionVersionLen = 1
+	stateEncryptionNonceLen   = 12
+	stateEncryptionTagLen     = 16
+	stateEncryptionVersionV1  byte = 0x01
 )
 
 // PartRecord holds per-part encryption metadata persisted in Valkey.
@@ -106,13 +122,18 @@ const (
 
 // ValkeyStateStore implements StateStore backed by Valkey (via go-redis/v9).
 type ValkeyStateStore struct {
-	client redis.UniversalClient
-	ttl    time.Duration
+	client       redis.UniversalClient
+	ttl          time.Duration
+	stateKey     []byte
+	encryptState bool
+	legacyWarn   sync.Once
 }
 
 // NewValkeyStateStore constructs a ValkeyStateStore from cfg and performs a
 // HealthCheck. Returns an error (fail-closed) if Valkey is unreachable.
-func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig) (*ValkeyStateStore, error) {
+// encryptionPassword is the main gateway encryption password, used as fallback
+// when cfg.EncryptionPasswordEnv is not set.
+func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, encryptionPassword string) (*ValkeyStateStore, error) {
 	password := ""
 	if cfg.PasswordEnv != "" {
 		password = os.Getenv(cfg.PasswordEnv)
@@ -148,7 +169,30 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig) (*ValkeyS
 	}
 
 	client := redis.NewUniversalClient(opts)
-	s := &ValkeyStateStore{client: client, ttl: ttl}
+
+	// Derive at-rest encryption key.
+	encryptState := cfg.EncryptState == nil || *cfg.EncryptState
+	var stateKey []byte
+	if encryptState {
+		encPassword := ""
+		if cfg.EncryptionPasswordEnv != "" {
+			encPassword = os.Getenv(cfg.EncryptionPasswordEnv)
+		} else {
+			encPassword = encryptionPassword
+		}
+		if encPassword == "" {
+			_ = client.Close()
+			return nil, fmt.Errorf("%w: valkey state encryption enabled but no encryption password available (set %s or configure encryption.password)", ErrStateUnavailable, cfg.EncryptionPasswordEnv)
+		}
+		stateKey = deriveStateAEADKey(encPassword)
+	}
+
+	s := &ValkeyStateStore{
+		client:       client,
+		ttl:          ttl,
+		stateKey:     stateKey,
+		encryptState: encryptState,
+	}
 
 	// Fail-closed: if Valkey is unreachable at startup, refuse to start.
 	if err := s.HealthCheck(ctx); err != nil {
@@ -204,6 +248,69 @@ func buildTLSConfig(cfg config.ValkeyTLSConfig) (*tls.Config, error) {
 }
 
 // Create stores a new UploadState using HSETNX for the meta field (idempotency).
+
+// EncryptState seals a plaintext JSON blob with AES-256-GCM.
+// Returns a byte slice in the versioned ciphertext format:
+//
+//	version(1 byte) || nonce(12 bytes) || ciphertext(...) || tag(16 bytes)
+//
+// Nonce is crypto/rand 96 bits.
+func (s *ValkeyStateStore) EncryptState(plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(s.stateKey)
+	if err != nil {
+		return nil, fmt.Errorf("mpu: aes new cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("mpu: new gcm: %w", err)
+	}
+
+	nonce := make([]byte, stateEncryptionNonceLen)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("mpu: random nonce: %w", err)
+	}
+
+	// Seal appends to dst[:0] so pre-allocate the full output buffer.
+	out := make([]byte, stateEncryptionVersionLen+stateEncryptionNonceLen+len(plaintext)+stateEncryptionTagLen)
+	out[0] = stateEncryptionVersionV1
+	copy(out[stateEncryptionVersionLen:], nonce)
+	gcm.Seal(out[stateEncryptionVersionLen+stateEncryptionNonceLen:stateEncryptionVersionLen+stateEncryptionNonceLen], nonce, plaintext, nil)
+	return out, nil
+}
+
+// DecryptState opens a ciphertext blob sealed by EncryptState.
+// If decryption fails with an AEAD tag error, returns ErrStateDecryptFailed
+// so the caller can attempt legacy plaintext fallback.
+func (s *ValkeyStateStore) DecryptState(ciphertext []byte) ([]byte, error) {
+	minLen := stateEncryptionVersionLen + stateEncryptionNonceLen + stateEncryptionTagLen
+	if len(ciphertext) < minLen {
+		return nil, fmt.Errorf("%w: ciphertext too short (%d bytes, need >= %d)", ErrStateDecryptFailed, len(ciphertext), minLen)
+	}
+
+	version := ciphertext[0]
+	if version != stateEncryptionVersionV1 {
+		return nil, fmt.Errorf("%w: unknown version byte 0x%02x", ErrStateDecryptFailed, version)
+	}
+
+	block, err := aes.NewCipher(s.stateKey)
+	if err != nil {
+		return nil, fmt.Errorf("mpu: aes new cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("mpu: new gcm: %w", err)
+	}
+
+	nonce := ciphertext[stateEncryptionVersionLen : stateEncryptionVersionLen+stateEncryptionNonceLen]
+	encData := ciphertext[stateEncryptionVersionLen+stateEncryptionNonceLen:]
+
+	plaintext, err := gcm.Open(nil, nonce, encData, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStateDecryptFailed, err)
+	}
+	return plaintext, nil
+}
+
 func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error {
 	key := uploadKey(state.UploadID)
 	metaJSON, err := json.Marshal(state)
@@ -211,8 +318,17 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 		return fmt.Errorf("mpu: marshal state: %w", err)
 	}
 
+	value := metaJSON
+	if s.encryptState {
+		encrypted, err := s.EncryptState(metaJSON)
+		if err != nil {
+			return fmt.Errorf("mpu: encrypt state: %w", err)
+		}
+		value = encrypted
+	}
+
 	pipe := s.client.TxPipeline()
-	hsetnx := pipe.HSetNX(ctx, key, fieldMeta, metaJSON)
+	hsetnx := pipe.HSetNX(ctx, key, fieldMeta, value)
 	pipe.Expire(ctx, key, s.ttl)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return wrapRedisErr(err)
@@ -241,8 +357,24 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 		return nil, fmt.Errorf("mpu: state record for %q missing meta field", uploadID)
 	}
 
+	metaBytes := []byte(metaRaw)
+	if s.encryptState {
+		decrypted, err := s.DecryptState(metaBytes)
+		if err != nil {
+			// Decryption failed — try legacy plaintext fallback.
+			s.legacyWarn.Do(func() {
+				logrus.WithFields(logrus.Fields{
+					"component": "mpu_state",
+				}).Warn("Unencrypted Valkey state detected — enable valkey.encrypt_state=true")
+			})
+			// Leave metaBytes as the raw value; unmarshal below will handle plaintext JSON.
+		} else {
+			metaBytes = decrypted
+		}
+	}
+
 	var state UploadState
-	if err := json.Unmarshal([]byte(metaRaw), &state); err != nil {
+	if err := json.Unmarshal(metaBytes, &state); err != nil {
 		return nil, fmt.Errorf("mpu: unmarshal state: %w", err)
 	}
 
@@ -311,8 +443,24 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 			}
 			return nil, wrapRedisErr(err)
 		}
+
+		metaBytes := []byte(metaRaw)
+		if s.encryptState {
+			decrypted, err := s.DecryptState(metaBytes)
+			if err != nil {
+				// Legacy plaintext fallback.
+				s.legacyWarn.Do(func() {
+					logrus.WithFields(logrus.Fields{
+						"component": "mpu_state",
+					}).Warn("Unencrypted Valkey state detected — enable valkey.encrypt_state=true")
+				})
+			} else {
+				metaBytes = decrypted
+			}
+		}
+
 		var state UploadState
-		if err := json.Unmarshal([]byte(metaRaw), &state); err != nil {
+		if err := json.Unmarshal(metaBytes, &state); err != nil {
 			return nil, fmt.Errorf("mpu: unmarshal state for key %s: %w", key, err)
 		}
 		states = append(states, state)
@@ -333,8 +481,12 @@ func (s *ValkeyStateStore) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the underlying Redis client.
+// Close closes the underlying Redis client and zeroizes sensitive key material.
 func (s *ValkeyStateStore) Close() error {
+	if s.stateKey != nil {
+		zeroBytes(s.stateKey)
+		s.stateKey = nil
+	}
 	return s.client.Close()
 }
 
@@ -365,4 +517,29 @@ func IVPrefixFromHex(h string) ([12]byte, error) {
 func UploadIDHashB64(uploadID string) string {
 	h := sha256.Sum256([]byte(uploadID))
 	return base64.URLEncoding.EncodeToString(h[:])
+}
+
+// deriveStateAEADKey derives a dedicated 32-byte AES-256 key from the configured
+// password using HKDF-SHA256 Extract. The salt is a fixed public string that is
+// distinct from any salt used elsewhere in the binary.
+func deriveStateAEADKey(password string) []byte {
+	// HKDF-Extract is sufficient here because the input (password) is already
+	// a high-entropy secret. A fixed salt is safe as long as it is unique
+	// relative to other salts used in the same binary; "s3eg-mpu-state-v1" is
+	// distinct from any salt used in the engine's KDF or IV derivation.
+	salt := []byte("s3eg-mpu-state-v1")
+	// Use HKDF Extract to derive a 32-byte key.
+	extracted := hkdf.Extract(sha256.New, []byte(password), salt)
+	// hkdf.Extract returns a []byte whose length equals the hash output (32 for SHA-256).
+	// Copy it to guarantee immutability of the returned slice.
+	key := make([]byte, 32)
+	copy(key, extracted)
+	return key
+}
+
+// zeroBytes overwrites a byte slice with zeros for secure memory cleanup.
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }

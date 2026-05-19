@@ -205,6 +205,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	if o.valkeyAddr != "" && o.mpuStore == nil {
 		store, storeErr := mpu.NewValkeyStateStore(context.Background(), config.ValkeyConfig{
 			Addr:                   o.valkeyAddr,
+			EncryptState:           config.BoolPtr(false),
 			InsecureAllowPlaintext: true,
 			TLS:                    config.ValkeyTLSConfig{Enabled: false},
 			TTLSeconds:             3600,
@@ -212,7 +213,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			ReadTimeout:            1 * time.Second,
 			WriteTimeout:           1 * time.Second,
 			PoolSize:               4,
-		})
+		}, "")
 		if storeErr != nil {
 			listener.Close()
 			t.Fatalf("harness.StartGateway: create Valkey state store (%s): %v", o.valkeyAddr, storeErr)

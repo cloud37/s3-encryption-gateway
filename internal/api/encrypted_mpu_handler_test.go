@@ -262,6 +262,7 @@ encrypt_multipart_uploads: true
 	// Valkey state store (miniredis).
 	mr := miniredis.RunT(t)
 	store, err := mpu.NewValkeyStateStore(context.Background(), config.ValkeyConfig{
+		EncryptState:           config.BoolPtr(false),
 		Addr:                   mr.Addr(),
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
@@ -270,7 +271,7 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}
@@ -686,6 +687,7 @@ encrypt_multipart_uploads: true
 
 	mr := miniredis.RunT(t)
 	store, err := mpu.NewValkeyStateStore(context.Background(), config.ValkeyConfig{
+		EncryptState:           config.BoolPtr(false),
 		Addr:                   mr.Addr(),
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
@@ -694,7 +696,7 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}
