@@ -80,6 +80,14 @@ type Metrics struct {
 	// gatewayAdminProfilingEnabled is 1 when pprof routes are mounted.
 	gatewayAdminProfilingEnabled prometheus.Gauge
 
+	// V1.0-CRYPTO-2 — MPU state at-rest encryption metrics.
+	// gateway_mpu_state_encrypted_writes_total counts every successful
+	// encrypted write of a Valkey state blob. Labelled by op=create|get|list.
+	mpuStateEncryptedWrites *prometheus.CounterVec
+	// gateway_mpu_state_legacy_reads_total counts every fallback read of an
+	// unencrypted (legacy plaintext) Valkey state blob.
+	mpuStateLegacyReads prometheus.Counter
+
 	// V0.6-PERF-2 — S3 backend retry metrics (ADR 0010).
 	// s3BackendRetriesTotal counts retry attempts per operation and classifier
 	// reason. Labels: operation, reason, mode.
@@ -377,6 +385,21 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 				Help: "MPU manifests by storage location (location=inline|fallback).",
 			},
 			[]string{"location"},
+		),
+
+		// V1.0-CRYPTO-2 — MPU state at-rest encryption metrics.
+		mpuStateEncryptedWrites: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_mpu_state_encrypted_writes_total",
+				Help: "Total successful encrypted writes of Valkey MPU state blobs (op=create|get|list).",
+			},
+			[]string{"op"},
+		),
+		mpuStateLegacyReads: factory.NewCounter(
+			prometheus.CounterOpts{
+				Name: "gateway_mpu_state_legacy_reads_total",
+				Help: "Total fallback reads of unencrypted (legacy plaintext) Valkey MPU state blobs.",
+			},
 		),
 
 		// V0.6-PERF-2 — backend retry metrics (ADR 0010).
@@ -836,6 +859,27 @@ func (m *Metrics) RecordBackendRetryBackoff(delay time.Duration) {
 	if delay > 0 {
 		m.s3BackendRetryBackoffSeconds.Observe(delay.Seconds())
 	}
+}
+
+// ---- V1.0-CRYPTO-2 MPU state encryption metric helpers ----------------------
+
+// IncMPUStateEncryptedWrites increments gateway_mpu_state_encrypted_writes_total
+// for the given operation label (e.g. "create", "get", "list").
+func (m *Metrics) IncMPUStateEncryptedWrites(op string) {
+	if m == nil || m.mpuStateEncryptedWrites == nil {
+		return
+	}
+	m.mpuStateEncryptedWrites.WithLabelValues(op).Inc()
+}
+
+// IncMPUStateLegacyReads increments gateway_mpu_state_legacy_reads_total.
+// Call this whenever the state store falls back to reading an unencrypted
+// (legacy plaintext) Valkey blob.
+func (m *Metrics) IncMPUStateLegacyReads() {
+	if m == nil || m.mpuStateLegacyReads == nil {
+		return
+	}
+	m.mpuStateLegacyReads.Inc()
 }
 
 // getExemplar extracts trace ID from context and returns prometheus Labels for exemplar.

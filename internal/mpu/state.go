@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenneth/s3-encryption-gateway/internal/metrics"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/hkdf"
@@ -127,6 +128,8 @@ type ValkeyStateStore struct {
 	stateKey     []byte
 	encryptState bool
 	legacyWarn   sync.Once
+	// metrics is optional; when non-nil, encryption counters are reported.
+	metrics *metrics.Metrics
 }
 
 // NewValkeyStateStore constructs a ValkeyStateStore from cfg and performs a
@@ -325,6 +328,7 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 			return fmt.Errorf("mpu: encrypt state: %w", err)
 		}
 		value = encrypted
+		s.metrics.IncMPUStateEncryptedWrites("create")
 	}
 
 	pipe := s.client.TxPipeline()
@@ -367,9 +371,11 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 					"component": "mpu_state",
 				}).Warn("Unencrypted Valkey state detected — enable valkey.encrypt_state=true")
 			})
+			s.metrics.IncMPUStateLegacyReads()
 			// Leave metaBytes as the raw value; unmarshal below will handle plaintext JSON.
 		} else {
 			metaBytes = decrypted
+			s.metrics.IncMPUStateEncryptedWrites("get")
 		}
 	}
 
@@ -454,8 +460,10 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 						"component": "mpu_state",
 					}).Warn("Unencrypted Valkey state detected — enable valkey.encrypt_state=true")
 				})
+				s.metrics.IncMPUStateLegacyReads()
 			} else {
 				metaBytes = decrypted
+				s.metrics.IncMPUStateEncryptedWrites("list")
 			}
 		}
 
