@@ -302,6 +302,66 @@ Because `deriveKeyWithParams` reads iterations from metadata on decrypt, the
 source engine automatically handles both 100k and 600k objects during the
 migration window. No separate `--source-iterations` flag is strictly required.
 
+## Upgrading to Argon2id KDF
+
+V1.0-CRYPTO-1 introduces an alternative key derivation function: Argon2id
+(identified by `x-amz-meta-encryption-kdf-algorithm: argon2id` in object
+metadata). Objects encrypted with PBKDF2-SHA256 remain **fully readable** —
+the engine selects the correct KDF based on the metadata on decrypt.
+
+**Argon2id defaults are chosen for ~1 second on a modern server core:**
+- `time`: 2
+- `memory`: 19456 KiB (19 MiB)
+- `threads`: 1
+
+### Runbook: enabling Argon2id for new objects
+
+1. Upgrade the gateway to the V1.0-CRYPTO-1 release.
+2. Edit `gateway.yaml`:
+   ```yaml
+   encryption:
+     kdf:
+       algorithm: argon2id  # "pbkdf2-sha256" to keep current behaviour
+       argon2id:
+         time: 2
+         memory: 19456
+         threads: 1
+   ```
+3. Rolling-restart the gateway pods.
+4. Confirm the gateway logs show `kdf_algorithm=argon2id` at startup.
+5. **New objects** are now encrypted with Argon2id. Existing objects continue
+   to use whatever KDF they were created with.
+
+### Runbook: migrating existing objects to Argon2id
+
+To re-encrypt all existing PBKDF2-SHA256 objects with Argon2id:
+
+1. Verify the gateway is running with `encryption.kdf.algorithm: argon2id`.
+2. Run a dry-run scan:
+   ```bash
+   s3eg-migrate \
+     --bucket my-bucket \
+     --filter kdf \
+     --dry-run \
+     --state-file /tmp/argon2id-migration.json
+   ```
+3. When satisfied, run the actual migration:
+   ```bash
+   s3eg-migrate \
+     --bucket my-bucket \
+     --filter kdf \
+     --state-file /tmp/argon2id-migration.json \
+     --workers 8 \
+     --verify
+   ```
+4. Optionally rerun with `--dry-run` to confirm 0 ClassD objects remain.
+
+### FIPS environments
+
+When the binary is compiled with `-tags=fips`, Argon2id is **disabled** and
+the gateway refuses to start if `algorithm: argon2id` is configured. Use
+PBKDF2-SHA256 exclusively in FIPS mode.
+
 ## Future Work
 
 In v3.0, once all deployments have confirmed migration, the legacy read paths

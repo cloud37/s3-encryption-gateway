@@ -884,6 +884,20 @@
               "description": "Key derivation function configuration.",
               "additionalProperties": false,
               "properties": {
+                "algorithm": {
+                  "allOf": [
+                    { "$ref": "#/$defs/configValue" },
+                    {
+                      "properties": {
+                        "value": {
+                          "type": ["string", "null"],
+                          "description": "KDF algorithm: \\\"pbkdf2-sha256\\\" (default, FIPS-compatible) or \\\"argon2id\\\" (V1.0-CRYPTO-1).",
+                          "enum": ["pbkdf2-sha256", "argon2id"]
+                        }
+                      }
+                    }
+                  ]
+                },
                 "pbkdf2": {
                   "type": "object",
                   "description": "PBKDF2-SHA256 configuration (active when no argon2id support is compiled in).",
@@ -897,6 +911,52 @@
                             "value": {
                               "type": ["string", "integer", "null"],
                               "description": "PBKDF2-SHA256 iteration count. NIST SP 800-132 (2023) minimum: 600000. Must be >= 100000."
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "argon2id": {
+                  "type": "object",
+                  "description": "Argon2id KDF parameters (only used when algorithm is \\\"argon2id\\\").",
+                  "additionalProperties": false,
+                  "properties": {
+                    "time": {
+                      "allOf": [
+                        { "$ref": "#/$defs/configValue" },
+                        {
+                          "properties": {
+                            "value": {
+                              "type": ["string", "integer", "null"],
+                              "description": "Argon2id time parameter (number of passes). Default: 2, range: [1, 10]. Set via ENCRYPTION_KDF_ARGON2ID_TIME."
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "memory": {
+                      "allOf": [
+                        { "$ref": "#/$defs/configValue" },
+                        {
+                          "properties": {
+                            "value": {
+                              "type": ["string", "integer", "null"],
+                              "description": "Argon2id memory parameter in KiB. Default: 19456, range: [8192, 1048576]. Set via ENCRYPTION_KDF_ARGON2ID_MEMORY."
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "threads": {
+                      "allOf": [
+                        { "$ref": "#/$defs/configValue" },
+                        {
+                          "properties": {
+                            "value": {
+                              "type": ["string", "integer", "null"],
+                              "description": "Argon2id parallelism/threads parameter. Default: 1, range: [1, 256]. Set via ENCRYPTION_KDF_ARGON2ID_THREADS."
                             }
                           }
                         }

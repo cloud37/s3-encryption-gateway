@@ -86,12 +86,34 @@ spec:
         {{- if or .Values.config.encryption.supportedAlgorithms.value .Values.config.encryption.supportedAlgorithms.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_SUPPORTED_ALGORITHMS" "value" .Values.config.encryption.supportedAlgorithms.value "valueFrom" .Values.config.encryption.supportedAlgorithms.valueFrom) | nindent 8 }}
         {{- end }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_KDF_ALGORITHM" "value" .Values.config.encryption.kdf.algorithm.value "valueFrom" .Values.config.encryption.kdf.algorithm.valueFrom) | nindent 8 }}
         {{- if .Values.config.encryption.kdf.pbkdf2.iterations.value }}
         - name: ENCRYPTION_KDF_PBKDF2_ITERATIONS
           value: {{ .Values.config.encryption.kdf.pbkdf2.iterations.value | quote }}
         {{- else if .Values.config.encryption.kdf.pbkdf2.iterations.valueFrom }}
         - name: ENCRYPTION_KDF_PBKDF2_ITERATIONS
           valueFrom: {{ toYaml .Values.config.encryption.kdf.pbkdf2.iterations.valueFrom | nindent 12 }}
+        {{- end }}
+        {{- if .Values.config.encryption.kdf.argon2id.time.value }}
+        - name: ENCRYPTION_KDF_ARGON2ID_TIME
+          value: {{ .Values.config.encryption.kdf.argon2id.time.value | quote }}
+        {{- else if .Values.config.encryption.kdf.argon2id.time.valueFrom }}
+        - name: ENCRYPTION_KDF_ARGON2ID_TIME
+          valueFrom: {{ toYaml .Values.config.encryption.kdf.argon2id.time.valueFrom | nindent 12 }}
+        {{- end }}
+        {{- if .Values.config.encryption.kdf.argon2id.memory.value }}
+        - name: ENCRYPTION_KDF_ARGON2ID_MEMORY
+          value: {{ .Values.config.encryption.kdf.argon2id.memory.value | quote }}
+        {{- else if .Values.config.encryption.kdf.argon2id.memory.valueFrom }}
+        - name: ENCRYPTION_KDF_ARGON2ID_MEMORY
+          valueFrom: {{ toYaml .Values.config.encryption.kdf.argon2id.memory.valueFrom | nindent 12 }}
+        {{- end }}
+        {{- if .Values.config.encryption.kdf.argon2id.threads.value }}
+        - name: ENCRYPTION_KDF_ARGON2ID_THREADS
+          value: {{ .Values.config.encryption.kdf.argon2id.threads.value | quote }}
+        {{- else if .Values.config.encryption.kdf.argon2id.threads.valueFrom }}
+        - name: ENCRYPTION_KDF_ARGON2ID_THREADS
+          valueFrom: {{ toYaml .Values.config.encryption.kdf.argon2id.threads.valueFrom | nindent 12 }}
         {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "KEY_MANAGER_ENABLED" "value" .Values.config.encryption.keyManager.enabled.value "valueFrom" .Values.config.encryption.keyManager.enabled.valueFrom) | nindent 8 }}
         {{- if or (eq .Values.config.encryption.keyManager.enabled.value "true") (eq .Values.config.encryption.keyManager.enabled.value "1") }}

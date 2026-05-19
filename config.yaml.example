@@ -165,6 +165,32 @@ encryption:
       # client_key: "/path/to/client.key"  # Set via COSMIAN_KMS_CLIENT_KEY env var
       # insecure_skip_verify: false  # Set via COSMIAN_KMS_INSECURE_SKIP_VERIFY env var (for testing only)
 
+  # ---------------------------------------------------------------------------
+  # KDF (Key Derivation Function) — V1.0-CRYPTO-1
+  # ---------------------------------------------------------------------------
+  # Selects the password-based KDF for new objects. Existing objects are
+  # decrypted using whatever KDF their metadata indicates.
+  #
+  # Options:
+  #   "pbkdf2-sha256"  — PBKDF2 with HMAC-SHA256 (default, FIPS-compatible)
+  #   "argon2id"       — Argon2id (not available in FIPS builds)
+  #
+  # Default: pbkdf2-sha256
+  # Set via ENCRYPTION_KDF_ALGORITHM env var
+  #
+  # kdf:
+  #   algorithm: "pbkdf2-sha256"
+  #
+  #   # Argon2id parameters (only used when algorithm: "argon2id"):
+  #   #   time:    Number of passes (default: 2). Range: [1, 10].
+  #   #   memory:  Memory in KiB    (default: 19456). Range: [8192, 1048576].
+  #   #   threads: Parallelism     (default: 1).      Range: [1, 256].
+  #   # The defaults target ~1 second on a modern server core.
+  #   argon2id:
+  #     time: 2
+  #     memory: 19456
+  #     threads: 1
+
 compression:
   enabled: false
   min_size: 1024

@@ -338,6 +338,11 @@ config:
           #     key: cosmian-kms-insecure-skip-verify
 
     kdf:
+      # KDF algorithm: "pbkdf2-sha256" (default, FIPS-compatible) or "argon2id" (V1.0-CRYPTO-1).
+      # Set via ENCRYPTION_KDF_ALGORITHM env var.
+      algorithm:
+        value: "pbkdf2-sha256"
+        valueFrom: {}
       pbkdf2:
         iterations:
           value: "600000"
@@ -349,6 +354,18 @@ config:
           # Increase above 600000 to exceed the NIST SP 800-132 (2023) floor.
           # Do not set below 100000. Legacy objects (written before V1.0-SEC-H03)
           # are decrypted transparently regardless of this setting.
+      # Argon2id KDF parameters (only used when algorithm: "argon2id").
+      # Defaults target ~1 second on a modern server core.
+      argon2id:
+        time:
+          value: "2"
+          valueFrom: {}
+        memory:
+          value: "19456"
+          valueFrom: {}
+        threads:
+          value: "1"
+          valueFrom: {}
 
   # Compression configuration
   compression:
