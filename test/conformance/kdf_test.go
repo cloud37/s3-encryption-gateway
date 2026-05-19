@@ -140,3 +140,74 @@ func testKDF_Chunked_LegacyRead(t *testing.T, inst provider.Instance) {
 		t.Errorf("chunked legacy read mismatch")
 	}
 }
+
+
+// newEngineArgon2id creates an engine using argon2id KDF with the test
+// password and default argon2id parameters.
+func newEngineArgon2id(t *testing.T) crypto.EncryptionEngine {
+	t.Helper()
+	eng, err := crypto.NewEngineWithOpts(kdfTestPassword, nil,
+		crypto.WithKDFAlgorithm("argon2id"),
+		crypto.WithArgon2idParams(2, 19456, 1),
+	)
+	if err != nil {
+		t.Fatalf("newEngineArgon2id: %v", err)
+	}
+	return eng
+}
+
+// testKDF_Argon2id_RoundTrip verifies that a gateway configured with argon2id
+// KDF can PUT and GET a 128 KiB object correctly.
+func testKDF_Argon2id_RoundTrip(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst,
+		harness.WithKDFAlgorithm("argon2id"),
+		harness.WithArgon2idParams(2, 19456, 1),
+	)
+
+	data := bytes.Repeat([]byte("a"), 128*1024)
+	key := uniqueKey(t)
+	put(t, gw, inst.Bucket, key, data)
+	got := get(t, gw, inst.Bucket, key)
+	if !bytes.Equal(got, data) {
+		t.Errorf("argon2id round-trip mismatch: got %d bytes, want %d bytes", len(got), len(data))
+	}
+}
+
+// testKDF_Argon2id_LegacyRead writes an object directly to the backend using
+// an argon2id engine, then reads it back through a default PBKDF2 gateway.
+// Decryption must be driven by the metadata, not the engine default.
+func testKDF_Argon2id_LegacyRead(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	client := newS3Client(t, inst)
+	eng := newEngineArgon2id(t)
+	key := uniqueKey(t)
+	plaintext := []byte("argon2id-legacy-read-plaintext")
+
+	putEncryptedObject(t, client, eng, inst.Bucket, key, plaintext, nil)
+
+	gw := harness.StartGateway(t, inst)
+	got := get(t, gw, inst.Bucket, key)
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("argon2id legacy read mismatch: got %q, want %q", got, plaintext)
+	}
+}
+
+// testKDF_Argon2id_Chunked_RoundTrip verifies that a chunked gateway
+// configured with argon2id KDF can PUT and GET a 512 KiB object correctly.
+func testKDF_Argon2id_Chunked_RoundTrip(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst,
+		harness.WithChunking(true),
+		harness.WithKDFAlgorithm("argon2id"),
+		harness.WithArgon2idParams(2, 19456, 1),
+	)
+
+	data := bytes.Repeat([]byte("c"), 512*1024)
+	key := uniqueKey(t)
+	put(t, gw, inst.Bucket, key, data)
+	got := get(t, gw, inst.Bucket, key)
+	if !bytes.Equal(got, data) {
+		t.Errorf("argon2id chunked round-trip mismatch: got %d bytes, want %d bytes", len(got), len(data))
+	}
+}

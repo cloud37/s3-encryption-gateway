@@ -100,9 +100,11 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		Encryption: config.EncryptionConfig{
 			Password: o.encryptionPassword,
 			KDF: config.KDFConfig{
+				Algorithm: o.kdfAlgorithm,
 				PBKDF2: config.PBKDF2Config{
 					Iterations: o.pbkdf2Iterations,
 				},
+				Argon2id: o.argon2idParams,
 			},
 		},
 		Compression: config.CompressionConfig{
@@ -187,6 +189,8 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		compressionEngine,
 		crypto.WithPBKDF2Iterations(o.pbkdf2Iterations),
 		crypto.WithChunking(o.chunkedMode),
+		crypto.WithKDFAlgorithm(o.kdfAlgorithm),
+		crypto.WithArgon2idParams(o.argon2idParams.Time, o.argon2idParams.Memory, o.argon2idParams.Threads),
 	)
 	if err != nil {
 		listener.Close()

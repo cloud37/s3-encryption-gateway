@@ -722,3 +722,166 @@ func TestChunked_LegacyAbsentKDFParams(t *testing.T) {
 		t.Errorf("Decrypt() data mismatch")
 	}
 }
+
+func TestEncryptDecrypt_Argon2id(t *testing.T) {
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+		WithKDFAlgorithm("argon2id"),
+		WithArgon2idParams(2, 19456, 1),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	data := []byte("hello argon2id encryption")
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	decryptedData, err := io.ReadAll(decryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read decrypted data: %v", err)
+	}
+	if !bytes.Equal(decryptedData, data) {
+		t.Errorf("Decrypt() data mismatch: got %q, want %q", decryptedData, data)
+	}
+}
+
+func TestEncryptDecrypt_Argon2id_LegacyPBKDF2Read(t *testing.T) {
+	// Encrypt with PBKDF2 (default), decrypt with argon2id-configured engine.
+	pbkdf2Engine, err := NewEngineWithOpts([]byte("test-password-12345"), nil)
+	if err != nil {
+		t.Fatalf("Failed to create PBKDF2 engine: %v", err)
+	}
+
+	data := []byte("legacy pbkdf2 object read by argon2id engine")
+	encryptedReader, encMetadata, err := pbkdf2Engine.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+
+	// Decrypt with argon2id-configured engine (reads algorithm from metadata).
+	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+		WithKDFAlgorithm("argon2id"),
+		WithArgon2idParams(2, 19456, 1),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create argon2id engine: %v", err)
+	}
+	decryptedReader, _, err := argon2idEngine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	decryptedData, err := io.ReadAll(decryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read decrypted data: %v", err)
+	}
+	if !bytes.Equal(decryptedData, data) {
+		t.Errorf("Decrypt() data mismatch: got %q, want %q", decryptedData, data)
+	}
+}
+
+func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
+	// Encrypt with argon2id, decrypt with PBKDF2-configured engine (reads algorithm from metadata).
+	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+		WithKDFAlgorithm("argon2id"),
+		WithArgon2idParams(2, 19456, 1),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create argon2id engine: %v", err)
+	}
+
+	data := []byte("argon2id object read by pbkdf2 engine")
+	encryptedReader, encMetadata, err := argon2idEngine.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+
+	// Decrypt with PBKDF2 engine (reads argon2id from metadata).
+	pbkdf2Engine, err := NewEngineWithOpts([]byte("test-password-12345"), nil)
+	if err != nil {
+		t.Fatalf("Failed to create PBKDF2 engine: %v", err)
+	}
+	decryptedReader, _, err := pbkdf2Engine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	decryptedData, err := io.ReadAll(decryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read decrypted data: %v", err)
+	}
+	if !bytes.Equal(decryptedData, data) {
+		t.Errorf("Decrypt() data mismatch: got %q, want %q", decryptedData, data)
+	}
+}
+
+func TestEncrypt_WritesArgon2idMetadata(t *testing.T) {
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+		WithKDFAlgorithm("argon2id"),
+		WithArgon2idParams(3, 32768, 2),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	data := []byte("test data for argon2id metadata")
+	_, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+
+	want := "argon2id:3:32768:2"
+	if encMetadata[MetaKDFParams] != want {
+		t.Errorf("MetaKDFParams = %q, want %q", encMetadata[MetaKDFParams], want)
+	}
+}
+
+func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+		WithChunking(true),
+		WithKDFAlgorithm("argon2id"),
+		WithArgon2idParams(2, 19456, 1),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	data := []byte("chunked argon2id encryption test data")
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	if encMetadata[MetaChunkedFormat] != "true" {
+		t.Error("Expected chunked format marker")
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	decryptedData, err := io.ReadAll(decryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read decrypted data: %v", err)
+	}
+	if !bytes.Equal(decryptedData, data) {
+		t.Errorf("Decrypt() data mismatch: got %q, want %q", decryptedData, data)
+	}
+}

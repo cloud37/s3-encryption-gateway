@@ -2123,3 +2123,169 @@ auth:
 		t.Errorf("expected Metrics.Addr \":9091\", got %q", cfg.Metrics.Addr)
 	}
 }
+
+func TestConfig_Validate_Argon2id_NonFIPS_OK(t *testing.T) {
+	// In a non-FIPS build, argon2id algorithm should validate without error.
+	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
+	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
+	t.Setenv("ENCRYPTION_PASSWORD", "test-password")
+
+	// isFIPS() is false in non-FIPS builds.
+	cfg := &Config{}
+	cfg.ListenAddr = ":8080"
+	cfg.Auth.Credentials = []GatewayCredential{{AccessKey: "ak", SecretKey: "sk"}}
+	cfg.Backend.AccessKey = "bk"
+	cfg.Backend.SecretKey = "bs"
+	cfg.Encryption.Password = "test-password"
+	cfg.Encryption.KDF.Algorithm = "argon2id"
+	cfg.Encryption.KDF.Argon2id = Argon2idConfig{Time: 2, Memory: 19456, Threads: 1}
+
+	// Also require sufficient PBKDF2 iterations test to pass as side-effect.
+	cfg.Encryption.KDF.PBKDF2 = PBKDF2Config{Iterations: 600000}
+
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
+func TestConfig_Load_Argon2id_FullYAML(t *testing.T) {
+	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
+	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := `
+backend:
+  access_key: "test-key"
+  secret_key: "test-secret"
+encryption:
+  password: "test-password"
+  kdf:
+    algorithm: "argon2id"
+    pbkdf2:
+      iterations: 600000
+    argon2id:
+      time: 3
+      memory: 32768
+      threads: 2
+auth:
+  credentials:
+    - access_key: "gateway-key"
+      secret_key: "gateway-secret"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfg.Encryption.KDF.Algorithm != "argon2id" {
+		t.Errorf("KDF.Algorithm = %q, want %q", cfg.Encryption.KDF.Algorithm, "argon2id")
+	}
+	if cfg.Encryption.KDF.Argon2id.Time != 3 {
+		t.Errorf("Argon2id.Time = %d, want %d", cfg.Encryption.KDF.Argon2id.Time, 3)
+	}
+	if cfg.Encryption.KDF.Argon2id.Memory != 32768 {
+		t.Errorf("Argon2id.Memory = %d, want %d", cfg.Encryption.KDF.Argon2id.Memory, 32768)
+	}
+	if cfg.Encryption.KDF.Argon2id.Threads != 2 {
+		t.Errorf("Argon2id.Threads = %d, want %d", cfg.Encryption.KDF.Argon2id.Threads, 2)
+	}
+}
+
+func TestConfig_Validate_Argon2id_BadParams(t *testing.T) {
+	tests := []struct {
+		name    string
+		time    uint32
+		memory  uint32
+		threads uint8
+	}{
+		{"zero time", 0, 19456, 1},
+		{"zero memory", 2, 0, 1},
+		{"zero threads", 2, 19456, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.ListenAddr = ":8080"
+			cfg.Auth.Credentials = []GatewayCredential{{AccessKey: "ak", SecretKey: "sk"}}
+			cfg.Backend.AccessKey = "bk"
+			cfg.Backend.SecretKey = "bs"
+			cfg.Encryption.Password = "test-password"
+			cfg.Encryption.KDF.Algorithm = "argon2id"
+			cfg.Encryption.KDF.Argon2id = Argon2idConfig{Time: tt.time, Memory: tt.memory, Threads: tt.threads}
+			cfg.Encryption.KDF.PBKDF2 = PBKDF2Config{Iterations: 600000}
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() expected error for %s params", tt.name)
+			}
+		})
+	}
+}
+
+func TestConfig_Validate_Argon2id_UnknownAlgorithm(t *testing.T) {
+	cfg := &Config{}
+	cfg.ListenAddr = ":8080"
+	cfg.Auth.Credentials = []GatewayCredential{{AccessKey: "ak", SecretKey: "sk"}}
+	cfg.Backend.AccessKey = "bk"
+	cfg.Backend.SecretKey = "bs"
+	cfg.Encryption.Password = "test-password"
+	cfg.Encryption.KDF.Algorithm = "sha3"
+	cfg.Encryption.KDF.PBKDF2 = PBKDF2Config{Iterations: 600000}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error for unknown algorithm")
+	}
+	if !strings.Contains(err.Error(), `"sha3"`) {
+		t.Errorf("error should mention the unknown algorithm: %v", err)
+	}
+}
+
+func TestConfig_EnvOverride_Argon2idParams(t *testing.T) {
+	t.Setenv("ENCRYPTION_KDF_ALGORITHM", "argon2id")
+	t.Setenv("ENCRYPTION_KDF_ARGON2ID_TIME", "4")
+	t.Setenv("ENCRYPTION_KDF_ARGON2ID_MEMORY", "65536")
+	t.Setenv("ENCRYPTION_KDF_ARGON2ID_THREADS", "2")
+	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
+	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
+	t.Setenv("ENCRYPTION_PASSWORD", "test-password")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := `
+backend:
+  access_key: "test-key"
+  secret_key: "test-secret"
+encryption:
+  password: "test-password"
+auth:
+  credentials:
+    - access_key: "gateway-key"
+      secret_key: "gateway-secret"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfg.Encryption.KDF.Algorithm != "argon2id" {
+		t.Errorf("KDF.Algorithm = %q, want %q", cfg.Encryption.KDF.Algorithm, "argon2id")
+	}
+	if cfg.Encryption.KDF.Argon2id.Time != 4 {
+		t.Errorf("Argon2id.Time = %d, want %d", cfg.Encryption.KDF.Argon2id.Time, 4)
+	}
+	if cfg.Encryption.KDF.Argon2id.Memory != 65536 {
+		t.Errorf("Argon2id.Memory = %d, want %d", cfg.Encryption.KDF.Argon2id.Memory, 65536)
+	}
+	if cfg.Encryption.KDF.Argon2id.Threads != 2 {
+		t.Errorf("Argon2id.Threads = %d, want %d", cfg.Encryption.KDF.Argon2id.Threads, 2)
+	}
+}

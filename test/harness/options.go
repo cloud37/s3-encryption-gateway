@@ -36,6 +36,11 @@ type options struct {
 	pbkdf2Iterations    int
 	// chunkedMode enables chunked/streaming encryption for the gateway engine.
 	chunkedMode         bool
+	// kdfAlgorithm overrides the KDF algorithm for new objects.
+	// Empty string uses the default ("pbkdf2-sha256").
+	kdfAlgorithm        string
+	// argon2idParams overrides the argon2id KDF parameters.
+	argon2idParams      config.Argon2idConfig
 	// backendTransport, when non-nil, replaces the HTTP transport used by the
 	// gateway's S3 backend client.  Use this in chaos / retry tests to inject
 	// faults at the gateway→backend layer without an external proxy.
@@ -160,6 +165,24 @@ func WithPBKDF2Iterations(n int) Option {
 // gateway's encryption engine.
 func WithChunking(enabled bool) Option {
 	return func(o *options) { o.chunkedMode = enabled }
+}
+
+// WithKDFAlgorithm sets the KDF algorithm for the gateway's encryption engine.
+// Valid values: "pbkdf2-sha256" (default) or "argon2id" (non-FIPS only).
+func WithKDFAlgorithm(alg string) Option {
+	return func(o *options) { o.kdfAlgorithm = alg }
+}
+
+// WithArgon2idParams sets the argon2id KDF parameters for the gateway's
+// encryption engine. These are only used when WithKDFAlgorithm is "argon2id".
+func WithArgon2idParams(time, memory uint32, threads uint8) Option {
+	return func(o *options) {
+		o.argon2idParams = config.Argon2idConfig{
+			Time:    time,
+			Memory:  memory,
+			Threads: threads,
+		}
+	}
 }
 
 // WithAuth enables gateway authentication with the given credentials.
