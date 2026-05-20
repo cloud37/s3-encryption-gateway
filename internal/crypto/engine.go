@@ -560,6 +560,9 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 				delete(encMetadata, k)
 			}
 		}
+		// MetaEncrypted (x-amz-meta-encrypted) MUST remain outside the blob
+		// so that IsEncrypted works even without the metadata key (§2.6).
+		encMetadata[MetaEncrypted] = "true"
 		encMetadata[MetaEncryptedMetadata] = blob
 	}
 
@@ -931,6 +934,9 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 				delete(encMetadata, k)
 			}
 		}
+		// MetaEncrypted (x-amz-meta-encrypted) MUST remain outside the blob
+		// so that IsEncrypted works even without the metadata key (§2.6).
+		encMetadata[MetaEncrypted] = "true"
 		encMetadata[MetaEncryptedMetadata] = blob
 	}
 

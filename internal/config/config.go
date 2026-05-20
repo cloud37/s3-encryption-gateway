@@ -1522,6 +1522,11 @@ func (c *Config) Validate() error {
 	if metaKey != "" && len(metaKey) < 128 {
 		return fmt.Errorf("metadata_encryption_key must be at least 128 characters (got %d)", len(metaKey))
 	}
+	if metaKeyFile != "" {
+		if _, err := validateMetadataKeyFile(metaKeyFile); err != nil {
+			return fmt.Errorf("invalid metadata_encryption_key_file: %w", err)
+		}
+	}
 
 	if c.LogLevel != "" {
 		validLevels := map[string]bool{
@@ -2079,4 +2084,40 @@ func (r *ConfigReloader) GetCurrentConfig() *Config {
 	// Return a copy to prevent external modification
 	configCopy := *r.currentConfig
 	return &configCopy
+}
+
+// validateMetadataKeyFile reads a metadata encryption key file, base64-decodes
+// its content, and verifies that the decoded key is exactly 32 bytes.
+//
+// This implements the startup validation described in §2.1 Option A of
+// docs/plans/V1.0-CRYPTO-3-plan.md.
+// Returns the 32-byte key on success, or an error describing the problem.
+// A warning is logged (not returned) if the file mode is more permissive than 0600.
+func validateMetadataKeyFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read metadata key file: %w", err)
+	}
+
+	// Log a warning for permissive file modes (not an error).
+	if fi, err := os.Stat(path); err == nil {
+		const expectedPerm os.FileMode = 0600
+		mode := fi.Mode().Perm()
+		if mode&^expectedPerm != 0 {
+			slog.Warn("metadata encryption key file has permissive permissions",
+				"path", path,
+				"mode", mode,
+				"recommended", expectedPerm,
+			)
+		}
+	}
+
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("metadata key file contains invalid base64: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("metadata key file must decode to exactly 32 bytes (got %d)", len(key))
+	}
+	return key, nil
 }
