@@ -796,3 +796,56 @@ func TestChunkedEngineDecrypt_LegacyObject(t *testing.T) {
 		t.Errorf("Full-engine legacy-object round-trip failed: lengths %d vs %d", len(plaintext), len(decryptedData))
 	}
 }
+
+// TestIsChunkedFormat_NilMetadata verifies that nil metadata returns false
+// without panicking (covers the nil guard branch).
+func TestIsChunkedFormat_NilMetadata(t *testing.T) {
+	if IsChunkedFormat(nil) {
+		t.Error("IsChunkedFormat(nil) = true, want false")
+	}
+}
+
+// TestIsChunkedFormat_EmptyMetadata verifies that an empty map returns false.
+func TestIsChunkedFormat_EmptyMetadata(t *testing.T) {
+	if IsChunkedFormat(map[string]string{}) {
+		t.Error("IsChunkedFormat({}) = true, want false")
+	}
+}
+
+// TestIsChunkedFormat_TrueValue verifies that the "true" marker returns true.
+func TestIsChunkedFormat_TrueValue(t *testing.T) {
+	meta := map[string]string{MetaChunkedFormat: "true"}
+	if !IsChunkedFormat(meta) {
+		t.Error("IsChunkedFormat({chunked=true}) = false, want true")
+	}
+}
+
+// TestNewChunkedEncryptReader_Wrapper verifies the non-context wrapper delegates
+// to the context-aware version (covers the 0% newChunkedEncryptReader function).
+func TestNewChunkedEncryptReader_Wrapper(t *testing.T) {
+	key := make([]byte, aesKeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM: %v", err)
+	}
+	baseIV := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(baseIV); err != nil {
+		t.Fatalf("rand.Read baseIV: %v", err)
+	}
+
+	source := bytes.NewReader([]byte("hello chunked world"))
+	r, manifest := newChunkedEncryptReader(source, aead, baseIV, DefaultChunkSize, GetGlobalBufferPool())
+	if r == nil {
+		t.Fatal("newChunkedEncryptReader returned nil reader")
+	}
+	if manifest == nil {
+		t.Fatal("newChunkedEncryptReader returned nil manifest")
+	}
+}

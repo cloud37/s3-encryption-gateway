@@ -361,3 +361,120 @@ func TestBoundedQueue_IsClosed(t *testing.T) {
 		t.Error("IsClosed() should be true after Close()")
 	}
 }
+
+// TestBufferPoolMetrics_HitRate_ZeroTotal verifies that HitRate functions
+// return 0 when total (hits+misses) is zero (covers the total==0 guard branch).
+func TestBufferPoolMetrics_HitRate_ZeroTotal(t *testing.T) {
+	// A zero-value metrics struct has all zero counters.
+	m := BufferPoolMetrics{}
+	if r := m.HitRate4(); r != 0 {
+		t.Errorf("HitRate4() with zero total = %f, want 0", r)
+	}
+	if r := m.HitRate12(); r != 0 {
+		t.Errorf("HitRate12() with zero total = %f, want 0", r)
+	}
+	if r := m.HitRate32(); r != 0 {
+		t.Errorf("HitRate32() with zero total = %f, want 0", r)
+	}
+	if r := m.HitRate64K(); r != 0 {
+		t.Errorf("HitRate64K() with zero total = %f, want 0", r)
+	}
+}
+
+// TestBufferPoolMetrics_HitRate_NonZero verifies that HitRate functions
+// compute correctly when hits and misses are both non-zero.
+func TestBufferPoolMetrics_HitRate_NonZero(t *testing.T) {
+	m := BufferPoolMetrics{
+		Hits4:   3,
+		Misses4: 1,
+	}
+	// Expected hit rate: 3/(3+1) = 0.75
+	got := m.HitRate4()
+	if got < 0.74 || got > 0.76 {
+		t.Errorf("HitRate4() = %f, want ~0.75", got)
+	}
+}
+
+// TestCreateAESGCMCipher_ValidKey verifies that a valid 32-byte key creates a cipher.
+func TestCreateAESGCMCipher_ValidKey(t *testing.T) {
+	key := make([]byte, aesKeySize)
+	aead, err := createAESGCMCipher(key)
+	if err != nil {
+		t.Fatalf("createAESGCMCipher() unexpected error: %v", err)
+	}
+	if aead == nil {
+		t.Fatal("createAESGCMCipher() returned nil")
+	}
+}
+
+// TestCreateAESGCMCipher_InvalidKeySize verifies that an invalid key size
+// returns an error (covers the invalid-key-size branch).
+func TestCreateAESGCMCipher_InvalidKeySize(t *testing.T) {
+	_, err := createAESGCMCipher([]byte("short"))
+	if err == nil {
+		t.Fatal("createAESGCMCipher() expected error for invalid key size, got nil")
+	}
+}
+
+// TestGetNonceSize_UnsupportedAlgorithm verifies that an unknown algorithm
+// returns an error (covers the default branch of getNonceSize).
+func TestGetNonceSize_UnsupportedAlgorithm(t *testing.T) {
+	_, err := getNonceSize("unknown-algorithm")
+	if err == nil {
+		t.Fatal("getNonceSize() expected error for unknown algorithm, got nil")
+	}
+}
+
+// TestBufferPool_Get4_PoolHit exercises the pool-hit branch of Get4 by
+// putting then getting a buffer without an intervening GC.
+func TestBufferPool_Get4_PoolHit(t *testing.T) {
+	pool := GetGlobalBufferPool()
+	b := pool.Get4()
+	pool.Put4(b)
+	b2 := pool.Get4()
+	if len(b2) != 4 {
+		t.Errorf("Get4() len = %d, want 4", len(b2))
+	}
+	pool.Put4(b2)
+}
+
+// TestBufferPool_Get12_PoolHit exercises the pool-hit branch of Get12.
+func TestBufferPool_Get12_PoolHit(t *testing.T) {
+	pool := GetGlobalBufferPool()
+	b := pool.Get12()
+	pool.Put12(b)
+	b2 := pool.Get12()
+	if len(b2) != 12 {
+		t.Errorf("Get12() len = %d, want 12", len(b2))
+	}
+	pool.Put12(b2)
+}
+
+// TestBufferPool_Get32_PoolHit exercises the pool-hit branch of Get32.
+func TestBufferPool_Get32_PoolHit(t *testing.T) {
+	pool := GetGlobalBufferPool()
+	b := pool.Get32()
+	pool.Put32(b)
+	b2 := pool.Get32()
+	if len(b2) != 32 {
+		t.Errorf("Get32() len = %d, want 32", len(b2))
+	}
+	pool.Put32(b2)
+}
+
+// TestBufferPool_Get64K_PoolHit exercises the pool-hit branch of Get64K by
+// allocating a fresh buffer, putting it back, and getting it again.
+// We verify only that the returned buffer has sufficient capacity, as the length
+// may reflect a previous slice operation by the pool dispatcher.
+func TestBufferPool_Get64K_PoolHit(t *testing.T) {
+	pool := GetGlobalBufferPool()
+	// Allocate a fresh full-size buffer directly and return it.
+	b := make([]byte, 64*1024)
+	pool.Put64K(b)
+	b2 := pool.Get64K()
+	// Must have at least 64K capacity regardless of current length.
+	if cap(b2) < 64*1024 {
+		t.Errorf("Get64K() cap = %d, want >= %d", cap(b2), 64*1024)
+	}
+	pool.Put64K(b2)
+}

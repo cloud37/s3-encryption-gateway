@@ -885,3 +885,76 @@ func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
 		t.Errorf("Decrypt() data mismatch: got %q, want %q", decryptedData, data)
 	}
 }
+
+// TestEncryptDecrypt_ChaCha20Poly1305 verifies that the ChaCha20-Poly1305
+// algorithm path through encryptChunkedWithMetadataFallback is covered.
+// Using WithPreferredAlgorithm("ChaCha20-Poly1305") selects the non-AES
+// keySize branch.
+func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
+	eng, err := NewEngineWithOpts(
+		[]byte("test-password-chacha20poly1305"),
+		nil,
+		WithPreferredAlgorithm(AlgorithmChaCha20Poly1305),
+	)
+	if err != nil {
+		t.Fatalf("NewEngineWithOpts() error: %v", err)
+	}
+
+	data := []byte("chacha20-poly1305 test payload for coverage")
+	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll(encrypted): %v", err)
+	}
+
+	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	decData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll(decrypted): %v", err)
+	}
+	if !bytes.Equal(decData, data) {
+		t.Errorf("round-trip mismatch: got %q, want %q", decData, data)
+	}
+}
+
+// TestEncryptDecrypt_ChaCha20Poly1305_NonChunked verifies ChaCha20-Poly1305 in
+// non-chunked mode (standard Encrypt path).
+func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
+	eng, err := NewEngineWithOpts(
+		[]byte("test-password-chacha20-nonchunked"),
+		nil,
+		WithPreferredAlgorithm(AlgorithmChaCha20Poly1305),
+		WithChunking(false),
+	)
+	if err != nil {
+		t.Fatalf("NewEngineWithOpts() error: %v", err)
+	}
+
+	data := []byte("non-chunked chacha20 test payload")
+	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt() error: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll(encrypted): %v", err)
+	}
+
+	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	if err != nil {
+		t.Fatalf("Decrypt() error: %v", err)
+	}
+	decData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll(decrypted): %v", err)
+	}
+	if !bytes.Equal(decData, data) {
+		t.Errorf("non-chunked round-trip mismatch: got %q, want %q", decData, data)
+	}
+}
