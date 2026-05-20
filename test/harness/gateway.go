@@ -196,6 +196,11 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		listener.Close()
 		t.Fatalf("harness.StartGateway: create encryption engine: %v", err)
 	}
+	// V1.0-CRYPTO-3: wire metadata encryption key if configured.
+	if len(o.metadataEncryptionKey) > 0 {
+		crypto.SetMetadataKey(encryptionEngine, o.metadataEncryptionKey)
+	}
+
 	// Wire the KeyManager into the encryption engine so that regular PUT/GET
 	// operations use envelope encryption (KMS wrap/unwrap) and not just the
 	// password-derived key. Without this, WithKeyManager only affects the MPU

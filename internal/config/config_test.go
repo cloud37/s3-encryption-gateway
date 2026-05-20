@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"io"
 	"os"
 	"path/filepath"
@@ -2333,6 +2335,91 @@ func TestValidate_MetadataEncryptionKey_WithKeyManagerEnabled(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Errorf("expected mutual exclusion error with key_manager, got %v", err)
+	}
+}
+
+// TestMetadataEncryptionKey_ValidFile verifies that a valid base64-encoded
+// 32-byte key file passes validation.
+func TestMetadataEncryptionKey_ValidFile(t *testing.T) {
+	// Generate a random 32-byte key and base64-encode it.
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(key)
+
+	tmpDir := t.TempDir()
+	keyFile := filepath.Join(tmpDir, "metadata.key")
+	if err := os.WriteFile(keyFile, []byte(encoded+"\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKeyFile = keyFile
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected no error for valid key file, got: %v", err)
+	}
+}
+
+// TestMetadataEncryptionKey_InvalidFileLength verifies that a base64 value
+// decoding to a non-32-byte key is rejected.
+func TestMetadataEncryptionKey_InvalidFileLength(t *testing.T) {
+	// Generate 16 random bytes and base64-encode — decodes to 16, not 32.
+	key := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(key)
+
+	tmpDir := t.TempDir()
+	keyFile := filepath.Join(tmpDir, "metadata.key")
+	if err := os.WriteFile(keyFile, []byte(encoded+"\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKeyFile = keyFile
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for wrong-length key file, got nil")
+	}
+	if !strings.Contains(err.Error(), "32 bytes") {
+		t.Errorf("expected '32 bytes' error, got: %v", err)
+	}
+}
+
+// TestMetadataEncryptionKey_InvalidBase64 verifies that non-base64 file
+// content is rejected.
+func TestMetadataEncryptionKey_InvalidBase64(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyFile := filepath.Join(tmpDir, "metadata.key")
+	if err := os.WriteFile(keyFile, []byte("not-valid-base64!!!"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKeyFile = keyFile
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid base64 key file, got nil")
+	}
+	if !strings.Contains(err.Error(), "base64") {
+		t.Errorf("expected 'base64' error, got: %v", err)
+	}
+}
+
+// TestMetadataEncryptionKey_BothSet verifies that setting both
+// MetadataEncryptionKeyFile and MetadataEncryptionKey is rejected.
+func TestMetadataEncryptionKey_BothSet(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKeyFile = "/etc/metadata.key"
+	cfg.Encryption.MetadataEncryptionKey = "inline-key-that-is-at-least-128-characters-long-to-pass-the-initial-length-check-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected mutual exclusion error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected 'mutually exclusive' error, got: %v", err)
 	}
 }
 

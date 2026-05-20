@@ -57,6 +57,11 @@ type options struct {
 	adminToken   string
 	// adminProfiling enables /admin/debug/pprof/* when adminEnabled is also true.
 	adminProfiling bool
+
+	// metadataEncryptionKey is the 32-byte AES key for encrypting metadata
+	// blobs (V1.0-CRYPTO-3). When set, the gateway engine will encrypt
+	// encryption/compression metadata values in S3 object headers.
+	metadataEncryptionKey []byte
 }
 
 // Option is a functional option for StartGateway.
@@ -192,6 +197,16 @@ func WithArgon2idParams(time, memory uint32, threads uint8) Option {
 func WithAuth(creds ...config.GatewayCredential) Option {
 	return func(o *options) {
 		o.authCredentials = append(o.authCredentials, creds...)
+	}
+}
+
+// WithMetadataEncryptionKey sets the 32-byte AES key used for encrypting
+// metadata blobs in S3 object headers (V1.0-CRYPTO-3). The caller should
+// zero the slice after calling this; the harness makes its own copy.
+func WithMetadataEncryptionKey(key []byte) Option {
+	return func(o *options) {
+		o.metadataEncryptionKey = make([]byte, len(key))
+		copy(o.metadataEncryptionKey, key)
 	}
 }
 

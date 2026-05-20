@@ -104,6 +104,11 @@ func TestConformance(t *testing.T) {
 			// Metadata round-trip (catches cipher: authentication failed bugs).
 			{"Metadata_RoundTrip", 0, testMetadataRoundTrip},
 
+			// V1.0-CRYPTO-3 encrypted metadata conformance.
+			{"EncryptedMetadata_RoundTrip", 0, testEncryptedMetadata_RoundTrip},
+			{"EncryptedMetadata_BackwardCompat", 0, testEncryptedMetadata_BackwardCompat},
+			{"EncryptedMetadata_ListObjects", 0, testEncryptedMetadata_ListObjects},
+
 		// Concurrent operations.
 		{"Concurrent_PutGet", 0, testConcurrentPutGet},
 
