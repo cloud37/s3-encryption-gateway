@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Argon2id KDF support** (V1.0-CRYPTO-1): New selectable KDF algorithm
+  `"argon2id"` as an alternative to the default `"pbkdf2-sha256"`. Uses OWASP
+  2024 defaults (m=19456 KiB, t=2, p=1). FIPS builds reject argon2id at
+  config validation time. Backwards-compatible: existing objects encrypted with
+  PBKDF2 are transparently decrypted via `x-amz-meta-kdf-params` metadata.
+  Configurable via `kdf.algorithm`, `kdf.argon2id.*` YAML keys and
+  `S3GW_KDF_*` environment variables. Helm chart and `config.yaml.example`
+  updated with annotated argon2id stanza.
+
 - **Self-contained envelope encryption provider** (V1.0-KMS-4): New
   `"self_contained"` `KeyManager` adapter supporting AES-256-GCM (symmetric)
   and RSA-OAEP/SHA-256 (asymmetric) DEK wrapping with no external KMS
