@@ -191,6 +191,19 @@ encryption:
   #     memory: 19456
   #     threads: 1
 
+# multipart_state:
+#   valkey:
+#     addr: "valkey.internal:6379"
+#     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"  # V1.0-CRYPTO-2
+#     # encrypt_state: true                                    # V1.0-CRYPTO-2 (default)
+#     tls:
+#       enabled: true
+#       ca_file: "/etc/gateway/valkey-ca.pem"
+#       cert_file: "/etc/gateway/valkey-client.pem"
+#       key_file:  "/etc/gateway/valkey-client-key.pem"
+#     ttl_seconds: 604800
+#     pool_size: 16
+
 compression:
   enabled: false
   min_size: 1024

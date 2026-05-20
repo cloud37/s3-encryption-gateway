@@ -69,7 +69,7 @@ So we built a transparent proxy that solves the problem once, for every applicat
 All objects are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent — any S3 client works without modification.
 
 - **AES-256-GCM** (default) or **ChaCha20-Poly1305**: Authenticated encryption with per-object keys
-- **Key derivation**: PBKDF2-HMAC-SHA256 with 600,000+ iterations (configurable; default raised in v0.8 per NIST SP 800-132)
+- **Key derivation**: PBKDF2-HMAC-SHA256 with 600,000+ iterations (default, FIPS-compatible) or optional Argon2id (V1.0-CRYPTO-1). Both are configurable; PBKDF2 default raised in v0.8 per NIST SP 800-132
 - **Chunked streaming**: Large files are encrypted in chunks with per-chunk IVs, enabling efficient range requests
 - **Range requests**: Fetches only the encrypted chunks covering the requested plaintext byte range — 99.9%+ reduction in transferred bytes compared to fetching the full object
 - **FIPS-compliant profile**: Build with `-tags=fips` to restrict to AES-256-GCM + HKDF-SHA256 + PBKDF2-HMAC-SHA256 (all FIPS-140 approved)
@@ -511,6 +511,20 @@ encryption:
   supported_algorithms:
     - "AES256-GCM"
     - "ChaCha20-Poly1305"
+  # kdf:
+  #   algorithm: "pbkdf2-sha256"  # or "argon2id" (V1.0-CRYPTO-1)
+  #   argon2id:
+  #     time: 2
+  #     memory: 19456
+  #     threads: 1
+
+# multipart_state:
+#   valkey:
+#     addr: "valkey.internal:6379"
+#     tls:
+#       enabled: true
+#     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"  # V1.0-CRYPTO-2
+#     # encrypt_state: true                                    # V1.0-CRYPTO-2 (default)
 
 compression:
   enabled: false
@@ -553,6 +567,12 @@ export BACKEND_USE_PATH_STYLE=false
 export ENCRYPTION_PASSWORD="your-encryption-password"
 export ENCRYPTION_PREFERRED_ALGORITHM="AES256-GCM"
 export ENCRYPTION_SUPPORTED_ALGORITHMS="AES256-GCM,ChaCha20-Poly1305"
+export ENCRYPTION_KDF_ALGORITHM="pbkdf2-sha256"  # or "argon2id"
+# export ENCRYPTION_KDF_ARGON2ID_TIME="2"
+# export ENCRYPTION_KDF_ARGON2ID_MEMORY="19456"
+# export ENCRYPTION_KDF_ARGON2ID_THREADS="1"
+# export VALKEY_ENCRYPTION_PASSWORD_ENV="VALKEY_ENCRYPTION_PASSWORD"  # V1.0-CRYPTO-2
+# export VALKEY_ENCRYPT_STATE="true"                                  # V1.0-CRYPTO-2
 export COMPRESSION_ENABLED=false
 export RATE_LIMIT_ENABLED=false
 export CACHE_ENABLED=false
