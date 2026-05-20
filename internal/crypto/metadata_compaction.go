@@ -128,6 +128,11 @@ func (c *MetadataCompactor) compactEncryptionMetadata(metadata map[string]string
 			compacted["x-amz-meta-kdf"] = v // kdf params
 		}
 
+		// V1.0-CRYPTO-3: encrypted metadata blob
+		if v := metadata[MetaEncryptedMetadata]; v != "" {
+			compacted[MetaEncryptedMetadataCompact] = v // encrypted metadata blob
+		}
+
 		// Compression metadata (only if present)
 		if v := metadata[MetaCompressionEnabled]; v != "" && v != "false" {
 			compacted["x-amz-meta-ce"] = v // compression enabled
@@ -205,6 +210,10 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 		if v := metadata["x-amz-meta-kdf"]; v != "" {
 			expanded[MetaKDFParams] = v
 		}
+		// V1.0-CRYPTO-3: encrypted metadata blob expansion
+		if v := metadata[MetaEncryptedMetadataCompact]; v != "" {
+			expanded[MetaEncryptedMetadata] = v
+		}
 		if v := metadata["x-amz-meta-ce"]; v != "" {
 			expanded[MetaCompressionEnabled] = v
 			if v := metadata["x-amz-meta-ca"]; v != "" {
@@ -238,6 +247,7 @@ func (c *MetadataCompactor) isCompactedKey(key string) bool {
 		"x-amz-meta-cc", "x-amz-meta-m", "x-amz-meta-kv", "x-amz-meta-wk",
 		"x-amz-meta-kid", "x-amz-meta-kp", "x-amz-meta-ce",
 		"x-amz-meta-ca", "x-amz-meta-cos", "x-amz-meta-kdf",
+		MetaEncryptedMetadataCompact,
 	}
 
 	for _, ck := range compactedKeys {
