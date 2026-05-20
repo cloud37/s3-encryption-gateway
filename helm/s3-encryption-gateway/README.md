@@ -232,10 +232,9 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 | `config.multipartState.valkey.tls.keyFile` | Client key file for Valkey mTLS | `""` |
 | `config.multipartState.valkey.insecureAllowPlaintext` | Allow plaintext Valkey (development only) | `""` |
 | `config.multipartState.valkey.ttlSeconds` | TTL for in-flight MPU state records in Valkey (default: `604800` = 7 days) | `""` |
-| `config.multipartState.valkey.encryptionPasswordEnv` | Environment variable name holding the Valkey at-rest encryption password (V1.0-CRYPTO-2) | `""` |
-| `config.multipartState.valkey.encryptState` | Enable AES-256-GCM at-rest encryption of MPU state in Valkey (V1.0-CRYPTO-2; `"true"` / `"false"`) | `""` |
+| `config.multipartState.valkey.encryptionPassword` | Dedicated password for Valkey at-rest encryption (V1.0-CRYPTO-2). Provide via `.value` (plaintext) or `.valueFrom` (secret ref). When set, `VALKEY_ENCRYPT_STATE` is automatically `"true"` | `""` |
 
-> **CRYPTO-2 note:** `encryptState` defaults to `true` inside the gateway when `encryptionPasswordEnv` is set (or when the main `ENCRYPTION_PASSWORD` is present). Setting it to `"false"` disables at-rest encryption and logs a deprecation warning.
+> **CRYPTO-2 note:** When `encryptionPassword` is set (either `.value` or `.valueFrom`), the gateway automatically enables at-rest encryption (`VALKEY_ENCRYPT_STATE=true`). If unset, the gateway falls back to the main `ENCRYPTION_PASSWORD` with a distinct HKDF salt.
 
 #### Compression Configuration
 
