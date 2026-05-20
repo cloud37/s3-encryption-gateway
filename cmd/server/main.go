@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -570,6 +572,50 @@ func main() {
 	}
 	if keyManager != nil {
 		crypto.SetKeyManager(encryptionEngine, keyManager)
+	}
+
+	// V1.0-CRYPTO-3: load metadata encryption key.
+	var metadataKey []byte
+	switch {
+	case cfg.Encryption.MetadataEncryptionKeyFile != "" && cfg.Encryption.MetadataEncryptionKey != "":
+		logger.Fatal("Only one of metadata_encryption_key_file or metadata_encryption_key may be set")
+
+	case cfg.Encryption.MetadataEncryptionKeyFile != "":
+		data, err := os.ReadFile(cfg.Encryption.MetadataEncryptionKeyFile)
+		if err != nil {
+			logger.WithError(err).Fatal("Failed to read metadata encryption key file")
+		}
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+		if err != nil {
+			logger.WithError(err).Fatal("Metadata encryption key file is not valid base64")
+		}
+		if len(key) != 32 {
+			logger.Fatalf("Metadata encryption key must be exactly 32 bytes (got %d)", len(key))
+		}
+		metadataKey = key
+
+	case cfg.Encryption.MetadataEncryptionKey != "":
+		if len(cfg.Encryption.MetadataEncryptionKey) < 128 {
+			logger.Fatal("metadata_encryption_key must be at least 128 characters")
+		}
+		hash := sha256.Sum256([]byte(cfg.Encryption.MetadataEncryptionKey))
+		metadataKey = hash[:]
+	}
+
+	if metadataKey != nil {
+		if keyManager != nil {
+			envelope, err := keyManager.WrapKey(context.Background(), metadataKey, nil)
+			if err != nil {
+				logger.WithError(err).Fatal("Failed to wrap metadata key with KMS")
+			}
+			crypto.SetWrappedMetadataKey(encryptionEngine, envelope)
+		} else {
+			crypto.SetMetadataKey(encryptionEngine, metadataKey)
+		}
+		zeroBytes(metadataKey)
+		logger.Info("Metadata encryption key configured")
+	} else {
+		logger.Info("Metadata encryption not configured — encryption parameters will be stored as plaintext headers")
 	}
 
 	logger.WithFields(logrus.Fields{
