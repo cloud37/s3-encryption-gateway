@@ -2196,6 +2196,8 @@ auth:
 	}
 }
 
+
+
 func TestConfig_Validate_Argon2id_BadParams(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2289,3 +2291,49 @@ auth:
 		t.Errorf("Argon2id.Threads = %d, want %d", cfg.Encryption.KDF.Argon2id.Threads, 2)
 	}
 }
+
+// ---- V1.0-CRYPTO-3: metadata encryption key validation --------------------
+
+func TestValidate_MetadataEncryptionKey_MutuallyExclusive(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKeyFile = "/etc/key"
+	cfg.Encryption.MetadataEncryptionKey = "inline-key-that-is-at-least-128-characters-long-to-pass-the-initial-length-check-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutual exclusion error, got %v", err)
+	}
+}
+
+func TestValidate_MetadataEncryptionKey_InvalidTooShort(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKey = "short-key"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "at least 128") {
+		t.Errorf("expected 'at least 128' error for short key, got %v", err)
+	}
+}
+
+func TestValidate_MetadataEncryptionKey_ValidLength(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKey = ""
+	for i := 0; i < 128; i++ {
+		cfg.Encryption.MetadataEncryptionKey += "a"
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected no error for 128-char key, got %v", err)
+	}
+}
+
+func TestValidate_MetadataEncryptionKey_WithKeyManagerEnabled(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.MetadataEncryptionKeyFile = "/etc/key"
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "self_contained"
+	cfg.Encryption.KeyManager.SelfContained.Type = "aes"
+	cfg.Encryption.KeyManager.SelfContained.AES.Keys = []SelfContainedAESKeyEntry{
+		{Version: 1, KeySource: "env:MY_KEK"},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutual exclusion error with key_manager, got %v", err)
+	}
+}
+
+
