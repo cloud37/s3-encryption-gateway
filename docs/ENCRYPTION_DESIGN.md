@@ -317,6 +317,33 @@ For providers with strict header limits, metadata keys are compacted using short
 "x-amz-meta-cos"   // compression original size
 ```
 
+### Encrypted Metadata Flow
+
+When a metadata encryption key is configured, the encryption/compression metadata
+subset is sealed into a single encrypted blob before storage:
+
+```text
+Encrypt Path:
+  [Build encMetadata]
+      │
+      ├── metadataKey == nil ──► [Compact] ──► [Store in S3 headers]
+      │
+      └── metadataKey != nil ──► [Extract subset]
+                                      │
+                                      ▼
+                              [AES-256-GCM Seal]
+                                      │
+                                      ▼
+                              [Replace with single blob]
+                                      │
+                                      ▼
+                              [Compact] ──► [Store in S3 headers]
+```
+
+The decryption path reverses this: after expansion, if `x-amz-meta-enc-metadata`
+(or its compacted alias `x-amz-meta-em`) is present, the blob is decrypted and
+the recovered keys are merged back into the metadata map.
+
 ### Client Response Filtering
 - **Hide encryption metadata**: Don't expose internal encryption details
 - **Restore original metadata**: Show original Content-Type, ETag, etc.

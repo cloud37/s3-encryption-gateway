@@ -287,6 +287,13 @@ backendClient := s3.New(session.Must(session.NewSession(&aws.Config{
 - `x-amz-meta-encryption-original-size`: original size (canonical key)
 - `x-amz-meta-original-etag`: original ETag
 
+### Encrypted Metadata (Opt-in)
+When `metadata_encryption_key_file` or `metadata_encryption_key` is configured,
+all gateway-generated encryption metadata is stored as a single encrypted blob:
+- `x-amz-meta-enc-metadata`: Base64-encoded AES-256-GCM ciphertext (JSON payload)
+- `x-amz-meta-encrypted`: still `"true"` (outside the blob, for `IsEncrypted`)
+- User-supplied `x-amz-meta-*` headers: remain visible in S3
+
 ### Hidden Headers
 - Never expose backend-specific headers
 - Filter internal encryption metadata from client responses
