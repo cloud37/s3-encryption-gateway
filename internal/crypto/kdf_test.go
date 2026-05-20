@@ -239,6 +239,67 @@ func TestArgon2id_InvalidMemory(t *testing.T) {
 	}
 }
 
+func TestFormatKDFParams_UnknownAlgorithm(t *testing.T) {
+	p := KDFParams{Algorithm: KDFAlgorithm("unknown-alg"), Iterations: 100000}
+	got := FormatKDFParams(p)
+	if got != "" {
+		t.Errorf("FormatKDFParams() for unknown algorithm = %q, want %q", got, "")
+	}
+}
+
+func TestParseKDFParams_PBKDF2_TooManyParts(t *testing.T) {
+	_, err := ParseKDFParams("pbkdf2-sha256:100000:extra")
+	if err == nil {
+		t.Fatal("expected error for pbkdf2-sha256 with too many parts")
+	}
+}
+
+func TestParseKDFParams_PBKDF2_InvalidIterNonNumeric(t *testing.T) {
+	_, err := ParseKDFParams("pbkdf2-sha256:notanumber")
+	if err == nil {
+		t.Fatal("expected error for non-numeric PBKDF2 iteration count")
+	}
+}
+
+func TestParseKDFParams_Argon2id_InvalidTime(t *testing.T) {
+	_, err := ParseKDFParams("argon2id:notanumber:19456:1")
+	if err == nil {
+		t.Fatal("expected error for non-numeric argon2id time")
+	}
+}
+
+func TestParseKDFParams_Argon2id_InvalidMemory(t *testing.T) {
+	_, err := ParseKDFParams("argon2id:2:notanumber:1")
+	if err == nil {
+		t.Fatal("expected error for non-numeric argon2id memory")
+	}
+}
+
+func TestParseKDFParams_Argon2id_InvalidThreads(t *testing.T) {
+	_, err := ParseKDFParams("argon2id:2:19456:notanumber")
+	if err == nil {
+		t.Fatal("expected error for non-numeric argon2id threads")
+	}
+}
+
+func TestDefaultKDFParams_LowIterations(t *testing.T) {
+	// When pbkdf2Iterations is below the minimum, should reset to DefaultPBKDF2Iterations.
+	p := DefaultKDFParams(1000)
+	if p.Iterations != DefaultPBKDF2Iterations {
+		t.Errorf("DefaultKDFParams(1000).Iterations = %d, want %d", p.Iterations, DefaultPBKDF2Iterations)
+	}
+	if p.Algorithm != KDFAlgPBKDF2SHA256 {
+		t.Errorf("DefaultKDFParams(1000).Algorithm = %q, want %q", p.Algorithm, KDFAlgPBKDF2SHA256)
+	}
+}
+
+func TestDefaultKDFParams_SufficientIterations(t *testing.T) {
+	p := DefaultKDFParams(600000)
+	if p.Iterations != 600000 {
+		t.Errorf("DefaultKDFParams(600000).Iterations = %d, want 600000", p.Iterations)
+	}
+}
+
 func TestArgon2id_MismatchedPasswordLength(t *testing.T) {
 	// Verify derivation works with various password lengths (no minimum/maximum).
 	params := KDFParams{Algorithm: KDFAlgArgon2id, Time: 2, Memory: 19456, Threads: 1}
