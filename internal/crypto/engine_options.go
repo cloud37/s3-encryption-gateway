@@ -97,6 +97,45 @@ func WithProvider(provider string) Option {
 	}
 }
 
+// WithMetadataKey sets the metadata encryption key for AES-256-GCM encrypted
+// metadata blobs (V1.0-CRYPTO-3). The key must be exactly 32 bytes.
+// The caller should zero the source slice after calling this (the engine
+// makes its own copy).
+func WithMetadataKey(key []byte) Option {
+	return func(e *engine) {
+		if len(key) == 32 {
+			e.metadataKey = make([]byte, 32)
+			copy(e.metadataKey, key)
+		}
+	}
+}
+
+// WithWrappedMetadataKey sets the metadata encryption key via a KeyEnvelope
+// that will be unwrapped by the KeyManager at startup (V1.0-CRYPTO-3).
+func WithWrappedMetadataKey(envelope *KeyEnvelope) Option {
+	return func(e *engine) {
+		e.metadataKeyWrapped = envelope
+	}
+}
+
+// SetMetadataKey sets the metadata encryption key on an existing engine.
+// The key must be exactly 32 bytes. The caller should zero the source slice
+// after calling this (the engine makes its own copy).
+func SetMetadataKey(enc EncryptionEngine, key []byte) {
+	if e, ok := enc.(*engine); ok && len(key) == 32 {
+		e.metadataKey = make([]byte, 32)
+		copy(e.metadataKey, key)
+	}
+}
+
+// SetWrappedMetadataKey sets the metadata encryption key envelope on an
+// existing engine for KMS-based wrapping (V1.0-CRYPTO-3).
+func SetWrappedMetadataKey(enc EncryptionEngine, envelope *KeyEnvelope) {
+	if e, ok := enc.(*engine); ok {
+		e.metadataKeyWrapped = envelope
+	}
+}
+
 // NewEngineWithOpts creates a new encryption engine with full options and zero or
 // more functional Option values. This is the preferred constructor for new callers.
 //

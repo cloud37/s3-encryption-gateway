@@ -53,6 +53,12 @@ const (
 	// Absent on objects written before V1.0-SEC-H03.
 	MetaKDFParams = "x-amz-meta-encryption-kdf-params"
 
+	// Metadata encryption blob (V1.0-CRYPTO-3).
+	// MetaEncryptedMetadata is the full key for the encrypted metadata blob.
+	// MetaEncryptedMetadataCompact is the compacted alias.
+	MetaEncryptedMetadata        = "x-amz-meta-enc-metadata"
+	MetaEncryptedMetadataCompact = "x-amz-meta-em"
+
 	// Fallback metadata storage keys
 	MetaFallbackMode    = "x-amz-meta-encryption-fallback"
 	MetaFallbackPointer = "x-amz-meta-encryption-fallback-ptr"
@@ -127,6 +133,11 @@ type engine struct {
 	kmsManager KeyManager
 	// Rotation state machine for drain-and-cutover tracking
 	rotationState *RotationState
+	// Metadata encryption key (V1.0-CRYPTO-3).
+	// metadataKey is the 32-byte AES-256 key for encrypting metadata blobs.
+	// metadataKeyWrapped is set when a KeyManager wraps the key at startup.
+	metadataKey        []byte
+	metadataKeyWrapped *KeyEnvelope
 }
 
 // NewEngine creates a new encryption engine with the given password.
@@ -534,6 +545,24 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		encMetadata[MetaKeyVersion] = kv
 	}
 
+	// V1.0-CRYPTO-3: encrypt metadata blob if metadata key is configured.
+	// This replaces all individual encryption/compression metadata keys with
+	// a single AES-256-GCM sealed blob under MetaEncryptedMetadata.
+	if e.metadataKey != nil {
+		blob, err := e.encryptMetadata(encMetadata)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, nil, fmt.Errorf("encrypt metadata: %w", err)
+		}
+		// Remove all encryption/compression keys from the cleartext map.
+		for k := range encMetadata {
+			if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+				delete(encMetadata, k)
+			}
+		}
+		encMetadata[MetaEncryptedMetadata] = blob
+	}
+
 	// Check if we need fallback metadata storage before encrypting.
 	if e.needsMetadataFallback(encMetadata) {
 		return e.encryptWithMetadataFallback(plaintext, encMetadata, contentType, originalSize, originalETag)
@@ -621,6 +650,24 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 	expandedMetadata, err := e.compactor.ExpandMetadata(metadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to expand metadata: %w", err)
+	}
+
+	// V1.0-CRYPTO-3: decrypt encrypted metadata blob if metadata key is configured.
+	if e.metadataKey != nil {
+		blobKey := MetaEncryptedMetadata
+		if _, ok := expandedMetadata[MetaEncryptedMetadataCompact]; ok {
+			blobKey = MetaEncryptedMetadataCompact
+		}
+		if blob, ok := expandedMetadata[blobKey]; ok && blob != "" {
+			decryptedMeta, err := e.decryptMetadata(blob)
+			if err != nil {
+				return nil, nil, fmt.Errorf("decrypt metadata: %w", err)
+			}
+			for k, v := range decryptedMeta {
+				expandedMetadata[k] = v
+			}
+			delete(expandedMetadata, blobKey)
+		}
 	}
 
 	// Check if this is chunked format
@@ -872,6 +919,20 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	// Add chunked-specific metadata
 	encMetadata[MetaChunkedFormat] = "true"
 	encMetadata[MetaChunkSize] = fmt.Sprintf("%d", e.chunkSize)
+
+	// V1.0-CRYPTO-3: encrypt metadata blob if metadata key is configured.
+	if e.metadataKey != nil {
+		blob, err := e.encryptMetadata(encMetadata)
+		if err != nil {
+			return nil, nil, fmt.Errorf("encrypt metadata: %w", err)
+		}
+		for k := range encMetadata {
+			if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+				delete(encMetadata, k)
+			}
+		}
+		encMetadata[MetaEncryptedMetadata] = blob
+	}
 
 	// Check if we need fallback metadata storage
 	if e.needsMetadataFallback(encMetadata) {
@@ -1185,6 +1246,24 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 
 // decryptChunked implements streaming chunked decryption.
 func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+	// V1.0-CRYPTO-3: decrypt encrypted metadata blob if metadata key is configured.
+	if e.metadataKey != nil {
+		blobKey := MetaEncryptedMetadata
+		if _, ok := metadata[MetaEncryptedMetadataCompact]; ok {
+			blobKey = MetaEncryptedMetadataCompact
+		}
+		if blob, ok := metadata[blobKey]; ok && blob != "" {
+			decryptedMeta, err := e.decryptMetadata(blob)
+			if err != nil {
+				return nil, nil, fmt.Errorf("decrypt metadata: %w", err)
+			}
+			for k, v := range decryptedMeta {
+				metadata[k] = v
+			}
+			delete(metadata, blobKey)
+		}
+	}
+
 	// Load manifest from metadata
 	manifest, err := loadManifestFromMetadata(metadata)
 	if err != nil {
@@ -1318,6 +1397,24 @@ func (e *engine) DecryptRange(ctx context.Context, reader io.Reader, metadata ma
 	expandedMetadata, err := e.compactor.ExpandMetadata(metadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to expand metadata: %w", err)
+	}
+
+	// V1.0-CRYPTO-3: decrypt encrypted metadata blob if metadata key is configured.
+	if e.metadataKey != nil {
+		blobKey := MetaEncryptedMetadata
+		if _, ok := expandedMetadata[MetaEncryptedMetadataCompact]; ok {
+			blobKey = MetaEncryptedMetadataCompact
+		}
+		if blob, ok := expandedMetadata[blobKey]; ok && blob != "" {
+			decryptedMeta, err := e.decryptMetadata(blob)
+			if err != nil {
+				return nil, nil, fmt.Errorf("decrypt metadata: %w", err)
+			}
+			for k, v := range decryptedMeta {
+				expandedMetadata[k] = v
+			}
+			delete(expandedMetadata, blobKey)
+		}
 	}
 
 	// Only supports chunked format for range optimization
