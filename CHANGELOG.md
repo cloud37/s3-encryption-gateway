@@ -17,6 +17,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `S3GW_KDF_*` environment variables. Helm chart and `config.yaml.example`
   updated with annotated argon2id stanza.
 
+- **Valkey at-rest encryption for multipart-upload state** (V1.0-CRYPTO-2):
+  All `UploadState` blobs persisted in Valkey are now encrypted with
+  AES-256-GCM using a dedicated key derived via HKDF-SHA256. The encryption
+  password is sourced from `VALKEY_ENCRYPTION_PASSWORD` (or falls back to the
+  main `ENCRYPTION_PASSWORD` with a distinct salt). Backwards-compatible:
+  plaintext blobs are read via a transparent fallback and expire naturally via
+  TTL. Configurable via `multipart_state.valkey.encryption_password_env` and
+  `encrypt_state`. Helm chart, schema, deployment template, and runbook
+  (`docs/RUNBOOK.md`) fully updated.
+
 - **Self-contained envelope encryption provider** (V1.0-KMS-4): New
   `"self_contained"` `KeyManager` adapter supporting AES-256-GCM (symmetric)
   and RSA-OAEP/SHA-256 (asymmetric) DEK wrapping with no external KMS
