@@ -265,6 +265,12 @@ type EncryptionConfig struct {
 	ChunkSize           int              `yaml:"chunk_size" env:"ENCRYPTION_CHUNK_SIZE"`     // Size of each encryption chunk in bytes
 	Hardware            HardwareConfig   `yaml:"hardware"`
 	KDF                 KDFConfig        `yaml:"kdf"`
+	// MetadataEncryptionKeyFile is the path to a base64-encoded 32-byte AES key file.
+	// Mutually exclusive with MetadataEncryptionKey and KMS wrapping.
+	MetadataEncryptionKeyFile string `yaml:"metadata_encryption_key_file" env:"ENCRYPTION_METADATA_KEY_FILE"`
+	// MetadataEncryptionKey is an inline key (min 128 chars, SHA-256 hashed to 32 bytes).
+	// Mutually exclusive with MetadataEncryptionKeyFile and KMS wrapping.
+	MetadataEncryptionKey string `yaml:"metadata_encryption_key" env:"ENCRYPTION_METADATA_KEY"`
 }
 
 // HardwareConfig holds hardware acceleration configuration.
@@ -972,6 +978,13 @@ func loadFromEnv(config *Config) {
 			config.Encryption.KDF.Argon2id.Threads = uint8(n)
 		}
 	}
+	// V1.0-CRYPTO-3: metadata encryption key env vars
+	if v := os.Getenv("ENCRYPTION_METADATA_KEY_FILE"); v != "" {
+		config.Encryption.MetadataEncryptionKeyFile = v
+	}
+	if v := os.Getenv("ENCRYPTION_METADATA_KEY"); v != "" {
+		config.Encryption.MetadataEncryptionKey = v
+	}
 	if v := os.Getenv("KEY_MANAGER_ENABLED"); v != "" {
 		config.Encryption.KeyManager.Enabled = v == "true" || v == "1"
 	}
@@ -1490,6 +1503,24 @@ func (c *Config) Validate() error {
 
 	if c.Encryption.Password == "" && c.Encryption.KeyFile == "" {
 		return fmt.Errorf("either encryption.password or encryption.key_file is required")
+	}
+
+	// Validate metadata encryption key fields (V1.0-CRYPTO-3)
+	metaKeyFile := c.Encryption.MetadataEncryptionKeyFile
+	metaKey := c.Encryption.MetadataEncryptionKey
+	metaKMS := c.Encryption.KeyManager.Enabled
+
+	if metaKeyFile != "" && metaKey != "" {
+		return fmt.Errorf("metadata_encryption_key_file and metadata_encryption_key are mutually exclusive")
+	}
+	if metaKeyFile != "" && metaKMS {
+		return fmt.Errorf("metadata_encryption_key_file and key_manager are mutually exclusive; use KMS wrapping instead")
+	}
+	if metaKey != "" && metaKMS {
+		return fmt.Errorf("metadata_encryption_key and key_manager are mutually exclusive; use KMS wrapping instead")
+	}
+	if metaKey != "" && len(metaKey) < 128 {
+		return fmt.Errorf("metadata_encryption_key must be at least 128 characters (got %d)", len(metaKey))
 	}
 
 	if c.LogLevel != "" {
