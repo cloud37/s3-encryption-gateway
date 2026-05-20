@@ -1113,6 +1113,23 @@
                 "ttlSeconds": {
                   "allOf": [{ "$ref": "#/$defs/configValue" }],
                   "description": "TTL in seconds for in-flight MPU state records (default gateway-internal: 604800 = 7 days)."
+                },
+                "encryptionPasswordEnv": {
+                  "allOf": [{ "$ref": "#/$defs/configValue" }],
+                  "description": "Environment variable name holding the dedicated password for AES-256-GCM at-rest encryption of UploadState blobs in Valkey (V1.0-CRYPTO-2). If unset, falls back to deriving the key from the main ENCRYPTION_PASSWORD with a distinct HKDF salt."
+                },
+                "encryptState": {
+                  "allOf": [
+                    { "$ref": "#/$defs/configValue" },
+                    {
+                      "properties": {
+                        "value": {
+                          "type": ["string", "null"],
+                          "description": "Enable at-rest encryption for Valkey MPU state (V1.0-CRYPTO-2). \"true\" (default when password is present) or \"false\" (deprecated escape hatch)."
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }

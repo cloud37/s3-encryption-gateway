@@ -499,6 +499,26 @@ config:
       ttlSeconds:
         value: ""
 
+      # ── At-rest encryption for MPU state (V1.0-CRYPTO-2) ─────────────────
+      # encryptionPasswordEnv names the environment variable that holds the
+      # dedicated password for AES-256-GCM at-rest encryption of UploadState
+      # blobs in Valkey. If unset, the gateway derives the key from the main
+      # ENCRYPTION_PASSWORD with a distinct HKDF salt (backward-compatible).
+      # encryptState defaults to true inside the gateway; set to "false" only
+      # as a temporary escape hatch (deprecated, will be removed in v2.0).
+      encryptionPasswordEnv:
+        value: ""
+        # valueFrom:
+        #   secretKeyRef:
+        #     name: s3-encryption-gateway-secrets
+        #     key: valkey-encryption-password
+      encryptState:
+        value: ""
+        # valueFrom:
+        #   configMapKeyRef:
+        #     name: s3-encryption-gateway-config
+        #     key: valkey-encrypt-state
+
 # ── First-class bucket policies ────────────────────────────────────────────
 # Define bucket policies inline in values.yaml. The chart renders a single
 # ConfigMap (<release>-policies) from these entries, mounts it at

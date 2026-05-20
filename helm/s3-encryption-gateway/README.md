@@ -141,6 +141,18 @@ config:
 | `config.encryption.keyManager.cosmian.clientKey` | Client private key for mTLS (use valueFrom) | `""` |
 | `config.encryption.keyManager.cosmian.insecureSkipVerify` | Skip TLS verification (testing only) | `"false"` |
 
+#### KDF Configuration (V1.0-CRYPTO-1)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `config.encryption.kdf.algorithm` | KDF algorithm: `"pbkdf2-sha256"` (default, FIPS-compatible) or `"argon2id"` | `"pbkdf2-sha256"` |
+| `config.encryption.kdf.pbkdf2.iterations` | PBKDF2-SHA256 iteration count (≥ 600000 recommended per NIST SP 800-132) | `"600000"` |
+| `config.encryption.kdf.argon2id.time` | Argon2id passes (range: 1–10) | `"2"` |
+| `config.encryption.kdf.argon2id.memory` | Argon2id memory in KiB (range: 8192–1048576) | `"19456"` |
+| `config.encryption.kdf.argon2id.threads` | Argon2id parallelism/threads (range: 1–256) | `"1"` |
+
+> **FIPS note:** When the binary is compiled with `-tags=fips`, Argon2id is rejected at startup.
+
 **Key Manager (KMS) Configuration**: When `config.encryption.keyManager.enabled` is set to `"true"`, the gateway uses external KMS for envelope encryption. Currently, only **Cosmian KMIP** is fully supported.
 
 **Protocol Selection**:
@@ -220,6 +232,10 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 | `config.multipartState.valkey.tls.keyFile` | Client key file for Valkey mTLS | `""` |
 | `config.multipartState.valkey.insecureAllowPlaintext` | Allow plaintext Valkey (development only) | `""` |
 | `config.multipartState.valkey.ttlSeconds` | TTL for in-flight MPU state records in Valkey (default: `604800` = 7 days) | `""` |
+| `config.multipartState.valkey.encryptionPasswordEnv` | Environment variable name holding the Valkey at-rest encryption password (V1.0-CRYPTO-2) | `""` |
+| `config.multipartState.valkey.encryptState` | Enable AES-256-GCM at-rest encryption of MPU state in Valkey (V1.0-CRYPTO-2; `"true"` / `"false"`) | `""` |
+
+> **CRYPTO-2 note:** `encryptState` defaults to `true` inside the gateway when `encryptionPasswordEnv` is set (or when the main `ENCRYPTION_PASSWORD` is present). Setting it to `"false"` disables at-rest encryption and logs a deprecation warning.
 
 #### Compression Configuration
 

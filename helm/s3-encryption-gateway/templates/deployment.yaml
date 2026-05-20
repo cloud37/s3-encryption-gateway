@@ -243,6 +243,20 @@ spec:
         - name: VALKEY_TTL_SECONDS
           value: {{ .Values.config.multipartState.valkey.ttlSeconds.value | quote }}
         {{- end }}
+        {{- if .Values.config.multipartState.valkey.encryptionPasswordEnv.value }}
+        - name: VALKEY_ENCRYPTION_PASSWORD_ENV
+          value: {{ .Values.config.multipartState.valkey.encryptionPasswordEnv.value | quote }}
+        {{- else if .Values.config.multipartState.valkey.encryptionPasswordEnv.valueFrom }}
+        - name: VALKEY_ENCRYPTION_PASSWORD_ENV
+          valueFrom: {{ toYaml .Values.config.multipartState.valkey.encryptionPasswordEnv.valueFrom | nindent 12 }}
+        {{- end }}
+        {{- if .Values.config.multipartState.valkey.encryptState.value }}
+        - name: VALKEY_ENCRYPT_STATE
+          value: {{ .Values.config.multipartState.valkey.encryptState.value | quote }}
+        {{- else if .Values.config.multipartState.valkey.encryptState.valueFrom }}
+        - name: VALKEY_ENCRYPT_STATE
+          valueFrom: {{ toYaml .Values.config.multipartState.valkey.encryptState.valueFrom | nindent 12 }}
+        {{- end }}
         {{- if .Values.metrics.port }}
         - name: METRICS_ADDR
           value: {{ printf ":%d" (int .Values.metrics.port) | quote }}
