@@ -6,6 +6,8 @@ FROM golang:1.26-bookworm AS builder
 # Default is "true" (stripped) for production images.
 # V0.6-OBS-1: see docs/OBSERVABILITY.md §"Runtime Profiling" for usage.
 ARG STRIP_SYMBOLS=true
+ARG VERSION
+ARG COMMIT
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -37,9 +39,8 @@ RUN if [ "${STRIP_SYMBOLS}" = "false" ]; then \
     -trimpath \
     -ldflags="${LDFLAGS}" \
     -o /bin/s3-encryption-gateway \
-    ./cmd/server
-
-RUN GOFIPS140=v1.0.0 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    ./cmd/server && \
+    GOFIPS140=v1.0.0 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -tags=fips \
     -trimpath \
     -ldflags="${LDFLAGS}" \

@@ -6,6 +6,8 @@ FROM golang:1.26-alpine AS builder
 # Default is "true" (stripped) for production images.
 # V0.6-OBS-1: see docs/OBSERVABILITY.md §"Runtime Profiling" for usage.
 ARG STRIP_SYMBOLS=true
+ARG VERSION
+ARG COMMIT
 
 # Install build dependencies
 RUN apk add --no-cache git make
@@ -32,9 +34,8 @@ RUN if [ "${STRIP_SYMBOLS}" = "false" ]; then \
     -trimpath \
     -ldflags="${LDFLAGS}" \
     -o /bin/s3-encryption-gateway \
-    ./cmd/server
-
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    ./cmd/server && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath \
     -ldflags="${LDFLAGS}" \
     -o /bin/s3-encryption-gateway-healthcheck \
