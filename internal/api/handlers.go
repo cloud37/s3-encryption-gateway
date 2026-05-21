@@ -1860,7 +1860,6 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 // isEncryptionMetadata checks if a metadata key is related to encryption.
 func isEncryptionMetadata(key string) bool {
 	encryptionKeys := []string{
-		"x-amz-meta-encrypted",
 		"x-amz-meta-encryption-algorithm",
 		"x-amz-meta-encryption-key-salt",
 		"x-amz-meta-encryption-iv",

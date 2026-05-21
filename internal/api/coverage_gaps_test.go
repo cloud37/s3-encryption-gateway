@@ -1413,7 +1413,7 @@ func TestIsEncryptionMetadata(t *testing.T) {
 		key  string
 		want bool
 	}{
-		{"x-amz-meta-encrypted", true},
+		{"x-amz-meta-encrypted", false},
 		{"x-amz-meta-encryption-algorithm", true},
 		{"x-amz-meta-encryption-iv", true},
 		{"x-amz-meta-encryption-chunked", true},
