@@ -1853,6 +1853,37 @@ func TestLoadFromEnv_KeyManagerConfig(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_SelfContainedAESKeys(t *testing.T) {
+	t.Setenv("SELF_CONTAINED_TYPE", "aes")
+	t.Setenv("SELF_CONTAINED_AES_ACTIVE_VERSION", "2")
+	t.Setenv("SELF_CONTAINED_AES_KEYS", "1=env:AES_KEY_V1,2=base64:abc123")
+
+	cfg := &Config{}
+	loadFromEnv(cfg)
+
+	if cfg.Encryption.KeyManager.SelfContained.Type != "aes" {
+		t.Errorf("SelfContained.Type: want aes, got %q", cfg.Encryption.KeyManager.SelfContained.Type)
+	}
+	if cfg.Encryption.KeyManager.SelfContained.AES.ActiveVersion != 2 {
+		t.Errorf("SelfContained.AES.ActiveVersion: want 2, got %d", cfg.Encryption.KeyManager.SelfContained.AES.ActiveVersion)
+	}
+	if len(cfg.Encryption.KeyManager.SelfContained.AES.Keys) != 2 {
+		t.Fatalf("SelfContained.AES.Keys: want 2 entries, got %d", len(cfg.Encryption.KeyManager.SelfContained.AES.Keys))
+	}
+	if cfg.Encryption.KeyManager.SelfContained.AES.Keys[0].Version != 1 {
+		t.Errorf("AES.Keys[0].Version: want 1, got %d", cfg.Encryption.KeyManager.SelfContained.AES.Keys[0].Version)
+	}
+	if cfg.Encryption.KeyManager.SelfContained.AES.Keys[0].KeySource != "env:AES_KEY_V1" {
+		t.Errorf("AES.Keys[0].KeySource: want env:AES_KEY_V1, got %q", cfg.Encryption.KeyManager.SelfContained.AES.Keys[0].KeySource)
+	}
+	if cfg.Encryption.KeyManager.SelfContained.AES.Keys[1].Version != 2 {
+		t.Errorf("AES.Keys[1].Version: want 2, got %d", cfg.Encryption.KeyManager.SelfContained.AES.Keys[1].Version)
+	}
+	if cfg.Encryption.KeyManager.SelfContained.AES.Keys[1].KeySource != "base64:abc123" {
+		t.Errorf("AES.Keys[1].KeySource: want base64:abc123, got %q", cfg.Encryption.KeyManager.SelfContained.AES.Keys[1].KeySource)
+	}
+}
+
 func TestParseCosmianKeyRefs(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -1881,6 +1912,44 @@ func TestParseCosmianKeyRefs(t *testing.T) {
 				t.Errorf("parseCosmianKeyRefs(%q)[0].Version = %d, want %d", tt.input, refs[0].Version, tt.wantVer)
 			}
 		}
+	}
+}
+
+func TestParseSelfContainedAESKeys(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantLen    int
+		wantVer    int
+		wantSource string
+	}{
+		{"single env", "1=env:MY_KEY", 1, 1, "env:MY_KEY"},
+		{"single base64", "1=base64:abc123", 1, 1, "base64:abc123"},
+		{"single file", "1=file:/run/secrets/key", 1, 1, "file:/run/secrets/key"},
+		{"two versions", "1=env:KEY_V1,2=env:KEY_V2", 2, 1, "env:KEY_V1"},
+		{"empty input", "", 0, 0, ""},
+		{"spaces trimmed", " 1 = base64:abc ", 1, 1, "base64:abc"},
+		{"invalid version skipped", "0=env:KEY,1=env:KEY2", 1, 1, "env:KEY2"},
+		{"no equals skipped", "badentry,2=env:VALID", 1, 2, "env:VALID"},
+		{"empty source skipped", "1=,2=env:VALID", 1, 2, "env:VALID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entries := parseSelfContainedAESKeys(tt.input)
+			if len(entries) != tt.wantLen {
+				t.Errorf("parseSelfContainedAESKeys(%q): expected %d entries, got %d", tt.input, tt.wantLen, len(entries))
+				return
+			}
+			if tt.wantLen > 0 {
+				if entries[0].Version != tt.wantVer {
+					t.Errorf("parseSelfContainedAESKeys(%q)[0].Version = %d, want %d", tt.input, entries[0].Version, tt.wantVer)
+				}
+				if entries[0].KeySource != tt.wantSource {
+					t.Errorf("parseSelfContainedAESKeys(%q)[0].KeySource = %q, want %q", tt.input, entries[0].KeySource, tt.wantSource)
+				}
+			}
+		})
 	}
 }
 

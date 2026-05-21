@@ -1044,6 +1044,9 @@ func loadFromEnv(config *Config) {
 			config.Encryption.KeyManager.SelfContained.RSA.KeyVersion = n
 		}
 	}
+	if v := os.Getenv("SELF_CONTAINED_AES_KEYS"); v != "" {
+		config.Encryption.KeyManager.SelfContained.AES.Keys = parseSelfContainedAESKeys(v)
+	}
 
 	if v := os.Getenv("TLS_ENABLED"); v != "" {
 		config.TLS.Enabled = v == "true" || v == "1"
@@ -1460,6 +1463,44 @@ func parseCosmianKeyRefs(value string) []CosmianKeyReference {
 		refs = append(refs, ref)
 	}
 	return refs
+}
+
+// parseSelfContainedAESKeys parses the SELF_CONTAINED_AES_KEYS environment
+// variable value into a slice of SelfContainedAESKeyEntry values.
+//
+// Expected format: a comma-separated list of "version=key_source" pairs, e.g.
+//
+//	"1=base64:abc123,2=env:MY_KEY_VAR,3=file:/run/secrets/key3"
+//
+// Each version must be a positive integer. Key sources follow the same
+// resolution rules as the YAML key_source field (env:, base64:, file:, raw).
+func parseSelfContainedAESKeys(value string) []SelfContainedAESKeyEntry {
+	parts := strings.Split(value, ",")
+	entries := make([]SelfContainedAESKeyEntry, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		idx := strings.IndexByte(part, '=')
+		if idx <= 0 {
+			continue
+		}
+		versionStr := strings.TrimSpace(part[:idx])
+		keySource := strings.TrimSpace(part[idx+1:])
+		if keySource == "" {
+			continue
+		}
+		version, err := strconv.Atoi(versionStr)
+		if err != nil || version <= 0 {
+			continue
+		}
+		entries = append(entries, SelfContainedAESKeyEntry{
+			Version:   version,
+			KeySource: keySource,
+		})
+	}
+	return entries
 }
 
 // Validate validates the configuration and returns an error if invalid.
