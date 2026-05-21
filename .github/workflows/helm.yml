@@ -138,6 +138,29 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ── Build Docker image and run Trivy vulnerability scan ─────────────────
+      - name: Build Docker image
+        if: steps.version_check.outputs.already_released == 'false'
+        run: |
+          IMAGE_TAG="ghcr.io/${{ github.repository }}:${{ github.sha }}"
+          docker build -t "${IMAGE_TAG}" .
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+        id: build_image
+        shell: bash
+
+      - name: Trivy container scan
+        if: steps.version_check.outputs.already_released == 'false'
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest \
+            image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            ${{ steps.build_image.outputs.image_tag }}
+        shell: bash
+
       - name: Copy chart README to gh-pages
         run: |
           git fetch origin gh-pages
