@@ -130,9 +130,14 @@ config:
 | `config.encryption.keyFile` | Path to an encryption key file (optional) | `""` |
 | `config.encryption.preferredAlgorithm` | Preferred AEAD algorithm (`AES256-GCM`, `ChaCha20-Poly1305`) | `"AES256-GCM"` |
 | `config.encryption.supportedAlgorithms` | Comma-separated list of algorithms accepted for decryption | `"AES256-GCM,ChaCha20-Poly1305"` |
-| `config.encryption.keyManager.enabled` | Enable external KMS / key-manager mode | `"false"` |
-| `config.encryption.keyManager.provider` | KMS provider: `cosmian` (supported), `aws`, `vault` (planned) | `"cosmian"` |
+| `config.encryption.keyManager.enabled` | Enable envelope encryption key-manager mode | `"false"` |
+| `config.encryption.keyManager.provider` | KEK provider: `self_contained` (default, no external KMS), `cosmian`, `memory` | `"self_contained"` |
 | `config.encryption.keyManager.dualReadWindow` | Number of previous key versions tried during rotation | `"1"` |
+| `config.encryption.keyManager.selfContained.type` | Sub-type: `rsa` (recommended) or `aes` | `"rsa"` |
+| `config.encryption.keyManager.selfContained.rsa.privateKeySource` | RSA PEM key source — prefix `env:VAR`, `base64:DATA`, or `file:PATH` | `""` |
+| `config.encryption.keyManager.selfContained.rsa.keyVersion` | RSA key version (integer ≥ 1; increment to rotate) | `"1"` |
+| `config.encryption.keyManager.selfContained.aes.activeVersion` | Active AES key version for wrapping new DEKs | `"1"` |
+| `config.encryption.keyManager.selfContained.aes.keys` | Comma-separated AES-256 key entries (`"1=env:VAR,2=base64:DATA"`) | `""` |
 | `config.encryption.keyManager.cosmian.endpoint` | Cosmian KMIP endpoint (JSON/HTTP: `http://host:9998/kmip/2_1`; binary: `host:5696`) | `""` |
 | `config.encryption.keyManager.cosmian.timeout` | KMS operation timeout | `"10s"` |
 | `config.encryption.keyManager.cosmian.keys` | Comma-separated wrapping keys (`"key1:v1,key2:v2"`) | `""` |
@@ -153,18 +158,88 @@ config:
 
 > **FIPS note:** When the binary is compiled with `-tags=fips`, Argon2id is rejected at startup.
 
-**Key Manager (KMS) Configuration**: When `config.encryption.keyManager.enabled` is set to `"true"`, the gateway uses external KMS for envelope encryption. Currently, only **Cosmian KMIP** is fully supported.
+**Key Manager Configuration**: When `config.encryption.keyManager.enabled` is set to `"true"`, the gateway performs envelope encryption — each object gets a unique DEK that is wrapped by a Key Encryption Key (KEK). Three providers are available:
 
-**Protocol Selection**:
-- **JSON/HTTP (Recommended)**:
-  - Full URL: `http://host:9998/kmip/2_1` (recommended for clarity)
-  - Base URL: `http://host:9998` (path `/kmip/2_1` is automatically appended)
-  - No client certificates required for HTTP; `caCert` recommended for HTTPS
-- **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS); not fully tested in CI
+- **`self_contained`** (default, recommended): No external KMS required. The gateway wraps DEKs with a local RSA or AES key. The key material is loaded at startup from an environment variable, a mounted secret file, or an inline base64 value. No additional components to deploy or operate.
+- **`cosmian`**: Wraps DEKs with [Cosmian KMS](https://cosmian.com) over the KMIP protocol.
+- **`memory`**: Ephemeral in-memory key (testing only — encrypted objects are unreadable after a restart).
 
 See the [KMS Compatibility Guide](../../docs/KMS_COMPATIBILITY.md) for details.
 
-**Example KMS Configuration**:
+**Example — self-contained RSA envelope encryption (recommended)**:
+
+```yaml
+# Create the RSA private key Secret:
+#   openssl genrsa 2048 | kubectl create secret generic self-contained-kek \
+#       --from-file=private-key.pem=/dev/stdin
+config:
+  encryption:
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: s3-encryption-gateway-secrets
+          key: encryption-password
+    keyManager:
+      enabled:
+        value: "true"
+      provider:
+        value: "self_contained"
+      selfContained:
+        type:
+          value: "rsa"
+        rsa:
+          privateKeySource:
+            # "env:VAR" tells the gateway to read the PEM from the RSA_KEK_PRIVATE_KEY env var.
+            # The valueFrom below injects the Secret data into that env var.
+            value: "env:RSA_KEK_PRIVATE_KEY"
+          keyVersion:
+            value: "1"
+# Inject the key material as an env var via extraEnv:
+extraEnv:
+  - name: RSA_KEK_PRIVATE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: self-contained-kek
+        key: private-key.pem
+```
+
+**Example — self-contained AES envelope encryption (multi-version rotation)**:
+
+```yaml
+# Store base64-encoded 32-byte keys in a Secret:
+#   KEY1=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 -w0)
+#   KEY2=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 -w0)
+#   kubectl create secret generic aes-kek --from-literal=key1="$KEY1" --from-literal=key2="$KEY2"
+config:
+  encryption:
+    keyManager:
+      enabled:
+        value: "true"
+      provider:
+        value: "self_contained"
+      selfContained:
+        type:
+          value: "aes"
+        aes:
+          activeVersion:
+            value: "2"      # wraps new objects with key v2
+          keys:
+            # "1=env:AES_KEK_V1,2=env:AES_KEK_V2" — both versions available for unwrap
+            value: "1=env:AES_KEK_V1,2=env:AES_KEK_V2"
+extraEnv:
+  - name: AES_KEK_V1
+    valueFrom:
+      secretKeyRef:
+        name: aes-kek
+        key: key1
+  - name: AES_KEK_V2
+    valueFrom:
+      secretKeyRef:
+        name: aes-kek
+        key: key2
+```
+
+**Example — Cosmian KMIP provider**:
 
 ```yaml
 config:
@@ -206,6 +281,10 @@ config:
         insecureSkipVerify:
           value: "false"
 ```
+
+**Cosmian Protocol Selection**:
+- **JSON/HTTP (Recommended)**: Full URL `http://host:9998/kmip/2_1`; no client certificates needed for HTTP
+- **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS)
 
 #### Encrypted Multipart Upload State (Valkey)
 
@@ -539,6 +618,71 @@ kubectl create secret generic s3-encryption-gateway-secrets \
 helm install my-gateway s3-encryption-gateway/s3-encryption-gateway \
   --namespace default
 ```
+
+### Self-Contained Envelope Encryption (Recommended)
+
+Deploy with self-contained KEK — no external KMS service needed. Ideal for environments where you want envelope encryption without additional infrastructure.
+
+```bash
+# Generate a 2048-bit RSA key and store it as a Kubernetes Secret:
+openssl genrsa 2048 | kubectl create secret generic self-contained-kek \
+    --from-file=private-key.pem=/dev/stdin
+
+kubectl create secret generic s3-encryption-gateway-secrets \
+  --from-literal=backend-access-key='YOUR_ACCESS_KEY' \
+  --from-literal=backend-secret-key='YOUR_SECRET_KEY' \
+  --from-literal=encryption-password='fallback-password-123456'
+```
+
+```yaml
+config:
+  backend:
+    endpoint:
+      value: "https://s3.amazonaws.com"
+    region:
+      value: "us-east-1"
+    accessKey:
+      valueFrom:
+        secretKeyRef:
+          name: s3-encryption-gateway-secrets
+          key: backend-access-key
+    secretKey:
+      valueFrom:
+        secretKeyRef:
+          name: s3-encryption-gateway-secrets
+          key: backend-secret-key
+  encryption:
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: s3-encryption-gateway-secrets
+          key: encryption-password
+    keyManager:
+      enabled:
+        value: "true"
+      provider:
+        value: "self_contained"
+      selfContained:
+        type:
+          value: "rsa"
+        rsa:
+          privateKeySource:
+            value: "env:RSA_KEK_PRIVATE_KEY"
+          keyVersion:
+            value: "1"
+
+extraEnv:
+  - name: RSA_KEK_PRIVATE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: self-contained-kek
+        key: private-key.pem
+```
+
+**Notes:**
+- `encryption.password` remains required as a fallback for password-encrypted objects
+- Increment `keyVersion` and add the new key material to trigger key rotation; old objects remain readable via `dualReadWindow`
+- Key material never leaves the pod — the gateway is the sole decryption authority
 
 ### KMS Mode with Cosmian KMIP
 
