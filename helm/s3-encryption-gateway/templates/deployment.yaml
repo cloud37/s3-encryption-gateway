@@ -138,6 +138,21 @@ spec:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "COSMIAN_KMS_CLIENT_KEY" "value" .Values.config.encryption.keyManager.cosmian.clientKey.value "valueFrom" .Values.config.encryption.keyManager.cosmian.clientKey.valueFrom) | nindent 8 }}
         {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "COSMIAN_KMS_INSECURE_SKIP_VERIFY" "value" .Values.config.encryption.keyManager.cosmian.insecureSkipVerify.value "valueFrom" .Values.config.encryption.keyManager.cosmian.insecureSkipVerify.valueFrom) | nindent 8 }}
+        {{- if eq .Values.config.encryption.keyManager.provider.value "self_contained" }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_TYPE" "value" .Values.config.encryption.keyManager.selfContained.type.value "valueFrom" .Values.config.encryption.keyManager.selfContained.type.valueFrom) | nindent 8 }}
+        {{- if or .Values.config.encryption.keyManager.selfContained.rsa.privateKeySource.value .Values.config.encryption.keyManager.selfContained.rsa.privateKeySource.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_RSA_PRIVATE_KEY_SOURCE" "value" .Values.config.encryption.keyManager.selfContained.rsa.privateKeySource.value "valueFrom" .Values.config.encryption.keyManager.selfContained.rsa.privateKeySource.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.encryption.keyManager.selfContained.rsa.keyVersion.value .Values.config.encryption.keyManager.selfContained.rsa.keyVersion.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_RSA_KEY_VERSION" "value" .Values.config.encryption.keyManager.selfContained.rsa.keyVersion.value "valueFrom" .Values.config.encryption.keyManager.selfContained.rsa.keyVersion.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.encryption.keyManager.selfContained.aes.activeVersion.value .Values.config.encryption.keyManager.selfContained.aes.activeVersion.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_AES_ACTIVE_VERSION" "value" .Values.config.encryption.keyManager.selfContained.aes.activeVersion.value "valueFrom" .Values.config.encryption.keyManager.selfContained.aes.activeVersion.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.encryption.keyManager.selfContained.aes.keys.value .Values.config.encryption.keyManager.selfContained.aes.keys.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_AES_KEYS" "value" .Values.config.encryption.keyManager.selfContained.aes.keys.value "valueFrom" .Values.config.encryption.keyManager.selfContained.aes.keys.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- end }}
         {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "COMPRESSION_ENABLED" "value" .Values.config.compression.enabled.value "valueFrom" .Values.config.compression.enabled.valueFrom) | nindent 8 }}
         {{- if .Values.config.compression.enabled.value }}

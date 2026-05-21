@@ -855,8 +855,8 @@
                       "properties": {
                         "value": {
                           "type": ["string", "null"],
-                          "enum": ["cosmian", "hsm-stub", null],
-                          "description": "KMS provider identifier. Extend enum as new providers land."
+                           "enum": ["cosmian", "hsm-stub", "self_contained", "memory", null],
+                           "description": "KMS provider identifier. Extend enum as new providers land."
                         }
                       }
                     }
@@ -875,6 +875,32 @@
                     "clientCert":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "TLS client certificate for mTLS. Required for binary KMIP." },
                     "clientKey":          { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "TLS client private key for mTLS." },
                     "insecureSkipVerify": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Skip TLS verification (testing ONLY — do not use in production)." }
+                  }
+                },
+                "selfContained": {
+                  "type": "object",
+                  "description": "Self-contained envelope encryption provider (no external KMS). Uses AES-256-GCM or RSA-OAEP/SHA-256 to wrap per-object DEKs.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Sub-type: \\\"rsa\\\" (recommended, env-wireable) or \\\"aes\\\". Set via SELF_CONTAINED_TYPE." },
+                    "rsa": {
+                      "type": "object",
+                      "description": "RSA-OAEP/SHA-256 KEK configuration.",
+                      "additionalProperties": false,
+                      "properties": {
+                        "privateKeySource": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "PEM private key source. Prefixes: env:VAR, base64:DATA, file:PATH. Set via SELF_CONTAINED_RSA_PRIVATE_KEY_SOURCE." },
+                        "keyVersion":       { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Key version integer (≥1). Set via SELF_CONTAINED_RSA_KEY_VERSION." }
+                      }
+                    },
+                    "aes": {
+                      "type": "object",
+                      "description": "AES-256-GCM KEK configuration.",
+                      "additionalProperties": false,
+                      "properties": {
+                        "activeVersion": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Active key version for wrapping new DEKs. Set via SELF_CONTAINED_AES_ACTIVE_VERSION." },
+                        "keys":          { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Comma-separated key entries (format: version=source[,version=source]). Set via SELF_CONTAINED_AES_KEYS." }
+                      }
+                    }
                   }
                 }
               }
@@ -1235,7 +1261,7 @@
     },
 
     "invariantKeyManagerProviderRequired": {
-      "description": "I5: When keyManager.enabled.value is 'true', provider must be a valid enum and cosmian-specific fields must be present if provider is 'cosmian'.",
+      "description": "I5: When keyManager.enabled.value is 'true', provider must be one of the supported values.",
       "if": {
         "properties": {
           "config": {
@@ -1265,7 +1291,7 @@
                     "properties": {
                       "provider": {
                         "properties": {
-                          "value": { "type": "string", "enum": ["cosmian", "hsm-stub"] }
+                          "value": { "type": "string", "enum": ["cosmian", "hsm-stub", "self_contained", "memory"] }
                         }
                       }
                     }

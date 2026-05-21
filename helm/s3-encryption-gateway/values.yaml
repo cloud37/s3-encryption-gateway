@@ -270,7 +270,7 @@ config:
         #     name: s3-encryption-gateway-config
         #     key: key-manager-enabled
       provider:
-        value: "cosmian"
+        value: "self_contained"
         # valueFrom:
         #   configMapKeyRef:
         #     name: s3-encryption-gateway-config
@@ -336,6 +336,67 @@ config:
           #   configMapKeyRef:
           #     name: s3-encryption-gateway-config
           #     key: cosmian-kms-insecure-skip-verify
+
+      selfContained:
+        # Self-contained envelope encryption — no external KMS required.
+        # The gateway wraps per-object DEKs with a local key (AES-256-GCM or
+        # RSA-OAEP/SHA-256). Key material never leaves the pod; the gateway is
+        # the only system that can decrypt objects it encrypts.
+        #
+        # When keyManager.enabled = "true" and provider = "self_contained",
+        # the gateway will use whichever sub-type is selected below.
+        type:
+          # "rsa" (recommended — fully env-wireable via a single Secret) or "aes"
+          value: "rsa"
+          # valueFrom:
+          #   configMapKeyRef:
+          #     name: s3-encryption-gateway-config
+          #     key: self-contained-type
+
+        rsa:
+          privateKeySource:
+            # PEM-encoded RSA private key source for wrapping DEKs.
+            # Supports the following resolver prefixes:
+            #   env:VAR_NAME   — read the PEM from an environment variable
+            #   base64:DATA    — inline base64-encoded PEM
+            #   file:PATH      — path to a PEM file mounted in the container
+            # Example (env resolver): "env:RSA_KEK_PRIVATE_KEY"
+            # Example (file resolver): "file:/run/secrets/rsa-kek.pem"
+            value: ""
+            # valueFrom:
+            #   secretKeyRef:
+            #     name: s3-encryption-gateway-secrets
+            #     key: self-contained-rsa-private-key-source
+          keyVersion:
+            # RSA key version number (integer ≥ 1). Increment to rotate.
+            value: "1"
+            # valueFrom:
+            #   configMapKeyRef:
+            #     name: s3-encryption-gateway-config
+            #     key: self-contained-rsa-key-version
+
+        aes:
+          activeVersion:
+            # Which AES key version wraps new DEKs (must match one of the key
+            # versions configured in SELF_CONTAINED_AES_KEYS).
+            value: "1"
+            # valueFrom:
+            #   configMapKeyRef:
+            #     name: s3-encryption-gateway-config
+            #     key: self-contained-aes-active-version
+          keys:
+            # Comma-separated list of AES-256 key entries in "version=source" format.
+            # Supports the same resolver prefixes as the RSA privateKeySource:
+            #   env:VAR   — base64-encoded 32-byte key stored in an env var
+            #   base64:DATA — inline base64-encoded 32-byte key
+            #   file:PATH — path to a file containing a base64-encoded 32-byte key
+            # Example (two versions for rotation):
+            #   "1=env:AES_KEK_V1,2=env:AES_KEK_V2"
+            value: ""
+            # valueFrom:
+            #   secretKeyRef:
+            #     name: s3-encryption-gateway-secrets
+            #     key: self-contained-aes-keys
 
     kdf:
       # KDF algorithm: "pbkdf2-sha256" (default, FIPS-compatible) or "argon2id" (V1.0-CRYPTO-1).
