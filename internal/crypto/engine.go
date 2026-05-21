@@ -724,10 +724,16 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 		if len(env.Ciphertext) == 0 {
 			return nil, nil, fmt.Errorf("failed to unwrap data key: wrapped key ciphertext is empty")
 		}
-		// Validate wrapped key size (NIST Key Wrap produces ciphertext that is 8 bytes longer than plaintext)
-		// For a 32-byte AES-256 key, the wrapped key should be 40 bytes
-		if len(env.Ciphertext) < 32 || len(env.Ciphertext) > 64 {
-			return nil, nil, fmt.Errorf("failed to unwrap data key: wrapped key ciphertext has unexpected size %d bytes (expected 32-64 bytes for AES key wrap)", len(env.Ciphertext))
+		// Validate wrapped key size. The acceptable range depends on the KEK algorithm:
+		//   - AES key-wrap (RFC 3394):  plaintext + 8 bytes (e.g. 40 bytes for a 32-byte DEK)
+		//   - RSA-OAEP (2048-bit key):  256 bytes
+		//   - RSA-OAEP (4096-bit key):  512 bytes
+		//   - RSA-OAEP (8192-bit key):  1024 bytes
+		// The upper bound of 1024 covers RSA keys up to 8192 bits; anything larger
+		// is rejected as likely corrupted metadata. The lower bound of 32 ensures
+		// we always have at least enough bytes to attempt an AES or RSA unwrap.
+		if len(env.Ciphertext) < 32 || len(env.Ciphertext) > 1024 {
+			return nil, nil, fmt.Errorf("failed to unwrap data key: wrapped key ciphertext has unexpected size %d bytes (expected 32-1024 bytes)", len(env.Ciphertext))
 		}
 		key, err = e.kmsManager.UnwrapKey(ctx, env, expandedMetadata)
 		if err != nil {

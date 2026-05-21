@@ -133,6 +133,11 @@ func TestConformance(t *testing.T) {
 			// runs on local Testcontainer providers (MinIO, Garage) where the
 			// in-process gateway can reach the KMS container.
 			{"KMS_EnvelopeEncryption", provider.CapKMSIntegration, testKMSIntegration},
+			{"SelfContained_AES_EnvelopeRoundTrip", 0, testSelfContained_AES_EnvelopeRoundTrip},
+			{"SelfContained_AES_AtRest", 0, testSelfContained_AES_AtRest},
+			{"SelfContained_AES_Rotation_DualRead", 0, testSelfContained_AES_Rotation_DualRead},
+			{"SelfContained_RSA_EnvelopeRoundTrip", 0, testSelfContained_RSA_EnvelopeRoundTrip},
+			{"SelfContained_RSA_AtRest", 0, testSelfContained_RSA_AtRest},
 
 			// In-process load tests (range concurrency + multipart throughput).
 			// Only run against local providers (MinIO, Garage) where per-request
