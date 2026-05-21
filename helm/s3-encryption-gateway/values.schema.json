@@ -440,6 +440,65 @@
       "items": { "type": "object", "additionalProperties": true }
     },
 
+    "monitoring": {
+      "type": "object",
+      "description": "Monitoring integration configuration (V1.0-OBS-1). Grafana dashboard ConfigMap and PrometheusRule are independently opt-in.",
+      "additionalProperties": false,
+      "properties": {
+        "grafana": {
+          "type": "object",
+          "description": "Grafana dashboard integration settings.",
+          "additionalProperties": false,
+          "properties": {
+            "dashboard": {
+              "type": "object",
+              "description": "Grafana dashboard ConfigMap settings. When enabled, creates a ConfigMap with the grafana_dashboard: \"1\" label for sidecar auto-discovery.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Create a ConfigMap with the Grafana dashboard JSON."
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace for the ConfigMap. Defaults to Release.Namespace when empty."
+                },
+                "labels": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" },
+                  "description": "Extra labels added to the ConfigMap."
+                },
+                "datasource": {
+                  "type": "string",
+                  "description": "Default Prometheus datasource name for the dashboard."
+                }
+              }
+            }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "description": "PrometheusRule configuration for alerting rules (requires Prometheus Operator).",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Create a PrometheusRule resource with alerting rules."
+            },
+            "namespace": {
+              "type": "string",
+              "description": "Namespace for the PrometheusRule. Defaults to Release.Namespace when empty."
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Extra labels applied to the PrometheusRule (e.g. release: kube-prometheus-stack for ruleSelector matching)."
+            }
+          }
+        }
+      }
+    },
+
     "valkey": {
       "type": "object",
       "description": "Valkey subchart passthrough values. The subchart's own schema validates its keys; we expose the top-level block with additionalProperties: true. Used only when valkey.enabled is true (in-cluster subchart for local/dev). Production: set valkey.enabled: false and configure config.multipartState.valkey.addr.",

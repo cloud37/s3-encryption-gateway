@@ -27,6 +27,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `encrypt_state`. Helm chart, schema, deployment template, and runbook
   (`docs/RUNBOOK.md`) fully updated.
 
+- **Turnkey dashboards and alerting** (V1.0-OBS-1): Grafana dashboard (8 rows,
+  33 panels) and PrometheusRule (10 alert rules) now ship as opt-in Helm resources
+  (`monitoring.grafana.dashboard.enabled`, `monitoring.prometheusRule.enabled`).
+  8 new Prometheus metrics added: `gateway_kms_healthy`, `gateway_metadata_encryption_enabled`,
+  `gateway_tls_cert_expiry_seconds`, `gateway_key_rotation_objects_total`,
+  `gateway_kdf_algorithm_active`, `gateway_admin_api_requests_total`,
+  `gateway_admin_api_request_duration_seconds`, `gateway_mpu_active_uploads`,
+  `gateway_encrypted_object_bytes`. Dashboard supports stacked-by-pod
+  visualisation with `$pod`/`$namespace`/`$datasource`/`$interval` template
+  variables. Local verification via `hack/export-dashboard.sh`. Documentation
+  updated in `docs/OBSERVABILITY.md` and `docs/RUNBOOK.md`.
+
 - **Self-contained envelope encryption provider** (V1.0-KMS-4): New
   `"self_contained"` `KeyManager` adapter supporting AES-256-GCM (symmetric)
 

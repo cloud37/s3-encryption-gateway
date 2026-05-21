@@ -1,0 +1,116 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "s3-encryption-gateway.fullname" . }}
+  namespace: {{ .Values.monitoring.prometheusRule.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "s3-encryption-gateway.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: s3-encryption-gateway
+      rules:
+        - alert: S3GatewayHighErrorRate
+          expr: |
+            rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "S3 Gateway high error rate ({{"{{"}} $value | humanizePercentage {{"}}"}})"
+            description: "Error rate exceeds 5% over the last 5 minutes."
+            runbook_url: "RUNBOOK.md#high-error-rate"
+        - alert: S3GatewayHighLatency
+          expr: |
+            histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "S3 Gateway P99 latency > 2s"
+            description: "P99 latency exceeds 2 seconds over the last 10 minutes."
+            runbook_url: "RUNBOOK.md#high-latency"
+        - alert: S3GatewayEncryptionErrors
+          expr: |
+            increase(encryption_errors_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "S3 Gateway encryption errors detected"
+            description: "Encryption errors have occurred in the last 5 minutes."
+            runbook_url: "RUNBOOK.md#encryption-errors"
+        - alert: S3GatewayKMSUnhealthy
+          expr: |
+            gateway_kms_healthy == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "S3 Gateway KMS unreachable"
+            description: "KMS health check has been failing for more than 2 minutes."
+            runbook_url: "RUNBOOK.md#kms-unhealthy"
+        - alert: S3GatewayValkeyDown
+          expr: |
+            gateway_mpu_valkey_up == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "S3 Gateway Valkey down"
+            description: "Valkey health check has been failing for more than 2 minutes."
+            runbook_url: "RUNBOOK.md#valkey-down"
+        - alert: S3GatewayValkeyInsecure
+          expr: |
+            gateway_mpu_valkey_insecure == 1
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "S3 Gateway Valkey TLS disabled"
+            description: "Valkey connection is not using TLS."
+            runbook_url: "RUNBOOK.md#valkey-insecure"
+        - alert: S3GatewayTLSCertExpiringSoon
+          expr: |
+            gateway_tls_cert_expiry_seconds < 604800
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "S3 Gateway TLS certificate expiring soon"
+            description: "TLS certificate will expire in less than 7 days ({{"{{"}} $value | humanizeDuration {{"}}"}} remaining)."
+            runbook_url: "RUNBOOK.md#tls-cert-expiry"
+        - alert: S3GatewayTLSCertExpiryCritical
+          expr: |
+            gateway_tls_cert_expiry_seconds < 172800
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "S3 Gateway TLS certificate expiring critically"
+            description: "TLS certificate will expire in less than 2 days ({{"{{"}} $value | humanizeDuration {{"}}"}} remaining)."
+            runbook_url: "RUNBOOK.md#tls-cert-expiry"
+        - alert: S3GatewayHighRetryGiveUpRate
+          expr: |
+            rate(s3_backend_retry_give_ups_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "S3 Gateway high retry give-up rate"
+            description: "Backend retry give-ups exceed 0.1/s over the last 5 minutes."
+            runbook_url: "RUNBOOK.md#backend-retries"
+        - alert: S3GatewayLegacyValkeyStateReads
+          expr: |
+            increase(gateway_mpu_state_legacy_reads_total[1h]) > 0
+          for: 5m
+          labels:
+            severity: info
+          annotations:
+            summary: "S3 Gateway legacy Valkey state reads detected"
+            description: "Unencrypted Valkey state was read in the last hour."
+            runbook_url: "RUNBOOK.md#valkey-legacy-state"
+{{- end }}

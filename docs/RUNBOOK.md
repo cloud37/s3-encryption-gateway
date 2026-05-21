@@ -202,7 +202,204 @@ Recommended alert rules:
 
 ---
 
-### Troubleshooting
+---
+
+## Alert Playbooks
+
+### high-error-rate
+
+**Alert:** `S3GatewayHighErrorRate`
+**Severity:** critical
+**Expression:** `rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05`
+
+**Symptom:** The gateway is returning 5xx errors for more than 5% of requests.
+
+**Diagnosis:**
+1. Check the backend S3 provider health and connectivity.
+2. Examine gateway logs for error stacks: `kubectl logs -l app=s3-encryption-gateway --tail=100 | grep -E '"level":"error"'`.
+3. Check if the issue is isolated to specific routes: `sum by (path) (rate(http_requests_total{status=~"5.."}[5m]))`.
+4. Verify the encryption engine and KMS are operational.
+
+**Mitigation:**
+- If backend is degraded, fail over to a secondary S3 endpoint if configured.
+- If KMS is unreachable, ensure the KMS endpoint is accessible (see #kms-unhealthy).
+- If the gateway is overloaded, scale up replicas: `kubectl scale deployment s3-encryption-gateway --replicas=N`.
+- Restart a single replica to confirm if the issue is process-level (memory leak, goroutine leak).
+
+---
+
+### high-latency
+
+**Alert:** `S3GatewayHighLatency`
+**Severity:** warning
+**Expression:** `histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 2`
+
+**Symptom:** P99 request latency exceeds 2 seconds.
+
+**Diagnosis:**
+1. Check CPU and memory metrics in the Runtime dashboard row.
+2. Verify backend S3 latency: `rate(s3_operation_duration_seconds_sum[5m]) / rate(s3_operation_duration_seconds_count[5m])`.
+3. Check Valkey latency for MPU operations: `rate(gateway_mpu_state_store_latency_seconds_sum[5m]) / rate(gateway_mpu_state_store_latency_seconds_count[5m])`.
+4. Look for GC pressure: check goroutines and heap memory.
+
+**Mitigation:**
+- If backend latency is high, check the upstream S3 provider.
+- If Valkey latency is high, scale Valkey or add replicas.
+- Increase gateway replica count to spread load.
+- Consider increasing `chunk_size` if small chunks cause excessive per-chunk overhead.
+
+---
+
+### encryption-errors
+
+**Alert:** `S3GatewayEncryptionErrors`
+**Severity:** critical
+**Expression:** `increase(encryption_errors_total[5m]) > 0`
+
+**Symptom:** Encryption operations are failing.
+
+**Diagnosis:**
+1. Check the error type: `sum by (error_type) (rate(encryption_errors_total[5m]))`.
+2. Verify KMS connectivity (see #kms-unhealthy).
+3. Check if the operation is Encrypt or Decrypt: `rate(encryption_operations_total[5m])`.
+4. Examine gateway logs for AEAD or key-derivation errors.
+
+**Mitigation:**
+- If KMS-related: ensure the KMS endpoint is reachable and the key exists.
+- If algorithm mismatch: the gateway might not support the algorithm used to encrypt stored objects. Verify `supported_algorithms` in config.
+- If memory-related: ensure the gateway has sufficient memory for chunked encryption.
+- Restart the gateway pod if the error is transient.
+
+---
+
+### kms-unhealthy
+
+**Alert:** `S3GatewayKMSUnhealthy`
+**Severity:** critical
+**Expression:** `gateway_kms_healthy == 0`
+
+**Symptom:** KMS health check has been failing for more than 2 minutes.
+
+**Diagnosis:**
+1. Check KMS provider endpoint from the gateway pod: `kubectl exec POD -- curl -v http://kms-endpoint:port/`.
+2. Verify network policies allow egress to the KMS endpoint.
+3. Check TLS certificates if the KMS uses mTLS.
+4. Inspect KMS server logs (external system).
+
+**Mitigation:**
+- Restart the KMS service if self-hosted (Cosmian, Vault).
+- If using AWS KMS, check AWS health dashboard.
+- If the outage is prolonged, consider switching to a different KMS provider (requires config change and restart).
+- As a last resort, switch to password-only mode (no KMS) to restore service, then resolve the KMS issue.
+
+---
+
+### valkey-down
+
+**Alert:** `S3GatewayValkeyDown`
+**Severity:** critical
+**Expression:** `gateway_mpu_valkey_up == 0`
+
+**Symptom:** Valkey (Redis) has been unreachable for more than 2 minutes.
+
+**Diagnosis:**
+1. Check Valkey pod status: `kubectl get pods -l app=valkey`.
+2. Test connectivity from the gateway pod: `kubectl exec POD -- nc -zv valkey 6379`.
+3. Verify Valkey configuration (address, TLS, credentials).
+4. Check Valkey server logs.
+
+**Mitigation:**
+- Restart the Valkey pod: `kubectl rollout restart deployment/valkey`.
+- If Valkey has persistent storage, check for disk or memory pressure.
+- In-flight multipart uploads will fail until Valkey is restored — the uploads are not lost on the S3 side, but the state store is temporarily unavailable.
+- After Valkey recovers, in-flight uploads with active TTLs will be readable again.
+
+---
+
+### valkey-insecure
+
+**Alert:** `S3GatewayValkeyInsecure`
+**Severity:** warning
+**Expression:** `gateway_mpu_valkey_insecure == 1`
+
+**Symptom:** Valkey connection is established without TLS.
+
+**Diagnosis:**
+1. Check Helm values or config YAML for `multipart_state.valkey.tls.enabled`.
+2. Verify that Valkey is configured with TLS enabled.
+3. Check if `insecure_allow_plaintext: true` is set.
+
+**Mitigation:**
+- Set `multipartState.valkey.tls.enabled: true` in Helm values.
+- Configure Valkey with TLS certificates.
+- Remove `insecure_allow_plaintext` from production config.
+- Rolling restart the gateway.
+
+---
+
+### tls-cert-expiry
+
+**Alert:** `S3GatewayTLSCertExpiringSoon` (warning, < 7 days) / `S3GatewayTLSCertExpiryCritical` (critical, < 2 days)
+**Expression:** `gateway_tls_cert_expiry_seconds < 604800` / `gateway_tls_cert_expiry_seconds < 172800`
+
+**Symptom:** The gateway's TLS serving certificate is approaching its expiration date.
+
+**Diagnosis:**
+1. Check certificate details: `openssl x509 -in /path/to/cert.crt -noout -enddate`.
+2. Verify the cert file path matches `tls.cert_file` in config.
+3. Check the `role` label (data_plane, admin, metrics) on the metric to identify which listener.
+
+**Mitigation:**
+1. Generate a new certificate and key.
+2. Update the Kubernetes secret or mounted file with the new cert.
+3. Rolling restart the gateway pods.
+4. Verify the new cert: `echo | openssl s_client -connect GATEWAY:443 -servername GATEWAY 2>/dev/null | openssl x509 -noout -enddate`.
+
+---
+
+### backend-retries
+
+**Alert:** `S3GatewayHighRetryGiveUpRate`
+**Severity:** warning
+**Expression:** `rate(s3_backend_retry_give_ups_total[5m]) > 0.1`
+
+**Symptom:** The gateway is giving up on backend S3 requests at a high rate.
+
+**Diagnosis:**
+1. Check which operation is failing: `sum by (final_reason) (rate(s3_backend_retry_give_ups_total[5m]))`.
+2. Verify backend S3 health.
+3. Check backend retry configuration: `initial_backoff`, `max_attempts`, `mode`.
+4. Look for network issues between gateway and backend.
+
+**Mitigation:**
+- Increase `backend.retry.max_attempts` if the backend is experiencing transient failures.
+- Check for throttling by the upstream S3 provider (request rate limiting).
+- Verify network stability between gateway and backend.
+- If the backend is degraded, fail over to a secondary endpoint.
+
+---
+
+### valkey-legacy-state
+
+**Alert:** `S3GatewayLegacyValkeyStateReads`
+**Severity:** info
+**Expression:** `increase(gateway_mpu_state_legacy_reads_total[1h]) > 0`
+
+**Symptom:** The gateway is reading unencrypted Valkey state blobs.
+
+**Diagnosis:**
+1. Check if a recent migration to `encrypt_state: true` is still in progress.
+2. If the alert fires more than 7 days after the migration, investigate whether a gateway replica has encryption disabled.
+3. Check `valkey.ttl_seconds` — default is 7 days (604800 seconds).
+
+**Mitigation:**
+- No action required if this is during the TTL-based migration window (up to 7 days after enabling encrypt_state).
+- If persistent beyond 7 days, verify all replicas have `encrypt_state: true` and the encryption password is correctly injected.
+- If a replica is running without encryption, rolling restart with the correct configuration.
+
+---
+
+## Troubleshooting
 
 | Symptom | Likely Cause | Remediation |
 |---|---|---|

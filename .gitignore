@@ -37,6 +37,7 @@ Thumbs.db
 dist/
 build/
 *.out
+hack/dashboard.json.out
 
 # Configuration files with secrets
 config.local.yaml

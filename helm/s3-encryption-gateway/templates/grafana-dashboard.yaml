@@ -1,0 +1,16 @@
+{{- if .Values.monitoring.grafana.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "s3-encryption-gateway.fullname" . }}-dashboard
+  namespace: {{ .Values.monitoring.grafana.dashboard.namespace | default .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+    {{- include "s3-encryption-gateway.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.grafana.dashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  s3-encryption-gateway.json: |
+{{ .Files.Get "dashboards/s3-encryption-gateway.json" | indent 4 }}
+{{- end }}

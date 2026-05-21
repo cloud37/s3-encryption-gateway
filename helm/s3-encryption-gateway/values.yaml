@@ -839,6 +839,28 @@ topologySpreadConstraints: []
 #       matchLabels:
 #         app.kubernetes.io/name: s3-encryption-gateway
 
+# V1.0-OBS-1: Monitoring integration configuration.
+# Both Grafana dashboard and PrometheusRule are independently opt-in.
+monitoring:
+  grafana:
+    dashboard:
+      # Set to true to create a ConfigMap containing the Grafana dashboard JSON.
+      # The ConfigMap is labelled grafana_dashboard: "1" for sidecar auto-discovery.
+      enabled: false
+      # Namespace to create the ConfigMap in. Defaults to Release.Namespace.
+      namespace: ""
+      # Additional labels to add to the ConfigMap (e.g. grafana.sidecar.dashboards.label).
+      labels: {}
+      # Name of the Grafana datasource to use. Injected as the default datasource UID.
+      datasource: "Prometheus"
+  prometheusRule:
+    # Set to true to create a PrometheusRule resource (requires Prometheus Operator).
+    enabled: false
+    # Namespace for the PrometheusRule. Defaults to Release.Namespace.
+    namespace: ""
+    # Additional labels to add to the PrometheusRule (e.g. release: kube-prometheus-stack).
+    labels: {}
+
 # Valkey subchart configuration (for MPU state store)
 valkey:
   enabled: false

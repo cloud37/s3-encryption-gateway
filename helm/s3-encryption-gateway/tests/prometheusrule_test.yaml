@@ -1,0 +1,91 @@
+suite: test prometheusrule
+templates:
+  - prometheusrule.yaml
+release:
+  name: s3eg-test
+  namespace: default
+values:
+  - ../values.yaml
+tests:
+  - it: should not create PrometheusRule when monitoring.prometheusRule.enabled is false (default)
+    set:
+      monitoring.prometheusRule.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should create PrometheusRule when monitoring.prometheusRule.enabled is true
+    set:
+      monitoring.prometheusRule.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PrometheusRule
+      - matchRegex:
+          path: metadata.labels["app.kubernetes.io/name"]
+          pattern: s3-encryption-gateway
+
+  - it: should contain all 10 alert rules
+    set:
+      monitoring.prometheusRule.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: spec.groups[0].rules
+          count: 10
+
+  - it: should have the expected alert names
+    set:
+      monitoring.prometheusRule.enabled: true
+    asserts:
+      - equal:
+          path: spec.groups[0].rules[0].alert
+          value: "S3GatewayHighErrorRate"
+      - equal:
+          path: spec.groups[0].rules[1].alert
+          value: "S3GatewayHighLatency"
+      - equal:
+          path: spec.groups[0].rules[2].alert
+          value: "S3GatewayEncryptionErrors"
+      - equal:
+          path: spec.groups[0].rules[3].alert
+          value: "S3GatewayKMSUnhealthy"
+      - equal:
+          path: spec.groups[0].rules[4].alert
+          value: "S3GatewayValkeyDown"
+      - equal:
+          path: spec.groups[0].rules[5].alert
+          value: "S3GatewayValkeyInsecure"
+      - equal:
+          path: spec.groups[0].rules[6].alert
+          value: "S3GatewayTLSCertExpiringSoon"
+      - equal:
+          path: spec.groups[0].rules[7].alert
+          value: "S3GatewayTLSCertExpiryCritical"
+      - equal:
+          path: spec.groups[0].rules[8].alert
+          value: "S3GatewayHighRetryGiveUpRate"
+      - equal:
+          path: spec.groups[0].rules[9].alert
+          value: "S3GatewayLegacyValkeyStateReads"
+
+  - it: should support custom labels
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.labels:
+        release: kube-prometheus-stack
+    asserts:
+      - equal:
+          path: metadata.labels["release"]
+          value: kube-prometheus-stack
+
+  - it: should support custom namespace
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.namespace: custom-ns
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-ns

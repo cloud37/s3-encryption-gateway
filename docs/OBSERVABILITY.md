@@ -257,3 +257,146 @@ sum by (endpoint, outcome) (
 )
 ```
 
+---
+
+## Grafana Dashboard
+
+The gateway ships a comprehensive Grafana dashboard as an opt-in Helm resource.
+The dashboard covers all 47 existing Prometheus metrics plus the 8 new
+monitoring metrics introduced in V1.0-OBS-1, organised into 8 rows across
+33+ panels.
+
+### Dashboard Layout
+
+| Row | Title | Panels |
+|-----|-------|--------|
+| R1 | **Traffic Overview** | RPS (stacked by pod), P50/P95/P99 latency, error rate %, active connections |
+| R2 | **Encryption Engine** | Encrypt/decrypt RPS, throughput bytes/s, error rate, object size distribution, buffer pool hit ratio, encryption duration |
+| R3 | **S3 Operations** | S3 ops/s by operation, error rate by error_type, backend retry rate, retry give-up rate, attempts per request, backoff latency |
+| R4 | **KMS & Key Rotation** | KMS health status, active key version, rotation ops/s, rotation duration, in-flight wraps, rotated reads, skipped locked, KDF algorithm stat |
+| R5 | **Multipart Uploads** | Active MPU count, MPU success/error rate, parts/s, Valkey status, state store latency, state store ops, manifest size, encrypted/legacy reads |
+| R6 | **Security & Config** | FIPS mode, metadata encryption status, hardware acceleration, TLS cert expiry, admin API/profiling enabled, pprof requests, UploadPartCopy |
+| R7 | **Admin API** | Admin API RPS (stacked), error rate, P99 latency |
+| R8 | **Runtime** | Goroutines, heap alloc, system memory (all stacked by pod) |
+
+All rate/throughput panels use stacked-by-pod visualisation with a fleet-total
+dashed overlay line.
+
+### Opt-In via Helm
+
+The dashboard is packaged as a ConfigMap with the `grafana_dashboard: "1"` label
+for Grafana sidecar auto-discovery:
+
+```yaml
+monitoring:
+  grafana:
+    dashboard:
+      # Set to true to create the dashboard ConfigMap.
+      enabled: false
+      # Namespace override (defaults to Release.Namespace).
+      namespace: ""
+      # Additional labels (e.g., grafana.sidecar.dashboards.label).
+      labels: {}
+      # Grafana datasource UID to use as default.
+      datasource: "Prometheus"
+```
+
+### Local Verification
+
+To preview the dashboard JSON locally before deployment:
+
+```bash
+# Prerequisites: helm, python3
+bash hack/export-dashboard.sh
+
+# Output: hack/dashboard.json.out (gitignored)
+# Import into Grafana: Dashboards → Import → Upload
+```
+
+The export script renders the Helm chart with
+`monitoring.grafana.dashboard.enabled=true` and extracts the embedded JSON
+from the ConfigMap `data` field.
+
+### Dashboard JSON
+
+The canonical dashboard JSON is committed at:
+`helm/s3-encryption-gateway/dashboards/s3-encryption-gateway.json`
+
+You can import this file directly into any Grafana instance without the Helm
+chart.
+
+### Template Variables
+
+The dashboard defines four template variables:
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `$datasource` | Prometheus datasource | Select the Prometheus data source |
+| `$pod` | `label_values(http_requests_total, pod)` | Filter by pod (multi-select) |
+| `$namespace` | `label_values(http_requests_total, namespace)` | Filter by namespace (multi-select) |
+| `$interval` | Fixed `1m,5m,15m,30m` | Rate calculation window |
+
+---
+
+## Alerting
+
+The gateway ships 10 Prometheus alert rules as an opt-in PrometheusRule custom
+resource. These alerts fire on the Prometheus Operator and require the
+`monitoring.coreos.com/v1` CRD to be installed.
+
+### Opt-In via Helm
+
+```yaml
+monitoring:
+  prometheusRule:
+    # Set to true to create the PrometheusRule resource.
+    enabled: false
+    # Namespace override (defaults to Release.Namespace).
+    namespace: ""
+    # Additional labels (e.g., release: kube-prometheus-stack).
+    labels: {}
+```
+
+### Alert Rules Reference
+
+| # | Alert Name | Severity | Condition | For | Runbook |
+|---|-----------|----------|-----------|-----|---------|
+| 1 | `S3GatewayHighErrorRate` | critical | 5xx rate > 5% of total | 5m | `RUNBOOK.md#high-error-rate` |
+| 2 | `S3GatewayHighLatency` | warning | P99 latency > 2s | 10m | `RUNBOOK.md#high-latency` |
+| 3 | `S3GatewayEncryptionErrors` | critical | Any encryption error in 5m | 1m | `RUNBOOK.md#encryption-errors` |
+| 4 | `S3GatewayKMSUnhealthy` | critical | KMS health check fails | 2m | `RUNBOOK.md#kms-unhealthy` |
+| 5 | `S3GatewayValkeyDown` | critical | Valkey unreachable | 2m | `RUNBOOK.md#valkey-down` |
+| 6 | `S3GatewayValkeyInsecure` | warning | Valkey TLS disabled | 0m | `RUNBOOK.md#valkey-insecure` |
+| 7 | `S3GatewayTLSCertExpiringSoon` | warning | Cert < 7 days | 1h | `RUNBOOK.md#tls-cert-expiry` |
+| 8 | `S3GatewayTLSCertExpiryCritical` | critical | Cert < 2 days | 15m | `RUNBOOK.md#tls-cert-expiry` |
+| 9 | `S3GatewayHighRetryGiveUpRate` | warning | Give-ups > 0.1/s | 5m | `RUNBOOK.md#backend-retries` |
+| 10 | `S3GatewayLegacyValkeyStateReads` | info | Legacy Valkey state reads | 5m | `RUNBOOK.md#valkey-legacy-state` |
+
+### Tuning Rationale
+
+**Critical alerts** are designed to fire within 5 minutes of symptom onset:
+- `S3GatewayHighErrorRate` uses a 5% threshold (3σ above typical baseline of
+  < 1%) with a 5m `for` to avoid flapping from transient network blips.
+- `S3GatewayKMSUnhealthy` and `S3GatewayValkeyDown` fire after 2 consecutive
+  failed health-check intervals (each default interval is 30s).
+- `S3GatewayEncryptionErrors` has a 1m `for` because any encryption error is
+  potentially a data-loss or security event.
+
+**Warning alerts** are informational and allow longer observation windows:
+- `S3GatewayTLSCertExpiringSoon` fires at 7 days with a 1h `for` — operators
+  get a full week to renew without noise from repeated firings.
+- `S3GatewayHighRetryGiveUpRate` requires sustained give-ups > 0.1/s over 5m
+  to avoid alerting on short-lived backend hiccups.
+
+### PrometheusRule Direct Usage
+
+For environments without the Prometheus Operator, the same rules can be used
+with a vanilla Prometheus server by extracting the `spec.groups[0].rules`
+block from the rendered YAML:
+
+```bash
+helm template s3eg helm/s3-encryption-gateway \
+  --set monitoring.prometheusRule.enabled=true \
+  | yq 'select(.kind == "PrometheusRule") | .spec'
+```
+

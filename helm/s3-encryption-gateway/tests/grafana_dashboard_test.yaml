@@ -1,0 +1,62 @@
+suite: test grafana dashboard configmap
+templates:
+  - grafana-dashboard.yaml
+release:
+  name: s3eg-test
+  namespace: default
+values:
+  - ../values.yaml
+tests:
+  - it: should not create ConfigMap when monitoring.grafana.dashboard.enabled is false (default)
+    set:
+      monitoring.grafana.dashboard.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+      - release:
+          namespace: default
+
+  - it: should create ConfigMap when monitoring.grafana.dashboard.enabled is true
+    set:
+      monitoring.grafana.dashboard.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: s3eg-test-s3-encryption-gateway-dashboard
+      - equal:
+          path: metadata.labels["grafana_dashboard"]
+          value: "1"
+      - matchRegex:
+          path: metadata.labels["app.kubernetes.io/name"]
+          pattern: s3-encryption-gateway
+      - exists:
+          path: data["s3-encryption-gateway.json"]
+      - isNotEmpty:
+          path: data["s3-encryption-gateway.json"]
+
+  - it: should support custom labels
+    set:
+      monitoring.grafana.dashboard.enabled: true
+      monitoring.grafana.dashboard.labels:
+        custom-label: custom-value
+        release: kube-prometheus-stack
+    asserts:
+      - equal:
+          path: metadata.labels["custom-label"]
+          value: custom-value
+      - equal:
+          path: metadata.labels["release"]
+          value: kube-prometheus-stack
+
+  - it: should support custom namespace
+    set:
+      monitoring.grafana.dashboard.enabled: true
+      monitoring.grafana.dashboard.namespace: custom-ns
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-ns
