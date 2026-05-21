@@ -108,11 +108,13 @@ jobs:
 
       # ── Build and attach binaries to the same release ───────────────────────
       - name: Set up Go
+        if: steps.version_check.outputs.already_released == 'false'
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Build binaries
+        if: steps.version_check.outputs.already_released == 'false'
         id: build_binaries
         run: |
           CHART_VERSION="${{ steps.version_check.outputs.chart_version }}"
@@ -162,6 +164,7 @@ jobs:
         shell: bash
 
       - name: Copy chart README to gh-pages
+        if: steps.version_check.outputs.already_released == 'false'
         run: |
           git fetch origin gh-pages
           # Read the chart README from main before switching branches
