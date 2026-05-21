@@ -29,6 +29,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Self-contained envelope encryption provider** (V1.0-KMS-4): New
   `"self_contained"` `KeyManager` adapter supporting AES-256-GCM (symmetric)
+
+### CI / Security
+
+- **V1.0-OPS-2 — Security scanning in CI pipeline**: Added `govulncheck`
+  (dependency vulnerability scanning), `gosec` (static analysis), and Trivy
+  (container image scanning) to the CI pipeline. A new `.github/workflows/security.yml`
+  workflow runs both `govulncheck` and `gosec` on every PR to `main` and every
+  push to `main`. The `helm.yml` release workflow builds the Docker image and
+  runs Trivy with CRITICAL severity blocking the release. `Makefile` updated
+  with `security-scan`, `gosec`, and `trivy-scan` targets for local parity.
+  Initial `gosec` triage completed: 27 G115, 3 G402, 2 G703, 3 G704, 3 G101,
+  1 G404 HIGH findings suppressed with `#nosec` annotations and documented in
+  `docs/security/gosec-suppressions.md`. Gosec configured with `-severity=high`
+  so only HIGH findings gate CI.
   and RSA-OAEP/SHA-256 (asymmetric) DEK wrapping with no external KMS
   dependencies. Includes `AESKEKManager` (with `RotatableKeyManager` for key
   rotation), `RSAKEKManager`, factory registration, env-var injection, YAML
