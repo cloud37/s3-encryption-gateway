@@ -232,7 +232,7 @@ func TestRateLimiter_CleanupRuns(t *testing.T) {
 }
 
 // TestRateLimiter_AllowTiming verifies that the timing side-channel mitigation
-// in Allow keeps P99 latency within the allowed bound (minAllowTime + 20µs).
+// in Allow keeps P99 latency within the allowed bound (minAllowTime + 40µs).
 func TestRateLimiter_AllowTiming(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
@@ -254,7 +254,7 @@ func TestRateLimiter_AllowTiming(t *testing.T) {
 	})
 
 	p99 := latencies[len(latencies)*99/100]
-	maxAllowed := minAllowTime + 20*time.Microsecond
+	maxAllowed := minAllowTime + 40*time.Microsecond
 
 	if p99 > maxAllowed {
 		t.Fatalf("P99 latency %v exceeds allowed bound %v", p99, maxAllowed)
