@@ -3,7 +3,7 @@ package migrate
 import (
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 func TestClassify_Plaintext(t *testing.T) {

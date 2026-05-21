@@ -3,7 +3,7 @@ package crypto
 import (
 	"runtime"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 	"golang.org/x/sys/cpu"
 )
 

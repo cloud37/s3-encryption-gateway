@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // doUploadPartCopy issues an UploadPartCopy request and returns the ETag

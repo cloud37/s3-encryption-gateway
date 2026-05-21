@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )

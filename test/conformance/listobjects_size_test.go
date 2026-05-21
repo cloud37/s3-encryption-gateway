@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // s3ListBucketResult is a minimal XML struct for parsing ListObjects responses.

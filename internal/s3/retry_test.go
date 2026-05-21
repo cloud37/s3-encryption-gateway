@@ -19,8 +19,8 @@ import (
 
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // ---- helpers ----------------------------------------------------------------

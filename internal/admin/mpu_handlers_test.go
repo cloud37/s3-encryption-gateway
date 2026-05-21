@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/mpu"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/mpu"
 	"github.com/sirupsen/logrus"
 )
 

@@ -24,8 +24,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // cryptoRandInt63n returns a cryptographically random int64 in [0, n).

@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/audit"
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
-	"github.com/kenneth/s3-encryption-gateway/internal/metrics"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"

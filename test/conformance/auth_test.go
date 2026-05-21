@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 const (

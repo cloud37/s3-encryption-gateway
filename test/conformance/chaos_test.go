@@ -25,9 +25,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	internalconfig "github.com/kenneth/s3-encryption-gateway/internal/config"
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	internalconfig "github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // ── ToxicServer ─────────────────────────────────────────────────────────────

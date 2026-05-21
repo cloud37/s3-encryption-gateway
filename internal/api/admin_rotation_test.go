@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
-	"github.com/kenneth/s3-encryption-gateway/internal/metrics"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )

@@ -1,6 +1,6 @@
 goos: linux
 goarch: amd64
-pkg: github.com/kenneth/s3-encryption-gateway/internal/s3
+pkg: github.com/kenchrcum/s3-encryption-gateway/internal/s3
 cpu: AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S      
 BenchmarkS3Client_PutObject_NoFault-32                     	  110764	     30828 ns/op	   34685 B/op	     483 allocs/op
 BenchmarkS3Client_PutObject_NoFault-32                     	  137221	     27186 ns/op	   34686 B/op	     483 allocs/op

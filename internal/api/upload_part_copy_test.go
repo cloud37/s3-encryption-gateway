@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
-	"github.com/kenneth/s3-encryption-gateway/internal/s3"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

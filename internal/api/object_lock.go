@@ -24,7 +24,7 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/s3"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
 )
 
 // maxObjectLockXMLBody bounds the request-body size for every subresource

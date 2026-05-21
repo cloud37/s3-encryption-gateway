@@ -6,9 +6,9 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // kdfTestPassword matches the default harness password so that objects written

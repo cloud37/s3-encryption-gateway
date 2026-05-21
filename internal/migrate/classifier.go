@@ -1,7 +1,7 @@
 package migrate
 
 import (
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // ObjectClass represents the classification of an S3 object for migration purposes.

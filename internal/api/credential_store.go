@@ -3,7 +3,7 @@ package api
 import (
 	"fmt"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 )
 
 // CredentialStore is a read-only lookup of gateway-managed credentials.

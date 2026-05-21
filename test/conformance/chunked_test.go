@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // testChunkedRoundTrip verifies a full PUT/GET round-trip of a chunked-AEAD

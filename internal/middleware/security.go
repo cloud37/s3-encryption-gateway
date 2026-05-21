@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/util"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/util"
 	"github.com/sirupsen/logrus"
 )
 

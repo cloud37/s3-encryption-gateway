@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // testConcurrentPutGet verifies that concurrent PUT and GET operations

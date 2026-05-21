@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // migrateObject performs the decrypt→re-encrypt→write cycle for a single object.

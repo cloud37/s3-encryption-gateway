@@ -9,7 +9,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // TestEncryptWithMetadataEncryption_Enabled verifies that when a metadata

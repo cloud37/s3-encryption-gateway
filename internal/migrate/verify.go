@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // VerifyMaxBytes is the maximum object size for which the verifier performs a

@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 )
 
 func TestStaticCredentialStore_Lookup_Known(t *testing.T) {

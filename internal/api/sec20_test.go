@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 // mockEngine is a minimal EncryptionEngine that tracks Close() calls.

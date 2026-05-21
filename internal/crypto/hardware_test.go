@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 )
 
 func TestHasAESHardwareSupport(t *testing.T) {

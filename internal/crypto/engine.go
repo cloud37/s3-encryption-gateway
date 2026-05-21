@@ -15,7 +15,7 @@ import (
 	"log/slog"
 	"strconv"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/debug"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/debug"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"

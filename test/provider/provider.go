@@ -8,7 +8,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 )
 
 // Provider is the contract every S3-compatible backend-under-test satisfies.

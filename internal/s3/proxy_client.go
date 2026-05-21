@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 )
 
 // ProxyClient forwards HTTP requests to the backend with original headers intact.

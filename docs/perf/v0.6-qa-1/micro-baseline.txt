@@ -16,7 +16,7 @@
 #
 goos: linux
 goarch: amd64
-pkg: github.com/kenneth/s3-encryption-gateway/internal/crypto
+pkg: github.com/kenchrcum/s3-encryption-gateway/internal/crypto
 cpu: placeholder
 BenchmarkChunkedEncrypt_Parallel-4           	       1	  29305960 ns/op	 357.80 MB/s	26345704 B/op	    1539 allocs/op
 BenchmarkChunkedDecrypt_Parallel-4           	       1	  12301601 ns/op	 852.39 MB/s	  221696 B/op	    1194 allocs/op
@@ -31,7 +31,7 @@ BenchmarkMPUEncryptReader_100MiB-4           	       1	  95312471 ns/op	1099.60 
 BenchmarkMPUDecryptReader_100MiB-4           	       1	  40199512 ns/op	2608.14 MB/s	106989048 B/op	   30455 allocs/op
 BenchmarkEncryptWithMemoryKM-4               	       1	    178543 ns/op	 367.12 MB/s	  129776 B/op	     175 allocs/op
 PASS
-pkg: github.com/kenneth/s3-encryption-gateway/internal/s3
+pkg: github.com/kenchrcum/s3-encryption-gateway/internal/s3
 cpu: placeholder
 BenchmarkS3Client_PutObject_NoFault-4                    	       1	    300127 ns/op	  13.65 MB/s	   43928 B/op	     542 allocs/op
 BenchmarkS3Client_PutObject_ThunderingHerd_10pct503-4    	       1	 619119810 ns/op	   0.01 MB/s	   63224 B/op	     897 allocs/op

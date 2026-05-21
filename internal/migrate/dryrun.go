@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/s3"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
 )
 
 // DryRunReport holds the results of a dry-run classification scan.

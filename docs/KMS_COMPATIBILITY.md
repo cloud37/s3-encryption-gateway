@@ -201,7 +201,7 @@ package myadapter
 
 import (
     "context"
-    "github.com/kenneth/s3-encryption-gateway/internal/crypto"
+    "github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 func init() {
@@ -501,7 +501,7 @@ package awskms
 
 import (
     "github.com/aws/aws-sdk-go-v2/service/kms"
-    "github.com/kenneth/s3-encryption-gateway/internal/crypto"
+    "github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 type AWSKMSManager struct {
@@ -556,7 +556,7 @@ package vaultkms
 
 import (
     "github.com/hashicorp/vault/api"
-    "github.com/kenneth/s3-encryption-gateway/internal/crypto"
+    "github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 type VaultKMSManager struct {
@@ -584,7 +584,7 @@ package dbkms
 
 import (
     "database/sql"
-    "github.com/kenneth/s3-encryption-gateway/internal/crypto"
+    "github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 )
 
 type DatabaseKMSManager struct {

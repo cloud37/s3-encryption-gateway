@@ -18,12 +18,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenneth/s3-encryption-gateway/internal/config"
-	"github.com/kenneth/s3-encryption-gateway/internal/crypto"
-	"github.com/kenneth/s3-encryption-gateway/internal/migrate"
-	"github.com/kenneth/s3-encryption-gateway/internal/s3"
-	"github.com/kenneth/s3-encryption-gateway/test/harness"
-	"github.com/kenneth/s3-encryption-gateway/test/provider"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/migrate"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
+	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
 )
 
 // testPassword is the deterministic test password used for all engines.

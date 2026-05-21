@@ -4,7 +4,7 @@ package crypto
 // implementation. It is intentionally NOT in a _test.go file so that adapter
 // packages outside this module can import and invoke it:
 //
-//	import "github.com/kenneth/s3-encryption-gateway/internal/crypto"
+//	import "github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
 //
 //	func TestMyAdapter(t *testing.T) {
 //	    crypto.ConformanceSuite(t, func(t *testing.T) crypto.KeyManager {
