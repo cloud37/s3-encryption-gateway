@@ -33,6 +33,4 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: gosec
-        uses: securego/gosec@master
-        with:
-          args: '-exclude=G104 -severity high ./...'
+        run: go run github.com/securego/gosec/v2/cmd/gosec@latest -exclude=G104 -severity high ./...
