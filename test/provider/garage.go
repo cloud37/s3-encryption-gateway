@@ -70,7 +70,7 @@ func (p *garageProvider) Start(ctx context.Context, t *testing.T) Instance {
 		rpcPort   = "3901/tcp"
 	)
 
-	rpcSecret := "3fb5c4e9d0e2f8a1b7c6d5e4f3a2b1c03fb5c4e9d0e2f8a1b7c6d5e4f3a2b1c0"
+	rpcSecret := "3fb5c4e9d0e2f8a1b7c6d5e4f3a2b1c03fb5c4e9d0e2f8a1b7c6d5e4f3a2b1c0" // #nosec G101 — test-only RPC secret for Garage container
 
 	req := tc.ContainerRequest{
 		Image:        "dxflrs/garage:v2.3.0",

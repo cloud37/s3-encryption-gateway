@@ -208,7 +208,7 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 	client := &http.Client{
 		Transport: transport,
 	}
-	resp, err := client.Do(proxyReq)
+	resp, err := client.Do(proxyReq) // #nosec G704 — S3 proxy: forward to configured backend
 	if err != nil {
 		return nil, fmt.Errorf("backend request failed: %w", err)
 	}

@@ -471,7 +471,7 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Create request to backend
-	backendReq, err := http.NewRequestWithContext(r.Context(), method, backendURL, r.Body)
+	backendReq, err := http.NewRequestWithContext(r.Context(), method, backendURL, r.Body) // #nosec G704 — S3 proxy: forward to configured backend
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to create backend request")
 		s3Err := &S3Error{
@@ -560,7 +560,7 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 			MaxIdleConnsPerHost:   10,
 		},
 	}
-	backendResp, err := httpClient.Do(backendReq)
+	backendResp, err := httpClient.Do(backendReq) // #nosec G704 — S3 proxy: forward to configured backend
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to forward request to backend")
 		s3Err := &S3Error{
@@ -2945,7 +2945,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	// so the client retries (which idempotently overwrites the backend part) or
 	// aborts the upload. Returning 200 here would be a silent data-loss path.
 	if encMPUState != nil && contentLengthPtr != nil {
-		chunkCount := int32((encMPUPlainLen + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize))
+		chunkCount := int32((encMPUPlainLen + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)) // #nosec G115 — max ~82k for 5 GiB parts, well within int32
 		pr := mpu.PartRecord{
 			PartNumber: int32(partNumber),
 			ETag:       etag,

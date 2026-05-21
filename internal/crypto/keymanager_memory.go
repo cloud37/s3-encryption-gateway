@@ -266,14 +266,14 @@ func aesKeyWrap(kek, plaintext []byte) ([]byte, error) {
 			copy(a[:], buf[:8])
 			t := uint64(n*j + i + 1)
 			binary.BigEndian.PutUint64(a[:], binary.BigEndian.Uint64(a[:])|0) // noop
-			a[0] ^= byte(t >> 56)
-			a[1] ^= byte(t >> 48)
-			a[2] ^= byte(t >> 40)
-			a[3] ^= byte(t >> 32)
-			a[4] ^= byte(t >> 24)
-			a[5] ^= byte(t >> 16)
-			a[6] ^= byte(t >> 8)
-			a[7] ^= byte(t)
+			a[0] ^= byte(t >> 56)  // #nosec G115 — AES-KW (RFC 3394) uses small t values (< 6*n)
+			a[1] ^= byte(t >> 48)  // #nosec G115
+			a[2] ^= byte(t >> 40)  // #nosec G115
+			a[3] ^= byte(t >> 32)  // #nosec G115
+			a[4] ^= byte(t >> 24)  // #nosec G115
+			a[5] ^= byte(t >> 16)  // #nosec G115
+			a[6] ^= byte(t >> 8)   // #nosec G115
+			a[7] ^= byte(t)        // #nosec G115 — t = n*j + i + 1, j ≤ 5, n ≤ 2^32, product fits uint64
 			copy(r[i], buf[8:])
 		}
 	}
@@ -309,16 +309,16 @@ func aesKeyUnwrap(kek, ciphertext []byte) ([]byte, error) {
 	buf := make([]byte, 16)
 	for j := 5; j >= 0; j-- {
 		for i := n - 1; i >= 0; i-- {
-			t := uint64(n*j + i + 1)
+			t := uint64(n*j + i + 1) // #nosec G115 — AES-KW (RFC 3394) small t values (< 6*n), product fits int
 			aCopy := a
-			aCopy[0] ^= byte(t >> 56)
-			aCopy[1] ^= byte(t >> 48)
-			aCopy[2] ^= byte(t >> 40)
-			aCopy[3] ^= byte(t >> 32)
-			aCopy[4] ^= byte(t >> 24)
-			aCopy[5] ^= byte(t >> 16)
-			aCopy[6] ^= byte(t >> 8)
-			aCopy[7] ^= byte(t)
+			aCopy[0] ^= byte(t >> 56)  // #nosec G115 — AES-KW (RFC 3394) uses small t values (< 6*n)
+			aCopy[1] ^= byte(t >> 48)  // #nosec G115
+			aCopy[2] ^= byte(t >> 40)  // #nosec G115
+			aCopy[3] ^= byte(t >> 32)  // #nosec G115
+			aCopy[4] ^= byte(t >> 24)  // #nosec G115
+			aCopy[5] ^= byte(t >> 16)  // #nosec G115
+			aCopy[6] ^= byte(t >> 8)   // #nosec G115
+			aCopy[7] ^= byte(t)        // #nosec G115 — t = n*j + i + 1, j ≤ 5, n ≤ 2^32, product fits uint64
 			copy(buf[:8], aCopy[:])
 			copy(buf[8:], r[i])
 			block.Decrypt(buf, buf)

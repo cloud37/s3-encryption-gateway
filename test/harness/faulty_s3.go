@@ -72,7 +72,7 @@ func NewFaultyRoundTripper(inner http.RoundTripper, seed int64, rules []FaultRul
 	return &FaultyRoundTripper{
 		inner: inner,
 		rules: rules,
-		rng:   rand.New(rand.NewSource(seed)), //nolint:gosec // intentionally non-crypto
+		rng:   rand.New(rand.NewSource(seed)), // #nosec G404 //nolint:gosec // intentionally non-crypto
 	}
 }
 

@@ -331,6 +331,24 @@ docker-all: docker-build docker-push docker-build-fips docker-push-fips
 security-scan:
 	@echo "Running security scan..."
 	@govulncheck ./...
+	@echo "Running gosec..."
+	@go run github.com/securego/gosec/v2/cmd/gosec@latest -exclude=G104 -severity high ./...
+
+# gosec — run static analysis security scan
+gosec:
+	@echo "Running gosec static analysis..."
+	@go run github.com/securego/gosec/v2/cmd/gosec@latest -exclude=G104 -severity high ./...
+
+# trivy-scan — scan the local Docker image for vulnerabilities
+# Usage: make trivy-scan IMAGE_NAME=ghcr.io/kenchrcum/s3-encryption-gateway IMAGE_TAG=latest
+trivy-scan:
+	@echo "Running Trivy container image scan..."
+	@docker run --rm \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		aquasec/trivy:latest image \
+		--severity HIGH,CRITICAL \
+		--ignore-unfixed \
+		$(IMAGE_NAME):$(IMAGE_TAG)
 
 # Install development tools
 install-tools:
@@ -338,6 +356,7 @@ install-tools:
 	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	@go install golang.org/x/tools/cmd/goimports@latest
 	@go install golang.org/x/vuln/cmd/govulncheck@latest
+	@go install github.com/securego/gosec/v2/cmd/gosec@latest
 
 # Generate test coverage report (legacy target)
 coverage:
@@ -425,7 +444,9 @@ help:
 	@echo "  docker-build-fips  - Build FIPS Docker image"
 	@echo "  docker-push-fips   - Push FIPS Docker image"
 	@echo "  profile-image      - Build non-stripped image for pprof (V0.6-OBS-1)"
-	@echo "  security-scan      - Run security vulnerability scan"
+	@echo "  security-scan      - Run govulncheck + gosec security scan"
+	@echo "  gosec              - Run gosec static analysis security scan"
+	@echo "  trivy-scan         - Run Trivy container image scan (requires IMAGE_NAME + IMAGE_TAG)"
 	@echo "  install-tools      - Install development tools"
 	@echo "  coverage           - Generate test coverage report (legacy)"
 	@echo "  coverage-gate      - Enforce ≥COVERAGE_THRESHOLD% coverage (default: 80) (V0.6-QA-2)"

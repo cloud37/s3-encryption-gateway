@@ -1315,7 +1315,7 @@ func loadFromEnv(config *Config) {
 	}
 	// Load credentials from external file (AUTH_CREDENTIALS_FILE).
 	if path := os.Getenv("AUTH_CREDENTIALS_FILE"); path != "" {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) // #nosec G703 — operator-configured path from env var
 		if err != nil {
 			slog.Error("failed to read AUTH_CREDENTIALS_FILE", "path", path, "error", err)
 		} else {

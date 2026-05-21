@@ -16,6 +16,7 @@ func init() {
 	if ak == "" || sk == "" || bk == "" {
 		return
 	}
+	// #nosec G101 — test provider registration; values are env var names and default endpoints, not secrets
 	Register(&externalProvider{
 		name:      "hetzner",
 		endpoint:  envOr("HETZNER_ENDPOINT", "https://fsn1.your-objectstorage.com"),

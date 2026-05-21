@@ -125,8 +125,9 @@ func buildCosmianTLSConfig(cfg config.CosmianConfig) (*tls.Config, error) {
 	}
 
 	tlsCfg := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // operator opt-in
+		MinVersion: tls.VersionTLS12,
+		// #nosec G402 — operator opt-in with startup warning
+		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec
 		CipherSuites: []uint16{
 			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,

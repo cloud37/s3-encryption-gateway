@@ -215,6 +215,7 @@ func buildTLSConfig(cfg config.ValkeyTLSConfig) (*tls.Config, error) {
 	}
 
 	tc := &tls.Config{
+		// #nosec G402 — operator opt-in with startup warning
 		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec
 	}
 

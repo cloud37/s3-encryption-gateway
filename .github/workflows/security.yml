@@ -1,0 +1,38 @@
+# Security Scanning — govulncheck (vulnerability) + gosec (static analysis)
+#
+# Runs on every PR targeting main and every push to main.
+#
+# govulncheck: blocks any known CVE in direct or transitive Go dependencies.
+# gosec:       blocks HIGH-severity findings (G104 errors-unhandled is globally
+#              excluded because the project uses explicit error-handling patterns
+#              and G104 generates high-volume false positives in test helpers).
+
+name: Security Scanning
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Security scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: gosec
+        uses: securego/gosec@master
+        with:
+          args: '-exclude=G104 -severity high ./...'

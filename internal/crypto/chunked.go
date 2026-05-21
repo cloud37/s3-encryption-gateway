@@ -123,7 +123,7 @@ func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, a
 func deriveChunkIVHKDF(baseIV []byte, chunkIndex int) []byte {
 	info := make([]byte, 8+4)
 	copy(info, "chunk-iv")
-	binary.BigEndian.PutUint32(info[8:], uint32(chunkIndex))
+	binary.BigEndian.PutUint32(info[8:], uint32(chunkIndex)) // #nosec G115 — chunkIndex is bounded by object size / chunk size
 	r := hkdf.Expand(sha256.New, baseIV, info)
 	iv := make([]byte, len(baseIV))
 	io.ReadFull(r, iv)
@@ -411,7 +411,7 @@ func (r *chunkedDecryptReader) deriveChunkIV(chunkIndex int) []byte {
 	copy(iv, r.baseIV)
 
 	indexBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(indexBytes, uint32(chunkIndex))
+	binary.BigEndian.PutUint32(indexBytes, uint32(chunkIndex)) // #nosec G115 — chunkIndex is bounded by object size / chunk size
 
 	for i := 0; i < 4 && i < len(iv); i++ {
 		iv[len(iv)-1-i] ^= indexBytes[3-i]

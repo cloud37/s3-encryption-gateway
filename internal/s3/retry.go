@@ -43,7 +43,7 @@ func cryptoRandInt63n(n int64) int64 {
 		// Fallback: XOR with nanoseconds; acceptable for jitter, not for keys.
 		binary.BigEndian.PutUint64(buf[:], uint64(time.Now().UnixNano()))
 	}
-	return int64(binary.BigEndian.Uint64(buf[:]) % uint64(n))
+	return int64(binary.BigEndian.Uint64(buf[:]) % uint64(n)) // #nosec G115 — n is small (maxAttempts ≤ 10), product fits in int64
 }
 
 // retryReasonLabel is a closed set of classifier reason labels used as the

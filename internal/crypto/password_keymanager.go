@@ -96,7 +96,7 @@ func (m *passwordKeyManager) WrapKey(ctx context.Context, plaintext []byte, _ ma
 	// New format: [4-byte BE iterations][salt][nonce][sealed]
 	payload := make([]byte, 0, 4+len(salt)+len(nonce)+len(sealed))
 	iterBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(iterBuf, uint32(m.pbkdf2Iterations))
+	binary.BigEndian.PutUint32(iterBuf, uint32(m.pbkdf2Iterations)) // #nosec G115 — PBKDF2 iterations fit in uint32 (max ~10^7)
 	payload = append(payload, iterBuf...)
 	payload = append(payload, salt...)
 	payload = append(payload, nonce...)

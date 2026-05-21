@@ -106,7 +106,7 @@ func (r *rangeDecryptReader) deriveChunkIV(chunkIndex int) []byte {
 	copy(iv, r.baseIV)
 
 	indexBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(indexBytes, uint32(chunkIndex))
+	binary.BigEndian.PutUint32(indexBytes, uint32(chunkIndex)) // #nosec G115 — chunkIndex bounded by object size / chunk size
 
 	for i := 0; i < 4 && i < len(iv); i++ {
 		iv[len(iv)-1-i] ^= indexBytes[3-i]

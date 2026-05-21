@@ -127,7 +127,7 @@ func (m *MultipartManifest) PlainOffsetToPartChunk(offset int64) (partIdx int, c
 	for i, part := range m.Parts {
 		if offset < cumPlain+part.PlainLen {
 			relOffset := offset - cumPlain
-			ci := int32(relOffset / int64(m.ChunkSize))
+			ci := int32(relOffset / int64(m.ChunkSize)) // #nosec G115 — relOffset ≤ part.PlainLen ≤ maxPartSize (5 GiB), ChunkSize ≥ 64 KiB, quotient fits int32
 			ic := relOffset % int64(m.ChunkSize)
 			return i, ci, ic, nil
 		}

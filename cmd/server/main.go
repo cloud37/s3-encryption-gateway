@@ -348,7 +348,7 @@ func main() {
 
 	// If the config file doesn't exist on disk, disable hot-reload.
 	// This is normal when running with env-var-only configuration (e.g. Helm).
-	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) { // #nosec G703 — operator-configured file path
 		logger.WithField("config_file", configPath).Info("Config file not found — hot-reload disabled")
 		configPath = ""
 	}

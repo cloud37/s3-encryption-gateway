@@ -848,7 +848,7 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 
 	// Persist the part record. Fail-closed: a state-store hiccup here must
 	// return 503 so the client retries, matching handlers.go:2730-2757.
-	chunkCount := int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize))
+	chunkCount := int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)) // #nosec G115 — max ~82k for 5 GiB parts, fits int32
 	if appendErr := h.mpuStateStore.AppendPart(ctx, uploadID, mpu.PartRecord{
 		PartNumber: partNumber,
 		ETag:       etag,

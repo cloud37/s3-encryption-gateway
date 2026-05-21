@@ -273,7 +273,8 @@ func NewHTTPSinkWithConfig(endpoint string, headers map[string]string, cfg confi
 
 func buildSinkTLSConfig(cfg config.SinkTLSConfig) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		// #nosec G402 — operator opt-in with startup warning
+		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec
 		MinVersion:         tls.VersionTLS12,
 	}
 

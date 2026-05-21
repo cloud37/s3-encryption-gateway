@@ -118,7 +118,7 @@ func NewMPUPartEncryptReader(
 		dek:    dekCopy,
 		hash:   uploadIDHash,
 		prefix: ivPrefix,
-		part:   uint32(partNumber),
+		part:   uint32(partNumber), // #nosec G115 — S3 part number ≤ 10000, fits uint32
 		csz:    chunkSize,
 
 		plainBuf: plainBuf,
@@ -353,7 +353,7 @@ func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
 		return fmt.Errorf("mpu_decrypt: part %d chunk %d: read: %w", part.PartNumber, r.chunkIdx, err)
 	}
 
-	iv := DeriveMultipartIV(r.dek, r.uploadIDHash, r.ivPrefix, uint32(part.PartNumber), uint32(r.chunkIdx))
+	iv := DeriveMultipartIV(r.dek, r.uploadIDHash, r.ivPrefix, uint32(part.PartNumber), uint32(r.chunkIdx)) // #nosec G115 — partNumber ≤ 10000, chunkIdx bounded by part size
 	plain, err := r.gcm.Open(nil, iv[:], encChunk, nil)
 	if err != nil {
 		return fmt.Errorf("mpu_decrypt: part %d chunk %d auth failure: %w", part.PartNumber, r.chunkIdx, err)
@@ -413,7 +413,7 @@ func DecryptMPUPartRange(
 	var (
 		out        []byte
 		offset     int
-		chunkIndex = uint32(startChunkIdx)
+		chunkIndex = uint32(startChunkIdx) // #nosec G115 — startChunkIdx ≤ total chunks (\u003c 2^32)
 	)
 
 	for offset < len(ciphertext) {
@@ -422,7 +422,7 @@ func DecryptMPUPartRange(
 			end = len(ciphertext)
 		}
 		encChunk := ciphertext[offset:end]
-		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex)
+		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex) // #nosec G115 — partNumber ≤ 10000, chunkIndex already uint32
 		plain, err := aead.Open(nil, iv[:], encChunk, nil)
 		if err != nil {
 			return nil, fmt.Errorf("mpu_encrypter: chunk %d auth failure in part %d: %w", chunkIndex, partNumber, err)
@@ -468,7 +468,7 @@ func DecryptMPUPart(
 			end = len(ciphertext)
 		}
 		encChunk := ciphertext[offset:end]
-		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex)
+		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex) // #nosec G115 — partNumber ≤ 10000, chunkIndex already uint32
 		plain, err := aead.Open(nil, iv[:], encChunk, nil)
 		if err != nil {
 			return nil, fmt.Errorf("mpu_encrypter: chunk %d auth failure in part %d: %w", chunkIndex, partNumber, err)
