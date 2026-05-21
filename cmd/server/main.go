@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -573,6 +575,8 @@ func main() {
 	if keyManager != nil {
 		crypto.SetKeyManager(encryptionEngine, keyManager)
 	}
+	// V1.0-OBS-1 G8: wire metrics collector into the encryption engine.
+	crypto.SetEncryptedObjectSizeObserver(m.ObserveEncryptedObjectBytes)
 
 	// V1.0-CRYPTO-3: load metadata encryption key.
 	var metadataKey []byte
@@ -617,6 +621,8 @@ func main() {
 	} else {
 		logger.Info("Metadata encryption not configured — encryption parameters will be stored as plaintext headers")
 	}
+	// V1.0-OBS-1 G2: set metadata encryption enabled gauge at startup.
+	m.SetMetadataEncryptionEnabled(metadataKey != nil)
 
 	logger.WithFields(logrus.Fields{
 		"preferred_algorithm":       cfg.Encryption.PreferredAlgorithm,
@@ -629,6 +635,13 @@ func main() {
 		"kdf_argon2id_memory":       cfg.Encryption.KDF.Argon2id.Memory,
 		"kdf_argon2id_threads":      cfg.Encryption.KDF.Argon2id.Threads,
 	}).Info("Encryption configuration")
+
+	// V1.0-OBS-1 G5: set KDF algorithm active gauge at startup.
+	kdfAlg := cfg.Encryption.KDF.Algorithm
+	if kdfAlg == "" {
+		kdfAlg = "pbkdf2-sha256"
+	}
+	m.SetKDFAlgorithmActive(kdfAlg)
 
 	// Initialize cache if enabled (Phase 5 feature)
 	var objectCache cache.Cache
@@ -845,10 +858,49 @@ func main() {
 		}
 	}()
 
+	// V1.0-OBS-1 G3: start TLS certificate expiry monitoring goroutine.
+	// The goroutine reads the configured cert files every hour and updates
+	// the gateway_tls_cert_expiry_seconds gauge for each enabled role.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		// readCertExpiry loads a TLS certificate from file and returns its
+		// NotAfter time, or the zero time on error.
+		readCertExpiry := func(certFile, keyFile string) time.Time {
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				logger.WithFields(logrus.Fields{
+					"cert_file": certFile,
+					"key_file":  keyFile,
+				}).WithError(err).Warn("TLS cert expiry monitor: failed to load cert")
+				return time.Time{}
+			}
+			for _, c := range cert.Certificate {
+				parsed, err := x509.ParseCertificate(c)
+				if err == nil {
+					return parsed.NotAfter
+				}
+			}
+			return time.Time{}
+		}
+		for {
+			// Update data-plane TLS cert expiry.
+			if cfg.TLS.Enabled && cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
+				m.SetTLSCertExpiry("data_plane", readCertExpiry(cfg.TLS.CertFile, cfg.TLS.KeyFile))
+			} else {
+				m.SetTLSCertExpiry("data_plane", time.Time{})
+			}
+			select {
+			case <-ticker.C:
+				// continue
+			}
+		}
+	}()
+
 	// Start admin server if enabled
 	var adminServer *admin.Server
 	if cfg.Admin.Enabled {
-		adminServer = admin.NewServer(cfg.Admin, logger)
+		adminServer = admin.NewServer(cfg.Admin, logger).WithMetrics(m)
 
 		// Register rotation handler on admin mux
 		rotationHandler := api.NewAdminRotationHandler(encryptionEngine, logger, m, auditLogger)

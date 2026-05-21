@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -57,6 +58,9 @@ type Server struct {
 	// stopRefresh signals the periodic token refresh goroutine to exit.
 	stopRefresh     chan struct{}
 	stopRefreshOnce sync.Once
+
+	// metricsRecorder is an optional metrics collector for admin API request recording (V1.0-OBS-1).
+	metricsRecorder *metrics.Metrics
 }
 
 
@@ -70,6 +74,13 @@ func NewServer(cfg config.AdminConfig, logger *logrus.Logger) *Server {
 		mux:         mux,
 		stopRefresh: make(chan struct{}),
 	}
+	return s
+}
+
+// WithMetrics configures the admin server to record API request metrics.
+// The returned *Server allows chaining (s.WithMetrics(m).Start(ctx)).
+func (s *Server) WithMetrics(m *metrics.Metrics) *Server {
+	s.metricsRecorder = m
 	return s
 }
 
@@ -92,6 +103,11 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	handler := http.Handler(s.mux)
+
+	// Apply admin API metrics middleware if configured (V1.0-OBS-1 G6).
+	if s.metricsRecorder != nil {
+		handler = adminMetricsMiddleware(s.metricsRecorder, handler)
+	}
 
 	// Apply rate limiting
 	if s.cfg.RateLimit.RequestsPerMinute > 0 {
@@ -300,6 +316,18 @@ func adminContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), ctxKeyAdmin, true)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// adminMetricsMiddleware records admin API request metrics using the provided
+// metrics collector. It wraps the next handler and records method, path, status
+// code, and duration for every request (V1.0-OBS-1 G6).
+func adminMetricsMiddleware(m *metrics.Metrics, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sr, r)
+		m.RecordAdminAPIRequest(r.Method, r.URL.Path, sr.status, time.Since(start))
 	})
 }
 

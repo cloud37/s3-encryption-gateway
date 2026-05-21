@@ -138,6 +138,8 @@ type engine struct {
 	// metadataKeyWrapped is set when a KeyManager wraps the key at startup.
 	metadataKey        []byte
 	metadataKeyWrapped *KeyEnvelope
+	// V1.0-OBS-1 G8: optional observer for encrypted object size distribution.
+	observeEncryptedObjectBytes func(n int64)
 }
 
 // NewEngine creates a new encryption engine with the given password.
@@ -218,7 +220,7 @@ func NewEngineWithChunkingAndProvider(password []byte, compressionEngine Compres
 	passwordBytes := make([]byte, len(password))
 	copy(passwordBytes, password)
 
-	return &engine{
+	e := &engine{
 		password:            passwordBytes,
 		pbkdf2Iterations:    pbkdf2Iterations,
 		kdfAlgorithm:        KDFAlgPBKDF2SHA256,
@@ -236,7 +238,9 @@ func NewEngineWithChunkingAndProvider(password []byte, compressionEngine Compres
 		compactor:           compactor,
 		bufferPool:          GetGlobalBufferPool(),
 		tracer:              otel.Tracer("s3-encryption-gateway.crypto"),
-	}, nil
+	}
+	e.maybeWireObserver()
+	return e, nil
 }
 
 // SetKeyManager wires an external KeyManager into the engine for envelope encryption.
@@ -256,6 +260,26 @@ func GetKeyManager(enc EncryptionEngine) KeyManager {
 		return e.kmsManager
 	}
 	return nil
+}
+
+// observeEncryptedObjectBytes is a package-level function callback for observing
+// encrypted object sizes. Using a callback avoids a circular import between
+// internal/crypto and internal/metrics.
+var observeEncryptedObjectBytes func(n int64)
+
+// SetEncryptedObjectSizeObserver sets the observer function for encrypted object
+// size distribution (V1.0-OBS-1 G8). It is safe to call with a nil function
+// — the engine will skip the call. Using a function callback avoids a
+// circular import between internal/crypto and internal/metrics.
+func SetEncryptedObjectSizeObserver(fn func(n int64)) {
+	observeEncryptedObjectBytes = fn
+}
+
+// maybeWireObserver captures the current global observer function into this
+// engine instance. New engines created before SetEncryptedObjectSizeObserver is
+// called will have a nil observer; main.go wires it after engine construction.
+func (e *engine) maybeWireObserver() {
+	e.observeEncryptedObjectBytes = observeEncryptedObjectBytes
 }
 
 // GetRotationState returns the engine's rotation state machine. If no state
@@ -409,6 +433,10 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		return nil, nil, fmt.Errorf("failed to read plaintext: %w", err)
 	}
 	originalSize := int64(len(plaintext))
+	// V1.0-OBS-1 G8: observe plaintext object size distribution.
+	if e.observeEncryptedObjectBytes != nil {
+		e.observeEncryptedObjectBytes(originalSize)
+	}
 
 	// Extract content type from metadata
 	contentType := ""
@@ -903,6 +931,10 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 				originalSize = v
 			}
 		}
+	}
+	// V1.0-OBS-1 G8: observe plaintext object size distribution when known.
+	if e.observeEncryptedObjectBytes != nil && originalSize > 0 {
+		e.observeEncryptedObjectBytes(originalSize)
 	}
 	originalETag := ""
 	if metadata != nil {

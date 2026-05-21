@@ -101,6 +101,46 @@ type Metrics struct {
 	// s3BackendRetryBackoffSeconds is a histogram of backoff delays actually
 	// slept.
 	s3BackendRetryBackoffSeconds prometheus.Histogram
+
+	// V1.0-OBS-1 — observability phase A new metrics.
+
+	// kmsHealthy reports the result of the last KMS health check per provider.
+	// Value: 1 = healthy, 0 = unhealthy/unavailable.
+	// Labels: provider ∈ {cosmian, aws, vault, memory, self_contained}
+	kmsHealthy *prometheus.GaugeVec
+
+	// metadataEncryptionEnabled reports whether encrypted-object-metadata
+	// (V1.0-CRYPTO-3) is active. Value: 1 = active, 0 = inactive.
+	metadataEncryptionEnabled prometheus.Gauge
+
+	// tlsCertExpirySeconds reports seconds until TLS certificate expiry
+	// for the gateway's own serving certificate. Value: 0 when TLS is disabled.
+	// Labels: role ∈ {data_plane, admin, metrics}
+	tlsCertExpirySeconds *prometheus.GaugeVec
+
+	// keyRotationObjectsTotal counts objects processed by the rotation worker.
+	// Labels: result ∈ {reencrypted, skipped_locked, skipped_plaintext, error}
+	keyRotationObjectsTotal *prometheus.CounterVec
+
+	// kdfAlgorithmActive reports the active KDF algorithm as a label.
+	// Value: always 1.0. Labels: algorithm ∈ {pbkdf2-sha256, argon2id}
+	kdfAlgorithmActive *prometheus.GaugeVec
+
+	// adminAPIRequestsTotal counts all requests to the admin listener.
+	// Labels: method, path (sanitised), status_code
+	adminAPIRequestsTotal *prometheus.CounterVec
+
+	// adminAPIRequestDuration is a histogram of admin API request durations.
+	// Labels: method, path
+	adminAPIRequestDuration *prometheus.HistogramVec
+
+	// mpuActiveUploads reports the current count of in-flight multipart
+	// uploads tracked in Valkey.
+	mpuActiveUploads prometheus.Gauge
+
+	// encryptedObjectBytes is a histogram of plaintext object sizes seen
+	// by the encryption engine at Encrypt() time.
+	encryptedObjectBytes prometheus.Histogram
 }
 
 // NewMetrics creates a new metrics instance with default configuration.
@@ -445,6 +485,70 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 			prometheus.GaugeOpts{
 				Name: "gateway_admin_profiling_enabled",
 				Help: "Whether pprof profiling routes are mounted on the admin listener (1=enabled, 0=disabled).",
+			},
+		),
+
+		// V1.0-OBS-1 — observability phase A new metrics.
+		kmsHealthy: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "gateway_kms_healthy",
+				Help: "KMS health status per provider (1=healthy, 0=unhealthy/unavailable).",
+			},
+			[]string{"provider"},
+		),
+		metadataEncryptionEnabled: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "gateway_metadata_encryption_enabled",
+				Help: "Whether encrypted-object-metadata (V1.0-CRYPTO-3) is active (1=active, 0=inactive).",
+			},
+		),
+		tlsCertExpirySeconds: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "gateway_tls_cert_expiry_seconds",
+				Help: "Seconds until TLS certificate expiry per role (0 when TLS is disabled).",
+			},
+			[]string{"role"},
+		),
+		keyRotationObjectsTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_key_rotation_objects_total",
+				Help: "Objects processed by the key rotation worker, labelled by result.",
+			},
+			[]string{"result"},
+		),
+		kdfAlgorithmActive: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "gateway_kdf_algorithm_active",
+				Help: "Active KDF algorithm (value always 1.0, label indicates algorithm).",
+			},
+			[]string{"algorithm"},
+		),
+		adminAPIRequestsTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_admin_api_requests_total",
+				Help: "Total admin API requests by method, sanitised path, and status code.",
+			},
+			[]string{"method", "path", "status_code"},
+		),
+		adminAPIRequestDuration: factory.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "gateway_admin_api_request_duration_seconds",
+				Help:    "Admin API request duration in seconds by method and path.",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"method", "path"},
+		),
+		mpuActiveUploads: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "gateway_mpu_active_uploads",
+				Help: "Current number of in-flight multipart uploads tracked in Valkey.",
+			},
+		),
+		encryptedObjectBytes: factory.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:    "gateway_encrypted_object_bytes",
+				Help:    "Plaintext object size distribution at Encrypt() time.",
+				Buckets: []float64{1 << 10, 16 << 10, 256 << 10, 1 << 20, 16 << 20, 64 << 20, 256 << 20, 1 << 30},
 			},
 		),
 	}
@@ -880,6 +984,112 @@ func (m *Metrics) IncMPUStateLegacyReads() {
 		return
 	}
 	m.mpuStateLegacyReads.Inc()
+}
+
+// ---- V1.0-OBS-1 new metric helpers ------------------------------------------
+
+// SetKMSHealthy sets the KMS health status gauge for the given provider.
+// healthy=true sets 1, healthy=false sets 0.
+func (m *Metrics) SetKMSHealthy(provider string, healthy bool) {
+	if m == nil || m.kmsHealthy == nil {
+		return
+	}
+	val := 0.0
+	if healthy {
+		val = 1.0
+	}
+	m.kmsHealthy.WithLabelValues(provider).Set(val)
+}
+
+// SetMetadataEncryptionEnabled sets the metadata encryption enabled gauge.
+func (m *Metrics) SetMetadataEncryptionEnabled(enabled bool) {
+	if m == nil || m.metadataEncryptionEnabled == nil {
+		return
+	}
+	val := 0.0
+	if enabled {
+		val = 1.0
+	}
+	m.metadataEncryptionEnabled.Set(val)
+}
+
+// SetTLSCertExpiry sets the TLS certificate expiry gauge for the given role.
+// If the certificate is not loaded or TLS is disabled, call with a zero time.
+func (m *Metrics) SetTLSCertExpiry(role string, expiresAt time.Time) {
+	if m == nil || m.tlsCertExpirySeconds == nil {
+		return
+	}
+	var seconds float64
+	if !expiresAt.IsZero() {
+		seconds = time.Until(expiresAt).Seconds()
+		if seconds < 0 {
+			seconds = 0
+		}
+	}
+	m.tlsCertExpirySeconds.WithLabelValues(role).Set(seconds)
+}
+
+// RecordKeyRotationObject increments the key rotation objects counter.
+// result is one of "reencrypted", "skipped_locked", "skipped_plaintext", "error".
+func (m *Metrics) RecordKeyRotationObject(result string) {
+	if m == nil || m.keyRotationObjectsTotal == nil {
+		return
+	}
+	m.keyRotationObjectsTotal.WithLabelValues(result).Inc()
+}
+
+// SetKDFAlgorithmActive sets the active KDF algorithm gauge.
+// The value is always 1.0; the label identifies which algorithm is in use.
+func (m *Metrics) SetKDFAlgorithmActive(algorithm string) {
+	if m == nil || m.kdfAlgorithmActive == nil {
+		return
+	}
+	m.kdfAlgorithmActive.WithLabelValues(algorithm).Set(1.0)
+}
+
+// RecordAdminAPIRequest records an admin API request counter + duration.
+// path is sanitised before use as a label to bound cardinality.
+func (m *Metrics) RecordAdminAPIRequest(method, path string, status int, duration time.Duration) {
+	if m == nil || m.adminAPIRequestsTotal == nil {
+		return
+	}
+	label := sanitizePathLabel(path)
+	m.adminAPIRequestsTotal.WithLabelValues(method, label, http.StatusText(status)).Inc()
+	if m.adminAPIRequestDuration != nil {
+		m.adminAPIRequestDuration.WithLabelValues(method, label).Observe(duration.Seconds())
+	}
+}
+
+// SetMPUActiveUploads sets the current count of in-flight multipart uploads.
+func (m *Metrics) SetMPUActiveUploads(count int64) {
+	if m == nil || m.mpuActiveUploads == nil {
+		return
+	}
+	m.mpuActiveUploads.Set(float64(count))
+}
+
+// ObserveEncryptedObjectBytes observes the plaintext size of an encrypted object.
+func (m *Metrics) ObserveEncryptedObjectBytes(n int64) {
+	if m == nil || m.encryptedObjectBytes == nil {
+		return
+	}
+	m.encryptedObjectBytes.Observe(float64(n))
+}
+
+// IncMPUActiveUploads atomically increments the active MPU upload gauge by 1.
+func (m *Metrics) IncMPUActiveUploads() {
+	if m == nil || m.mpuActiveUploads == nil {
+		return
+	}
+	m.mpuActiveUploads.Inc()
+}
+
+// DecMPUActiveUploads atomically decrements the active MPU upload gauge by 1.
+func (m *Metrics) DecMPUActiveUploads() {
+	if m == nil || m.mpuActiveUploads == nil {
+		return
+	}
+	m.mpuActiveUploads.Dec()
 }
 
 // getExemplar extracts trace ID from context and returns prometheus Labels for exemplar.

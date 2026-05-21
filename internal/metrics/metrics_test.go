@@ -477,3 +477,236 @@ func TestMetrics_Gather_AllFamiliesPresent(t *testing.T) {
 		}
 	}
 }
+
+// ── V1.0-OBS-1 Phase A — new metric tests ──────────────────────────────────
+
+// TestMetrics_SetKMSHealthy verifies the KMS health gauge.
+func TestMetrics_SetKMSHealthy(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.SetKMSHealthy("memory", true)
+	m.SetKMSHealthy("aws", false)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_kms_healthy"] {
+		t.Error("gateway_kms_healthy metric not found after SetKMSHealthy")
+	}
+}
+
+// TestMetrics_SetMetadataEncryptionEnabled verifies the metadata encryption gauge.
+func TestMetrics_SetMetadataEncryptionEnabled(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.SetMetadataEncryptionEnabled(true)
+	m.SetMetadataEncryptionEnabled(false)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_metadata_encryption_enabled"] {
+		t.Error("gateway_metadata_encryption_enabled metric not found")
+	}
+}
+
+// TestMetrics_SetTLSCertExpiry verifies the TLS cert expiry gauge.
+func TestMetrics_SetTLSCertExpiry(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.SetTLSCertExpiry("data_plane", time.Now().Add(7*24*time.Hour))
+	m.SetTLSCertExpiry("admin", time.Time{}) // TLS disabled
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_tls_cert_expiry_seconds"] {
+		t.Error("gateway_tls_cert_expiry_seconds metric not found")
+	}
+}
+
+// TestMetrics_RecordKeyRotationObject verifies the key rotation counter.
+func TestMetrics_RecordKeyRotationObject(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.RecordKeyRotationObject("reencrypted")
+	m.RecordKeyRotationObject("skipped_locked")
+	m.RecordKeyRotationObject("error")
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_key_rotation_objects_total"] {
+		t.Error("gateway_key_rotation_objects_total metric not found")
+	}
+}
+
+// TestMetrics_SetKDFAlgorithmActive verifies the KDF algorithm gauge.
+func TestMetrics_SetKDFAlgorithmActive(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.SetKDFAlgorithmActive("pbkdf2-sha256")
+	m.SetKDFAlgorithmActive("argon2id")
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_kdf_algorithm_active"] {
+		t.Error("gateway_kdf_algorithm_active metric not found")
+	}
+}
+
+// TestMetrics_RecordAdminAPIRequest verifies admin API request recording.
+func TestMetrics_RecordAdminAPIRequest(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.RecordAdminAPIRequest("GET", "/health", 200, 5*time.Millisecond)
+	m.RecordAdminAPIRequest("POST", "/rotate", 202, 50*time.Millisecond)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	wants := []string{
+		"gateway_admin_api_requests_total",
+		"gateway_admin_api_request_duration_seconds",
+	}
+	for _, want := range wants {
+		if !names[want] {
+			t.Errorf("expected metric %q not found", want)
+		}
+	}
+}
+
+// TestMetrics_SetMPUActiveUploads verifies the active MPU gauge.
+func TestMetrics_SetMPUActiveUploads(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.SetMPUActiveUploads(5)
+	m.SetMPUActiveUploads(3)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_mpu_active_uploads"] {
+		t.Error("gateway_mpu_active_uploads metric not found")
+	}
+}
+
+// TestMetrics_ObserveEncryptedObjectBytes verifies the encrypted object size histogram.
+func TestMetrics_ObserveEncryptedObjectBytes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.ObserveEncryptedObjectBytes(1024)
+	m.ObserveEncryptedObjectBytes(1 << 20)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_encrypted_object_bytes"] {
+		t.Error("gateway_encrypted_object_bytes metric not found")
+	}
+}
+
+// TestMetrics_NewMetricsOBS1_AllMetricsRegistered verifies all 8 new OBS-1 metrics
+// are registered after NewMetricsWithRegistry.
+func TestMetrics_NewMetricsOBS1_AllMetricsRegistered(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	// Touch each helper so metrics are recorded and appear in Gather.
+	m.SetKMSHealthy("memory", true)
+	m.SetMetadataEncryptionEnabled(true)
+	m.SetTLSCertExpiry("data_plane", time.Now().Add(7*24*time.Hour))
+	m.RecordKeyRotationObject("reencrypted")
+	m.SetKDFAlgorithmActive("pbkdf2-sha256")
+	m.RecordAdminAPIRequest("GET", "/health", 200, time.Millisecond)
+	m.SetMPUActiveUploads(1)
+	m.ObserveEncryptedObjectBytes(1024)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	wants := []string{
+		"gateway_kms_healthy",
+		"gateway_metadata_encryption_enabled",
+		"gateway_tls_cert_expiry_seconds",
+		"gateway_key_rotation_objects_total",
+		"gateway_kdf_algorithm_active",
+		"gateway_admin_api_requests_total",
+		"gateway_admin_api_request_duration_seconds",
+		"gateway_mpu_active_uploads",
+		"gateway_encrypted_object_bytes",
+	}
+	for _, want := range wants {
+		if !names[want] {
+			t.Errorf("expected metric %q not found after recording", want)
+		}
+	}
+}
+
+// TestMetrics_OBS1_NilSafe verifies nil-safe guards on all new OBS-1 helpers.
+func TestMetrics_OBS1_NilSafe(t *testing.T) {
+	var m *Metrics
+
+	m.SetKMSHealthy("memory", true)
+	m.SetMetadataEncryptionEnabled(true)
+	m.SetTLSCertExpiry("data_plane", time.Now())
+	m.RecordKeyRotationObject("reencrypted")
+	m.SetKDFAlgorithmActive("pbkdf2-sha256")
+	m.RecordAdminAPIRequest("GET", "/health", 200, time.Millisecond)
+	m.SetMPUActiveUploads(5)
+	m.ObserveEncryptedObjectBytes(1024)
+}

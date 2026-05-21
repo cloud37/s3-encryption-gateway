@@ -343,6 +343,8 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 	if !hsetnx.Val() {
 		return ErrUploadAlreadyExists
 	}
+	// V1.0-OBS-1 G7: increment active MPU upload gauge on successful create.
+	s.metrics.IncMPUActiveUploads()
 	return nil
 }
 
@@ -434,6 +436,8 @@ func (s *ValkeyStateStore) Delete(ctx context.Context, uploadID string) error {
 	if err := s.client.Del(ctx, key).Err(); err != nil {
 		return wrapRedisErr(err)
 	}
+	// V1.0-OBS-1 G7: decrement active MPU upload gauge on successful delete.
+	s.metrics.DecMPUActiveUploads()
 	return nil
 }
 
