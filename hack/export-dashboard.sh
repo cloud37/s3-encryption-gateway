@@ -18,7 +18,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
 CHART="${REPO}/helm/s3-encryption-gateway"
 
-DATASOURCE_UID="${1:-"${DS_PROMETHEUS}"}"
+# Determine the Datasource UID to inject.
+# Priority: 1) CLI argument, 2) DS_PROMETHEUS env var, 3) Grafana placeholder.
+if [ -n "${1:-}" ]; then
+  DATASOURCE_UID="$1"
+elif [ -n "${DS_PROMETHEUS:-}" ]; then
+  DATASOURCE_UID="${DS_PROMETHEUS}"
+else
+  DATASOURCE_UID='${DS_PROMETHEUS}'
+fi
 
 OUTPUT="${HERE}/dashboard.json.out"
 
