@@ -171,6 +171,9 @@ func TestRoundTrip_PBKDF2_Various(t *testing.T) {
 }
 
 func TestArgon2id_KAT(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	// Known-answer test for argon2id derivation.
 	// Computed with: argon2.IDKey([]byte("test-password"), []byte("test-salt"), 2, 19456, 1, 32)
 	// Verified offline against the reference implementation.
@@ -201,6 +204,9 @@ func TestArgon2id_KAT(t *testing.T) {
 }
 
 func TestArgon2id_RoundTrip(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	password := []byte("test-password-2")
 	salt := []byte("test-salt-2")
 	params := KDFParams{Algorithm: KDFAlgArgon2id, Time: 2, Memory: 19456, Threads: 1}
@@ -301,6 +307,9 @@ func TestDefaultKDFParams_SufficientIterations(t *testing.T) {
 }
 
 func TestArgon2id_MismatchedPasswordLength(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	// Verify derivation works with various password lengths (no minimum/maximum).
 	params := KDFParams{Algorithm: KDFAlgArgon2id, Time: 2, Memory: 19456, Threads: 1}
 	salt := []byte("fixed-salt")

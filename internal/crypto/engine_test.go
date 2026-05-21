@@ -724,6 +724,9 @@ func TestChunked_LegacyAbsentKDFParams(t *testing.T) {
 }
 
 func TestEncryptDecrypt_Argon2id(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(2, 19456, 1),
@@ -793,6 +796,9 @@ func TestEncryptDecrypt_Argon2id_LegacyPBKDF2Read(t *testing.T) {
 }
 
 func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	// Encrypt with argon2id, decrypt with PBKDF2-configured engine (reads algorithm from metadata).
 	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
 		WithKDFAlgorithm("argon2id"),
@@ -831,6 +837,9 @@ func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
 }
 
 func TestEncrypt_WritesArgon2idMetadata(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(3, 32768, 2),
@@ -852,6 +861,9 @@ func TestEncrypt_WritesArgon2idMetadata(t *testing.T) {
 }
 
 func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
 		WithChunking(true),
 		WithKDFAlgorithm("argon2id"),
@@ -891,6 +903,9 @@ func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
 // Using WithPreferredAlgorithm("ChaCha20-Poly1305") selects the non-AES
 // keySize branch.
 func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("ChaCha20-Poly1305 is not approved in FIPS builds")
+	}
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-chacha20poly1305"),
 		nil,
@@ -926,6 +941,9 @@ func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
 // TestEncryptDecrypt_ChaCha20Poly1305_NonChunked verifies ChaCha20-Poly1305 in
 // non-chunked mode (standard Encrypt path).
 func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("ChaCha20-Poly1305 is not approved in FIPS builds")
+	}
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-chacha20-nonchunked"),
 		nil,

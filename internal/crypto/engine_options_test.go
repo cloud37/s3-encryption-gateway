@@ -303,6 +303,9 @@ func TestDeriveKeyWithParams_UnsupportedAlgorithm(t *testing.T) {
 // TestCreateChaCha20Poly1305Cipher_Valid verifies that a valid 32-byte key
 // produces a non-nil AEAD (covers the happy path of createChaCha20Poly1305Cipher).
 func TestCreateChaCha20Poly1305Cipher_Valid(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("ChaCha20-Poly1305 is not approved in FIPS builds")
+	}
 	key := make([]byte, chacha20KeySize)
 	aead, err := createChaCha20Poly1305Cipher(key)
 	if err != nil {

@@ -2196,6 +2196,9 @@ auth:
 }
 
 func TestConfig_Validate_Argon2id_NonFIPS_OK(t *testing.T) {
+	if isFIPS() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	// In a non-FIPS build, argon2id algorithm should validate without error.
 	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
 	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
@@ -2221,6 +2224,9 @@ func TestConfig_Validate_Argon2id_NonFIPS_OK(t *testing.T) {
 }
 
 func TestConfig_Load_Argon2id_FullYAML(t *testing.T) {
+	if isFIPS() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
 	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
 
@@ -2320,6 +2326,9 @@ func TestConfig_Validate_Argon2id_UnknownAlgorithm(t *testing.T) {
 }
 
 func TestConfig_EnvOverride_Argon2idParams(t *testing.T) {
+	if isFIPS() {
+		t.Skip("argon2id is not approved in FIPS builds")
+	}
 	t.Setenv("ENCRYPTION_KDF_ALGORITHM", "argon2id")
 	t.Setenv("ENCRYPTION_KDF_ARGON2ID_TIME", "4")
 	t.Setenv("ENCRYPTION_KDF_ARGON2ID_MEMORY", "65536")

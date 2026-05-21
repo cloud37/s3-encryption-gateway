@@ -1,6 +1,6 @@
 module github.com/kenchrcum/s3-encryption-gateway
 
-go 1.25.5
+go 1.26.3
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
