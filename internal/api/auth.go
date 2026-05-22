@@ -211,6 +211,12 @@ func ValidateSignatureV2(r *http.Request, secretKey string, clockSkew time.Durat
 			if err != nil {
 				return fmt.Errorf("invalid Expires format")
 			}
+			// Enforce the same 7-day upper bound as SigV4. A
+			// presigned URL with Expires far in the future (e.g. year 2286)
+			// could otherwise remain valid indefinitely.
+			if expires-time.Now().Unix() > 604800 {
+				return fmt.Errorf("presigned url expiry exceeds maximum allowed duration")
+			}
 			if time.Now().Unix() > expires {
 				return fmt.Errorf("request has expired")
 			}

@@ -581,11 +581,21 @@ type AuthConfig struct {
 	// request timestamp (X-Amz-Date) and server time. Requests outside this
 	// window are rejected to prevent replay attacks.
 	// Default: 15 minutes (matching AWS SigV4 specification).
-	ClockSkewTolerance time.Duration       `yaml:"clock_skew_tolerance" env:"AUTH_CLOCK_SKEW_TOLERANCE"`
+	ClockSkewTolerance time.Duration `yaml:"clock_skew_tolerance" env:"AUTH_CLOCK_SKEW_TOLERANCE"`
+
+	// AllowLegacySignatureV2 controls whether the gateway accepts AWS
+	// Signature Version 2 (HMAC-SHA1) requests. SigV2 is deprecated and
+	// uses weaker HMAC-SHA1 signing; it also exposes the secret key in URL
+	// query parameters when used with presigned-URL style auth.
+	// Operators who can guarantee all clients use SigV4 should set this to
+	// false to enforce a V4-only policy.
+	// Default: true (backward-compatible).
+	AllowLegacySignatureV2 bool `yaml:"allow_legacy_signature_v2" env:"AUTH_ALLOW_LEGACY_SIGNATURE_V2"`
+
 	// Credentials holds the gateway-managed credential store.
 	// Every inbound S3 request must present one of these access keys with a
 	// valid signature.
-	Credentials        []GatewayCredential `yaml:"credentials"`
+	Credentials []GatewayCredential `yaml:"credentials"`
 }
 
 // AdminConfig holds admin API configuration.
@@ -800,7 +810,8 @@ func LoadConfig(path string) (*Config, error) {
 			RedactHeaders:   []string{"authorization", "x-amz-security-token", "x-amz-signature", "x-amz-tagging", "x-encryption-key", "x-encryption-password"},
 		},
 		Auth: AuthConfig{
-			ClockSkewTolerance: 5 * time.Minute,
+			ClockSkewTolerance:     5 * time.Minute,
+			AllowLegacySignatureV2: true,
 		},
 		Admin: AdminConfig{
 			Enabled:        false,
