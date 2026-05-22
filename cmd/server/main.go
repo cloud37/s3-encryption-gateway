@@ -823,7 +823,7 @@ func main() {
 	// business logic. It runs inside RecoveryMiddleware so panics during auth
 	// validation are caught, but it must be outermost among functional
 	// middleware so unauthenticated requests are rejected early.
-	httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger)(httpHandler)
+	httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, auditLogger, cfg.Auth.AllowLegacySignatureV2)(httpHandler)
 
 	// RecoveryMiddleware wraps the ENTIRE chain so panics in any layer are caught.
 	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)
@@ -900,7 +900,7 @@ func main() {
 	// Start admin server if enabled
 	var adminServer *admin.Server
 	if cfg.Admin.Enabled {
-		adminServer = admin.NewServer(cfg.Admin, logger).WithMetrics(m)
+		adminServer = admin.NewServer(cfg.Admin, logger).WithMetrics(m).WithAuditLogger(auditLogger)
 
 		// Register rotation handler on admin mux
 		rotationHandler := api.NewAdminRotationHandler(encryptionEngine, logger, m, auditLogger)

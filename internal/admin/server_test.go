@@ -48,7 +48,7 @@ func TestBearerAuth_ValidToken(t *testing.T) {
 	token := randomToken(t)
 	source := func() []byte { return []byte(token) }
 
-	handler := BearerAuthMiddleware(source, testLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := BearerAuthMiddleware(source, testLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -66,7 +66,7 @@ func TestBearerAuth_MissingHeader(t *testing.T) {
 	token := randomToken(t)
 	source := func() []byte { return []byte(token) }
 
-	handler := BearerAuthMiddleware(source, testLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := BearerAuthMiddleware(source, testLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -83,7 +83,7 @@ func TestBearerAuth_WrongToken(t *testing.T) {
 	token := randomToken(t)
 	source := func() []byte { return []byte(token) }
 
-	handler := BearerAuthMiddleware(source, testLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := BearerAuthMiddleware(source, testLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -101,7 +101,7 @@ func TestBearerAuth_TruncatedToken(t *testing.T) {
 	token := randomToken(t)
 	source := func() []byte { return []byte(token) }
 
-	handler := BearerAuthMiddleware(source, testLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := BearerAuthMiddleware(source, testLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -119,7 +119,7 @@ func TestBearerAuth_MalformedHeader(t *testing.T) {
 	token := randomToken(t)
 	source := func() []byte { return []byte(token) }
 
-	handler := BearerAuthMiddleware(source, testLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := BearerAuthMiddleware(source, testLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -343,7 +343,7 @@ func buildAdminHandler(token string, rpm int, mux *http.ServeMux, logger *logrus
 		handler = rl.Middleware(handler)
 	}
 	source := func() []byte { return []byte(token) }
-	handler = BearerAuthMiddleware(source, logger)(handler)
+	handler = BearerAuthMiddleware(source, logger, nil)(handler)
 	handler = adminContextMiddleware(handler)
 	return handler
 }

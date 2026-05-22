@@ -28,7 +28,7 @@ func testCredentialStore() CredentialStore {
 func TestAuthMiddleware_NoCredentials(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -50,7 +50,7 @@ func TestAuthMiddleware_NoCredentials(t *testing.T) {
 func TestAuthMiddleware_UnknownAccessKey(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -68,18 +68,21 @@ func TestAuthMiddleware_UnknownAccessKey(t *testing.T) {
 func TestAuthMiddleware_SigV2_Valid(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	// Use a dynamic expires 1 hour from now — within the 7-day upper bound.
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+
 	q := url.Values{}
 	q.Set("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE")
-	q.Set("Expires", "1893456000")
+	q.Set("Expires", expires)
 	q.Set("AWSSecretAccessKey", "dummy")
 
-	stringToSign := "GET\n\n\n1893456000\n/bucket/key"
+	stringToSign := "GET\n\n\n" + expires + "\n/bucket/key"
 	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), []byte(stringToSign)))
 	q.Set("Signature", sig)
 
@@ -95,7 +98,7 @@ func TestAuthMiddleware_SigV2_Valid(t *testing.T) {
 func TestAuthMiddleware_SigV2_BadSignature(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -113,7 +116,7 @@ func TestAuthMiddleware_SigV2_BadSignature(t *testing.T) {
 func TestAuthMiddleware_SigV2_Expired(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -136,10 +139,73 @@ func TestAuthMiddleware_SigV2_Expired(t *testing.T) {
 	}
 }
 
+// TestAuthMiddleware_SigV2_ExpiryExceedsMaxDuration verifies that SigV2 presigned URLs
+// a SigV2 presigned URL with Expires more than 7 days in the future is rejected.
+func TestAuthMiddleware_SigV2_ExpiryExceedsMaxDuration(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Expires 8 days from now — exceeds the 7-day cap (604800 s).
+	expires := strconv.FormatInt(time.Now().Add(8*24*time.Hour).Unix(), 10)
+	q := url.Values{}
+	q.Set("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE")
+	q.Set("Expires", expires)
+	q.Set("AWSSecretAccessKey", "dummy")
+	q.Set("Signature", "irrelevant") // rejected before signature check
+
+	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+// TestAuthMiddleware_SigV2_DisabledByPolicy verifies that
+// when allowSigV2=false, SigV2 requests are rejected with SignatureDoesNotMatch.
+func TestAuthMiddleware_SigV2_DisabledByPolicy(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	// allowSigV2=false enforces V4-only policy
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, false)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	q := url.Values{}
+	q.Set("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE")
+	q.Set("Expires", expires)
+	q.Set("AWSSecretAccessKey", "dummy")
+
+	stringToSign := "GET\n\n\n" + expires + "\n/bucket/key"
+	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), []byte(stringToSign)))
+	q.Set("Signature", sig)
+
+	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "SignatureDoesNotMatch") {
+		t.Errorf("body = %q, want SignatureDoesNotMatch", body)
+	}
+}
+
 func TestAuthMiddleware_PresignedV4_Expired(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -158,7 +224,7 @@ func TestAuthMiddleware_PresignedV4_Expired(t *testing.T) {
 func TestAuthMiddleware_ContextLabel(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	var capturedLabel string
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,12 +232,15 @@ func TestAuthMiddleware_ContextLabel(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	// Use a dynamic expires 1 hour from now — within the 7-day upper bound.
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+
 	q := url.Values{}
 	q.Set("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE")
-	q.Set("Expires", "1893456000")
+	q.Set("Expires", expires)
 	q.Set("AWSSecretAccessKey", "dummy")
 
-	stringToSign := "GET\n\n\n1893456000\n/bucket/key"
+	stringToSign := "GET\n\n\n" + expires + "\n/bucket/key"
 	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), []byte(stringToSign)))
 	q.Set("Signature", sig)
 
@@ -190,7 +259,7 @@ func TestAuthMiddleware_ContextLabel(t *testing.T) {
 func TestAuthMiddleware_SigV4_Valid(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -236,7 +305,7 @@ func TestAuthMiddleware_SigV4_Valid(t *testing.T) {
 func TestAuthMiddleware_SigV4_BadSignature(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -264,7 +333,7 @@ func TestAuthMiddleware_SigV4_BadSignature(t *testing.T) {
 func TestAuthMiddleware_PresignedV4_Valid(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
-	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
