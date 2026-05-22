@@ -48,7 +48,7 @@ We follow responsible disclosure: we will coordinate the publication date with y
 - Authentication bypass: weaknesses in AWS Signature V4 validation, admin bearer-token authentication, or rate-limiting
 - Metadata integrity: ability to tamper with or substitute encryption metadata without detection
 - KMIP/KMS integration: vulnerabilities in the Cosmian KMIP or HSM adapter that could lead to key material exposure
-- Container image: critical CVEs in the published `ghcr.io/cloud37io/s3-encryption-gateway` image
+- Container image: critical CVEs in the published `cloud37io/s3-encryption-gateway` image
 - Privilege escalation in the admin API
 
 ### Out of Scope
