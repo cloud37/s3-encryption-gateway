@@ -77,7 +77,7 @@ test-conformance:
 test-conformance-local:
 	@echo "Running conformance tests (local providers only: MinIO + Garage + RustFS + SeaweedFS)..."
 	@GATEWAY_TEST_SKIP_EXTERNAL=1 \
-		go test -count=1 -tags=conformance -race -v ./test/conformance/...
+		go test -count=1 -tags=conformance -race -v -timeout 30m ./test/conformance/...
 
 test-conformance-external:
 	@echo "Running conformance tests (external providers with credentials)..."
