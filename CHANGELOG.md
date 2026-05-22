@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-22
+
+### ⚠️ Repository Migration ⚠️
+
+- **GitHub repository moved**: `kenchrcum/s3-encryption-gateway` →
+  `cloud37/s3-encryption-gateway`. Update any bookmarks, CI references, and
+  `go get` import paths accordingly. The Go module path is now
+  `github.com/cloud37/s3-encryption-gateway`.
+
+- **Docker image moved**: `kenchrcum/s3-encryption-gateway` →
+  `cloud37io/s3-encryption-gateway`. Update any `image:` references in
+  Kubernetes manifests, Helm values, and `docker pull` commands.
+
+- **Helm chart repository moved**: `https://kenchrcum.github.io/s3-encryption-gateway/`
+  → `https://cloud37.github.io/s3-encryption-gateway/`. Update your `helm repo add`
+  commands and FluxCD / ArgoCD `HelmRepository` resources.
+
+### Security
+
+- **Auth failure audit events on all rejection paths**: `auth.failure` audit
+  events are now emitted on every S3 authentication rejection path (SigV4,
+  SigV2, presigned URL) as well as on admin bearer-auth failures. Provides
+  complete audit coverage for authentication events in SIEM and log aggregation
+  pipelines.
+
+- **V1.0-OPS-2 — Security scanning in CI pipeline**: Added `govulncheck`
+  (dependency vulnerability scanning), `gosec` (static analysis), and Trivy
+  (container image scanning) to the CI pipeline. A new `.github/workflows/security.yml`
+  workflow runs both `govulncheck` and `gosec` on every PR to `main` and every
+  push to `main`. The `helm.yml` release workflow builds the Docker image and
+  runs Trivy with CRITICAL severity blocking the release. `Makefile` updated
+  with `security-scan`, `gosec`, and `trivy-scan` targets for local parity.
+  Initial `gosec` triage completed: 27 G115, 3 G402, 2 G703, 3 G704, 3 G101,
+  1 G404 HIGH findings suppressed with `#nosec` annotations and documented in
+  `docs/security/gosec-suppressions.md`. Gosec configured with `-severity=high`
+  so only HIGH findings gate CI.
+
 ### Added
 
 - **Argon2id KDF support** (V1.0-CRYPTO-1): New selectable KDF algorithm
@@ -27,6 +64,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `encrypt_state`. Helm chart, schema, deployment template, and runbook
   (`docs/RUNBOOK.md`) fully updated.
 
+- **Object metadata encryption** (V1.0-CRYPTO-3): All S3 object metadata values
+  (e.g. user-supplied `x-amz-meta-*` headers) are now optionally encrypted
+  at rest using AES-256-GCM with a dedicated metadata key. The `MetaEncrypted`
+  marker is preserved outside the encrypted blob so the gateway can detect
+  encrypted objects on `HEAD` and `GET` responses. Configurable via
+  `crypto.metadata_encryption.key` / `METADATA_ENCRYPTION_KEY` environment
+  variable. Mutual-exclusion validation prevents misconfiguration.
+  Full metadata encryption round-trip, tamper-detection, and configuration
+  validation tests included.
+
 - **Turnkey dashboards and alerting** (V1.0-OBS-1): Grafana dashboard (8 rows,
   33 panels) and PrometheusRule (10 alert rules) now ship as opt-in Helm resources
   (`monitoring.grafana.dashboard.enabled`, `monitoring.prometheusRule.enabled`).
@@ -39,27 +86,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   variables. Local verification via `hack/export-dashboard.sh`. Documentation
   updated in `docs/OBSERVABILITY.md` and `docs/RUNBOOK.md`.
 
+- **Dedicated decrypt-bytes metrics for MPU and full-object GET paths**:
+  `gateway_decrypted_object_bytes` is now incremented on both the MPU and
+  single-object `GetObject` code paths, giving accurate decryption throughput
+  metrics for all read paths.
+
 - **Self-contained envelope encryption provider** (V1.0-KMS-4): New
   `"self_contained"` `KeyManager` adapter supporting AES-256-GCM (symmetric)
-
-### CI / Security
-
-- **V1.0-OPS-2 — Security scanning in CI pipeline**: Added `govulncheck`
-  (dependency vulnerability scanning), `gosec` (static analysis), and Trivy
-  (container image scanning) to the CI pipeline. A new `.github/workflows/security.yml`
-  workflow runs both `govulncheck` and `gosec` on every PR to `main` and every
-  push to `main`. The `helm.yml` release workflow builds the Docker image and
-  runs Trivy with CRITICAL severity blocking the release. `Makefile` updated
-  with `security-scan`, `gosec`, and `trivy-scan` targets for local parity.
-  Initial `gosec` triage completed: 27 G115, 3 G402, 2 G703, 3 G704, 3 G101,
-  1 G404 HIGH findings suppressed with `#nosec` annotations and documented in
-  `docs/security/gosec-suppressions.md`. Gosec configured with `-severity=high`
-  so only HIGH findings gate CI.
   and RSA-OAEP/SHA-256 (asymmetric) DEK wrapping with no external KMS
   dependencies. Includes `AESKEKManager` (with `RotatableKeyManager` for key
-  rotation), `RSAKEKManager`, factory registration, env-var injection, YAML
-  config schema, ADR-0013, and full test suite (unit, conformance, fuzz,
-  integration). See `docs/KMS_COMPATIBILITY.md` for configuration examples.
+  rotation), `RSAKEKManager`, factory registration, env-var injection
+  (`SELF_CONTAINED_AES_KEYS`), YAML config schema, ADR-0013, and full test
+  suite (unit, conformance, fuzz, integration). Wired as the default Helm
+  KMS provider. See `docs/KMS_COMPATIBILITY.md` for configuration examples.
+
+- **`ENCRYPTION_MODES.md` guide**: new documentation page covering all
+  supported encryption modes, KDF options, and provider-specific
+  compatibility notes.
+
+- **SigV2 policy flag and presigned URL expiry cap**: a new
+  `auth.allow_sigv2` policy flag (default `true`) lets operators disable
+  SigV2 entirely per-bucket or globally. Presigned URL `Expires` query
+  parameter is capped to a configurable maximum (default 7 days) consistent
+  with the SigV4 presigned URL cap introduced in 0.8.0.
+
+### Fixed
+
+- **`x-amz-meta-encrypted` no longer filtered from HEAD responses**: the
+  `x-amz-meta-encrypted` marker was incorrectly stripped from `HEAD` object
+  responses, preventing clients from detecting encrypted objects. It is now
+  preserved and forwarded.
+
+- **Go module path corrected** after repository migration: stale
+  `github.com/kenchrcum/s3-encryption-gateway` import paths updated
+  throughout the codebase to `github.com/cloud37/s3-encryption-gateway`.
+
+- **`export-dashboard.sh` unbound variable**: a missing variable reference
+  in `hack/export-dashboard.sh` caused the script to fail with `unbound
+  variable` in strict-mode shells. Fixed.
+
+### CI & Infrastructure
+
+- **Conformance test timeout increased to 30 minutes**: the
+  `test-conformance-local` CI job timeout raised from the previous default
+  to 30 minutes to accommodate the full multi-provider conformance matrix
+  without spurious timeouts on slow CI runners.
+
+- **Conformance tests unified across all local providers**: MinIO- and
+  Garage-specific CI jobs removed; all conformance tests now run against
+  the full set of local providers (MinIO, Garage, RustFS, SeaweedFS) in a
+  single job matrix, reducing CI surface area and duplication.
+
+- **Go version bumped to 1.26.3**: CI and Docker images updated to Go 1.26.3;
+  FIPS build jobs skip non-FIPS algorithm tests to avoid false failures.
+
+- **`gosec` runs via `go run`**: the `gosec` CI step now uses `go run
+  github.com/securego/gosec/...` instead of a Docker image to avoid
+  Go version mismatches between the CI runner and the gosec image.
+
+- **Helm release skips duplicate publish**: the chart-releaser step in the
+  release workflow is skipped when the chart version has already been
+  published, and the binary-build and README-copy steps are also skipped
+  accordingly — preventing duplicate-release errors on documentation-only
+  pushes.
+
+### Dependencies
+
+- Updated `golang.org/x/crypto` to v0.52.0
 
 ## [0.8.0] — 2026-05-18
 
