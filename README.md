@@ -8,7 +8,7 @@ The S3 Encryption Gateway sits between S3 clients and backend storage providers,
 
 ## Repository
 
-This chart is available at: **https://kenchrcum.github.io/s3-encryption-gateway**
+This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ This chart is available at: **https://kenchrcum.github.io/s3-encryption-gateway*
 ### Add the Helm repository
 
 ```bash
-helm repo add s3-encryption-gateway https://kenchrcum.github.io/s3-encryption-gateway
+helm repo add s3-encryption-gateway https://cloud37.github.io/s3-encryption-gateway
 helm repo update
 ```
 
@@ -426,8 +426,8 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.repository` | Container image repository | `kenchrcum/s3-encryption-gateway` |
-| `image.tag` | Container image tag | `"0.8.0"` |
+| `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
+| `image.tag` | Container image tag | `"0.9.0-rc1"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override the chart name portion of resource names | `""` |
@@ -1098,7 +1098,7 @@ helm install gw-blue . \
 
 # Green side (new version):
 helm install gw-green . \
-  --set image.tag=v0.8.0 \
+  --set image.tag=v0.9.0-rc1 \
   --values examples/values-green.yaml \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
 
@@ -1184,7 +1184,7 @@ helm uninstall my-gateway
 
 5. **TLS**: Enable TLS on the gateway listener (`config.tls.enabled`) and use cert-manager for automatic certificate rotation.
 
-6. **FIPS**: Use `image.tag: 0.8.0-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
+6. **FIPS**: Use `image.tag: 0.9.0-rc1-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
 
 ## Troubleshooting
 
@@ -1217,9 +1217,9 @@ The `/readyz` endpoint returns `200 OK` when all dependencies (KMS, Valkey) are 
 ## Support
 
 For issues, feature requests, or questions:
-- GitHub: https://github.com/kenchrcum/s3-encryption-gateway
-- Chart Repository: https://kenchrcum.github.io/s3-encryption-gateway
+- GitHub: https://github.com/cloud37/s3-encryption-gateway
+- Chart Repository: https://cloud37.github.io/s3-encryption-gateway
 
 ## License
 
-MIT License — see [LICENSE](https://github.com/kenchrcum/s3-encryption-gateway/blob/main/LICENSE) for details.
+MIT License — see [LICENSE](https://github.com/cloud37/s3-encryption-gateway/blob/main/LICENSE) for details.
