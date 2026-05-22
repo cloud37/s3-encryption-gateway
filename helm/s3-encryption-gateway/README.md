@@ -426,7 +426,7 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.repository` | Container image repository | `kenchrcum/s3-encryption-gateway` |
+| `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
 | `image.tag` | Container image tag | `"0.8.0"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |

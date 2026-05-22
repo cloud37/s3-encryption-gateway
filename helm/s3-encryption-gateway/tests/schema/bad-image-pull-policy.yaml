@@ -1,5 +1,5 @@
 # bad-image-pull-policy.yaml — image.pullPolicy must be Always, IfNotPresent, or Never.
 # Expected error substring: "Must be one of"
 image:
-  repository: kenchrcum/s3-encryption-gateway
+  repository: cloud37io/s3-encryption-gateway
   pullPolicy: "WhenMissing"

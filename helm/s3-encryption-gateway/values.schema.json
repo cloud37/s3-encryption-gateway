@@ -30,7 +30,7 @@
         "repository": {
           "type": "string",
           "minLength": 1,
-          "description": "Container image repository (e.g. kenchrcum/s3-encryption-gateway)."
+          "description": "Container image repository (e.g. cloud37io/s3-encryption-gateway)."
         },
         "tag": {
           "type": "string",

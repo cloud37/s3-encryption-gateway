@@ -238,7 +238,7 @@ binaries. To profile with full function names:
 make profile-image
 
 # The image is tagged with ":profile" suffix:
-docker run -p 8080:8080 -p 8081:8081 kenchrcum/s3-encryption-gateway:dev-profile
+docker run -p 8080:8080 -p 8081:8081 cloud37io/s3-encryption-gateway:dev-profile
 ```
 
 The `STRIP_SYMBOLS=false` build-arg is also available directly:

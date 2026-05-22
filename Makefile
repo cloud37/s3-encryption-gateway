@@ -4,7 +4,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BINARY_NAME := s3-encryption-gateway
-IMAGE_NAME ?= kenchrcum/s3-encryption-gateway
+IMAGE_NAME ?= cloud37io/s3-encryption-gateway
 IMAGE_TAG ?= $(VERSION)
 
 # V0.6-QA-2 — Coverage gate and mutation testing settings
@@ -334,7 +334,7 @@ gosec:
 	@go run github.com/securego/gosec/v2/cmd/gosec@latest -exclude=G104 -severity high ./...
 
 # trivy-scan — scan the local Docker image for vulnerabilities
-# Usage: make trivy-scan IMAGE_NAME=ghcr.io/kenchrcum/s3-encryption-gateway IMAGE_TAG=latest
+# Usage: make trivy-scan IMAGE_NAME=ghcr.io/cloud37io/s3-encryption-gateway IMAGE_TAG=latest
 trivy-scan:
 	@echo "Running Trivy container image scan..."
 	@docker run --rm \

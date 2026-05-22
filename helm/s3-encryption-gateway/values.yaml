@@ -15,7 +15,7 @@ replicaCount: 1
 track: ""
 
 image:
-  repository: kenchrcum/s3-encryption-gateway
+  repository: cloud37io/s3-encryption-gateway
   pullPolicy: IfNotPresent
   tag: "0.8.0"
 
