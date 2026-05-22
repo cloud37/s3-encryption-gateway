@@ -1026,8 +1026,11 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 	// For MPU-encrypted objects, delegate to the MPU decrypt path.
 	if metadata[crypto.MetaMPUEncrypted] == "true" {
+		decryptStart := time.Now()
 		decryptedReader, err := h.decryptMPUObject(ctx, bucket, key, metadata, reader, s3Client)
+		decryptDuration := time.Since(decryptStart)
 		if err != nil {
+			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_decryption_failed")
 			h.logger.WithError(err).WithFields(logrus.Fields{
 				"bucket": bucket,
 				"key":    key,
@@ -1119,6 +1122,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			}
 			written += int(extra)
 		}
+		h.metrics.RecordEncryptionOperation(r.Context(), "decrypt", decryptDuration, decryptedSizeForMPU(metadata))
 		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(written))
 		return
 	}
@@ -1202,6 +1206,12 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		// For optimized range, the reader already contains only the range
 		// But we still need to read it to send it
 		decryptedSize = plaintextEnd - plaintextStart + 1
+	} else {
+		// Full-object decrypt (no range request): try to get plaintext size
+		// from encryption metadata so the byte counter is accurate.
+		if ps, err := crypto.GetPlaintextSizeFromMetadata(metadata); err == nil && ps > 0 {
+			decryptedSize = ps
+		}
 	}
 	h.metrics.RecordEncryptionOperation(r.Context(), "decrypt", decryptDuration, decryptedSize)
 
