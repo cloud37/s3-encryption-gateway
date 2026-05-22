@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-local test-conformance-minio test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -61,7 +61,6 @@ test-fips:
 #                          credentials are set).
 # test-conformance-local   Local providers only (MinIO + Garage + RustFS +
 #                          SeaweedFS); skips external.
-# test-conformance-minio   MinIO only — fastest signal, used as the PR gate.
 # test-conformance-external External providers whose credential env vars are set;
 #                            local providers skipped.
 #
@@ -78,11 +77,6 @@ test-conformance:
 test-conformance-local:
 	@echo "Running conformance tests (local providers only: MinIO + Garage + RustFS + SeaweedFS)..."
 	@GATEWAY_TEST_SKIP_EXTERNAL=1 \
-		go test -count=1 -tags=conformance -race -v ./test/conformance/...
-
-test-conformance-minio:
-	@echo "Running conformance tests (MinIO only)..."
-	@GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 GATEWAY_TEST_SKIP_EXTERNAL=1 \
 		go test -count=1 -tags=conformance -race -v ./test/conformance/...
 
 test-conformance-external:
@@ -414,7 +408,6 @@ help:
 	@echo "  test-fuzz          - Run fuzz tests (regression mode)"
 	@echo "  test-conformance   - Run tier-2 conformance tests (all providers; requires Docker)"
 	@echo "  test-conformance-local  - Conformance: local providers (MinIO + Garage + RustFS + SeaweedFS)"
-	@echo "  test-conformance-minio  - Conformance: MinIO only (PR gate)"
 	@echo "  test-conformance-external - Conformance: external providers with credentials"
 	@echo "  test-conformance-kms     - Conformance: KMS envelope encryption (MinIO + Cosmian KMS)"
 	@echo "  test-isolation-check    - Check test/ does not reference docker-compose / hard-coded ports"
