@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 )
 
 // S3Client is the minimal S3 interface needed by the migration tool.

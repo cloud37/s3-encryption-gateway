@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
-	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
+	"github.com/cloud37/s3-encryption-gateway/test/harness"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // testEncryptedMetadata_RoundTrip verifies full PUT/GET round-trip with

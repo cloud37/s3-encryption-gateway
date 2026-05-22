@@ -17,7 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 )
 
 // mockClient is a mock implementation for testing.

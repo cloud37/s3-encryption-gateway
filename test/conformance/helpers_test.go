@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
+	"github.com/cloud37/s3-encryption-gateway/test/harness"
 )
 
 // keySeq provides unique keys within a test run.

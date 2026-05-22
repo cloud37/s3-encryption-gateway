@@ -7,8 +7,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 )
 
 // mockS3ForVerify is a minimal mock that satisfies S3Client.

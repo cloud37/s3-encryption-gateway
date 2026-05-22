@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/sirupsen/logrus"
 )
 

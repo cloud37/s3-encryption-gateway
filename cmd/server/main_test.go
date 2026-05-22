@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

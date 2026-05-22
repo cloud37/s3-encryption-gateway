@@ -21,7 +21,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // TestConformance runs every conformance test case against every registered

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 )
 
 // mockS3ForMigrate is a full-featured mock S3 client for migration tests.

@@ -8,7 +8,7 @@ The S3 Encryption Gateway sits between S3 clients and backend storage providers,
 
 ## Repository
 
-This chart is available at: **https://kenchrcum.github.io/s3-encryption-gateway**
+This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ This chart is available at: **https://kenchrcum.github.io/s3-encryption-gateway*
 ### Add the Helm repository
 
 ```bash
-helm repo add s3-encryption-gateway https://kenchrcum.github.io/s3-encryption-gateway
+helm repo add s3-encryption-gateway https://cloud37.github.io/s3-encryption-gateway
 helm repo update
 ```
 
@@ -1217,9 +1217,9 @@ The `/readyz` endpoint returns `200 OK` when all dependencies (KMS, Valkey) are 
 ## Support
 
 For issues, feature requests, or questions:
-- GitHub: https://github.com/kenchrcum/s3-encryption-gateway
-- Chart Repository: https://kenchrcum.github.io/s3-encryption-gateway
+- GitHub: https://github.com/cloud37/s3-encryption-gateway
+- Chart Repository: https://cloud37.github.io/s3-encryption-gateway
 
 ## License
 
-MIT License — see [LICENSE](https://github.com/kenchrcum/s3-encryption-gateway/blob/main/LICENSE) for details.
+MIT License — see [LICENSE](https://github.com/cloud37/s3-encryption-gateway/blob/main/LICENSE) for details.

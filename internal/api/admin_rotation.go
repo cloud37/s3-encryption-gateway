@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/admin"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
+	"github.com/cloud37/s3-encryption-gateway/internal/admin"
+	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/sirupsen/logrus"
 )
 

@@ -35,8 +35,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
-	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
+	"github.com/cloud37/s3-encryption-gateway/test/harness"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // ── Parameter resolution ────────────────────────────────────────────────────

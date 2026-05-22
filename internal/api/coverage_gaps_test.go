@@ -14,8 +14,8 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/sirupsen/logrus"
 )
 

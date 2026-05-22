@@ -15,7 +15,7 @@ import (
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/util"
+	"github.com/cloud37/s3-encryption-gateway/internal/util"
 )
 
 // ipExtractor is the shared IP extractor instance configured with trusted proxies.

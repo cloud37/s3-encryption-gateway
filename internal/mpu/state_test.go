@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	metricsmod "github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	metricsmod "github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/util"
+	"github.com/cloud37/s3-encryption-gateway/internal/util"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"

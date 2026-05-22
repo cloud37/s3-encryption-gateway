@@ -6,10 +6,10 @@ package harness
 import (
 	"net/http"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/mpu"
+	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 )
 
 // options accumulates gateway configuration requested by Option functions.

@@ -22,9 +22,9 @@ import (
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/debug"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/debug"
+	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"

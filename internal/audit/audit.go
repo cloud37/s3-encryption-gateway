@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 )
 
 // EventType represents the type of audit event.

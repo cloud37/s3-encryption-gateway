@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )

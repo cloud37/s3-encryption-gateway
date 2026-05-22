@@ -1,4 +1,4 @@
-module github.com/kenchrcum/s3-encryption-gateway
+module github.com/cloud37/s3-encryption-gateway
 
 go 1.26.3
 

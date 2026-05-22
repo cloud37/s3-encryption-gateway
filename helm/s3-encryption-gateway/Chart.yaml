@@ -6,9 +6,9 @@ keywords:
   - encryption
   - gateway
   - storage
-home: https://github.com/kenchrcum/s3-encryption-gateway
+home: https://github.com/cloud37/s3-encryption-gateway
 sources:
-  - https://github.com/kenchrcum/s3-encryption-gateway
+  - https://github.com/cloud37/s3-encryption-gateway
 maintainers:
   - name: kenchrcum
     url: https://github.com/kenchrcum

@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )

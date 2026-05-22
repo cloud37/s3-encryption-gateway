@@ -14,9 +14,9 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
-	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/test/harness"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // selfContainedPlaintext is a fixed test payload used across all

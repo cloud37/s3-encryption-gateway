@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 )
 
 // closeEngine calls Close() on an EncryptionEngine if it implements the

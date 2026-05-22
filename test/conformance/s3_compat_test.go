@@ -15,8 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/kenchrcum/s3-encryption-gateway/test/harness"
-	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
+	"github.com/cloud37/s3-encryption-gateway/test/harness"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // newS3CompatClient creates an S3 SDK client that talks directly to the

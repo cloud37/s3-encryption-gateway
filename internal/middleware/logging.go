@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/sirupsen/logrus"
 )
 

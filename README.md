@@ -1,6 +1,6 @@
 # S3 Encryption Gateway
 
-![GitHub Release](https://img.shields.io/github/v/release/kenchrcum/s3-encryption-gateway)
+![GitHub Release](https://img.shields.io/github/v/release/cloud37/s3-encryption-gateway)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)](https://artifacthub.io/packages/search?repo=s3-encryption-gateway)
 
@@ -703,7 +703,7 @@ The gateway works with any S3-compatible storage service. Tested and compatible 
 | DigitalOcean Spaces | Compatible | S3-compatible API |
 | Backblaze B2 | Compatible | S3-compatible API |
 
-Using a backend not listed here? [Open an issue](https://github.com/kenchrcum/s3-encryption-gateway/issues) to let us know about your experience.
+Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-encryption-gateway/issues) to let us know about your experience.
 
 ---
 
@@ -806,5 +806,5 @@ MIT License — see [LICENSE](LICENSE) file for details.
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/kenchrcum/s3-encryption-gateway/issues)
+- **Issues**: [GitHub Issues](https://github.com/cloud37/s3-encryption-gateway/issues)
 - **Documentation**: [`docs/`](docs/) directory

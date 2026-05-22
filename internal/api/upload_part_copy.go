@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/mpu"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/sirupsen/logrus"
 )
 

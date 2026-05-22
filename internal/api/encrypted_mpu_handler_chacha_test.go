@@ -14,9 +14,9 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gorilla/mux"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/crypto"
-	"github.com/kenchrcum/s3-encryption-gateway/internal/mpu"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/sirupsen/logrus"
 )
 

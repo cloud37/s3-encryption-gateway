@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/kenchrcum/s3-encryption-gateway/helm/values.schema.json",
+  "$id": "https://github.com/cloud37/s3-encryption-gateway/helm/values.schema.json",
   "title": "s3-encryption-gateway Helm values",
   "description": "Validates values.yaml and overlays for the S3 Encryption Gateway Helm chart (draft-07). Run `helm lint` or `helm install --dry-run` to surface errors client-side before a cluster render.",
   "type": "object",

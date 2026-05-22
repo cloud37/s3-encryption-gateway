@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/sirupsen/logrus"
 )
 

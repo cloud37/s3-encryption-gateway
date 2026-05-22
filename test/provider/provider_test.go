@@ -3,7 +3,7 @@ package provider_test
 import (
 	"testing"
 
-	"github.com/kenchrcum/s3-encryption-gateway/test/provider"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // TestRegistry_NoDuplicateNames asserts that no two registered providers share

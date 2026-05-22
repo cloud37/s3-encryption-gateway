@@ -16,7 +16,7 @@ We provide security fixes for the current minor release only. Older versions do 
 If you discover a vulnerability in the S3 Encryption Gateway, report it privately via one of these channels:
 
 - **GitHub Private Vulnerability Reporting** (preferred):
-  [https://github.com/kenchrcum/s3-encryption-gateway/security/advisories/new](https://github.com/kenchrcum/s3-encryption-gateway/security/advisories/new)
+  [https://github.com/cloud37/s3-encryption-gateway/security/advisories/new](https://github.com/cloud37/s3-encryption-gateway/security/advisories/new)
 - **Email**: Open a private advisory via GitHub and we will respond within 48 hours.
 
 ### What to Include

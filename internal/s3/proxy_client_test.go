@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 )
 
 // newTestProxyClient creates a ProxyClient pointed at the given test server URL.
