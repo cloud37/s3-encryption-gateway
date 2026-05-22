@@ -38,6 +38,12 @@ const (
 	// Emitted on every profile fetch via the admin /debug/pprof/* endpoints.
 	// Satisfies Adkins et al., BSRS Ch. 15 "auditable debug interface" mandate.
 	EventTypePprofFetch EventType = "pprof_fetch"
+
+	// EventTypeAuthFailure is emitted on every authentication failure on both
+	// the S3 data-plane and the admin API. It provides a full audit trail for
+	// credential enumeration, signature-mismatch, replay attacks, and
+	// unauthenticated probe detection. Success: false always.
+	EventTypeAuthFailure EventType = "auth.failure"
 )
 
 // AuditEvent represents a single audit log event.

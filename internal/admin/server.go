@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
 	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
 	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
 	"github.com/sirupsen/logrus"
@@ -61,6 +62,10 @@ type Server struct {
 
 	// metricsRecorder is an optional metrics collector for admin API request recording (V1.0-OBS-1).
 	metricsRecorder *metrics.Metrics
+
+	// auditLog is an optional audit logger for recording admin auth failures.
+	// When nil, auth-failure events are silently skipped.
+	auditLog audit.Logger
 }
 
 
@@ -81,6 +86,14 @@ func NewServer(cfg config.AdminConfig, logger *logrus.Logger) *Server {
 // The returned *Server allows chaining (s.WithMetrics(m).Start(ctx)).
 func (s *Server) WithMetrics(m *metrics.Metrics) *Server {
 	s.metricsRecorder = m
+	return s
+}
+
+// WithAuditLogger configures the admin server to emit auth.failure audit
+// events via the provided logger. When not called (or called with nil),
+// auth-failure events are silently skipped.
+func (s *Server) WithAuditLogger(l audit.Logger) *Server {
+	s.auditLog = l
 	return s
 }
 
@@ -116,7 +129,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Apply bearer authentication
-	handler = BearerAuthMiddleware(tokenSource, s.logger)(handler)
+	handler = BearerAuthMiddleware(tokenSource, s.logger, s.auditLog)(handler)
 
 	// Set admin context flag on every request
 	handler = adminContextMiddleware(handler)

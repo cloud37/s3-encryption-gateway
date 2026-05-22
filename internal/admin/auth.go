@@ -3,20 +3,54 @@ package admin
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 
+	"github.com/kenchrcum/s3-encryption-gateway/internal/audit"
 	"github.com/sirupsen/logrus"
+)
+
+// Sentinel errors for admin authentication failures.
+var (
+	errAdminMissingAuthHeader  = errors.New("missing Authorization header")
+	errAdminMalformedAuthHeader = errors.New("malformed Authorization header")
+	errAdminWrongScheme        = errors.New("only Bearer authentication is supported")
+	errAdminInvalidToken       = errors.New("invalid bearer token")
 )
 
 // BearerAuthMiddleware returns HTTP middleware that validates an
 // Authorization: Bearer <token> header using constant-time comparison.
 // tokenSource is called on every request to support runtime token rotation
 // (e.g. via file-watch).
-func BearerAuthMiddleware(tokenSource func() []byte, logger *logrus.Logger) func(http.Handler) http.Handler {
+//
+// auditLog may be nil; when nil, audit events are silently skipped so callers
+// that do not configure an audit sink still function correctly.
+func BearerAuthMiddleware(tokenSource func() []byte, logger *logrus.Logger, auditLog audit.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			clientIP := r.RemoteAddr
+			userAgent := r.UserAgent()
+			requestID := r.Header.Get("X-Request-Id")
+
+			emitAuthFailure := func(reason error) {
+				if auditLog == nil {
+					return
+				}
+				auditLog.LogAccessWithMetadata(
+					string(audit.EventTypeAuthFailure),
+					"", "", clientIP, userAgent, requestID,
+					false, reason, 0,
+					map[string]interface{}{
+						"method":    r.Method,
+						"path":      r.URL.Path,
+						"subsystem": "admin",
+					},
+				)
+			}
+
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
+				emitAuthFailure(errAdminMissingAuthHeader)
 				writeAdminError(w, http.StatusUnauthorized, "Unauthorized", "missing Authorization header")
 				return
 			}
@@ -29,10 +63,12 @@ func BearerAuthMiddleware(tokenSource func() []byte, logger *logrus.Logger) func
 			// requires the entire auth header to be handled in constant time.
 			const prefix = "Bearer "
 			if len(authHeader) <= len(prefix) {
+				emitAuthFailure(errAdminMalformedAuthHeader)
 				writeAdminError(w, http.StatusUnauthorized, "Unauthorized", "malformed Authorization header")
 				return
 			}
 			if subtle.ConstantTimeCompare([]byte(authHeader[:len(prefix)]), []byte(prefix)) != 1 {
+				emitAuthFailure(errAdminWrongScheme)
 				writeAdminError(w, http.StatusUnauthorized, "Unauthorized", "only Bearer authentication is supported")
 				return
 			}
@@ -47,6 +83,7 @@ func BearerAuthMiddleware(tokenSource func() []byte, logger *logrus.Logger) func
 
 			// Constant-time comparison to prevent timing side-channels.
 			if subtle.ConstantTimeCompare(got, want) != 1 {
+				emitAuthFailure(errAdminInvalidToken)
 				writeAdminError(w, http.StatusUnauthorized, "Unauthorized", "invalid bearer token")
 				return
 			}
