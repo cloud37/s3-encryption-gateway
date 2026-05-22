@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	"github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )
 
@@ -1249,5 +1251,36 @@ func TestBuildAdminTLSConfig_RejectCBC(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Log("accept goroutine did not finish in time (non-fatal)")
+	}
+}
+
+// TestAdminServer_MetricsMiddleware_RecordsRequest verifies that adminMetricsMiddleware
+// records gateway_admin_api_requests_total and gateway_admin_api_request_duration_seconds
+// when a request is served (V1.0-OBS-1 G6).
+func TestAdminServer_MetricsMiddleware_RecordsRequest(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+
+	handler := adminMetricsMiddleware(m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rw := httptest.NewRecorder()
+	handler.ServeHTTP(rw, req)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	if !names["gateway_admin_api_requests_total"] {
+		t.Error("gateway_admin_api_requests_total not found after request")
+	}
+	if !names["gateway_admin_api_request_duration_seconds"] {
+		t.Error("gateway_admin_api_request_duration_seconds not found after request")
 	}
 }

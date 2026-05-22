@@ -11,6 +11,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/kenchrcum/s3-encryption-gateway/internal/config"
+	metricsmod "github.com/kenchrcum/s3-encryption-gateway/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -515,4 +517,42 @@ func TestBuildTLSConfig_NoInsecureSkipVerify_NoWarning(t *testing.T) {
 
 	logOutput := buf.String()
 	assert.NotContains(t, logOutput, "InsecureSkipVerify is ENABLED", "expected no warning when InsecureSkipVerify is false")
+}
+
+// TestMPUState_ActiveUploadsGauge_IncDec verifies that Create increments and
+// Delete decrements the gateway_mpu_active_uploads gauge (V1.0-OBS-1 G7).
+func TestMPUState_ActiveUploadsGauge_IncDec(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metricsmod.NewMetricsWithRegistry(reg)
+
+	s, _ := newTestStore(t)
+	s.metrics = m
+
+	ctx := context.Background()
+	state := sampleState("upload-gauge-test")
+
+	// Create should increment the gauge.
+	require.NoError(t, s.Create(ctx, state))
+
+	assertGauge := func(want float64) {
+		t.Helper()
+		mfs, err := reg.Gather()
+		require.NoError(t, err)
+		for _, mf := range mfs {
+			if mf.GetName() == "gateway_mpu_active_uploads" {
+				got := mf.GetMetric()[0].GetGauge().GetValue()
+				if got != want {
+					t.Errorf("gateway_mpu_active_uploads = %v, want %v", got, want)
+				}
+				return
+			}
+		}
+		t.Errorf("gateway_mpu_active_uploads metric not found (want %v)", want)
+	}
+
+	assertGauge(1)
+
+	// Delete should decrement the gauge.
+	require.NoError(t, s.Delete(ctx, state.UploadID))
+	assertGauge(0)
 }

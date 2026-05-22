@@ -710,3 +710,27 @@ func TestMetrics_OBS1_NilSafe(t *testing.T) {
 	m.SetMPUActiveUploads(5)
 	m.ObserveEncryptedObjectBytes(1024)
 }
+
+// TestMetrics_IncDecMPUActiveUploads verifies IncMPUActiveUploads and DecMPUActiveUploads.
+func TestMetrics_IncDecMPUActiveUploads(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.IncMPUActiveUploads()
+	m.IncMPUActiveUploads()
+	m.DecMPUActiveUploads()
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_mpu_active_uploads" {
+			if got := mf.GetMetric()[0].GetGauge().GetValue(); got != 1.0 {
+				t.Errorf("gateway_mpu_active_uploads = %v, want 1.0", got)
+			}
+			return
+		}
+	}
+	t.Error("gateway_mpu_active_uploads metric not found")
+}
