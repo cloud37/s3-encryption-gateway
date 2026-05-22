@@ -9,18 +9,20 @@ Accepted
 
 ## Context
 
-The S3 Encryption Gateway supports multipart uploads for S3 API compatibility, but **multipart uploads are not encrypted** due to fundamental architectural limitations. When multipart uploads are enabled, the gateway must handle them securely while ensuring users understand the security implications.
+The S3 Encryption Gateway supports multipart uploads for S3 API compatibility. This ADR documents the XML parsing, request validation, interoperability, and error-translation rules for the multipart control plane.
+
+At the time ADR 0002 was originally written, multipart upload bodies were passed through unencrypted due to architectural limitations. That historical constraint is no longer the full project truth: buckets with `EncryptMultipartUploads=true` now follow ADR 0009, while buckets that opt out continue to use the legacy plaintext path.
 
 Multipart uploads are critical for:
 - Large file uploads (>100MB) where single-part uploads may timeout
 - Resumable uploads that can recover from network failures
 - Parallel upload performance through concurrent part uploads
 
-However, multipart uploads introduce security and compatibility challenges:
+Multipart uploads introduce security and compatibility challenges regardless of whether the data path is encrypted:
 - XML parsing vulnerabilities (XXE, DoS attacks)
 - Complex validation requirements for part ordering and ETags
 - Provider-specific differences in multipart behavior
-- **Security risk**: Unencrypted data storage when multipart uploads are used
+- Encryption-mode negotiation between legacy and ADR-0009-backed buckets
 
 ## Problem Statement
 
@@ -29,11 +31,11 @@ Multipart uploads create multiple attack vectors and compatibility issues:
 - Denial of service through malformed or oversized XML payloads
 - Authentication bypass through part manipulation
 - Compatibility issues across S3 providers (AWS, MinIO, Wasabi, etc.)
-- **Critical**: Multipart uploads bypass encryption, storing data unencrypted
+- Safe coexistence of legacy plaintext MPU behavior and ADR 0009 encrypted MPU behavior
 
 ## Decision
 
-Implement comprehensive security validation for multipart uploads while maintaining clear security warnings and providing an option to disable multipart uploads entirely for maximum security.
+Implement comprehensive security validation for multipart uploads independent of the chosen data path. XML parsing, part validation, backend interoperability, and error translation remain governed by this ADR. Encryption behavior is delegated to ADR 0009 for buckets with `EncryptMultipartUploads=true`; legacy plaintext MPU behavior remains available for buckets that explicitly opt out.
 
 ### Key Design Decisions
 
@@ -64,9 +66,14 @@ Implement comprehensive security validation for multipart uploads while maintain
 
 ## Implementation Details
 
-### Multipart Upload Encryption Limitation
+### Multipart Upload Encryption Behavior
 
-**Multipart uploads are not encrypted** due to S3's concatenation behavior:
+ADR 0002 no longer defines a single encryption behavior for all multipart uploads.
+
+- **Encrypted MPU path**: Buckets with `EncryptMultipartUploads=true` follow ADR 0009.
+- **Legacy plaintext path**: Buckets that explicitly opt out continue to pass multipart bodies through unchanged.
+
+The historical plaintext-only implementation looked like this:
 
 ```go
 // For multipart uploads, skip encryption to avoid concatenation issues
@@ -75,17 +82,18 @@ Implement comprehensive security validation for multipart uploads while maintain
 var encryptedReader io.Reader = r.Body  // Skip encryption for multipart
 ```
 
-**Why this limitation exists:**
+**Why the legacy plaintext path existed:**
 - S3 concatenates multipart upload parts server-side without knowledge of encryption boundaries
 - Encrypting each part individually creates multiple encrypted streams
 - When concatenated, the result is not a valid encrypted object
 - Gateway cannot decrypt such concatenated encrypted streams
 
-**Security Implications:**
-- Multipart upload data is stored **unencrypted** on S3 backend
-- Only single-part uploads receive encryption
-- `disable_multipart_uploads` option ensures all data is encrypted
-- Clear documentation warnings about this limitation
+ADR 0009 closes that limitation for opted-in buckets by introducing per-upload DEKs, deterministic IV derivation, Valkey-backed upload state, and a finalization manifest.
+
+**Current security implications:**
+- Buckets using ADR 0009 store multipart upload data encrypted end-to-end
+- Buckets that explicitly opt out retain the legacy plaintext MPU behavior
+- `disable_multipart_uploads` remains the fail-closed option for deployments that prefer no MPU path at all
 
 ### XML Parsing Security
 ```go

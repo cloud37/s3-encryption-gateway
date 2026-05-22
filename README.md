@@ -770,7 +770,7 @@ soak tests (MinIO, Garage, RustFS, SeaweedFS) and fails the job on
 
 ## Test Coverage
 
-The project enforces a **≥ 80% statement coverage gate** on every PR via
+The project enforces a **≥ 75% statement coverage gate** on every PR and push to
 `make coverage-gate`. Nightly mutation testing (Gremlins) runs on the
 critical non-crypto packages. See [`docs/COVERAGE.md`](docs/COVERAGE.md)
 for the exclusion policy, regeneration guide, and mutation testing scope.

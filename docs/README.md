@@ -17,12 +17,12 @@ This directory contains comprehensive documentation for the S3 Encryption Gatewa
 ## Architecture Decision Records (ADRs)
 
 - **[ADR 0001: Range Optimization Design](adr/0001-range-optimization-design.md)** - Design decisions for range-optimized decryption
-- **[ADR 0002: Multipart Upload Security Validation](adr/0002-multipart-upload-interoperability.md)** - Security validation and multipart upload limitations
+- **[ADR 0002: Multipart Upload Security Validation](adr/0002-multipart-upload-interoperability.md)** - XML validation and interoperability decisions for multipart uploads
 
 ## Diagrams
 
 - **[Range Optimization Flow](diagrams/range-optimization.svg)** - Visual explanation of range request optimization
-- **[Multipart Upload Flow](diagrams/multipart-upload-flow.svg)** - Security validation flow (note: multipart uploads are not encrypted)
+- **[Multipart Upload Flow](diagrams/multipart-upload-flow.svg)** - Multipart request validation flow; encryption behavior is documented in [ADR 0009](adr/0009-encrypted-multipart-uploads.md)
 
 ## Security & Operations
 
@@ -31,4 +31,3 @@ This directory contains comprehensive documentation for the S3 Encryption Gatewa
 ## Planning
 
 - **[ROADMAP.md](ROADMAP.md)** - Future improvements and milestones
-

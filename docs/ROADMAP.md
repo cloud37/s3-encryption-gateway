@@ -100,7 +100,7 @@ This roadmap outlines potential future improvements, grouped by milestones and t
 
 - Testing & Quality
   - ✅ Performance baseline per provider (V0.6-QA-1) — see [`docs/PERFORMANCE.md`](PERFORMANCE.md) and [`docs/plans/V0.6-QA-1-plan.md`](plans/V0.6-QA-1-plan.md).
-  - ✅ Coverage gate (≥80%) and mutation testing on critical crypto-free code (V0.6-QA-2) — see [`docs/COVERAGE.md`](COVERAGE.md).
+  - ✅ Coverage gate (≥75%) and mutation testing on critical crypto-free code (V0.6-QA-2) — see [`docs/COVERAGE.md`](COVERAGE.md).
 
 - Docs
   - Migration guide for enabling KMS mode from single-password mode.
@@ -151,5 +151,4 @@ This roadmap outlines potential future improvements, grouped by milestones and t
 
 - Semantic versioning with changelogs, upgrade notes, and migration guides.
 - Release artifacts: images (multi-arch), chart updates, docs site refresh.
-
 

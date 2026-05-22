@@ -733,7 +733,7 @@ func TestS3Gateway_EndToEnd(t *testing.T) {
 ```
 
 #### Test Coverage Requirements
-- **Unit tests**: 80%+ coverage for all packages
+- **Unit tests**: maintain the current 75%+ project coverage gate and raise it over time
 - **Integration tests**: Cover all major S3 operations
 - **Performance tests**: Benchmark encryption/decryption speeds
 - **Security tests**: Test encryption correctness and error handling

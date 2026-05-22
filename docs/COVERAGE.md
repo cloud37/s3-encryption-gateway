@@ -6,12 +6,12 @@ V0.6-QA-2.
 
 ## Gate threshold
 
-The project enforces **≥ 80% statement coverage** on every PR and on every push to
+The project enforces **≥ 75% statement coverage** on every PR and on every push to
 `main`. The gate is implemented in `scripts/coverage-gate.sh` and wired into the
 `coverage-gate` CI job in `.github/workflows/conformance.yml`.
 
 ```
-make coverage-gate            # default 80% threshold
+make coverage-gate            # default 75% threshold
 make coverage-gate COVERAGE_THRESHOLD=85   # override
 make coverage-html            # open HTML report after gate run
 ```
@@ -19,7 +19,7 @@ make coverage-html            # open HTML report after gate run
 The FIPS build profile is gated separately:
 
 ```
-make coverage-fips            # runs with -tags=fips; threshold = 80%
+make coverage-fips            # runs with -tags=fips; threshold = 75%
 ```
 
 ## Excluded packages

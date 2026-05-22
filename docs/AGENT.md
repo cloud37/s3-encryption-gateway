@@ -88,7 +88,7 @@ s3-encryption-gateway/
     -   Handle cancellation via Context.
 
 ## Testing Strategy
--   **Unit Tests**: Cover all exported functions (80%+ coverage target).
+-   **Unit Tests**: Cover exported functions well enough to sustain the current 75%+ project coverage gate.
 -   **Table-Driven**: Use for multiple inputs/cases.
 -   **Mocks**: Mock external dependencies (S3 backends) using interfaces.
 -   **Integration**: Test full flows (upload -> encrypt -> store -> retrieve -> decrypt).
@@ -121,4 +121,3 @@ type S3Backend interface {
     HeadObject(ctx context.Context, bucket, key string) (map[string]string, error)
 }
 ```
-

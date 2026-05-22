@@ -19,7 +19,7 @@ Tests are divided into three tiers. A test lives in **exactly one** tier.
 ├──────────────────────────────────────────────────────────────────┤
 │ Tier 2 — Conformance (multi-provider)                             │
 │ Build tag: conformance                                            │
-│ PR gate (MinIO only); nightly gate (all local providers).         │
+│ PR gate and main push both run all local providers.               │
 │ Budget: < 15 min.                                                 │
 ├──────────────────────────────────────────────────────────────────┤
 │ Tier 1 — Unit                                                     │
@@ -62,9 +62,6 @@ Requires Docker. Testcontainers-Go pulls and starts containers automatically;
 no `docker-compose up` is needed.
 
 ```bash
-# MinIO only (fastest — matches the PR gate).
-make test-conformance-minio
-
 # All local providers (MinIO + Garage + RustFS + SeaweedFS).
 make test-conformance-local
 
@@ -91,10 +88,10 @@ GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 make test-conformance-l
 ```bash
 # What the PR gate runs.
 make test
-make test-conformance-minio
+make test-conformance-local
 make test-isolation-check
 
-# What the main-push gate runs (adds Garage + RustFS + SeaweedFS).
+# What the main-push gate runs (same local provider suite).
 make test-comprehensive
 ```
 
@@ -259,12 +256,12 @@ Use capability bits. The `TestConformance_NoProviderNameLiterals` AST check in
 
 ## CI matrix
 
-| Trigger       | Tier 1 | MinIO conformance | Local conformance                    | External conformance | Tier 3 |
-|---------------|--------|-------------------|--------------------------------------|----------------------|--------|
-| PR            | ✅     | ✅                | –                                    | –                    | –      |
-| `main` push   | ✅     | ✅                | ✅ (Garage + RustFS + SeaweedFS)     | –                    | –      |
-| Nightly       | ✅     | ✅                | ✅ (all four local providers)        | ✅ (with creds)      | –      |
-| Release tag   | ✅     | ✅                | ✅                                   | ✅                   | ✅     |
+| Trigger       | Tier 1 | Local conformance                  | External conformance | Tier 3 |
+|---------------|--------|------------------------------------|----------------------|--------|
+| PR            | ✅     | ✅ (`make test-conformance-local`) | –                    | –      |
+| `main` push   | ✅     | ✅ (`make test-conformance-local`) | –                    | –      |
+| Nightly       | ✅     | ✅ (`make test-conformance-local`) | ✅ (with creds)      | –      |
+| Release tag   | ✅     | ✅ (`make test-conformance-local`) | ✅                   | ✅     |
 
 ---
 
