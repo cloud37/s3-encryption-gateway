@@ -16,9 +16,9 @@ const fallbackTestPassword = "fallback-test-password-long-enough"
 func makeFallbackKMs(t *testing.T) (primary crypto.KeyManager, password crypto.KeyManager) {
 	t.Helper()
 	// Use an in-memory (AES-KW) manager as the primary.
-	primary, err := crypto.NewPasswordKeyManager([]byte("primary-test-password-long-enough"), crypto.DefaultPBKDF2Iterations)
+	primary, err := crypto.NewPasswordKeyManager([]byte("primary-test-password-long-enough"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
-	password, err = crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.DefaultPBKDF2Iterations)
+	password, err = crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 	return primary, password
 }
@@ -52,9 +52,9 @@ func TestFallbackKeyManager_UnwrapFallback_OldPasswordEnvelope(t *testing.T) {
 	// cannot unwrap a DEK wrapped by the old password KM.
 	// We use two separate password KMs with different passwords to reproduce
 	// the "wrong key" scenario.
-	legacyPKM, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.DefaultPBKDF2Iterations)
+	legacyPKM, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
-	newPrimary, err := crypto.NewPasswordKeyManager([]byte("new-primary-password-long-enough"), crypto.DefaultPBKDF2Iterations)
+	newPrimary, err := crypto.NewPasswordKeyManager([]byte("new-primary-password-long-enough"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 
 	// Wrap the DEK with the *legacy* password KM (simulates old object).
@@ -81,9 +81,9 @@ func TestFallbackKeyManager_NoFallbackForNonPasswordProvider(t *testing.T) {
 	// Use two KMs with the same password so primary fails with ErrUnwrapFailed
 	// (wrong ciphertext), not a provider-mismatch, for a "password" envelope
 	// that was wrapped by a third KM.  Then use a non-"password" provider field.
-	primary, err := crypto.NewPasswordKeyManager([]byte("primary-test-password-long-enough"), crypto.DefaultPBKDF2Iterations)
+	primary, err := crypto.NewPasswordKeyManager([]byte("primary-test-password-long-enough"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
-	fallback, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.DefaultPBKDF2Iterations)
+	fallback, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 	fm := crypto.NewFallbackKeyManager(primary, fallback)
 
@@ -106,11 +106,11 @@ func TestFallbackKeyManager_NoFallbackForNonPasswordProvider(t *testing.T) {
 // primary and fallback fail for a "password" provider envelope.
 func TestFallbackKeyManager_BothFail(t *testing.T) {
 	// Both KMs use different passwords — neither can unwrap the other's envelope.
-	km1, err := crypto.NewPasswordKeyManager([]byte("password-one-long-enough-here"), crypto.DefaultPBKDF2Iterations)
+	km1, err := crypto.NewPasswordKeyManager([]byte("password-one-long-enough-here"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
-	km2, err := crypto.NewPasswordKeyManager([]byte("password-two-long-enough-here"), crypto.DefaultPBKDF2Iterations)
+	km2, err := crypto.NewPasswordKeyManager([]byte("password-two-long-enough-here"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
-	km3, err := crypto.NewPasswordKeyManager([]byte("password-thr-long-enough-here"), crypto.DefaultPBKDF2Iterations)
+	km3, err := crypto.NewPasswordKeyManager([]byte("password-thr-long-enough-here"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 
 	// Wrap with km3 — neither km1 nor km2 can unwrap it.
@@ -129,9 +129,9 @@ func TestFallbackKeyManager_BothFail(t *testing.T) {
 // delegates to the primary (not the fallback), so new objects are never
 // written with the legacy password wrapping.
 func TestFallbackKeyManager_WrapAlwaysPrimary(t *testing.T) {
-	primary, err := crypto.NewPasswordKeyManager([]byte("primary-test-password-long-enough"), crypto.DefaultPBKDF2Iterations)
+	primary, err := crypto.NewPasswordKeyManager([]byte("primary-test-password-long-enough"), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
-	fallback, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.DefaultPBKDF2Iterations)
+	fallback, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 
 	fm := crypto.NewFallbackKeyManager(primary, fallback)
@@ -190,7 +190,7 @@ func TestFallbackKeyManager_HealthCheck_PrimaryUnhealthy(t *testing.T) {
 	primaryAES, err := crypto.NewAESKEKManager(map[int][]byte{1: kek}, 1)
 	require.NoError(t, err)
 
-	fallbackPW, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.DefaultPBKDF2Iterations)
+	fallbackPW, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 
 	fm := crypto.NewFallbackKeyManager(primaryAES, fallbackPW)

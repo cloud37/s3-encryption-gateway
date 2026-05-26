@@ -83,7 +83,7 @@ func TestChunkedDecryptReader_Close(t *testing.T) {
 // ---- passwordKeyManager.Provider -------------------------------------------
 
 func TestPasswordKeyManager_Provider(t *testing.T) {
-	km, err := NewPasswordKeyManager([]byte("test-password-long-enough"), DefaultPBKDF2Iterations)
+	km, err := NewPasswordKeyManager([]byte("test-password-long-enough"), WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("NewPasswordKeyManager: %v", err)
 	}

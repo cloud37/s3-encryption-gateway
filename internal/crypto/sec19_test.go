@@ -41,7 +41,7 @@ func TestSEC19_EngineAcceptsByteSlicePassword(t *testing.T) {
 func TestSEC19_PasswordKeyManagerAcceptsByteSlicePassword(t *testing.T) {
 	pw := []byte("a-sufficiently-long-test-password")
 
-	km, err := NewPasswordKeyManager(pw, DefaultPBKDF2Iterations)
+	km, err := NewPasswordKeyManager(pw, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
 	require.NoError(t, err)
 	require.NotNil(t, km)
 
