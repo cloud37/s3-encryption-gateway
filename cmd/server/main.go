@@ -464,6 +464,19 @@ func main() {
 		logger.WithFields(logrus.Fields{
 			"provider": strings.ToLower(cfg.Encryption.KeyManager.Provider),
 		}).Info("External key manager initialized")
+
+		// Backwards-compatibility: if a password is also configured, wrap the
+		// primary KM in a FallbackKeyManager so that old MPU objects whose DEK
+		// was wrapped by the passwordKeyManager (provider="password") can still
+		// be decrypted. New objects are always wrapped by the primary KM.
+		if len(activePassword) > 0 {
+			pkm, pkmErr := crypto.NewPasswordKeyManager(activePassword, cfg.Encryption.KDF.PBKDF2.Iterations)
+			if pkmErr != nil {
+				logger.WithError(pkmErr).Fatal("Failed to initialize password fallback key manager")
+			}
+			keyManager = crypto.NewFallbackKeyManager(keyManager, pkm)
+			logger.Info("Password fallback key manager enabled for legacy MPU object decryption")
+		}
 	} else {
 		// Password-only mode: construct a PasswordKeyManager so that encrypted
 		// multipart uploads (EncryptMultipartUploads=true) can wrap per-upload
