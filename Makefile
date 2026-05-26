@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -225,6 +225,36 @@ bench-macro-seaweedfs:
 bench-baseline: bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs
 	@echo "bench-baseline: complete. Artefacts under docs/perf/v0.6-qa-1/."
 
+# benchmark-local — full local encryption benchmark matrix.
+#
+# Runs all 4 local providers (MinIO, Garage, RustFS, SeaweedFS) × 6 encryption
+# configurations:
+#   1. Password + PBKDF2 chunked
+#   2. Password + Argon2id chunked
+#   3. AES-256-GCM KEK envelope chunked
+#   4. RSA-OAEP KEK envelope chunked
+#   5. AES KEK + encrypted MPU (5 MiB default, 4 parts)
+#   6. AES KEK + ranged GET multi-chunk (200 KiB, 5 sub-ranges)
+#
+# Tuning via environment variables:
+#   BENCH_LOCAL_WORKERS=8            goroutines per config
+#   BENCH_LOCAL_DURATION=30s         test duration per config
+#   BENCH_LOCAL_OBJECT_SIZE=1048576  single-object size (bytes)
+#   BENCH_LOCAL_MPU_SIZE=5242880    per-part MPU size (bytes)
+#   BENCH_LOCAL_JSON_OUT=results.ndjson  NDJSON output file (optional;
+#                                         relative paths are resolved from
+#                                         the repository root)
+#
+# NOT run in CI (requires Docker + local provider containers).
+benchmark-local:
+	@echo "Starting local benchmark suite (all providers × all encryption configs)..."
+	@if [ -n "$$BENCH_LOCAL_JSON_OUT" ]; then \
+		export BENCH_LOCAL_JSON_OUT=$$(realpath "$$BENCH_LOCAL_JSON_OUT" 2>/dev/null || readlink -f "$$BENCH_LOCAL_JSON_OUT"); \
+		echo "  output file: $$BENCH_LOCAL_JSON_OUT"; \
+	fi; \
+	go test -count=1 -tags=conformance,benchmark_local -v -timeout 0 \
+		-run 'TestBenchmarkLocal' ./test/conformance/...
+
 # Run key rotation conformance tests (tier-2, all registered providers).
 test-rotation:
 	@echo "Running key rotation conformance tests (all registered providers)..."
@@ -425,6 +455,7 @@ help:
 	@echo "  bench-micro-baseline - Run micro benchmarks, write docs/perf/v0.6-qa-1/micro-baseline.txt"
 	@echo "  bench-macro-<prov>   - Run soak on one provider, write macro-<prov>.json (minio|garage|rustfs|seaweedfs)"
 	@echo "  bench-baseline     - Run micro + all four macros (full V0.6-QA-1 baseline)"
+	@echo "  benchmark-local    - Full local encryption benchmark matrix (4 providers × 6 configs)"
 	@echo "  test-rotation      - Run key rotation conformance tests (tier-2, all providers)"
 	@echo "  test-comprehensive - Run comprehensive test suite (tier-1 + local conformance + isolation check)"
 	@echo "  test-coverage      - Run tests with HTML coverage report"

@@ -114,6 +114,51 @@ make test-load-rustfs
 make test-load-seaweedfs
 ```
 
+### Local encryption benchmark matrix (`benchmark-local`)
+
+`make benchmark-local` runs every local provider (MinIO, Garage, RustFS,
+SeaweedFS) against the following six encryption configurations in sequence:
+
+| # | Config name                         | Key material          | Object / op         |
+|---|-------------------------------------|-----------------------|---------------------|
+| 1 | `Password_PBKDF2_Chunked`           | Password + PBKDF2     | 1 MiB PutObject     |
+| 2 | `Password_Argon2id_Chunked`         | Password + Argon2id   | 1 MiB PutObject     |
+| 3 | `AES256GCM_KEK_Chunked`             | AES-256-GCM KEK       | 1 MiB PutObject     |
+| 4 | `RSA_OAEP_KEK_Chunked`              | RSA-OAEP/SHA-256 KEK  | 1 MiB PutObject     |
+| 5 | `AES256GCM_KEK_EncryptedMPU_50MiB`  | AES-256-GCM KEK       | 4 × 50 MiB MPU      |
+| 6 | `AES256GCM_KEK_RangedGet_MultiChunk`| AES-256-GCM KEK       | 200 KiB 5 sub-ranges|
+
+Results are always printed via `t.Logf` (visible with `-v`). Optionally write
+NDJSON for programmatic comparison:
+
+```bash
+# Default: 8 workers, 30s per config.
+make benchmark-local
+
+# Custom: 16 workers, 2 min per config, save results.
+BENCH_LOCAL_WORKERS=16 BENCH_LOCAL_DURATION=2m \
+  BENCH_LOCAL_JSON_OUT=/tmp/bench-results.ndjson \
+  make benchmark-local
+
+# Run only one provider.
+GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 \
+  GATEWAY_TEST_SKIP_SEAWEEDFS=1 make benchmark-local
+```
+
+**Environment variables:**
+
+| Variable                  | Default     | Description                            |
+|---------------------------|-------------|----------------------------------------|
+| `BENCH_LOCAL_WORKERS`     | `8`         | Goroutines per config                  |
+| `BENCH_LOCAL_DURATION`    | `30s`       | Duration per config                    |
+| `BENCH_LOCAL_OBJECT_SIZE` | `1048576`   | PutObject payload size (bytes)         |
+| `BENCH_LOCAL_MPU_SIZE`    | `52428800`  | Per-part MPU size (bytes, default 50 MiB)|
+| `BENCH_LOCAL_JSON_OUT`    | *(empty)*   | NDJSON output file path (optional)     |
+
+This suite is **not run in CI** (requires Docker and takes several minutes per
+configuration). It is intended for manual performance verification and
+regression detection between versions.
+
 ---
 
 ## Capability bitmap reference

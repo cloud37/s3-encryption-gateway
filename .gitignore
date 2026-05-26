@@ -19,6 +19,9 @@ test/testdata/baselines/*.json
 coverage.out
 coverage.html
 
+# Benchmark output
+*.ndjson
+
 # Go workspace file
 go.work
 
