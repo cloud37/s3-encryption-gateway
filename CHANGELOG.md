@@ -100,6 +100,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   suite (unit, conformance, fuzz, integration). Wired as the default Helm
   KMS provider. See `docs/KMS_COMPATIBILITY.md` for configuration examples.
 
+  **Updated between rc1 and rc2**: The Helm `selfContained.aes.keys` value
+  was restructured from a flat composite string (`"1=env:VAR,2=env:VAR2"`) to
+  a list of typed entries. Each entry specifies a `version` and exactly one of
+  `value` (inline base64), `secretKeyRef`, or `configMapKeyRef`. The chart
+  synthesises `SELF_CONTAINED_AES_KEY_V{version}` env vars and the
+  `SELF_CONTAINED_AES_KEYS` composite string automatically. Kubernetes Secrets
+  synced from HashiCorp Vault or other secrets managers can now be referenced
+  directly without manual string composition:
+  ```yaml
+  selfContained:
+    aes:
+      keys:
+        - version: 1
+          secretKeyRef:
+            name: s3-gateway-master-key
+            key: master_key
+  ```
+
 - **`ENCRYPTION_MODES.md` guide**: new documentation page covering all
   supported encryption modes, KDF options, and provider-specific
   compatibility notes.
@@ -153,6 +171,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Dependencies
 
 - Updated `golang.org/x/crypto` to v0.52.0
+- Updated `aws-sdk-go-v2/config` to v1.32.18, `aws-sdk-go-v2/credentials` to v1.19.17, `aws-sdk-go-v2/service/ssooidc` to v1.36.0
 
 ## [0.8.0] — 2026-05-18
 
