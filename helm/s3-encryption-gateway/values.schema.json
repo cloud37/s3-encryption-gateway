@@ -539,6 +539,32 @@
 
   "$defs": {
 
+    "selfContainedAESKeyEntry": {
+      "type": "object",
+      "description": "One AES-256 KEK entry. Specify 'version' and exactly one of 'value', 'secretKeyRef', or 'configMapKeyRef'.",
+      "required": ["version"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Key version number (integer ≥ 1). Used to form SELF_CONTAINED_AES_KEY_V{version}."
+        },
+        "value": {
+          "type": "string",
+          "description": "Inline base64-encoded 32-byte AES-256 key (development/testing only — prefer secretKeyRef in production)."
+        },
+        "secretKeyRef": {
+          "$ref": "#/$defs/keyRef",
+          "description": "Reference to a Kubernetes Secret key holding the base64-encoded 32-byte AES-256 key."
+        },
+        "configMapKeyRef": {
+          "$ref": "#/$defs/keyRef",
+          "description": "Reference to a Kubernetes ConfigMap key holding the base64-encoded 32-byte AES-256 key (non-sensitive keys only)."
+        }
+      }
+    },
+
     "keyRef": {
       "type": "object",
       "required": ["name", "key"],
@@ -957,7 +983,11 @@
                       "additionalProperties": false,
                       "properties": {
                         "activeVersion": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Active key version for wrapping new DEKs. Set via SELF_CONTAINED_AES_ACTIVE_VERSION." },
-                        "keys":          { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Comma-separated key entries (format: version=source[,version=source]). Set via SELF_CONTAINED_AES_KEYS." }
+                        "keys": {
+                          "type": "array",
+                          "description": "List of AES-256 KEK entries. The chart synthesises SELF_CONTAINED_AES_KEY_V{version} env vars and the SELF_CONTAINED_AES_KEYS composite string automatically. Leave empty ([]) when not using the aes provider.",
+                          "items": { "$ref": "#/$defs/selfContainedAESKeyEntry" }
+                        }
                       }
                     }
                   }

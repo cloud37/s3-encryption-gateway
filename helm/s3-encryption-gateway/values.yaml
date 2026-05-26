@@ -385,18 +385,33 @@ config:
             #     name: s3-encryption-gateway-config
             #     key: self-contained-aes-active-version
           keys:
-            # Comma-separated list of AES-256 key entries in "version=source" format.
-            # Supports the same resolver prefixes as the RSA privateKeySource:
-            #   env:VAR   — base64-encoded 32-byte key stored in an env var
-            #   base64:DATA — inline base64-encoded 32-byte key
-            #   file:PATH — path to a file containing a base64-encoded 32-byte key
-            # Example (two versions for rotation):
-            #   "1=env:AES_KEK_V1,2=env:AES_KEK_V2"
-            value: ""
-            # valueFrom:
-            #   secretKeyRef:
-            #     name: s3-encryption-gateway-secrets
-            #     key: self-contained-aes-keys
+            # List of AES-256 key entries. Each entry specifies a version and exactly one
+            # key source: an inline base64-encoded value, a secretKeyRef (recommended for
+            # keys synced from HashiCorp Vault or another secrets manager), or a
+            # configMapKeyRef. The Helm chart synthesises one env var per entry
+            # (SELF_CONTAINED_AES_KEY_V{version}) and assembles SELF_CONTAINED_AES_KEYS
+            # automatically — you never need to compose that string manually.
+            #
+            # Example — single key from a Vault-synced Kubernetes Secret:
+            #   - version: 1
+            #     secretKeyRef:
+            #       name: s3-gateway-master-key
+            #       key: master_key
+            #
+            # Example — inline base64 key (development/testing only):
+            #   - version: 1
+            #     value: "pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o="
+            #
+            # Example — two-version rotation (old key still decrypts, new key wraps):
+            #   - version: 1
+            #     secretKeyRef:
+            #       name: s3-gateway-master-key
+            #       key: master_key_v1
+            #   - version: 2
+            #     secretKeyRef:
+            #       name: s3-gateway-master-key
+            #       key: master_key_v2
+            []
 
     kdf:
       # KDF algorithm: "pbkdf2-sha256" (default, FIPS-compatible) or "argon2id" (V1.0-CRYPTO-1).

@@ -1,0 +1,20 @@
+# good-keymanager-selfcontained-aes.yaml — I5 satisfied: keyManager enabled with valid
+# self_contained/aes provider using the structured aes.keys list (secretKeyRef entry).
+config:
+  encryption:
+    keyManager:
+      enabled:
+        value: "true"
+      provider:
+        value: "self_contained"
+      selfContained:
+        type:
+          value: "aes"
+        aes:
+          activeVersion:
+            value: "1"
+          keys:
+            - version: 1
+              secretKeyRef:
+                name: s3-gateway-master-key
+                key: master_key

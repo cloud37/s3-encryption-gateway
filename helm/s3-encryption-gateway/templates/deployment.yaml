@@ -149,8 +149,32 @@ spec:
         {{- if or .Values.config.encryption.keyManager.selfContained.aes.activeVersion.value .Values.config.encryption.keyManager.selfContained.aes.activeVersion.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_AES_ACTIVE_VERSION" "value" .Values.config.encryption.keyManager.selfContained.aes.activeVersion.value "valueFrom" .Values.config.encryption.keyManager.selfContained.aes.activeVersion.valueFrom) | nindent 8 }}
         {{- end }}
-        {{- if or .Values.config.encryption.keyManager.selfContained.aes.keys.value .Values.config.encryption.keyManager.selfContained.aes.keys.valueFrom }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "SELF_CONTAINED_AES_KEYS" "value" .Values.config.encryption.keyManager.selfContained.aes.keys.value "valueFrom" .Values.config.encryption.keyManager.selfContained.aes.keys.valueFrom) | nindent 8 }}
+        {{- $aesKeys := .Values.config.encryption.keyManager.selfContained.aes.keys }}
+        {{- if $aesKeys }}
+        {{- $keyParts := list }}
+        {{- range $aesKeys }}
+        {{- $ver := int .version }}
+        {{- $envVarName := printf "SELF_CONTAINED_AES_KEY_V%d" $ver }}
+        {{- if .value }}
+        - name: {{ $envVarName }}
+          value: {{ .value | quote }}
+        {{- else if .secretKeyRef }}
+        - name: {{ $envVarName }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .secretKeyRef.name | quote }}
+              key: {{ .secretKeyRef.key | quote }}
+        {{- else if .configMapKeyRef }}
+        - name: {{ $envVarName }}
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .configMapKeyRef.name | quote }}
+              key: {{ .configMapKeyRef.key | quote }}
+        {{- end }}
+        {{- $keyParts = append $keyParts (printf "%d=env:%s" $ver $envVarName) }}
+        {{- end }}
+        - name: SELF_CONTAINED_AES_KEYS
+          value: {{ join "," $keyParts | quote }}
         {{- end }}
         {{- end }}
         {{- end }}
