@@ -227,6 +227,104 @@ func testSelfContained_RSA_EnvelopeRoundTrip(t *testing.T, inst provider.Instanc
 	}
 }
 
+// testSelfContained_AES_RangedGet_LargeChunked verifies byte-range reads on a
+// multi-chunk object encrypted with an AES-256-GCM KEK.
+//
+// The object is 200 KiB (> 3× the 64 KiB default chunk size) so multiple
+// chunked-AEAD blocks are exercised. Five sub-ranges are tested:
+//   - a range within the first chunk
+//   - a range crossing the first/second chunk boundary
+//   - a range entirely within the second chunk
+//   - a range crossing the second/third chunk boundary
+//   - a range that spans all three chunks
+func testSelfContained_AES_RangedGet_LargeChunked(t *testing.T, inst provider.Instance) {
+	t.Helper()
+
+	const objSize = 200 * 1024 // 200 KiB — spans 3 × 64 KiB chunks
+
+	// Fill with a non-repeating pattern so any mis-alignment is immediately visible.
+	plaintext := make([]byte, objSize)
+	for i := range plaintext {
+		plaintext[i] = byte(i & 0xFF)
+	}
+
+	km := makeAESKEKManager(t)
+	gw := harness.StartGateway(t, inst, harness.WithKeyManager(km))
+
+	key := uniqueKey(t)
+	put(t, gw, inst.Bucket, key, plaintext)
+
+	const chunkSize = 64 * 1024 // default chunk boundary
+
+	rangeTests := []struct {
+		name       string
+		start, end int64
+	}{
+		{"within-chunk-1", 0, 1023},
+		{"cross-chunk-1-2", int64(chunkSize - 512), int64(chunkSize + 511)},
+		{"within-chunk-2", int64(chunkSize), int64(2*chunkSize - 1)},
+		{"cross-chunk-2-3", int64(2*chunkSize - 256), int64(2*chunkSize + 255)},
+		{"span-all-chunks", 0, int64(objSize - 1)},
+	}
+
+	for _, rt := range rangeTests {
+		rt := rt
+		t.Run(rt.name, func(t *testing.T) {
+			got := getRange(t, gw, inst.Bucket, key, rt.start, rt.end)
+			want := plaintext[rt.start : rt.end+1]
+			if !bytes.Equal(got, want) {
+				t.Errorf("AES ranged-get [%d-%d]: got %d bytes, want %d bytes (content mismatch)",
+					rt.start, rt.end, len(got), len(want))
+			}
+		})
+	}
+}
+
+// testSelfContained_RSA_RangedGet verifies byte-range reads on an object
+// encrypted with an RSA-OAEP/SHA-256 KEK.
+//
+// Uses a 200 KiB object to exercise multiple chunks. Three sub-ranges are
+// tested to cover intra-chunk and cross-chunk cases.
+func testSelfContained_RSA_RangedGet(t *testing.T, inst provider.Instance) {
+	t.Helper()
+
+	const objSize = 200 * 1024
+
+	plaintext := make([]byte, objSize)
+	for i := range plaintext {
+		plaintext[i] = byte((i * 7) & 0xFF)
+	}
+
+	km := makeRSAKEKManager(t)
+	gw := harness.StartGateway(t, inst, harness.WithKeyManager(km))
+
+	key := uniqueKey(t)
+	put(t, gw, inst.Bucket, key, plaintext)
+
+	const chunkSize = 64 * 1024
+
+	rangeTests := []struct {
+		name       string
+		start, end int64
+	}{
+		{"first-512-bytes", 0, 511},
+		{"cross-chunk-1-2", int64(chunkSize - 128), int64(chunkSize + 127)},
+		{"last-512-bytes", int64(objSize - 512), int64(objSize - 1)},
+	}
+
+	for _, rt := range rangeTests {
+		rt := rt
+		t.Run(rt.name, func(t *testing.T) {
+			got := getRange(t, gw, inst.Bucket, key, rt.start, rt.end)
+			want := plaintext[rt.start : rt.end+1]
+			if !bytes.Equal(got, want) {
+				t.Errorf("RSA ranged-get [%d-%d]: got %d bytes, want %d bytes (content mismatch)",
+					rt.start, rt.end, len(got), len(want))
+			}
+		})
+	}
+}
+
 // testSelfContained_RSA_AtRest verifies that objects encrypted via the RSA KEK
 // are stored as ciphertext on the backend (not readable in cleartext):
 //

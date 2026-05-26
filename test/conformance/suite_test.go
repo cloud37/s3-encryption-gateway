@@ -136,8 +136,19 @@ func TestConformance(t *testing.T) {
 			{"SelfContained_AES_EnvelopeRoundTrip", 0, testSelfContained_AES_EnvelopeRoundTrip},
 			{"SelfContained_AES_AtRest", 0, testSelfContained_AES_AtRest},
 			{"SelfContained_AES_Rotation_DualRead", 0, testSelfContained_AES_Rotation_DualRead},
+			{"SelfContained_AES_RangedGet_LargeChunked", 0, testSelfContained_AES_RangedGet_LargeChunked},
 			{"SelfContained_RSA_EnvelopeRoundTrip", 0, testSelfContained_RSA_EnvelopeRoundTrip},
 			{"SelfContained_RSA_AtRest", 0, testSelfContained_RSA_AtRest},
+			{"SelfContained_RSA_RangedGet", 0, testSelfContained_RSA_RangedGet},
+
+			// Self-contained KEK + encrypted MPU (Gap 1 & 2: AES KEK with MPU).
+			// Requires Docker for a Valkey container (MPU state store).
+			{"SelfContained_AES_EncryptedMPU_RoundTrip", provider.CapEncryptedMPU, testSelfContained_AES_EncryptedMPU_RoundTrip},
+			{"SelfContained_AES_EncryptedMPU_RangedGet", provider.CapEncryptedMPU, testSelfContained_AES_EncryptedMPU_RangedGet},
+			{"SelfContained_AES_EncryptedMPU_AtRest", provider.CapEncryptedMPU, testSelfContained_AES_EncryptedMPU_AtRest},
+			{"SelfContained_AES_Rotation_EncryptedMPU", provider.CapEncryptedMPU, testSelfContained_AES_Rotation_EncryptedMPU},
+			// Gap 4: FallbackKeyManager end-to-end upgrade scenario.
+			{"FallbackKeyManager_EncryptedMPU_LegacyUpgrade", provider.CapEncryptedMPU, testFallbackKeyManager_EncryptedMPU_LegacyUpgrade},
 
 			// In-process load tests (range concurrency + multipart throughput).
 			// Only run against local providers (MinIO, Garage) where per-request
