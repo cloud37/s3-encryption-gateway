@@ -254,7 +254,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	// When encrypted MPU is active a KeyManager is required for DEK wrap/unwrap.
 	// Default to the password-derived KeyManager if none was supplied.
 	if o.mpuStore != nil && o.keyManager == nil {
-		km, kmErr := crypto.NewPasswordKeyManager([]byte(o.encryptionPassword), crypto.DefaultPBKDF2Iterations)
+		km, kmErr := crypto.NewPasswordKeyManager([]byte(o.encryptionPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 		if kmErr != nil {
 			listener.Close()
 			t.Fatalf("harness.StartGateway: create password KeyManager: %v", kmErr)

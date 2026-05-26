@@ -451,6 +451,20 @@ func main() {
 	activePassword := make([]byte, len(encryptionPassword))
 	copy(activePassword, encryptionPassword)
 	zeroBytes(encryptionPassword)
+
+	var pkmOpts []crypto.PasswordKMOption
+	if cfg.Encryption.KDF.Algorithm == string(crypto.KDFAlgArgon2id) {
+		pkmOpts = append(pkmOpts, crypto.WithPasswordKMArgon2id(
+			cfg.Encryption.KDF.Argon2id.Time,
+			cfg.Encryption.KDF.Argon2id.Memory,
+			cfg.Encryption.KDF.Argon2id.Threads,
+		))
+	} else {
+		pkmOpts = append(pkmOpts, crypto.WithPasswordKMPBKDF2(
+			cfg.Encryption.KDF.PBKDF2.Iterations,
+		))
+	}
+
 	if cfg.Encryption.KeyManager.Enabled {
 		keyManager, err = api.BuildKeyManager(&cfg.Encryption.KeyManager, logger)
 		if err != nil {
@@ -470,24 +484,28 @@ func main() {
 		// was wrapped by the passwordKeyManager (provider="password") can still
 		// be decrypted. New objects are always wrapped by the primary KM.
 		if len(activePassword) > 0 {
-			pkm, pkmErr := crypto.NewPasswordKeyManager(activePassword, cfg.Encryption.KDF.PBKDF2.Iterations)
+			pkm, pkmErr := crypto.NewPasswordKeyManager(activePassword, pkmOpts...)
 			if pkmErr != nil {
 				logger.WithError(pkmErr).Fatal("Failed to initialize password fallback key manager")
 			}
 			keyManager = crypto.NewFallbackKeyManager(keyManager, pkm)
-			logger.Info("Password fallback key manager enabled for legacy MPU object decryption")
+			logger.WithFields(logrus.Fields{
+				"kdf_algorithm": cfg.Encryption.KDF.Algorithm,
+			}).Info("Password fallback key manager enabled for legacy MPU object decryption")
 		}
 	} else {
 		// Password-only mode: construct a PasswordKeyManager so that encrypted
 		// multipart uploads (EncryptMultipartUploads=true) can wrap per-upload
-		// DEKs with PBKDF2+AES-256-GCM instead of storing them in plaintext.
+		// DEKs with the configured KDF (PBKDF2 or Argon2id).
 		// This provides equivalent confidentiality to single-PUT chunked encryption.
-		pkm, pkmErr := crypto.NewPasswordKeyManager(activePassword, cfg.Encryption.KDF.PBKDF2.Iterations)
+		pkm, pkmErr := crypto.NewPasswordKeyManager(activePassword, pkmOpts...)
 		if pkmErr != nil {
 			logger.WithError(pkmErr).Fatal("Failed to initialize password key manager")
 		}
 		keyManager = pkm
-		logger.Info("Using single password mode (no key rotation); PasswordKeyManager active for MPU DEK wrapping")
+		logger.WithFields(logrus.Fields{
+			"kdf_algorithm": cfg.Encryption.KDF.Algorithm,
+		}).Info("Using single password mode (no key rotation); PasswordKeyManager active for MPU DEK wrapping")
 	}
 
 	// Initialize compression engine if enabled
