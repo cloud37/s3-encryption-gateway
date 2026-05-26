@@ -63,6 +63,8 @@ func BuildKeyManager(cfg *config.KeyManagerConfig, logger *logrus.Logger) (crypt
 		return crypto.Open(context.Background(), "memory", memoryCfg)
 	case "hsm":
 		return crypto.Open(context.Background(), "hsm", map[string]any{})
+	case "self_contained":
+		return buildSelfContainedKeyManager(cfg)
 	default:
 		// Attempt generic registry lookup for third-party adapters.
 		km, err := crypto.Open(context.Background(), provider, map[string]any{})
@@ -76,6 +78,36 @@ func BuildKeyManager(cfg *config.KeyManagerConfig, logger *logrus.Logger) (crypt
 // buildCosmianOptions constructs a crypto.CosmianKMIPOptions struct from the
 // typed configuration. It performs the same validation as the previous
 // newCosmianKeyManager helper.
+// buildSelfContainedKeyManager constructs the cfg map expected by the
+// selfContainedFactory from the typed [config.KeyManagerConfig.SelfContained]
+// fields and calls [crypto.Open].
+func buildSelfContainedKeyManager(kmCfg *config.KeyManagerConfig) (crypto.KeyManager, error) {
+	sc := kmCfg.SelfContained
+	scCfg := map[string]any{
+		"type": sc.Type,
+	}
+
+	switch strings.ToLower(sc.Type) {
+	case "aes":
+		keys := make([]any, 0, len(sc.AES.Keys))
+		for _, k := range sc.AES.Keys {
+			keys = append(keys, map[string]any{
+				"version":    k.Version,
+				"key_source": k.KeySource,
+			})
+		}
+		scCfg["keys"] = keys
+		if sc.AES.ActiveVersion != 0 {
+			scCfg["active_version"] = sc.AES.ActiveVersion
+		}
+	case "rsa":
+		scCfg["private_key_source"] = sc.RSA.PrivateKeySource
+		scCfg["key_version"] = sc.RSA.KeyVersion
+	}
+
+	return crypto.Open(context.Background(), "self_contained", scCfg)
+}
+
 func buildCosmianOptions(kmCfg *config.KeyManagerConfig) (crypto.CosmianKMIPOptions, error) {
 	if kmCfg.Cosmian.Endpoint == "" {
 		return crypto.CosmianKMIPOptions{}, fmt.Errorf("cosmian.key_manager.endpoint is required")

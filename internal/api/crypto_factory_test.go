@@ -156,6 +156,50 @@ func TestBuildKeyManager_UnknownProvider(t *testing.T) {
 	}
 }
 
+// TestBuildKeyManager_SelfContainedAES verifies that the self_contained
+// provider with an AES inline key builds a KeyManager without error.
+func TestBuildKeyManager_SelfContainedAES(t *testing.T) {
+	// 32-byte base64-encoded key (non-zero, valid for AES-256)
+	const testKey = "base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o="
+
+	cfg := &config.KeyManagerConfig{
+		Provider: "self_contained",
+		SelfContained: config.SelfContainedKMConfig{
+			Type: "aes",
+			AES: config.SelfContainedAESConfig{
+				Keys: []config.SelfContainedAESKeyEntry{
+					{Version: 1, KeySource: testKey},
+				},
+				ActiveVersion: 1,
+			},
+		},
+	}
+
+	km, err := BuildKeyManager(cfg, testFactoryLogger())
+	if err != nil {
+		t.Fatalf("BuildKeyManager(self_contained/aes) error: %v", err)
+	}
+	if km == nil {
+		t.Fatal("BuildKeyManager(self_contained/aes) returned nil KeyManager")
+	}
+}
+
+// TestBuildKeyManager_SelfContainedMissingType verifies that the self_contained
+// provider returns an error when the type field is empty.
+func TestBuildKeyManager_SelfContainedMissingType(t *testing.T) {
+	cfg := &config.KeyManagerConfig{
+		Provider: "self_contained",
+		SelfContained: config.SelfContainedKMConfig{
+			Type: "", // missing
+		},
+	}
+
+	_, err := BuildKeyManager(cfg, testFactoryLogger())
+	if err == nil {
+		t.Fatal("BuildKeyManager(self_contained) with no type expected error, got nil")
+	}
+}
+
 // TestBuildCosmianTLSConfig_Basic verifies that buildCosmianTLSConfig
 // with no certificates returns a minimal TLS config.
 func TestBuildCosmianTLSConfig_Basic(t *testing.T) {
