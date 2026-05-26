@@ -3,6 +3,8 @@ package crypto
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"io"
 	"testing"
 )
@@ -974,5 +976,130 @@ func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
 	}
 	if !bytes.Equal(decData, data) {
 		t.Errorf("non-chunked round-trip mismatch: got %q, want %q", decData, data)
+	}
+}
+
+// TestEngine_Decrypt_WithAESKEKManager verifies that engine.Encrypt / engine.Decrypt
+// correctly use the AES-256-GCM envelope key manager path:
+//
+//  1. Build an AESKEKManager from a random 32-byte KEK.
+//  2. Wire it into the engine via WithKeyManager.
+//  3. Encrypt a payload — the engine must generate a fresh DEK, wrap it with
+//     the AES KEK, and store the wrapped ciphertext in the returned metadata.
+//  4. Decrypt using the same engine — the engine unwraps the DEK and recovers
+//     the plaintext.
+//  5. Assert byte-perfect round-trip and that the wrapped key metadata is present.
+func TestEngine_Decrypt_WithAESKEKManager(t *testing.T) {
+	kek := make([]byte, 32)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatalf("rand.Read kek: %v", err)
+	}
+	km, err := NewAESKEKManager(map[int][]byte{1: kek}, 1)
+	if err != nil {
+		t.Fatalf("NewAESKEKManager: %v", err)
+	}
+	defer km.Close(context.Background()) //nolint:errcheck
+
+	eng, err := NewEngineWithOpts(
+		[]byte("engine-aes-kek-test-password"),
+		nil,
+		WithKeyManager(km),
+	)
+	if err != nil {
+		t.Fatalf("NewEngineWithOpts: %v", err)
+	}
+
+	data := bytes.Repeat([]byte("aes-kek-engine-test"), 512) // ~9 KiB
+
+	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll encrypted: %v", err)
+	}
+
+	// The wrapped key must be present in the metadata.
+	if encMeta[MetaWrappedKeyCiphertext] == "" {
+		t.Error("Encrypt with AES KEK: MetaWrappedKeyCiphertext is absent from metadata")
+	}
+	if encMeta[MetaKMSKeyID] == "" {
+		t.Error("Encrypt with AES KEK: MetaKMSKeyID is absent from metadata")
+	}
+
+	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	decData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll decrypted: %v", err)
+	}
+	if !bytes.Equal(decData, data) {
+		t.Errorf("AES KEK engine round-trip mismatch: got %d bytes, want %d bytes",
+			len(decData), len(data))
+	}
+}
+
+// TestEngine_Decrypt_WithRSAKEKManager verifies that engine.Encrypt / engine.Decrypt
+// correctly use the RSA-OAEP/SHA-256 envelope key manager path:
+//
+//  1. Generate a 2048-bit RSA key pair.
+//  2. Build an RSAKEKManager and wire it into the engine via WithKeyManager.
+//  3. Encrypt a payload — the engine generates a fresh DEK, wraps it with
+//     RSA-OAEP, and stores the ciphertext in metadata.
+//  4. Decrypt using the same engine.
+//  5. Assert byte-perfect round-trip and that the wrapped key metadata is present.
+func TestEngine_Decrypt_WithRSAKEKManager(t *testing.T) {
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	km, err := NewRSAKEKManager(privKey, 1)
+	if err != nil {
+		t.Fatalf("NewRSAKEKManager: %v", err)
+	}
+	defer km.Close(context.Background()) //nolint:errcheck
+
+	eng, err := NewEngineWithOpts(
+		[]byte("engine-rsa-kek-test-password"),
+		nil,
+		WithKeyManager(km),
+	)
+	if err != nil {
+		t.Fatalf("NewEngineWithOpts: %v", err)
+	}
+
+	data := bytes.Repeat([]byte("rsa-kek-engine-test"), 256) // ~4.5 KiB
+
+	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	encData, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll encrypted: %v", err)
+	}
+
+	// The wrapped key must be present in the metadata.
+	if encMeta[MetaWrappedKeyCiphertext] == "" {
+		t.Error("Encrypt with RSA KEK: MetaWrappedKeyCiphertext is absent from metadata")
+	}
+	if encMeta[MetaKMSKeyID] == "" {
+		t.Error("Encrypt with RSA KEK: MetaKMSKeyID is absent from metadata")
+	}
+
+	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	decData, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll decrypted: %v", err)
+	}
+	if !bytes.Equal(decData, data) {
+		t.Errorf("RSA KEK engine round-trip mismatch: got %d bytes, want %d bytes",
+			len(decData), len(data))
 	}
 }

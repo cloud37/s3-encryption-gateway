@@ -167,3 +167,48 @@ func TestFallbackKeyManager_Close(t *testing.T) {
 	_, err = fm.WrapKey(context.Background(), make([]byte, 32), nil)
 	assert.ErrorIs(t, err, crypto.ErrProviderUnavailable)
 }
+
+// TestFallbackKeyManager_HealthCheck_PrimaryUnhealthy verifies the behaviour
+// when the primary key manager is closed (unhealthy) while the fallback is
+// still healthy:
+//
+//   - HealthCheck must propagate the primary's error (FallbackKeyManager
+//     delegates HealthCheck to the primary only — the fallback is a local,
+//     in-memory operation that does not require an independent health check).
+//   - ActiveKeyVersion must also propagate the primary's error.
+//
+// This test uses AESKEKManager (self-contained) as the primary because it
+// returns ErrProviderUnavailable on any call after Close, which gives us a
+// reliable "unhealthy primary" without relying on network connectivity.
+func TestFallbackKeyManager_HealthCheck_PrimaryUnhealthy(t *testing.T) {
+	ctx := context.Background()
+
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 100)
+	}
+	primaryAES, err := crypto.NewAESKEKManager(map[int][]byte{1: kek}, 1)
+	require.NoError(t, err)
+
+	fallbackPW, err := crypto.NewPasswordKeyManager([]byte(fallbackTestPassword), crypto.DefaultPBKDF2Iterations)
+	require.NoError(t, err)
+
+	fm := crypto.NewFallbackKeyManager(primaryAES, fallbackPW)
+
+	// Sanity: HealthCheck must pass before closing.
+	require.NoError(t, fm.HealthCheck(ctx), "HealthCheck must pass before primary is closed")
+
+	// Close the primary — it is now unhealthy.
+	require.NoError(t, primaryAES.Close(ctx))
+
+	// HealthCheck must now return an error (ErrProviderUnavailable from the AES KM).
+	err = fm.HealthCheck(ctx)
+	assert.Error(t, err, "HealthCheck must fail when the primary is closed")
+	assert.ErrorIs(t, err, crypto.ErrProviderUnavailable,
+		"HealthCheck error must wrap ErrProviderUnavailable from the closed AES primary")
+
+	// ActiveKeyVersion must also propagate the primary's error.
+	_, err = fm.ActiveKeyVersion(ctx)
+	assert.Error(t, err, "ActiveKeyVersion must fail when the primary is closed")
+	assert.ErrorIs(t, err, crypto.ErrProviderUnavailable)
+}
