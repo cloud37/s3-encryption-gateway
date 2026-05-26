@@ -429,7 +429,7 @@ docker run -p 8080:8080 \
   -e ENCRYPTION_PASSWORD="your-password" \
   -e GW_ACCESS_KEY_1="gateway-access-key" \
   -e GW_SECRET_KEY_1="gateway-secret-key" \
-  cloud37io/s3-encryption-gateway:0.9.0-rc1
+  cloud37io/s3-encryption-gateway:0.9.0-rc2
 ```
 
 > **Authentication is required.** As of v0.8, every request must include valid AWS Signature V4 or V2 credentials matching an entry in `auth.credentials`. Unauthenticated requests will receive `AccessDenied`.
