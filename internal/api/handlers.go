@@ -1133,22 +1133,30 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	var decMetadata map[string]string
 
 	if useRangeOptimization && engine.IsEncrypted(metadata) {
-		// Use range-optimized decryption (only decrypts needed chunks)
-		// Access the concrete engine type for DecryptRange method
-		// This is safe because we know it's chunked format
+		// Use range-optimized decryption (only decrypts needed chunks).
+		// The source reader is already positioned at the correct encrypted
+		// byte range (backendRange was applied), so we need the variant
+		// that does NOT skip leading chunks.
 		if eng, ok := engine.(interface {
-			DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
+			DecryptRangeOptimized(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
 		}); ok {
-			decryptedReader, decMetadata, err = eng.DecryptRange(r.Context(), reader, metadata, plaintextStart, plaintextEnd)
+			decryptedReader, decMetadata, err = eng.DecryptRangeOptimized(r.Context(), reader, metadata, plaintextStart, plaintextEnd)
 			if err != nil {
-				h.logger.WithError(err).Warn("Range optimization failed, falling back to full decrypt")
-				// Fall back to full decryption
-				decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), reader, metadata)
-				useRangeOptimization = false
+				h.logger.WithError(err).Error("Range-optimized decryption failed")
+				h.metrics.RecordEncryptionError(r.Context(), "decrypt", "range_optimized_decryption_failed")
+				s3Err := &S3Error{
+					Code:       "InternalError",
+					Message:    "Failed to decrypt object",
+					Resource:   r.URL.Path,
+					HTTPStatus: http.StatusInternalServerError,
+				}
+				s3Err.WriteXML(w)
+				h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+				return
 			}
 		} else {
-			// Engine doesn't support DecryptRange, fall back
-			h.logger.Warn("Engine doesn't support DecryptRange, falling back to full decrypt")
+			// Engine doesn't support DecryptRangeOptimized, fall back
+			h.logger.Warn("Engine doesn't support DecryptRangeOptimized, falling back to full decrypt")
 			decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), reader, metadata)
 			useRangeOptimization = false
 		}

@@ -1432,7 +1432,22 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 
 // DecryptRange decrypts only the chunks needed for a specific plaintext range.
 // This optimizes range requests by decrypting only necessary chunks.
+// The source reader must contain the FULL encrypted object starting at chunk 0.
 func (e *engine) DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error) {
+	return e.decryptRange(ctx, reader, metadata, plaintextStart, plaintextEnd, false)
+}
+
+// DecryptRangeOptimized is like DecryptRange but assumes the source reader
+// already begins at the first encrypted chunk required by the range (i.e.
+// the caller has already translated the plaintext range to a ciphertext
+// range and fetched only those bytes from the backend). The reader will
+// NOT skip leading chunks.
+func (e *engine) DecryptRangeOptimized(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error) {
+	return e.decryptRange(ctx, reader, metadata, plaintextStart, plaintextEnd, true)
+}
+
+// decryptRange is the shared implementation for DecryptRange and DecryptRangeOptimized.
+func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64, isOptimizedSource bool) (io.Reader, map[string]string, error) {
 	if !e.IsEncrypted(metadata) {
 		return nil, nil, fmt.Errorf("object is not encrypted")
 	}
@@ -1570,7 +1585,7 @@ func (e *engine) DecryptRange(ctx context.Context, reader io.Reader, metadata ma
 	aead := aeadCipher.(cipher.AEAD)
 
 	// Create range-aware decrypt reader
-	rangeReader, err := newRangeDecryptReader(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool)
+	rangeReader, err := newRangeDecryptReader(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool, isOptimizedSource)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create range reader: %w", err)
 	}

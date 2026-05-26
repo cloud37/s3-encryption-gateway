@@ -33,6 +33,9 @@ type rangeDecryptReader struct {
 }
 
 // newRangeDecryptReader creates a decryption reader that only decrypts chunks needed for a range.
+// If isOptimizedSource is true, the caller has already positioned the source at the first
+// encrypted chunk; otherwise the reader is expected to start at chunk 0 and will be
+// seeked forward by discarding startChunk*encryptedChunkSize bytes.
 func newRangeDecryptReader(
 	source io.Reader,
 	aead cipher.AEAD,
@@ -40,6 +43,7 @@ func newRangeDecryptReader(
 	baseIV []byte,
 	plaintextStart, plaintextEnd int64,
 	bufferPool *BufferPool,
+	isOptimizedSource bool,
 ) (*rangeDecryptReader, error) {
 	// Calculate which chunks we need
 	startChunk, endChunk, startOffset, endOffset := calculateChunkRangeFromPlaintext(
@@ -54,9 +58,12 @@ func newRangeDecryptReader(
 		return nil, fmt.Errorf("invalid chunk range: %d-%d (total chunks: %d)", startChunk, endChunk, manifest.ChunkCount)
 	}
 
-	// Assume source contains full encrypted object (for backward compatibility)
-	// Skip to startChunk if needed
-	if startChunk > 0 {
+	// For non-optimized sources the reader starts at chunk 0; skip forward to
+	// the first chunk we actually need.  When the caller has already applied a
+	// backend byte-range (isOptimizedSource == true) the reader is already
+	// positioned at startChunk and skipping would read past the start of the
+	// partial stream.
+	if !isOptimizedSource && startChunk > 0 {
 		encryptedChunkSize := manifest.ChunkSize + tagSize
 		skipBytes := int64(startChunk) * int64(encryptedChunkSize)
 		skipped, err := io.CopyN(io.Discard, source, skipBytes)
@@ -90,7 +97,7 @@ func newRangeDecryptReader(
 		bufferPool:         bufferPool,
 		closed:             false,
 		err:                nil,
-		isOptimized:        false, // Assume not optimized for backward compatibility
+		isOptimized:        isOptimizedSource,
 	}, nil
 }
 
