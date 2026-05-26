@@ -117,16 +117,20 @@ make test-load-seaweedfs
 ### Local encryption benchmark matrix (`benchmark-local`)
 
 `make benchmark-local` runs every local provider (MinIO, Garage, RustFS,
-SeaweedFS) against the following six encryption configurations in sequence:
+SeaweedFS) against the following encryption configurations in sequence:
 
-| # | Config name                         | Key material          | Object / op         |
-|---|-------------------------------------|-----------------------|---------------------|
-| 1 | `Password_PBKDF2_Chunked`           | Password + PBKDF2     | 1 MiB PutObject     |
-| 2 | `Password_Argon2id_Chunked`         | Password + Argon2id   | 1 MiB PutObject     |
-| 3 | `AES256GCM_KEK_Chunked`             | AES-256-GCM KEK       | 1 MiB PutObject     |
-| 4 | `RSA_OAEP_KEK_Chunked`              | RSA-OAEP/SHA-256 KEK  | 1 MiB PutObject     |
-| 5 | `AES256GCM_KEK_EncryptedMPU_50MiB`  | AES-256-GCM KEK       | 4 × 50 MiB MPU      |
-| 6 | `AES256GCM_KEK_RangedGet_MultiChunk`| AES-256-GCM KEK       | 200 KiB 5 sub-ranges|
+| # | Config name                              | Key material          | Object / op         |
+|---|------------------------------------------|-----------------------|---------------------|
+| 1 | `Password_PBKDF2_Chunked`                | Password + PBKDF2     | 1 MiB PutObject     |
+| 2 | `Password_PBKDF2_100k_Chunked`           | Password + PBKDF2 (min) | 1 MiB PutObject   |
+| 3 | `Password_Argon2id_Chunked`              | Password + Argon2id   | 1 MiB PutObject     |
+| 4 | `AES256GCM_KEK_Chunked`                  | AES-256-GCM KEK       | 1 MiB PutObject     |
+| 5 | `RSA_OAEP_KEK_Chunked`                   | RSA-OAEP/SHA-256 KEK  | 1 MiB PutObject     |
+| 6 | `AES256GCM_KEK_EncryptedMPU_50MiB`       | AES-256-GCM KEK       | 4 × 50 MiB MPU      |
+| 7 | `Password_PBKDF2_EncryptedMPU_50MiB`     | Password + PBKDF2     | 4 × 50 MiB MPU      |
+| 8 | `Password_PBKDF2_100k_EncryptedMPU_50MiB`| Password + PBKDF2 (min) | 4 × 50 MiB MPU    |
+| 9 | `Password_Argon2id_EncryptedMPU_50MiB`   | Password + Argon2id   | 4 × 50 MiB MPU      |
+|10 | `AES256GCM_KEK_RangedGet_MultiChunk`     | AES-256-GCM KEK       | 200 KiB 5 sub-ranges|
 
 Results are always printed via `t.Logf` (visible with `-v`). Optionally write
 NDJSON for programmatic comparison:

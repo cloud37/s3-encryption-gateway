@@ -98,7 +98,7 @@ type benchConfig struct {
 
 const benchLocalPassword = "benchmark-local-password-long-enough"
 
-// allBenchConfigs returns the complete matrix of 8 encryption configurations.
+// allBenchConfigs returns the complete matrix of 10 encryption configurations.
 func allBenchConfigs(t *testing.T) []benchConfig {
 	t.Helper()
 	return []benchConfig{
@@ -108,6 +108,16 @@ func allBenchConfigs(t *testing.T) []benchConfig {
 				return []harness.Option{
 					harness.WithEncryptionPassword(benchLocalPassword),
 					harness.WithChunking(true),
+				}
+			},
+		},
+		{
+			name: "Password_PBKDF2_100k_Chunked",
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithChunking(true),
+					harness.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations),
 				}
 			},
 		},
@@ -183,7 +193,37 @@ func allBenchConfigs(t *testing.T) []benchConfig {
 			name: "Password_PBKDF2_EncryptedMPU_50MiB",
 			mpu:  true,
 			buildOpts: func(t *testing.T, inst provider.Instance) []harness.Option {
-				km, err := crypto.NewPasswordKeyManager([]byte(benchLocalPassword), crypto.DefaultPBKDF2Iterations)
+				km, err := crypto.NewPasswordKeyManager([]byte(benchLocalPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
+				if err != nil {
+					t.Fatalf("NewPasswordKeyManager: %v", err)
+				}
+				t.Cleanup(func() { _ = km.Close(context.Background()) })
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithKeyManager(km),
+				}
+			},
+		},
+		{
+			name: "Password_PBKDF2_100k_EncryptedMPU_50MiB",
+			mpu:  true,
+			buildOpts: func(t *testing.T, inst provider.Instance) []harness.Option {
+				km, err := crypto.NewPasswordKeyManager([]byte(benchLocalPassword), crypto.WithPasswordKMPBKDF2(crypto.MinPBKDF2Iterations))
+				if err != nil {
+					t.Fatalf("NewPasswordKeyManager: %v", err)
+				}
+				t.Cleanup(func() { _ = km.Close(context.Background()) })
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithKeyManager(km),
+				}
+			},
+		},
+		{
+			name: "Password_Argon2id_EncryptedMPU_50MiB",
+			mpu:  true,
+			buildOpts: func(t *testing.T, inst provider.Instance) []harness.Option {
+				km, err := crypto.NewPasswordKeyManager([]byte(benchLocalPassword), crypto.WithPasswordKMArgon2id(2, 19456, 1))
 				if err != nil {
 					t.Fatalf("NewPasswordKeyManager: %v", err)
 				}

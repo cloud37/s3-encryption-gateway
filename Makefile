@@ -227,14 +227,18 @@ bench-baseline: bench-micro-baseline bench-macro-minio bench-macro-garage bench-
 
 # benchmark-local — full local encryption benchmark matrix.
 #
-# Runs all 4 local providers (MinIO, Garage, RustFS, SeaweedFS) × 6 encryption
+# Runs all 4 local providers (MinIO, Garage, RustFS, SeaweedFS) × 10 encryption
 # configurations:
-#   1. Password + PBKDF2 chunked
-#   2. Password + Argon2id chunked
-#   3. AES-256-GCM KEK envelope chunked
-#   4. RSA-OAEP KEK envelope chunked
-#   5. AES KEK + encrypted MPU (5 MiB default, 4 parts)
-#   6. AES KEK + ranged GET multi-chunk (200 KiB, 5 sub-ranges)
+#   1. Password + PBKDF2 (600k) chunked
+#   2. Password + PBKDF2 (100k) chunked
+#   3. Password + Argon2id chunked
+#   4. AES-256-GCM KEK envelope chunked
+#   5. RSA-OAEP KEK envelope chunked
+#   6. AES KEK + encrypted MPU (50 MiB default, 4 parts)
+#   7. Password + PBKDF2 (600k) + encrypted MPU
+#   8. Password + PBKDF2 (100k) + encrypted MPU
+#   9. Password + Argon2id + encrypted MPU
+#  10. AES KEK + ranged GET multi-chunk (200 KiB, 5 sub-ranges)
 #
 # Tuning via environment variables:
 #   BENCH_LOCAL_WORKERS=8            goroutines per config
