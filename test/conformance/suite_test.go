@@ -215,6 +215,9 @@ func TestConformance(t *testing.T) {
 			{"KDF_Argon2id_LegacyRead", 0, testKDF_Argon2id_LegacyRead},
 			{"KDF_Argon2id_Chunked_RoundTrip", 0, testKDF_Argon2id_Chunked_RoundTrip},
 
+			// V1.0-CRYPTO-4 argon2id KDF for encrypted MPU conformance.
+			{"KDF_Argon2id_EncryptedMPU_RoundTrip", provider.CapEncryptedMPU, testKDF_Argon2id_EncryptedMPU_RoundTrip},
+
 			// V1.0-AUTH-1 — Gateway-managed authentication. Runs on every provider.
 			{"Auth_V4_PutGetDelete", 0, testAuth_V4_PutGetDelete},
 			{"Auth_Unauthenticated_Rejected", 0, testAuth_Unauthenticated_Rejected},

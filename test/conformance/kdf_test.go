@@ -4,6 +4,7 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
@@ -209,5 +210,48 @@ func testKDF_Argon2id_Chunked_RoundTrip(t *testing.T, inst provider.Instance) {
 	got := get(t, gw, inst.Bucket, key)
 	if !bytes.Equal(got, data) {
 		t.Errorf("argon2id chunked round-trip mismatch: got %d bytes, want %d bytes", len(got), len(data))
+	}
+}
+
+func testKDF_Argon2id_EncryptedMPU_RoundTrip(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+
+	vk := provider.StartValkey(ctx, t)
+
+	km, err := crypto.NewPasswordKeyManager(kdfTestPassword, crypto.WithPasswordKMArgon2id(2, 19456, 1))
+	if err != nil {
+		t.Fatalf("NewPasswordKeyManager (argon2id): %v", err)
+	}
+	t.Cleanup(func() { _ = km.Close(ctx) })
+
+	gw := harness.StartGateway(t, inst,
+		harness.WithKDFAlgorithm("argon2id"),
+		harness.WithArgon2idParams(2, 19456, 1),
+		harness.WithKeyManager(km),
+		harness.WithValkeyAddr(vk.Addr),
+		harness.WithEncryptedMPUForBucket(inst.Bucket),
+	)
+
+	key := uniqueKey(t)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+
+	part1 := bytes.Repeat([]byte("A"), 5*1024*1024)
+	part2 := make([]byte, 128)
+	for i := range part2 {
+		part2[i] = byte(i)
+	}
+
+	etag1 := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, part1)
+	etag2 := uploadPart(t, gw, inst.Bucket, key, uploadID, 2, part2)
+	completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{
+		{1, etag1}, {2, etag2},
+	})
+
+	want := append(append([]byte(nil), part1...), part2...)
+	got := get(t, gw, inst.Bucket, key)
+	if !bytes.Equal(got, want) {
+		t.Errorf("argon2id MPU round-trip: got %d bytes, want %d bytes", len(got), len(want))
 	}
 }

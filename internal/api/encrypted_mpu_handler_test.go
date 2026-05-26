@@ -252,7 +252,7 @@ encrypt_multipart_uploads: true
 	}
 
 	// Password-mode KeyManager — mirrors what cmd/server/main.go does.
-	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.DefaultPBKDF2Iterations)
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("password keymanager: %v", err)
 	}
@@ -1286,4 +1286,119 @@ func TestMPU_GetObject_Tamper_MidStream(t *testing.T) {
 
 func TestMPU_GetObject_Tamper_Manifest(t *testing.T) {
 	// Function covered by TestMPU_Issue2_ManifestEncryptedAtRest
+}
+
+func TestEncryptedMPU_Argon2id_CreateUploadCompleteDownload(t *testing.T) {
+	mockClient := newMPUMockS3Client()
+
+	engine, err := crypto.NewEngine([]byte(mpuTestPassword))
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	policyDir := t.TempDir()
+	policyYAML := `id: test-mpu-argon2id
+buckets:
+  - "ar2-*"
+encrypt_multipart_uploads: true
+`
+	policyPath := policyDir + "/policy.yaml"
+	if err := os.WriteFile(policyPath, []byte(policyYAML), 0600); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	pm := config.NewPolicyManager()
+	if err := pm.LoadPolicies([]string{policyPath}); err != nil {
+		t.Fatalf("load policies: %v", err)
+	}
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{},
+		Encryption: config.EncryptionConfig{Password: mpuTestPassword},
+	}
+
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMArgon2id(2, 19456, 1))
+	if err != nil {
+		t.Fatalf("password keymanager (argon2id): %v", err)
+	}
+
+	handler := NewHandlerWithFeatures(mockClient, engine, logger, getTestMetrics(), km, nil, nil, cfg, pm)
+
+	mr := miniredis.RunT(t)
+	store, err := mpu.NewValkeyStateStore(context.Background(), config.ValkeyConfig{
+		EncryptState:           config.BoolPtr(false),
+		Addr:                   mr.Addr(),
+		InsecureAllowPlaintext: true,
+		TLS:                    config.ValkeyTLSConfig{Enabled: false},
+		TTLSeconds:             3600,
+		DialTimeout:            2 * time.Second,
+		ReadTimeout:            1 * time.Second,
+		WriteTimeout:           1 * time.Second,
+		PoolSize:               2,
+	}, "")
+	if err != nil {
+		t.Fatalf("valkey store: %v", err)
+	}
+	handler.WithMPUStateStore(store)
+	t.Cleanup(func() { _ = store.Close() })
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "ar2-bucket", "obj.bin"
+
+	part1 := bytes.Repeat([]byte("Argon2id-MPU-"), 100_000)
+	part2 := []byte("tail-argon2id-data")
+
+	req := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Create: %d %s", w.Code, w.Body.String())
+	}
+	uploadID := extractUploadID(t, w.Body.String())
+
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID), bytes.NewReader(part1))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(part1)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UploadPart 1: %d %s", w.Code, w.Body.String())
+	}
+	etag1 := w.Header().Get("ETag")
+
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=2&uploadId=%s", bucket, key, uploadID), bytes.NewReader(part2))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(part2)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UploadPart 2: %d %s", w.Code, w.Body.String())
+	}
+	etag2 := w.Header().Get("ETag")
+
+	completeXML := fmt.Sprintf(`<?xml version="1.0"?>
+<CompleteMultipartUpload>
+  <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+  <Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>
+</CompleteMultipartUpload>`, etag1, etag2)
+	req = httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(completeXML))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Complete: %d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/"+bucket+"/"+key, nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET: %d %s", w.Code, w.Body.String())
+	}
+
+	got := w.Body.Bytes()
+	want := append(append([]byte(nil), part1...), part2...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("plaintext mismatch: want %d bytes, got %d bytes", len(want), len(got))
+	}
 }

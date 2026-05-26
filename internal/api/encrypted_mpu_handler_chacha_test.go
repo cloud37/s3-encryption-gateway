@@ -55,7 +55,7 @@ encrypt_multipart_uploads: true
 	}
 
 	// Password-mode KeyManager — mirrors what cmd/server/main.go does.
-	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.DefaultPBKDF2Iterations)
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("password keymanager: %v", err)
 	}
@@ -135,7 +135,7 @@ encrypt_multipart_uploads: true
 	}
 
 	// Password-mode KeyManager — mirrors what cmd/server/main.go does.
-	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.DefaultPBKDF2Iterations)
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("password keymanager: %v", err)
 	}

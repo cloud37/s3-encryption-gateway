@@ -280,7 +280,7 @@ func testFallbackKeyManager_EncryptedMPU_LegacyUpgrade(t *testing.T, inst provid
 
 	// Step 2: "Upgrade" to a new gateway with AES KEK primary + password fallback.
 	newKM := makeAESKEKManager(t)
-	legacyKM, err := crypto.NewPasswordKeyManager([]byte(legacyPassword), crypto.DefaultPBKDF2Iterations)
+	legacyKM, err := crypto.NewPasswordKeyManager([]byte(legacyPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("NewPasswordKeyManager (legacy): %v", err)
 	}
