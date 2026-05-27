@@ -68,11 +68,14 @@ So we built a transparent proxy that solves the problem once, for every applicat
 
 All objects are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent — any S3 client works without modification.
 
+**Recommended: Envelope encryption** with a locally-held AES-256 or RSA key, or an external KMS (Cosmian KMIP). A random per-object Data Encryption Key (DEK) is wrapped with the Key Encryption Key (KEK) at encrypt time and unwrapped at decrypt time — no key derivation on the hot path. Envelope encryption is **50–76× faster** than PBKDF2 600k for single-object uploads and over **70× faster** for range reads. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for full benchmark tables and a mode comparison.
+
+**Password-derived (legacy, simpler deployment):** Derives per-object keys from a gateway password via PBKDF2 or argon2id. Requires no key infrastructure — just a single `ENCRYPTION_PASSWORD` environment variable — but runs key derivation on every request. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for throughput numbers and a [migration guide](docs/ENCRYPTION_MODES.md#migration-between-modes) if you are switching from password-derived to envelope encryption.
+
 - **AES-256-GCM** (default) or **ChaCha20-Poly1305**: Authenticated encryption with per-object keys
-- **Key derivation**: PBKDF2-HMAC-SHA256 with 600,000+ iterations (default, FIPS-compatible) or optional Argon2id (V1.0-CRYPTO-1). Both are configurable; PBKDF2 default raised in v0.8 per NIST SP 800-132
 - **Chunked streaming**: Large files are encrypted in chunks with per-chunk IVs, enabling efficient range requests
-- **Range requests**: Fetches only the encrypted chunks covering the requested plaintext byte range — 99.9%+ reduction in transferred bytes compared to fetching the full object
-- **FIPS-compliant profile**: Build with `-tags=fips` to restrict to AES-256-GCM + HKDF-SHA256 + PBKDF2-HMAC-SHA256 (all FIPS-140 approved)
+- **Range requests**: Fetches only the encrypted chunks covering the requested plaintext byte range
+- **FIPS-compliant profile**: Build with `-tags=fips` to restrict to AES-256-GCM + HKDF-SHA256 (FIPS-140 approved). Under envelope encryption, DEK wrapping uses AES-256-GCM (AES KEK) or RSA-OAEP/SHA-256 (RSA KEK) — both FIPS-approved. The `argon2id` KDF is rejected at startup under `-tags=fips`.
 
 ### Encrypted Multipart Uploads
 
@@ -171,16 +174,76 @@ When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to 
 
 > **Cost note for Wasabi / Glacier / S3 IA users:** The Valkey state store exists precisely to avoid writing state objects to S3 — which on backends with minimum-storage-duration policies (Wasabi: 90 days on Pay-Go; Glacier / Standard-IA / One Zone-IA: 30–180 days) would incur significant phantom-storage charges. Your *data* objects still land on whichever backend you choose; only the ephemeral per-upload state lives in Valkey.
 
-### External Key Management (KMS)
+### Envelope Encryption (Recommended)
 
-The gateway supports external Key Management Systems for envelope encryption with key rotation support. Currently **Cosmian KMIP** is fully implemented and tested.
+Envelope encryption removes key derivation from the per-request hot path: a random per-object Data Encryption Key (DEK) is wrapped with a Key Encryption Key (KEK). The KEK is loaded once at startup. This is **50–76× faster than PBKDF2 600k** and is the recommended path for all production deployments. See [`docs/ENCRYPTION_MODES.md`](docs/ENCRYPTION_MODES.md) for performance benchmarks.
 
-- **Envelope encryption**: A unique Data Encryption Key (DEK) is generated per object, then wrapped with the KMS master key
+> **Migrating from password-only?** Set `encryption.password` to your existing password and enable `key_manager`. The gateway reads the password for objects encrypted before the switch and uses the KEK for all new objects — no data migration required. To re-encrypt existing objects, use the [`s3eg-migrate`](docs/ENCRYPTION_MODES.md#migration-between-modes) tool.
+
+Three variants are supported:
+
+#### Self-contained AES KEK (simplest, no external dependencies)
+
+Generate a 32-byte base64 KEK:
+
+```bash
+openssl rand -base64 32
+# example output: pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=
+```
+
+**Option A — YAML config** (uses `key_source` to read the key from an environment variable):
+
+```yaml
+encryption:
+  password: "fallback-password-123456"     # for legacy objects encrypted with password
+  key_manager:
+    enabled: true
+    provider: self_contained
+    self_contained:
+      type: aes
+      aes:
+        keys:
+          - version: 1
+            key_source: "env:S3EG_AES_KEK"   # name of the env var holding the base64 key
+```
+
+```bash
+export S3EG_AES_KEK="pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o="
+```
+
+**Option B — environment variables only** (no config file; the `SELF_CONTAINED_AES_KEYS` format is `"version=base64:value"`):
+
+```bash
+export KEY_MANAGER_ENABLED=true
+export KEY_MANAGER_PROVIDER=self_contained
+export SELF_CONTAINED_TYPE=aes
+export SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o="
+```
+
+#### Self-contained RSA KEK (uses existing PKI)
+
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: self_contained
+    self_contained:
+      type: rsa
+      rsa:
+        private_key_source: "file:/run/secrets/kek_rsa.pem"
+        key_version: 1
+```
+
+#### Cosmian KMIP KMS (external KMS with key rotation)
+
+The gateway supports envelope encryption via **Cosmian KMIP** with key rotation and dual-read windows.
+
+- **Envelope encryption**: A unique DEK is generated per object, then wrapped with the KMS master key
 - **Key rotation**: The `dual_read_window` setting allows reading objects encrypted with previous key versions during rotation
 - **Fallback support**: Objects encrypted with the password (before KMS was enabled) can still be decrypted
 - **Health checks**: KMS health is automatically checked via the `/ready` endpoint
 
-#### Quick start with Cosmian KMS
+##### Quick start
 
 1. Start Cosmian KMS:
 
@@ -196,11 +259,11 @@ docker run -d --rm --name cosmian-kms \
 
 ```yaml
 encryption:
-  password: "fallback-password-123456"  # Used for pre-existing objects encrypted with password
+  password: "fallback-password-123456"
   key_manager:
     enabled: true
     provider: "cosmian"
-    dual_read_window: 1  # Allow reading with previous 1 key version during rotation
+    dual_read_window: 1
     cosmian:
       endpoint: "http://localhost:9998/kmip/2_1"
       timeout: "10s"
@@ -217,10 +280,10 @@ export KEY_MANAGER_PROVIDER=cosmian
 export KEY_MANAGER_DUAL_READ_WINDOW=1
 export COSMIAN_KMS_ENDPOINT=http://localhost:9998/kmip/2_1
 export COSMIAN_KMS_TIMEOUT=10s
-export COSMIAN_KMS_KEYS="your-key-id:1"  # Format: "key1:version1,key2:version2"
+export COSMIAN_KMS_KEYS="your-key-id:1"
 ```
 
-#### Protocol options
+##### Protocol options
 
 **JSON/HTTP (recommended, tested in CI)**:
 - Full URL: `http://localhost:9998/kmip/2_1` or `https://kms.example.com/kmip/2_1`
@@ -232,58 +295,7 @@ export COSMIAN_KMS_KEYS="your-key-id:1"  # Format: "key1:version1,key2:version2"
 - Requires `ca_cert`, `client_cert`, and `client_key`
 - Not fully tested in CI — use with caution
 
-#### Self-contained KEK adapter (no external KMS required)
-
-The `self_contained` adapter provides envelope encryption without any external
-KMS. It supports AES-256-GCM (symmetric) and RSA-OAEP (asymmetric) wrapping
-using only local key material. This is ideal for air-gapped deployments,
-testing, and operators who want to use existing PKI infrastructure.
-
-Generate a 32-byte base64 AES KEK:
-
-```bash
-openssl rand -base64 32
-```
-
-Minimal YAML configuration:
-
-```yaml
-encryption:
-  key_manager:
-    enabled: true
-    provider: self_contained
-    self_contained:
-      type: aes
-      aes:
-        keys:
-          - version: 1
-            key_source: "env:AES_KEK_V1"
-```
-
-Or via environment variables:
-
-```bash
-export KEY_MANAGER_ENABLED=true
-export KEY_MANAGER_PROVIDER=self_contained
-export SELF_CONTAINED_TYPE=aes
-# AES_KEK_V1 must contain the base64-encoded 32-byte key
-```
-
-For RSA-OAEP:
-
-```yaml
-encryption:
-  key_manager:
-    enabled: true
-    provider: self_contained
-    self_contained:
-      type: rsa
-      rsa:
-        private_key_source: "file:/run/secrets/kek_rsa.pem"
-        key_version: 1
-```
-
-See [`docs/KMS_COMPATIBILITY.md`](docs/KMS_COMPATIBILITY.md) for detailed documentation. AWS KMS and Vault Transit adapters are on the roadmap (see Roadmap section below).
+See [`docs/KMS_COMPATIBILITY.md`](docs/KMS_COMPATIBILITY.md) for detailed documentation. AWS KMS and Vault Transit adapters are on the roadmap.
 
 ### Compression
 
@@ -418,7 +430,38 @@ Bearer-authenticated admin endpoints on a separate port:
 - Docker (recommended), or
 - Go 1.25+ for local builds
 
-### Docker (Simplest)
+### Docker — Envelope encryption (Recommended)
+
+Generate an AES-256 KEK once and keep it secret — this is the key that protects all your encrypted objects:
+
+```bash
+openssl rand -base64 32
+# example output: pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=
+```
+
+```bash
+docker run -p 8080:8080 \
+  -e BACKEND_ENDPOINT="https://s3.amazonaws.com" \
+  -e BACKEND_REGION="us-east-1" \
+  -e BACKEND_ACCESS_KEY="your-key" \
+  -e BACKEND_SECRET_KEY="your-secret" \
+  -e ENCRYPTION_PASSWORD="your-existing-password" \
+  -e KEY_MANAGER_ENABLED=true \
+  -e KEY_MANAGER_PROVIDER=self_contained \
+  -e SELF_CONTAINED_TYPE=aes \
+  -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
+  -e GW_ACCESS_KEY_1="gateway-access-key" \
+  -e GW_SECRET_KEY_1="gateway-secret-key" \
+  cloud37io/s3-encryption-gateway:0.9.0-rc3
+```
+
+> **Replace the example KEK.** The value shown in `SELF_CONTAINED_AES_KEYS` is a documentation placeholder — generate your own with `openssl rand -base64 32` and keep it in a secrets manager. Anyone with this key can decrypt your objects.
+
+> **`ENCRYPTION_PASSWORD`** is the fallback for objects encrypted before you enabled `KEY_MANAGER`. If you have no existing objects, set it to any strong random value. If you are migrating from password-only mode, set it to your existing encryption password — existing objects will continue to decrypt transparently.
+
+This runs **envelope encryption** — per-object DEKs wrapped with a local AES-256 KEK. No key derivation on the hot path. See [Envelope Encryption](#envelope-encryption-recommended) above and [benchmark results](docs/ENCRYPTION_MODES.md).
+
+### Docker — Password-only (simpler deployment, slower)
 
 ```bash
 docker run -p 8080:8080 \
@@ -431,6 +474,8 @@ docker run -p 8080:8080 \
   -e GW_SECRET_KEY_1="gateway-secret-key" \
   cloud37io/s3-encryption-gateway:0.9.0-rc3
 ```
+
+Runs PBKDF2-SHA256 600k on every request. No key infrastructure needed — just a single password — but throughput is **50× lower** than envelope encryption.
 
 > **Authentication is required.** As of v0.8, every request must include valid AWS Signature V4 or V2 credentials matching an entry in `auth.credentials`. Unauthenticated requests will receive `AccessDenied`.
 
@@ -446,6 +491,46 @@ aws s3 cp backup.sql s3://my-bucket/ --endpoint-url http://localhost:8080
 
 ### Kubernetes (Helm)
 
+**Envelope encryption (recommended):**
+
+```bash
+# Generate a KEK — replace the placeholder below with this output
+openssl rand -base64 32
+# example output: pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=
+
+kubectl create secret generic s3-encryption-gateway-secrets \
+  --from-literal=backend-access-key=YOUR_KEY \
+  --from-literal=backend-secret-key=YOUR_SECRET \
+  --from-literal=encryption-password=YOUR_EXISTING_PASSWORD \
+  --from-literal=gateway-access-key=YOUR_GATEWAY_ACCESS_KEY \
+  --from-literal=gateway-secret-key=YOUR_GATEWAY_SECRET_KEY \
+  --from-literal=master-key=pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=
+```
+
+```yaml
+# values.yaml
+config:
+  encryption:
+    keyManager:
+      enabled:
+        value: "true"
+      provider:
+        value: self_contained
+      selfContained:
+        type:
+          value: aes
+        aes:
+          activeVersion:
+            value: "1"
+          keys:
+            - version: 1
+              secretKeyRef:
+                name: s3-encryption-gateway-secrets
+                key: master-key
+```
+
+**Password-only (simpler, slower):**
+
 ```bash
 kubectl create secret generic s3-encryption-gateway-secrets \
   --from-literal=backend-access-key=YOUR_KEY \
@@ -453,11 +538,44 @@ kubectl create secret generic s3-encryption-gateway-secrets \
   --from-literal=encryption-password=YOUR_PASSWORD \
   --from-literal=gateway-access-key=YOUR_GATEWAY_ACCESS_KEY \
   --from-literal=gateway-secret-key=YOUR_GATEWAY_SECRET_KEY
+```
 
+```bash
 helm install s3-encryption-gateway ./helm/s3-encryption-gateway
 ```
 
 See the [Helm chart documentation](helm/s3-encryption-gateway/README.md) for detailed deployment options.
+
+### Docker — Local testing with RustFS
+
+[RustFS](https://rustfs.com) is a lightweight, S3-compatible object store ideal for local development. It is actively maintained (unlike MinIO, which is archived for self-hosted use):
+
+```bash
+docker network create s3gw-net
+
+# Start RustFS
+docker run -d --name rustfs --network s3gw-net \
+  -p 9000:9000 -p 9001:9001 \
+  -e RUSTFS_ACCESS_KEY=minioadmin \
+  -e RUSTFS_SECRET_KEY=minioadmin \
+  rustfs/rustfs:latest
+
+# Start the gateway pointing at RustFS
+docker run -p 8080:8080 --network s3gw-net \
+  -e BACKEND_ENDPOINT="http://rustfs:9000" \
+  -e BACKEND_REGION="us-east-1" \
+  -e BACKEND_ACCESS_KEY="minioadmin" \
+  -e BACKEND_SECRET_KEY="minioadmin" \
+  -e BACKEND_USE_PATH_STYLE="true" \
+  -e ENCRYPTION_PASSWORD="dev-password" \
+  -e KEY_MANAGER_ENABLED=true \
+  -e KEY_MANAGER_PROVIDER=self_contained \
+  -e SELF_CONTAINED_TYPE=aes \
+  -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
+  -e GW_ACCESS_KEY_1="gw-access-key" \
+  -e GW_SECRET_KEY_1="gw-secret-key" \
+  cloud37io/s3-encryption-gateway:0.9.0-rc3
+```
 
 ### Docker Compose
 
@@ -506,13 +624,28 @@ backend:
   use_path_style: false  # set true for some S3-compatible providers
 
 encryption:
-  password: "YOUR_ENCRYPTION_PASSWORD"
-  preferred_algorithm: "AES256-GCM"   # or "ChaCha20-Poly1305"
+  password: "fallback-for-legacy-objects"    # only needed when migrating from password-only
+  preferred_algorithm: "AES256-GCM"          # or "ChaCha20-Poly1305"
   supported_algorithms:
     - "AES256-GCM"
     - "ChaCha20-Poly1305"
+
+  # --- Envelope encryption (Recommended) ---
+  # Remove key_manager entirely to use password-only PBKDF2 derivation instead.
+  key_manager:
+    enabled: true
+    provider: self_contained                  # or "cosmian"
+    self_contained:
+      type: aes
+      aes:
+        keys:
+          - version: 1
+            key_source: "env:S3EG_AES_KEK"    # name of the env var holding the base64 key
+
+  # --- Password-only KDF (legacy, slower) ---
+  # Only active when key_manager.enabled is false or key_manager is absent.
   # kdf:
-  #   algorithm: "pbkdf2-sha256"  # or "argon2id" (V1.0-CRYPTO-1)
+  #   algorithm: "pbkdf2-sha256"  # or "argon2id"
   #   argon2id:
   #     time: 2
   #     memory: 19456
@@ -523,8 +656,8 @@ encryption:
 #     addr: "valkey.internal:6379"
 #     tls:
 #       enabled: true
-#     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"  # V1.0-CRYPTO-2
-#     # encrypt_state: true                                    # V1.0-CRYPTO-2 (default)
+#     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"
+#     # encrypt_state: true  # default: true
 
 compression:
   enabled: false
@@ -564,15 +697,23 @@ export BACKEND_REGION="us-east-1"
 export BACKEND_ACCESS_KEY="your-access-key"
 export BACKEND_SECRET_KEY="your-secret-key"
 export BACKEND_USE_PATH_STYLE=false
-export ENCRYPTION_PASSWORD="your-encryption-password"
+export ENCRYPTION_PASSWORD="fallback-for-legacy-objects"
 export ENCRYPTION_PREFERRED_ALGORITHM="AES256-GCM"
 export ENCRYPTION_SUPPORTED_ALGORITHMS="AES256-GCM,ChaCha20-Poly1305"
-export ENCRYPTION_KDF_ALGORITHM="pbkdf2-sha256"  # or "argon2id"
+
+# --- Envelope encryption (Recommended) ---
+export KEY_MANAGER_ENABLED=true
+export KEY_MANAGER_PROVIDER=self_contained   # or "cosmian"
+export SELF_CONTAINED_TYPE=aes
+export SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o="
+
+# --- Password-only KDF (legacy, omit if using envelope encryption) ---
+# export ENCRYPTION_KDF_ALGORITHM="pbkdf2-sha256"  # or "argon2id"
 # export ENCRYPTION_KDF_ARGON2ID_TIME="2"
 # export ENCRYPTION_KDF_ARGON2ID_MEMORY="19456"
 # export ENCRYPTION_KDF_ARGON2ID_THREADS="1"
-# export VALKEY_ENCRYPTION_PASSWORD_ENV="VALKEY_ENCRYPTION_PASSWORD"  # V1.0-CRYPTO-2
-# export VALKEY_ENCRYPT_STATE="true"                                  # V1.0-CRYPTO-2
+# export VALKEY_ENCRYPTION_PASSWORD_ENV="VALKEY_ENCRYPTION_PASSWORD"
+# export VALKEY_ENCRYPT_STATE="true"
 export COMPRESSION_ENABLED=false
 export RATE_LIMIT_ENABLED=false
 export CACHE_ENABLED=false
@@ -654,10 +795,10 @@ flowchart LR
   subgraph G["Encryption Gateway"]
     D["Middleware<br/>(logging, recovery, security, rate limit)"]
     E["Encryption Engine<br/>AES-256-GCM default<br/>ChaCha20-Poly1305"]
-    K["Key Manager<br/>(optional)"]
+    K["Key Manager<br/>(AES KEK / RSA KEK / Cosmian KMIP)"]
     CMP["Compression<br/>(optional)"]
     D --> E
-    K -.-> |key resolve| E
+    K --> |wrap / unwrap DEK| E
     CMP -.-> |pre/post| E
   end
   G --> |S3 API| B[("S3 Backend<br/>AWS, MinIO, Wasabi, Hetzner")]
@@ -672,10 +813,10 @@ sequenceDiagram
   participant S3
   Client->>Gateway: PUT /bucket/key plaintext
   Gateway->>Gateway: optional compress
-  Gateway->>Gateway: derive key PBKDF2 600k
+  Gateway->>Gateway: generate per-object DEK, wrap with KEK
   Gateway->>Gateway: encrypt AES-GCM or ChaCha20-Poly1305
   Gateway->>S3: PUT /bucket/key ciphertext + metadata
-  Note over Gateway,S3: metadata stores salt, iv, alg, original size
+  Note over Gateway,S3: metadata stores wrapped DEK, iv, alg, original size
   Client->>Gateway: GET /bucket/key
   alt Range request
     Gateway->>S3: GET optimized encrypted byte range chunked
@@ -709,7 +850,8 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 
 ## Security Considerations
 
-- **Encryption password**: Store securely using a secrets manager (Kubernetes Secrets, HashiCorp Vault, etc.)
+- **Key Encryption Key (KEK)**: Store securely using a secrets manager (Kubernetes Secrets, HashiCorp Vault, etc.). For self-contained AES KEK, generate with `openssl rand -base64 32` and inject via environment variable or mounted secret file. Never commit KEKs to version control.
+- **Encryption password** (fallback / legacy only): Used only for pre-existing objects when migrating to envelope encryption. If running password-only mode, treat as the primary secret.
 - **Backend credentials**: Use IAM roles, service accounts, or secure credential storage
 - **Network security**: Deploy behind TLS termination or enable built-in TLS
 - **Access control**: Restrict gateway access using network policies, firewalls, or API gateways
