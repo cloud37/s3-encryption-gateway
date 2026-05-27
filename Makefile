@@ -227,18 +227,13 @@ bench-baseline: bench-micro-baseline bench-macro-minio bench-macro-garage bench-
 
 # benchmark-local — full local encryption benchmark matrix.
 #
-# Runs all 4 local providers (MinIO, Garage, RustFS, SeaweedFS) × 10 encryption
+# Runs all 4 local providers (MinIO, Garage, RustFS, SeaweedFS) × 18 encryption
 # configurations:
-#   1. Password + PBKDF2 (600k) chunked
-#   2. Password + PBKDF2 (100k) chunked
-#   3. Password + Argon2id chunked
-#   4. AES-256-GCM KEK envelope chunked
-#   5. RSA-OAEP KEK envelope chunked
-#   6. AES KEK + encrypted MPU (50 MiB default, 4 parts)
-#   7. Password + PBKDF2 (600k) + encrypted MPU
-#   8. Password + PBKDF2 (100k) + encrypted MPU
-#   9. Password + Argon2id + encrypted MPU
-#  10. AES KEK + ranged GET multi-chunk (200 KiB, 5 sub-ranges)
+#  Chunked PutGet (5): PBKDF2 600k, PBKDF2 100k, Argon2id, AES KEK, RSA KEK
+#  Encrypted MPU  (5): AES KEK, PBKDF2 600k, PBKDF2 100k, Argon2id, RSA KEK
+#  Ranged GET      (5): AES KEK, PBKDF2 600k, PBKDF2 100k, Argon2id, RSA KEK
+#  Cosmian KMIP KMS(3): Chunked, Encrypted MPU, Ranged GET (skipped if
+#                       GATEWAY_TEST_SKIP_COSMIAN=1)
 #
 # Tuning via environment variables:
 #   BENCH_LOCAL_WORKERS=8            goroutines per config
@@ -248,6 +243,7 @@ bench-baseline: bench-micro-baseline bench-macro-minio bench-macro-garage bench-
 #   BENCH_LOCAL_JSON_OUT=results.ndjson  NDJSON output file (optional;
 #                                         relative paths are resolved from
 #                                         the repository root)
+#   GATEWAY_TEST_SKIP_COSMIAN=1     skip Cosmian KMS-backed configs
 #
 # NOT run in CI (requires Docker + local provider containers).
 benchmark-local:
@@ -459,7 +455,7 @@ help:
 	@echo "  bench-micro-baseline - Run micro benchmarks, write docs/perf/v0.6-qa-1/micro-baseline.txt"
 	@echo "  bench-macro-<prov>   - Run soak on one provider, write macro-<prov>.json (minio|garage|rustfs|seaweedfs)"
 	@echo "  bench-baseline     - Run micro + all four macros (full V0.6-QA-1 baseline)"
-	@echo "  benchmark-local    - Full local encryption benchmark matrix (4 providers × 6 configs)"
+	@echo "  benchmark-local    - Full local encryption benchmark matrix (4 providers × 18 configs)"
 	@echo "  test-rotation      - Run key rotation conformance tests (tier-2, all providers)"
 	@echo "  test-comprehensive - Run comprehensive test suite (tier-1 + local conformance + isolation check)"
 	@echo "  test-coverage      - Run tests with HTML coverage report"
