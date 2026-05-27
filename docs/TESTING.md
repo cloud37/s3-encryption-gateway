@@ -140,7 +140,7 @@ SeaweedFS) against the following encryption configurations in sequence:
 |17 | `CosmianKMIP_EncryptedMPU_50MiB`         | Cosmian KMIP KMS      | 4 × 50 MiB MPU        |
 |18 | `CosmianKMIP_RangedGet_MultiChunk`       | Cosmian KMIP KMS      | 200 KiB 5 sub-ranges  |
 
-Configs 16-18 require a Cosmian KMS container (`ghcr.io/cosmian/kms:5.21.0`)
+Configs 16-18 require a Cosmian KMS container (`ghcr.io/cosmian/kms:5.22.0`)
 and are automatically skipped when `GATEWAY_TEST_SKIP_COSMIAN=1` is set.
 
 Results are always printed via `t.Logf` (visible with `-v`). Optionally write

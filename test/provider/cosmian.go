@@ -24,7 +24,7 @@ import (
 
 const (
 	// cosmianKMSImage is the official Cosmian KMS container image.
-	cosmianKMSImage = "ghcr.io/cosmian/kms:5.21.0"
+	cosmianKMSImage = "ghcr.io/cosmian/kms:5.22.0"
 
 	// cosmianKMSPort is the default HTTP port the KMS listens on.
 	cosmianKMSPort = "9998/tcp"

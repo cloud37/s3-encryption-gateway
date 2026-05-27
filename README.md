@@ -250,7 +250,7 @@ The gateway supports envelope encryption via **Cosmian KMIP** with key rotation 
 ```bash
 docker run -d --rm --name cosmian-kms \
   -p 5696:5696 -p 9998:9998 --entrypoint cosmian_kms \
-  ghcr.io/cosmian/kms:5.14.1
+  ghcr.io/cosmian/kms:5.22.0
 ```
 
 2. Create a wrapping key via the Cosmian KMS UI (http://localhost:9998/ui) and note the key ID.

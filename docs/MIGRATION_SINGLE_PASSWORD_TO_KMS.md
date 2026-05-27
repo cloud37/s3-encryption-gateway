@@ -34,7 +34,7 @@ wrapping/unwrapping event.
 | Gateway version | v0.6 or later |
 | Go test access | `go test ./...` must pass before and after |
 | Backup | All encrypted objects backed up or snapshots taken |
-| KMS (for production) | Cosmian KMS ≥ 5.14.1 running and reachable from the gateway |
+| KMS (for production) | Cosmian KMS ≥ 5.22.0 running and reachable from the gateway |
 | Admin API | `admin.enabled: true` configured; bearer token on hand |
 | Monitoring | Prometheus scraping `/metrics`; `kms_*` metrics visible |
 
@@ -200,7 +200,7 @@ operations. It is the recommended provider for production deployments.
 docker run -d --rm --name cosmian-kms \
   -p 5696:5696 -p 9998:9998 \
   --entrypoint cosmian_kms \
-  ghcr.io/cosmian/kms:5.14.1
+  ghcr.io/cosmian/kms:5.22.0
 ```
 
 For production, follow the
