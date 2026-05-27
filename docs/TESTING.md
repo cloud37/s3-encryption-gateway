@@ -119,18 +119,29 @@ make test-load-seaweedfs
 `make benchmark-local` runs every local provider (MinIO, Garage, RustFS,
 SeaweedFS) against the following encryption configurations in sequence:
 
-| # | Config name                              | Key material          | Object / op         |
-|---|------------------------------------------|-----------------------|---------------------|
-| 1 | `Password_PBKDF2_Chunked`                | Password + PBKDF2     | 1 MiB PutObject     |
-| 2 | `Password_PBKDF2_100k_Chunked`           | Password + PBKDF2 (min) | 1 MiB PutObject   |
-| 3 | `Password_Argon2id_Chunked`              | Password + Argon2id   | 1 MiB PutObject     |
-| 4 | `AES256GCM_KEK_Chunked`                  | AES-256-GCM KEK       | 1 MiB PutObject     |
-| 5 | `RSA_OAEP_KEK_Chunked`                   | RSA-OAEP/SHA-256 KEK  | 1 MiB PutObject     |
-| 6 | `AES256GCM_KEK_EncryptedMPU_50MiB`       | AES-256-GCM KEK       | 4 × 50 MiB MPU      |
-| 7 | `Password_PBKDF2_EncryptedMPU_50MiB`     | Password + PBKDF2     | 4 × 50 MiB MPU      |
-| 8 | `Password_PBKDF2_100k_EncryptedMPU_50MiB`| Password + PBKDF2 (min) | 4 × 50 MiB MPU    |
-| 9 | `Password_Argon2id_EncryptedMPU_50MiB`   | Password + Argon2id   | 4 × 50 MiB MPU      |
-|10 | `AES256GCM_KEK_RangedGet_MultiChunk`     | AES-256-GCM KEK       | 200 KiB 5 sub-ranges|
+| # | Config name                              | Key material          | Object / op           |
+|---|------------------------------------------|-----------------------|-----------------------|
+| 1 | `Password_PBKDF2_Chunked`                | Password + PBKDF2     | 1 MiB PutObject       |
+| 2 | `Password_PBKDF2_100k_Chunked`           | Password + PBKDF2 (min) | 1 MiB PutObject     |
+| 3 | `Password_Argon2id_Chunked`              | Password + Argon2id   | 1 MiB PutObject       |
+| 4 | `AES256GCM_KEK_Chunked`                  | AES-256-GCM KEK       | 1 MiB PutObject       |
+| 5 | `RSA_OAEP_KEK_Chunked`                   | RSA-OAEP/SHA-256 KEK  | 1 MiB PutObject       |
+| 6 | `AES256GCM_KEK_EncryptedMPU_50MiB`       | AES-256-GCM KEK       | 4 × 50 MiB MPU        |
+| 7 | `Password_PBKDF2_EncryptedMPU_50MiB`     | Password + PBKDF2     | 4 × 50 MiB MPU        |
+| 8 | `Password_PBKDF2_100k_EncryptedMPU_50MiB`| Password + PBKDF2 (min) | 4 × 50 MiB MPU      |
+| 9 | `Password_Argon2id_EncryptedMPU_50MiB`   | Password + Argon2id   | 4 × 50 MiB MPU        |
+|10 | `RSA_OAEP_KEK_EncryptedMPU_50MiB`        | RSA-OAEP/SHA-256 KEK  | 4 × 50 MiB MPU        |
+|11 | `AES256GCM_KEK_RangedGet_MultiChunk`     | AES-256-GCM KEK       | 200 KiB 5 sub-ranges  |
+|12 | `Password_PBKDF2_RangedGet_MultiChunk`   | Password + PBKDF2     | 200 KiB 5 sub-ranges  |
+|13 | `Password_PBKDF2_100k_RangedGet_MultiChunk`| Password + PBKDF2 (min) | 200 KiB 5 sub-ranges|
+|14 | `Password_Argon2id_RangedGet_MultiChunk` | Password + Argon2id   | 200 KiB 5 sub-ranges  |
+|15 | `RSA_OAEP_KEK_RangedGet_MultiChunk`      | RSA-OAEP/SHA-256 KEK  | 200 KiB 5 sub-ranges  |
+|16 | `CosmianKMIP_Chunked`                    | Cosmian KMIP KMS      | 1 MiB PutObject       |
+|17 | `CosmianKMIP_EncryptedMPU_50MiB`         | Cosmian KMIP KMS      | 4 × 50 MiB MPU        |
+|18 | `CosmianKMIP_RangedGet_MultiChunk`       | Cosmian KMIP KMS      | 200 KiB 5 sub-ranges  |
+
+Configs 16-18 require a Cosmian KMS container (`ghcr.io/cosmian/kms:5.21.0`)
+and are automatically skipped when `GATEWAY_TEST_SKIP_COSMIAN=1` is set.
 
 Results are always printed via `t.Logf` (visible with `-v`). Optionally write
 NDJSON for programmatic comparison:
@@ -147,6 +158,9 @@ BENCH_LOCAL_WORKERS=16 BENCH_LOCAL_DURATION=2m \
 # Run only one provider.
 GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 \
   GATEWAY_TEST_SKIP_SEAWEEDFS=1 make benchmark-local
+
+# Skip KMS-backed configs.
+GATEWAY_TEST_SKIP_COSMIAN=1 make benchmark-local
 ```
 
 **Environment variables:**
@@ -158,6 +172,7 @@ GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 \
 | `BENCH_LOCAL_OBJECT_SIZE` | `1048576`   | PutObject payload size (bytes)         |
 | `BENCH_LOCAL_MPU_SIZE`    | `52428800`  | Per-part MPU size (bytes, default 50 MiB)|
 | `BENCH_LOCAL_JSON_OUT`    | *(empty)*   | NDJSON output file path (optional)     |
+| `GATEWAY_TEST_SKIP_COSMIAN` | *(unset)*| Set to `1` to omit KMS-backed configs  |
 
 This suite is **not run in CI** (requires Docker and takes several minutes per
 configuration). It is intended for manual performance verification and

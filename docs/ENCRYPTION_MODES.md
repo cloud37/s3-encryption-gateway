@@ -2,13 +2,68 @@
 
 This document explains the three key-derivation and key-management paths available in the S3 Encryption Gateway, their security properties, and their performance impact.
 
+## Benchmark Results
+
+Results from `make benchmark-local` (5-second runs, 4 concurrent workers, three local
+Testcontainer backends). Throughput ranges span the fastest three providers
+(MinIO, RustFS, SeaweedFS); the slowest backend is excluded as it bottlenecks
+at its own network ceiling rather than reflecting encryption cost.
+
+### Chunked PutObject (1 MiB payload, single-object upload)
+
+| Mode | Throughput (Mbps) | vs. PBKDF2 600k |
+|------|--------------------:|:---:|
+| PBKDF2-SHA256 600k iterations | 45–49 | 1× |
+| PBKDF2-SHA256 100k iterations | 250–264 | 5.5× |
+| argon2id (t=2, m=19456 KiB, p=1) | 199–209 | 4.4× |
+| **AES-256-GCM KEK** (envelope) | 2387–3710 | 53–76× |
+| RSA-OAEP/SHA-256 KEK (envelope) | 1705–2266 | 38–46× |
+| Cosmian KMIP KMS (envelope) | 1949–3010 | 41–61× |
+
+### Encrypted Multipart Upload (4 × 50 MiB parts)
+
+| Mode | Throughput (Mbps) | vs. PBKDF2 600k |
+|------|-------------------:|:---:|
+| PBKDF2-SHA256 600k | 92–96 | 1× |
+| PBKDF2-SHA256 100k | 192–224 | 2.1× |
+| argon2id (t=2, m=19456 KiB, p=1) | 176–208 | 2.0× |
+| AES-256-GCM KEK | 236–304 | 2.8× |
+| RSA-OAEP/SHA-256 KEK | 240–292 | 2.7× |
+| Cosmian KMIP KMS | 236–288 | 2.7× |
+
+### RangedGet (200 KiB object, 5 sub-ranges)
+
+| Mode | Throughput (Mbps) | vs. PBKDF2 600k |
+|------|-------------------:|:---:|
+| PBKDF2-SHA256 600k | 2.3–2.5 | 1× |
+| PBKDF2-SHA256 100k | 13.4–13.8 | 5.5× |
+| argon2id (t=2, m=19456 KiB, p=1) | 10.3–10.5 | 4.2× |
+| AES-256-GCM KEK | 111–172 | 48–74× |
+| RSA-OAEP/SHA-256 KEK | 97–111 | 41–47× |
+| Cosmian KMIP KMS | 95–141 | 40–60× |
+
+### Key observations
+
+- **PBKDF2 600k RangedGet is unusable at scale**: 2.5 Mbps per client — KDF
+  compute (78 ms p50) dominates. A single client cannot saturate a 10 Mbps
+  link on ranged reads.
+- **Envelope encryption is 50×+ faster than PBKDF2 600k** on single-object
+  uploads. On RangedGet the gap widens to 70×.
+- **KMS network overhead is negligible**: Cosmian KMIP over localhost adds
+  ~15% vs local AES KEK in Chunked and is effectively identical in MPU. The
+  KMIP round-trip costs ~100 μs — 800× less than PBKDF2 600k.
+- **argon2id is 4.4× faster than PBKDF2 600k** for Chunked despite being
+  memory-hard. PBKDF2's 600 000 SHA-256 iterations burn more CPU than
+  argon2id's two-pass 19 MiB hash. argon2id obtains its security from memory
+  hardness (resisting GPU/ASIC), not raw iteration count.
+
 ## Quick Comparison
 
-| Mode | Request latency | Key source | FIPS 140-3 | Best for |
-|------|-----------------|------------|------------|----------|
-| **PBKDF2 password-derived** | Slow (~50–100 ms per request) | Gateway password | ✅ Yes | Regulated environments that require FIPS approval and can tolerate latency |
-| **argon2id password-derived** | Very slow (memory-hard by design) | Gateway password | ❌ No | Air-gapped or password-only deployments that want maximum brute-force resistance |
-| **Self-contained envelope** | Fast (< 1 ms per request) | Locally-held AES-256 or RSA KEK | ✅ Yes (AES-GCM / RSA-OAEP) | Production deployments that need low latency without an external KMS |
+| Mode | Request latency (p50) | Chunked throughput | Key source | FIPS 140-3 | Best for |
+|------|----------------------|---------------------|------------|------------|----------|
+| **PBKDF2 password-derived** | ~80 ms | 45–49 Mbps | Gateway password | ✅ Yes | Regulated environments that require FIPS approval and can tolerate latency |
+| **argon2id password-derived** | ~19 ms | 199–209 Mbps | Gateway password | ❌ No | Air-gapped or password-only deployments that want maximum brute-force resistance |
+| **Self-contained envelope** | < 2 ms | 2387–3710 Mbps | Locally-held AES-256 / RSA KEK, or external KMS | ✅ Yes (AES-GCM / RSA-OAEP) | Production deployments that need low latency without an external KMS |
 
 ## 1. PBKDF2 Password-Derived Keys
 
@@ -16,7 +71,7 @@ This is the default when no `key_manager` is configured. The gateway runs PBKDF2
 
 ### Why it is slow
 
-PBKDF2 is intentionally compute-heavy to slow down password-guessing attacks. On modern hardware a single derivation takes tens of milliseconds. For a single `GetObject` or `DecryptRange` request that cost is paid **once per object**. For multipart uploads it is paid **once per part**.
+PBKDF2 is intentionally compute-heavy to slow down password-guessing attacks. At 600 000 iterations a single derivation takes **~80 ms (p50)** on modern hardware. For a single `GetObject` or `DecryptRange` request that cost is paid **once per object**, capping throughput around **45–49 Mbps** (Chunked) or **2.5 Mbps** (RangedGet, where the KDF dominates the 200 KiB read). For multipart uploads the derivation runs **once per 50 MiB part**, limiting throughput to **92–96 Mbps**.
 
 ### When to use it
 
@@ -36,11 +91,11 @@ encryption:
 
 ## 2. argon2id Password-Derived Keys
 
-argon2id is a memory-hard password-hashing function (PHC 2015 winner). It is even slower than PBKDF2 by design because it forces attackers to spend memory as well as CPU cycles.
+argon2id is a memory-hard password-hashing function (PHC 2015 winner). At OWASP-recommended parameters (t=2, m=19456 KiB, p=1) it is **~4× faster** per request than PBKDF2 600k (~19 ms vs ~80 ms), because PBKDF2 burns more CPU on raw iteration count. argon2id achieves its security margin by forcing attackers to spend 19 MiB of RAM per guess — a resource that GPUs and ASICs cannot scale as cheaply as CPU cycles.
 
-### Why it is slower than PBKDF2
+### Why it is faster than PBKDF2 at equivalent security
 
-argon2id consumes a configurable amount of RAM per derivation. The recommended OWASP 2024 parameters (`m=19456 KiB, t=2, p=1`) add memory pressure on top of CPU cost. Do **not** expect it to fix a latency problem — it will make it worse.
+argon2id obtains equivalent brute-force resistance to 600 000 PBKDF2 iterations with only 2 passes over 19 MiB of memory. On a modern CPU this costs ~19 ms per derivation vs. ~80 ms for PBKDF2. The memory-hardness prevents attackers from parallelising guesses on GPU/ASIC hardware, so you do not need to burn as many CPU cycles to achieve the same security level. The performance benefit is most visible on **Chunked PutObject (199–209 Mbps vs 45–49 Mbps)** and **RangedGet (10.5 Mbps vs 2.5 Mbps)**.
 
 ### FIPS status
 
@@ -50,7 +105,7 @@ There is **no FIPS 140-3 validated implementation of argon2id**. If you build th
 
 - You want the strongest password-hashing defence available today.
 - FIPS compliance is not required.
-- Latency is acceptable (e.g., batch workloads, not latency-sensitive S3 serving).
+- You are switching from PBKDF2 and want better throughput without deploying a key manager.
 
 ### Configuration
 
@@ -79,8 +134,11 @@ The KEK is loaded once at startup and kept in memory. No KDF runs per request.
 
 ### Performance impact
 
-- Key wrap / unwrap: microseconds (AES-GCM is hardware-accelerated on modern x86_64 and ARM64).
-- Removes the 50–100 ms PBKDF2/argon2id penalty.
+- Key wrap / unwrap: < 2 ms (AES-GCM is hardware-accelerated on modern x86_64 and ARM64).
+- Removes the ~80 ms PBKDF2 penalty entirely.
+- **Chunked throughput**: 2387–3710 Mbps (AES KEK), 1705–2266 Mbps (RSA KEK), 1949–3010 Mbps (Cosmian KMIP KMS). All three variants are functionally identical on the hot path — DEK wrap/unwrap is a single AES operation regardless of whether the KEK is local or fetched from a KMS.
+- **MPU throughput**: 236–304 Mbps across all three KEK variants. The KMS path (288 Mbps) is indistinguishable from local AES KEK (304 Mbps) — the ~100 μs KMIP round-trip is invisible at MPU part sizes.
+- **RangedGet throughput**: 95–172 Mbps across all KEK variants. KMS adds no measurable overhead vs local KEK; the spread is dominated by backend S3 provider latency, not crypto.
 
 ### FIPS status
 
@@ -146,10 +204,12 @@ See [`KMS_COMPATIBILITY.md`](KMS_COMPATIBILITY.md) for full key-source formats a
 3. **New objects** use argon2id.
 4. **Old objects** are still readable — the KDF parameters are stored in metadata (`x-amz-meta-encryption-kdf-params`) and the gateway selects the correct function automatically.
 
-> **Warning:** Do not switch to argon2id to solve a latency problem. It is a security-hardening move, not a performance move.
+> **Note:** Switching from PBKDF2 600k to argon2id gives a ~4× throughput improvement while maintaining equivalent brute-force resistance. It is a throughput upgrade, not a downgrade.
 
 ## Key Takeaways
 
-- **PBKDF2 and argon2id are about password-hardening.** They both run on every request. PBKDF2 is FIPS-friendly but slow; argon2id is stronger but even slower and not FIPS-approved.
-- **Self-contained envelope is about removing that cost from the hot path.** It uses fast symmetric (or asymmetric) crypto to wrap per-object DEKs. It is FIPS-compatible and the right choice for low-latency production workloads.
+- **PBKDF2 600k is the slowest option** at ~80 ms per derivation (45–49 Mbps Chunked, 2.5 Mbps RangedGet). It is FIPS-compatible but unsuitable for latency-sensitive or high-throughput workloads.
+- **argon2id is ~4× faster than PBKDF2 600k** at equivalent brute-force resistance (~19 ms, 199–209 Mbps Chunked). Not FIPS-approved but a substantial throughput improvement for password-only deployments.
+- **Envelope encryption (AES KEK / RSA KEK / Cosmian KMIP) removes KDF from the hot path entirely.** Throughput is 50–76× higher than PBKDF2 600k for Chunked and 70× higher for RangedGet. The KMIP network overhead to an external KMS is imperceptible (~100 μs).
+- **PBKDF2 100k is a low-security floor** included only for benchmark comparison. It is not recommended for production — 100 000 iterations provides minimal brute-force resistance.
 - You can switch modes without losing access to existing data. The gateway keeps enough metadata to decode objects written under any of the three schemes.
