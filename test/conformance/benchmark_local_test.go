@@ -98,10 +98,11 @@ type benchConfig struct {
 
 const benchLocalPassword = "benchmark-local-password-long-enough"
 
-// allBenchConfigs returns the complete matrix of 10 encryption configurations.
-func allBenchConfigs(t *testing.T) []benchConfig {
+// allBenchConfigs returns the complete matrix of 15-18 encryption configurations.
+// When kmsInst is non-nil, Cosmian KMIP KMS-backed configurations are appended.
+func allBenchConfigs(t *testing.T, kmsInst *provider.CosmianKMSInstance) []benchConfig {
 	t.Helper()
-	return []benchConfig{
+	configs := []benchConfig{
 		{
 			name: "Password_PBKDF2_Chunked",
 			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
@@ -273,7 +274,128 @@ func allBenchConfigs(t *testing.T) []benchConfig {
 				}
 			},
 		},
+		{
+			name:   "Password_PBKDF2_RangedGet_MultiChunk",
+			ranged: true,
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithChunking(true),
+				}
+			},
+		},
+		{
+			name:   "Password_PBKDF2_100k_RangedGet_MultiChunk",
+			ranged: true,
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithChunking(true),
+					harness.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations),
+				}
+			},
+		},
+		{
+			name:   "Password_Argon2id_RangedGet_MultiChunk",
+			ranged: true,
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithChunking(true),
+					harness.WithKDFAlgorithm("argon2id"),
+					harness.WithArgon2idParams(2, 19456, 1),
+				}
+			},
+		},
+		{
+			name:   "RSA_OAEP_KEK_RangedGet_MultiChunk",
+			ranged: true,
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+				if err != nil {
+					t.Fatalf("rsa.GenerateKey: %v", err)
+				}
+				km, err := crypto.NewRSAKEKManager(privKey, 1)
+				if err != nil {
+					t.Fatalf("NewRSAKEKManager: %v", err)
+				}
+				t.Cleanup(func() { _ = km.Close(context.Background()) })
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithKeyManager(km),
+					harness.WithChunking(true),
+				}
+			},
+		},
 	}
+
+	if kmsInst != nil {
+		configs = append(configs, benchConfig{
+			name: "CosmianKMIP_Chunked",
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				km, err := crypto.NewCosmianKMIPManager(crypto.CosmianKMIPOptions{
+					Endpoint: kmsInst.Endpoint,
+					Keys: []crypto.KMIPKeyReference{
+						{ID: kmsInst.KeyID, Version: 1},
+					},
+				})
+				if err != nil {
+					t.Fatalf("NewCosmianKMIPManager: %v", err)
+				}
+				t.Cleanup(func() { _ = km.Close(context.Background()) })
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithKeyManager(km),
+					harness.WithChunking(true),
+				}
+			},
+		})
+
+		configs = append(configs, benchConfig{
+			name: "CosmianKMIP_EncryptedMPU_50MiB",
+			mpu:  true,
+			buildOpts: func(t *testing.T, inst provider.Instance) []harness.Option {
+				km, err := crypto.NewCosmianKMIPManager(crypto.CosmianKMIPOptions{
+					Endpoint: kmsInst.Endpoint,
+					Keys: []crypto.KMIPKeyReference{
+						{ID: kmsInst.KeyID, Version: 1},
+					},
+				})
+				if err != nil {
+					t.Fatalf("NewCosmianKMIPManager: %v", err)
+				}
+				t.Cleanup(func() { _ = km.Close(context.Background()) })
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithKeyManager(km),
+				}
+			},
+		})
+
+		configs = append(configs, benchConfig{
+			name:   "CosmianKMIP_RangedGet_MultiChunk",
+			ranged: true,
+			buildOpts: func(t *testing.T, _ provider.Instance) []harness.Option {
+				km, err := crypto.NewCosmianKMIPManager(crypto.CosmianKMIPOptions{
+					Endpoint: kmsInst.Endpoint,
+					Keys: []crypto.KMIPKeyReference{
+						{ID: kmsInst.KeyID, Version: 1},
+					},
+				})
+				if err != nil {
+					t.Fatalf("NewCosmianKMIPManager: %v", err)
+				}
+				t.Cleanup(func() { _ = km.Close(context.Background()) })
+				return []harness.Option{
+					harness.WithEncryptionPassword(benchLocalPassword),
+					harness.WithKeyManager(km),
+					harness.WithChunking(true),
+				}
+			},
+		})
+	}
+
+	return configs
 }
 
 // ── Top-level benchmark runner ───────────────────────────────────────────────
@@ -291,7 +413,15 @@ func TestBenchmarkLocal(t *testing.T) {
 		t.Skip("No providers registered; ensure Docker is available")
 	}
 
-	configs := allBenchConfigs(t)
+	ctx := context.Background()
+
+	var kmsInst *provider.CosmianKMSInstance
+	if os.Getenv("GATEWAY_TEST_SKIP_COSMIAN") == "" {
+		inst := provider.StartCosmianKMS(ctx, t)
+		kmsInst = &inst
+	}
+
+	configs := allBenchConfigs(t, kmsInst)
 
 	for _, prov := range providers {
 		prov := prov
