@@ -1289,6 +1289,10 @@ func TestMPU_GetObject_Tamper_Manifest(t *testing.T) {
 }
 
 func TestEncryptedMPU_Argon2id_CreateUploadCompleteDownload(t *testing.T) {
+	if crypto.FIPSEnabled() {
+		t.Skip("argon2id not available in FIPS builds")
+	}
+
 	mockClient := newMPUMockS3Client()
 
 	engine, err := crypto.NewEngine([]byte(mpuTestPassword))
