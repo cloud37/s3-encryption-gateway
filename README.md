@@ -4,6 +4,10 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)](https://artifacthub.io/packages/search?repo=s3-encryption-gateway)
 
+[![Conformance](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/conformance.yml/badge.svg)](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/conformance.yml)
+[![Security Scanning](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/security.yml/badge.svg)](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/security.yml)
+[![Mutation Testing](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/mutation.yml/badge.svg)](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/mutation.yml)
+
 ## The Problem
 
 Countless applications write data to S3-compatible storage — database backups, log archives, ML training data, CI/CD artifacts — but most of them don't encrypt that data client-side.
@@ -452,7 +456,7 @@ docker run -p 8080:8080 \
   -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
   -e GW_ACCESS_KEY_1="gateway-access-key" \
   -e GW_SECRET_KEY_1="gateway-secret-key" \
-  cloud37io/s3-encryption-gateway:0.9.0-rc3
+  cloud37io/s3-encryption-gateway:0.9.0
 ```
 
 > **Replace the example KEK.** The value shown in `SELF_CONTAINED_AES_KEYS` is a documentation placeholder — generate your own with `openssl rand -base64 32` and keep it in a secrets manager. Anyone with this key can decrypt your objects.
@@ -472,7 +476,7 @@ docker run -p 8080:8080 \
   -e ENCRYPTION_PASSWORD="your-password" \
   -e GW_ACCESS_KEY_1="gateway-access-key" \
   -e GW_SECRET_KEY_1="gateway-secret-key" \
-  cloud37io/s3-encryption-gateway:0.9.0-rc3
+  cloud37io/s3-encryption-gateway:0.9.0
 ```
 
 Runs PBKDF2-SHA256 600k on every request. No key infrastructure needed — just a single password — but throughput is **50× lower** than envelope encryption.
@@ -574,7 +578,7 @@ docker run -p 8080:8080 --network s3gw-net \
   -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
   -e GW_ACCESS_KEY_1="gw-access-key" \
   -e GW_SECRET_KEY_1="gw-secret-key" \
-  cloud37io/s3-encryption-gateway:0.9.0-rc3
+  cloud37io/s3-encryption-gateway:0.9.0
 ```
 
 ### Docker Compose
