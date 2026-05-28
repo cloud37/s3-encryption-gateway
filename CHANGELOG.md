@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.9.0] — 2026-05-22
+## [0.9.0] — 2026-05-28
 
 ### ⚠️ Repository Migration ⚠️
 
@@ -52,7 +52,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   PBKDF2 are transparently decrypted via `x-amz-meta-kdf-params` metadata.
   Configurable via `kdf.algorithm`, `kdf.argon2id.*` YAML keys and
   `S3GW_KDF_*` environment variables. Helm chart and `config.yaml.example`
-  updated with annotated argon2id stanza.
+  updated with annotated argon2id stanza. Full multipart round-trip and
+  conformance tests added; all existing PBKDF2 callers migrated to the new
+  options API.
 
 - **Valkey at-rest encryption for multipart-upload state** (V1.0-CRYPTO-2):
   All `UploadState` blobs persisted in Valkey are now encrypted with
@@ -128,7 +130,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parameter is capped to a configurable maximum (default 7 days) consistent
   with the SigV4 presigned URL cap introduced in 0.8.0.
 
+### Performance
+
+- **`DecryptRangeOptimized` — zero-seek range decryption**: new
+  `DecryptRangeOptimized` method on the crypto engine that assumes the
+  caller has already fetched only the ciphertext byte-range from the backend.
+  The range-decrypt reader is extended with an `isOptimizedSource` flag that
+  skips all forward chunk-seeking when the source is already aligned to the
+  requested range. `handleGetObject` now uses this path, removing unnecessary
+  full-object reads on ranged GETs. Range-decryption failures now escalate to
+  `InternalError` instead of silently falling back to a full-object read (which
+  would read beyond the already-applied backend byte-range).
+
 ### Fixed
+
+- **`FallbackKeyManager` for legacy password-wrapped MPU DEKs**: objects
+  written before a self-contained KEK provider was activated store their
+  `WrappedDEK` with `provider="password"`. After upgrading, `serveMPURangedGet`
+  routed all `UnwrapKey` calls to the new primary `KeyManager`, which returned
+  `ErrUnwrapFailed` because it cannot unwrap a PBKDF2+AES-GCM envelope.
+  Introduced `FallbackKeyManager` (`internal/crypto/keymanager_fallback.go`)
+  that wraps a primary `KeyManager` with a `passwordKeyManager` fallback:
+  `UnwrapKey` tries the primary first; if `ErrUnwrapFailed` is returned and
+  `envelope.Provider == "password"`, it falls back to the password KM.
+  `WrapKey` always delegates to the primary so new objects are never written
+  with legacy password wrapping. No config changes required.
+
+- **`BuildKeyManager` — self-contained provider no longer falls through**: the
+  `self_contained` provider fell through to the generic default branch in
+  `BuildKeyManager`, which called `crypto.Open` with an empty config map,
+  causing the runtime error `keymanager/self-contained: "type" field is
+  required (must be "aes" or "rsa")`. A dedicated `"self_contained"` case now
+  constructs the config map from `cfg.SelfContained` and delegates correctly.
 
 - **`x-amz-meta-encrypted` no longer filtered from HEAD responses**: the
   `x-amz-meta-encrypted` marker was incorrectly stripped from `HEAD` object
@@ -139,11 +172,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `github.com/kenchrcum/s3-encryption-gateway` import paths updated
   throughout the codebase to `github.com/cloud37/s3-encryption-gateway`.
 
+- **`internal/api` mock `GetObject` byte-range support**: the race-detector
+  test `TestContentRangeMapping/last_byte` failed because
+  `mockS3Client.GetObject` ignored the `Range` request header,
+  causing the range-optimised decrypt reader to read the wrong chunk
+  and fail AEAD authentication. The mock now respects byte ranges,
+  matching the behaviour of `mpuMockS3Client`.
+
 - **`export-dashboard.sh` unbound variable**: a missing variable reference
   in `hack/export-dashboard.sh` caused the script to fail with `unbound
   variable` in strict-mode shells. Fixed.
 
+- **SeaweedFS conformance test volume size**: test volume increased from
+  128 MiB to 1 GiB to prevent OOM kills on full-matrix benchmark runs.
+
 ### CI & Infrastructure
+
+- **Encryption benchmark matrix** (`make benchmark-local`): new benchmark
+  infrastructure covering 18 configurations across three operation types
+  (Chunked PutObject, Encrypted MPU, RangedGet) and all encryption modes
+  (PBKDF2 100k/600k, argon2id, AES KEK, RSA KEK, Cosmian KMIP). Results are
+  emitted as NDJSON for automated regression gating. Benchmark configs include
+  a 100k PBKDF2 floor (for comparison only — not production-recommended) and
+  KMIP-backed ranged-read scenarios. Full results published in
+  `docs/ENCRYPTION_MODES.md`.
+
+- **Grafana dashboard overhaul**: the bundled Grafana dashboard
+  (`helm/s3-encryption-gateway/dashboards/s3-encryption-gateway.json`) was
+  substantially expanded — 432 lines → 2239 lines, adding per-mode encryption
+  throughput panels, KMS health status, metadata encryption indicators, and
+  improved template variable support.
 
 - **Conformance test timeout increased to 30 minutes**: the
   `test-conformance-local` CI job timeout raised from the previous default
@@ -168,10 +226,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   accordingly — preventing duplicate-release errors on documentation-only
   pushes.
 
+- **Conformance tests run per-provider in a CI matrix**:
+  `conformance-local` now shards MinIO, Garage, RustFS, and SeaweedFS
+  across four parallel jobs (one provider per `ubuntu-latest` runner)
+  instead of running all providers concurrently on a single runner.
+  Prevents resource exhaustion (SIGTERM / exit 143) caused by simultaneous
+  Docker container startup under the `-race` memory overhead.
+
+- **Removed `needs: [unit]` from conformance-local**: conformance tests
+  now execute in parallel with unit tests rather than waiting for them,
+  reducing overall PR gate wall-clock time.
+
+- **RustFS test environment compatibility**: the conformance test fixture
+  now sets `RUSTFS_ALLOW_INSECURE_DEFAULT_CREDENTIALS=true` to accommodate
+  `rustfs/rustfs:latest` rejecting default credentials on non-loopback
+  interfaces.
+
+- **Performance-baseline workflow label fix**: removed the `--label
+  perf-regression` requirement from `gh issue create` and `gh issue list`
+  calls in `.github/workflows/performance-baseline.yml` to fix failures
+  when the repository does not have that label.
+
 ### Dependencies
 
 - Updated `golang.org/x/crypto` to v0.52.0
 - Updated `aws-sdk-go-v2/config` to v1.32.18, `aws-sdk-go-v2/credentials` to v1.19.17, `aws-sdk-go-v2/service/ssooidc` to v1.36.0
+- Updated `ghcr.io/cosmian/kms` to 5.22.0
+- Updated `go.opentelemetry.io/otel` monorepo to v1.44.0
+- Updated `github.com/aws/aws-sdk-go-v2/service/s3` to v1.102.0
+- Updated `github.com/aws/smithy-go` to v1.26.0
+- Updated `github.com/redis/go-redis/v9` to v9.20.0
 
 ## [0.8.0] — 2026-05-18
 
