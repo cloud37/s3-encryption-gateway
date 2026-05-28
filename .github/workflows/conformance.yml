@@ -62,18 +62,33 @@ jobs:
 
   # ── Tier 2 — all local providers (PR / main push / nightly / release) ──────
   conformance-local:
-    name: Conformance / local providers
+    name: Conformance / ${{ matrix.provider }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [minio, garage, rustfs, seaweedfs]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - name: Conformance / local providers (-race)
+      - name: Conformance / ${{ matrix.provider }} (-race)
         env:
           GATEWAY_TEST_SKIP_EXTERNAL: "1"
-        run: make test-conformance-local
+        run: |
+          # Skip all providers except the one under test.
+          for p in minio garage rustfs seaweedfs; do
+            if [[ "$p" != "${{ matrix.provider }}" ]]; then
+              var="GATEWAY_TEST_SKIP_$(echo "$p" | tr '[:lower:]' '[:upper:]')"
+              export "$var=1"
+            fi
+          done
+          go test -count=1 -tags=conformance -race -v -timeout 30m \
+            -run "TestConformance_NoProviderNameLiterals|TestConformance/${{ matrix.provider }}" \
+            ./test/conformance/...
 
   # ── Tier 2 — external providers (nightly, conditional on secrets) ────────────
   conformance-external:
