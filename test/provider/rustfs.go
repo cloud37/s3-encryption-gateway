@@ -98,6 +98,7 @@ func (p *rustfsProvider) Start(ctx context.Context, t *testing.T) Instance {
 		Env: map[string]string{
 			"RUSTFS_ACCESS_KEY": accessKey,
 			"RUSTFS_SECRET_KEY": secretKey,
+			"RUSTFS_ALLOW_INSECURE_DEFAULT_CREDENTIALS": "true",
 		},
 		// Use the image's own /data directory (already owned by UID 10001
 		// inside the image).  Do NOT mount anything at /data or /logs —

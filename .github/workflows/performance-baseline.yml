@@ -86,11 +86,11 @@ jobs:
           title="perf: micro regression on $(date -u +%Y-%m-%d)"
           body=$'Nightly V0.6-QA-1 micro gate failed.\n\nArtefacts: '"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"$'\n\nComparator output:\n\n```\n'"$(cat /tmp/qa1/micro-compare.txt 2>/dev/null || echo '(empty)')"$'\n```\n\nSee docs/PERFORMANCE.md.'
           # Dedup by searching for an open perf-regression issue.
-          existing="$(gh issue list --label perf-regression --state open --search 'micro regression' --json number --jq '.[0].number' || true)"
+          existing="$(gh issue list --state open --search 'micro regression' --json number --jq '.[0].number' || true)"
           if [[ -n "${existing:-}" ]]; then
             gh issue comment "$existing" --body "$body"
           else
-            gh issue create --label perf-regression --title "$title" --body "$body"
+            gh issue create --title "$title" --body "$body"
           fi
 
   # ── Nightly macro regression gate (per-provider matrix) ────────────────────
@@ -161,11 +161,11 @@ jobs:
         run: |
           title="perf: macro regression / ${{ matrix.provider }} on $(date -u +%Y-%m-%d)"
           body=$'Nightly V0.6-QA-1 macro gate failed for ${{ matrix.provider }}.\n\nArtefacts: '"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"$'\n\nComparator output:\n\n```\n'"$(cat /tmp/qa1/macro-${{ matrix.provider }}-compare.txt 2>/dev/null || echo '(empty)')"$'\n```\n\nSee docs/PERFORMANCE.md.'
-          existing="$(gh issue list --label perf-regression --state open --search 'macro regression ${{ matrix.provider }}' --json number --jq '.[0].number' || true)"
+          existing="$(gh issue list --state open --search 'macro regression ${{ matrix.provider }}' --json number --jq '.[0].number' || true)"
           if [[ -n "${existing:-}" ]]; then
             gh issue comment "$existing" --body "$body"
           else
-            gh issue create --label perf-regression --title "$title" --body "$body"
+            gh issue create --title "$title" --body "$body"
           fi
 
   # ── Advisory PR gate — micro only, never fails the job ─────────────────────

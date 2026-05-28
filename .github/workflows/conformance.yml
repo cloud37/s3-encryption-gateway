@@ -64,7 +64,6 @@ jobs:
   conformance-local:
     name: Conformance / local providers
     runs-on: ubuntu-latest
-    needs: [unit]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
