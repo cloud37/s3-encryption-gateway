@@ -90,6 +90,37 @@ jobs:
             -run "TestConformance_NoProviderNameLiterals|TestConformance/${{ matrix.provider }}" \
             ./test/conformance/...
 
+  # ── V1.0-COMPAT-1 — SDK/Tool compatibility matrix (PR / push / nightly) ─────
+  compat-matrix:
+    name: Compat Matrix / ${{ matrix.provider }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [unit]
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [minio, garage, rustfs, seaweedfs]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: SDK/Tool compat smoke tests / ${{ matrix.provider }} (-race)
+        env:
+          GATEWAY_TEST_SKIP_EXTERNAL: "1"
+        run: |
+          # Skip all providers except the one under test.
+          for p in minio garage rustfs seaweedfs; do
+            if [[ "$p" != "${{ matrix.provider }}" ]]; then
+              var="GATEWAY_TEST_SKIP_$(echo "$p" | tr '[:lower:]' '[:upper:]')"
+              export "$var=1"
+            fi
+          done
+          go test -count=1 -tags=conformance -race -v -timeout 30m \
+            -run "TestConformance/${{ matrix.provider }}/Compat_" \
+            ./test/conformance/...
+
   # ── Tier 2 — external providers (nightly, conditional on secrets) ────────────
   conformance-external:
     name: Conformance / ${{ matrix.provider }}
@@ -191,7 +222,7 @@ jobs:
   conformance-summary:
     name: Conformance summary
     runs-on: ubuntu-latest
-    needs: [conformance-local]
+    needs: [conformance-local, compat-matrix]
     if: github.event_name == 'pull_request'
     steps:
       - name: Summary
@@ -201,4 +232,5 @@ jobs:
           echo "| Provider | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Local suite | ✅ (PR gate / main push / nightly / release) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Compat Matrix | ✅ (PR gate / main push / nightly / release) |" >> $GITHUB_STEP_SUMMARY
           echo "| External | 🌙 (nightly when credentials set) |" >> $GITHUB_STEP_SUMMARY
