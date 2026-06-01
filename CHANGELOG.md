@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **V1.0-COMPAT-1 — SDK/Tool Compatibility Matrix**: Automated smoke tests for
+  AWS SDK Go v2, boto3, awscli, s5cmd, rclone, and minio-py against all local
+  providers. Published `docs/SDK_COMPATIBILITY.md` with pass/fail and caveats.
+  CI `compat-matrix` job added to conformance workflow.
+
 - KMS production hardening: retry-with-backoff decorator (`RetryingKeyManager`),
   circuit-breaker decorator (`CircuitBreakerKeyManager`), DEK unwrap cache
   (`CachingKeyManager`), and periodic health-check goroutine (V1.0-KMS-1).
