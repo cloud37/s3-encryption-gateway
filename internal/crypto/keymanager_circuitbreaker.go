@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 )
 
 // cbState represents the circuit-breaker state.
@@ -54,9 +52,8 @@ func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
 //   - Failure threshold: ConsecutiveFailures consecutive errors trip the breaker.
 //   - SuccessThreshold: consecutive successes in Half-Open to close the breaker.
 type CircuitBreakerKeyManager struct {
-	inner   KeyManager
-	cfg     CircuitBreakerConfig
-	metrics *metrics.Metrics
+	inner KeyManager
+	cfg   CircuitBreakerConfig
 
 	mu        sync.Mutex
 	state     cbState
@@ -69,13 +66,13 @@ type CircuitBreakerKeyManager struct {
 var _ KeyManager = (*CircuitBreakerKeyManager)(nil)
 
 // NewCircuitBreakerKeyManager wraps inner with a circuit breaker.
-// Provide a nil metrics to disable metric recording.
-func NewCircuitBreakerKeyManager(inner KeyManager, cfg CircuitBreakerConfig, m *metrics.Metrics) KeyManager {
+// Circuit-breaker state metrics are recorded via the callback registered
+// by SetKMSCircuitBreakerStateObserver.
+func NewCircuitBreakerKeyManager(inner KeyManager, cfg CircuitBreakerConfig) KeyManager {
 	return &CircuitBreakerKeyManager{
-		inner:   inner,
-		cfg:     cfg,
-		metrics: m,
-		state:   cbStateClosed,
+		inner: inner,
+		cfg:   cfg,
+		state: cbStateClosed,
 	}
 }
 
@@ -191,7 +188,7 @@ func (cb *CircuitBreakerKeyManager) updateMetrics() {
 
 // updateMetricsLocked must be called with cb.mu held.
 func (cb *CircuitBreakerKeyManager) updateMetricsLocked() {
-	if cb.metrics != nil {
-		cb.metrics.SetKMSCircuitBreakerState(cb.inner.Provider(), int(cb.state))
+	if setKMSCircuitBreakerStateFn != nil {
+		setKMSCircuitBreakerStateFn(cb.inner.Provider(), int(cb.state))
 	}
 }

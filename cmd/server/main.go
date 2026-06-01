@@ -609,6 +609,12 @@ func main() {
 	// V1.0-OBS-1 G8: wire metrics collector into the encryption engine.
 	crypto.SetEncryptedObjectSizeObserver(m.ObserveEncryptedObjectBytes)
 
+	// V1.0-KMS-1: wire KMS production readiness metric callbacks.
+	crypto.SetKMSDEKCacheHitObserver(m.RecordKMSDEKCacheHit)
+	crypto.SetKMSDEKCacheMissObserver(m.RecordKMSDEKCacheMiss)
+	crypto.SetKMSCircuitBreakerStateObserver(m.SetKMSCircuitBreakerState)
+	crypto.SetKMSRetryAttemptObserver(m.RecordKMSRetryAttempt)
+
 	// V1.0-CRYPTO-3: load metadata encryption key.
 	var metadataKey []byte
 	switch {

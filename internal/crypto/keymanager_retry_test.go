@@ -7,10 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-
-	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 )
 
 // mockRetryKM implements KeyManager with controllable failure for retry tests.
@@ -63,7 +60,7 @@ func TestRetryingKeyManager_WrapUnwrap_NoError(t *testing.T) {
 	cfg.InitialInterval = time.Millisecond
 	cfg.MaxElapsedTime = time.Second
 
-	km := NewRetryingKeyManager(inner, cfg, nil)
+	km := NewRetryingKeyManager(inner, cfg)
 
 	// WrapKey — should succeed on first attempt
 	env, err := km.WrapKey(context.Background(), []byte("pt"), nil)
@@ -90,7 +87,7 @@ func TestRetryingKeyManager_WrapKey_TransientErrorRetries(t *testing.T) {
 	cfg.MaxInterval = 10 * time.Millisecond
 	cfg.MaxElapsedTime = time.Second
 
-	km := NewRetryingKeyManager(inner, cfg, nil)
+	km := NewRetryingKeyManager(inner, cfg)
 
 	env, err := km.WrapKey(context.Background(), []byte("pt"), nil)
 	require.NoError(t, err)
@@ -109,7 +106,7 @@ func TestRetryingKeyManager_UnwrapKey_PermanentError_NotRetried(t *testing.T) {
 	cfg.MaxInterval = 10 * time.Millisecond
 	cfg.MaxElapsedTime = time.Second
 
-	km := NewRetryingKeyManager(inner, cfg, nil)
+	km := NewRetryingKeyManager(inner, cfg)
 
 	_, err := km.UnwrapKey(context.Background(), &KeyEnvelope{Ciphertext: []byte("ct")}, nil)
 	require.Error(t, err)
@@ -129,7 +126,7 @@ func TestRetryingKeyManager_WrapKey_ContextCancelled_StopsRetry(t *testing.T) {
 	cfg.MaxInterval = 10 * time.Millisecond
 	cfg.MaxElapsedTime = 0 // retry indefinitely
 
-	km := NewRetryingKeyManager(inner, cfg, nil)
+	km := NewRetryingKeyManager(inner, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -152,7 +149,7 @@ func TestRetryingKeyManager_WrapKey_ExhaustedRetries(t *testing.T) {
 	cfg.MaxInterval = 2 * time.Millisecond
 	cfg.MaxElapsedTime = 5 * time.Millisecond // very short window — ~3-5 attempts before exhausted
 
-	km := NewRetryingKeyManager(inner, cfg, nil)
+	km := NewRetryingKeyManager(inner, cfg)
 
 	_, err := km.WrapKey(context.Background(), []byte("pt"), nil)
 	require.Error(t, err, "expected error from exhausted retries")
@@ -168,7 +165,7 @@ func TestRetryingKeyManager_HealthCheck_NoRetry(t *testing.T) {
 		provider: "test",
 	}
 	cfg := DefaultRetryConfig()
-	km := NewRetryingKeyManager(inner, cfg, nil)
+	km := NewRetryingKeyManager(inner, cfg)
 
 	err := km.HealthCheck(context.Background())
 	require.NoError(t, err)
@@ -178,7 +175,7 @@ func TestRetryingKeyManager_HealthCheck_NoRetry(t *testing.T) {
 
 func TestRetryingKeyManager_Provider_Delegates(t *testing.T) {
 	inner := &mockRetryKM{provider: "cosmian-kmip"}
-	km := NewRetryingKeyManager(inner, DefaultRetryConfig(), nil)
+	km := NewRetryingKeyManager(inner, DefaultRetryConfig())
 	require.Equal(t, "cosmian-kmip", km.Provider())
 }
 
@@ -201,7 +198,7 @@ func TestRetryingKeyManager_AllPermanentErrors_NotRetried(t *testing.T) {
 			cfg.InitialInterval = time.Millisecond
 			cfg.MaxElapsedTime = time.Second
 
-			km := NewRetryingKeyManager(inner, cfg, nil)
+			km := NewRetryingKeyManager(inner, cfg)
 			_, err := km.UnwrapKey(context.Background(), &KeyEnvelope{Ciphertext: []byte("ct")}, nil)
 			require.Error(t, err)
 			require.ErrorIs(t, err, permErr)
@@ -211,29 +208,4 @@ func TestRetryingKeyManager_AllPermanentErrors_NotRetried(t *testing.T) {
 	}
 }
 
-// TestRetryingKeyManager_MetricsRecords verifies that retry metrics are recorded.
-func TestRetryingKeyManager_MetricsRecords(t *testing.T) {
-	m := testMetrics(t)
-	inner := &mockRetryKM{
-		provider:       "test",
-		failWrapsUntil: 2,
-		wrapErr:        errors.New("transient error"),
-		wrapResult:     &KeyEnvelope{KeyID: "k1"},
-	}
-	cfg := DefaultRetryConfig()
-	cfg.InitialInterval = time.Millisecond
-	cfg.MaxInterval = 5 * time.Millisecond
-	cfg.MaxElapsedTime = time.Second
 
-	km := NewRetryingKeyManager(inner, cfg, m)
-	_, err := km.WrapKey(context.Background(), []byte("pt"), nil)
-	require.NoError(t, err)
-
-	// We just verify it didn't panic; metric value checking is in metrics tests
-}
-
-// testMetrics creates a Metrics with a fresh registry for testing.
-func testMetrics(t *testing.T) *metrics.Metrics {
-	t.Helper()
-	return metrics.NewMetricsWithRegistry(prometheus.NewRegistry())
-}

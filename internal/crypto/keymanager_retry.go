@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-
-	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 )
 
 // RetryConfig holds exponential-backoff parameters for KMS retries.
@@ -49,9 +47,8 @@ func DefaultRetryConfig() RetryConfig {
 //   - If all retries are exhausted, the last error is returned wrapped with
 //     fmt.Errorf("keymanager/retry: max elapsed time exceeded: %w", lastErr).
 type RetryingKeyManager struct {
-	inner   KeyManager
-	cfg     RetryConfig
-	metrics *metrics.Metrics
+	inner KeyManager
+	cfg   RetryConfig
 }
 
 // Compile-time assertion that RetryingKeyManager implements KeyManager.
@@ -59,12 +56,12 @@ var _ KeyManager = (*RetryingKeyManager)(nil)
 
 // NewRetryingKeyManager wraps inner with exponential-backoff retry on
 // transient KMS errors. Only WrapKey and UnwrapKey are retried.
-// Provide a nil metrics to disable metric recording.
-func NewRetryingKeyManager(inner KeyManager, cfg RetryConfig, m *metrics.Metrics) KeyManager {
+// KMS retry metrics are recorded via the callback registered by
+// SetKMSRetryAttemptObserver.
+func NewRetryingKeyManager(inner KeyManager, cfg RetryConfig) KeyManager {
 	return &RetryingKeyManager{
-		inner:   inner,
-		cfg:     cfg,
-		metrics: m,
+		inner: inner,
+		cfg:   cfg,
 	}
 }
 
@@ -106,14 +103,14 @@ func (r *RetryingKeyManager) WrapKey(ctx context.Context, plaintext []byte, meta
 			if isPermanentKMSError(err) {
 				return backoff.Permanent(err)
 			}
-			if r.metrics != nil {
-				r.metrics.RecordKMSRetryAttempt(r.inner.Provider(), "wrap", "failure")
+			if recordKMSRetryAttemptFn != nil {
+				recordKMSRetryAttemptFn(r.inner.Provider(), "wrap", "failure")
 			}
 			return err
 		}
 		result = env
-		if r.metrics != nil {
-			r.metrics.RecordKMSRetryAttempt(r.inner.Provider(), "wrap", "success")
+		if recordKMSRetryAttemptFn != nil {
+			recordKMSRetryAttemptFn(r.inner.Provider(), "wrap", "success")
 		}
 		return nil
 	}
@@ -133,14 +130,14 @@ func (r *RetryingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelop
 			if isPermanentKMSError(err) {
 				return backoff.Permanent(err)
 			}
-			if r.metrics != nil {
-				r.metrics.RecordKMSRetryAttempt(r.inner.Provider(), "unwrap", "failure")
+			if recordKMSRetryAttemptFn != nil {
+				recordKMSRetryAttemptFn(r.inner.Provider(), "unwrap", "failure")
 			}
 			return err
 		}
 		result = pt
-		if r.metrics != nil {
-			r.metrics.RecordKMSRetryAttempt(r.inner.Provider(), "unwrap", "success")
+		if recordKMSRetryAttemptFn != nil {
+			recordKMSRetryAttemptFn(r.inner.Provider(), "unwrap", "success")
 		}
 		return nil
 	}

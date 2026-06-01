@@ -52,7 +52,7 @@ func (m *mockCbKM) Close(_ context.Context) error { return nil }
 
 func TestCircuitBreaker_InitialState_Closed(t *testing.T) {
 	inner := &mockCbKM{provider: "test"}
-	cb := NewCircuitBreakerKeyManager(inner, DefaultCircuitBreakerConfig(), nil)
+	cb := NewCircuitBreakerKeyManager(inner, DefaultCircuitBreakerConfig())
 
 	// Initial state should be closed; first request should go through
 	env, err := cb.WrapKey(context.Background(), []byte("pt"), nil)
@@ -69,7 +69,7 @@ func TestCircuitBreaker_ConsecutiveFailures_TripsOpen(t *testing.T) {
 	cfg := DefaultCircuitBreakerConfig()
 	cfg.ConsecutiveFailures = 3
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	// First 3 failures should trip the breaker
 	for i := 0; i < 3; i++ {
@@ -91,7 +91,7 @@ func TestCircuitBreaker_Open_FailsFastWithoutCallingInner(t *testing.T) {
 	cfg := DefaultCircuitBreakerConfig()
 	cfg.ConsecutiveFailures = 2
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	// Trip the breaker
 	_, _ = cb.WrapKey(context.Background(), []byte("pt"), nil)
@@ -117,7 +117,7 @@ func TestCircuitBreaker_HalfOpen_SuccessCloses(t *testing.T) {
 	cfg.OpenTimeout = 10 * time.Millisecond
 	cfg.SuccessThreshold = 2
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	// Trip the breaker
 	for i := 0; i < 3; i++ {
@@ -153,7 +153,7 @@ func TestCircuitBreaker_HalfOpen_FailureReopens(t *testing.T) {
 	cfg.OpenTimeout = 10 * time.Millisecond
 	cfg.SuccessThreshold = 2
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	// Trip the breaker (3 failures)
 	for i := 0; i < 3; i++ {
@@ -184,7 +184,7 @@ func TestCircuitBreaker_SuccessResetsFailureCounter(t *testing.T) {
 	cfg := DefaultCircuitBreakerConfig()
 	cfg.ConsecutiveFailures = 5
 
-	cbTyped := NewCircuitBreakerKeyManager(inner, cfg, nil).(*CircuitBreakerKeyManager)
+	cbTyped := NewCircuitBreakerKeyManager(inner, cfg).(*CircuitBreakerKeyManager)
 
 	// 2 failures (counter = 2)
 	_, _ = cbTyped.WrapKey(context.Background(), []byte("pt"), nil)
@@ -219,7 +219,7 @@ func TestCircuitBreaker_HealthCheck_AlwaysDelegates(t *testing.T) {
 	cfg := DefaultCircuitBreakerConfig()
 	cfg.ConsecutiveFailures = 2
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	// Trip the breaker
 	_, _ = cb.WrapKey(context.Background(), []byte("pt"), nil)
@@ -240,7 +240,7 @@ func TestCircuitBreaker_ActiveKeyVersion_AlwaysDelegates(t *testing.T) {
 	cfg := DefaultCircuitBreakerConfig()
 	cfg.ConsecutiveFailures = 2
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	// Trip the breaker
 	_, _ = cb.WrapKey(context.Background(), []byte("pt"), nil)
@@ -257,7 +257,7 @@ func TestCircuitBreaker_Close_SetsOpenState(t *testing.T) {
 	cfg := DefaultCircuitBreakerConfig()
 	cfg.OpenTimeout = time.Hour // long timeout so it stays open
 
-	cb := NewCircuitBreakerKeyManager(inner, cfg, nil)
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
 
 	require.NoError(t, cb.Close(context.Background()))
 
