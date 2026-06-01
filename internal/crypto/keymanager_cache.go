@@ -59,6 +59,7 @@ type CachingKeyManager struct {
 	lruOrder      [][32]byte               // insertion-ordered for LRU eviction
 	stopCleanup   chan struct{}
 	cleanupDone   chan struct{}
+	closed        bool // guards against double-Close
 }
 
 // cacheFingerprint computes the SHA-256 fingerprint of ciphertext.
@@ -250,19 +251,27 @@ func (c *CachingKeyManager) ActiveKeyVersion(ctx context.Context) (int, error) {
 }
 
 // Close stops the cleanup goroutine, zeroizes all cached plaintexts,
-// and delegates to the inner KeyManager.
+// and delegates to the inner KeyManager. Idempotent: subsequent calls
+// return nil.
 func (c *CachingKeyManager) Close(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.mu.Unlock()
+
 	close(c.stopCleanup)
 	<-c.cleanupDone
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	for fp, entry := range c.entries {
 		zeroBytes(entry.plaintext)
 		delete(c.entries, fp)
 	}
 	c.lruOrder = nil
+	c.mu.Unlock()
 
 	return c.inner.Close(ctx)
 }
