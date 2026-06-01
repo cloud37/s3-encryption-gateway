@@ -156,6 +156,29 @@ requires manual key pair replacement and re-instantiation.
 
 **Note**: The examples below for AWS KMS and Vault Transit are **conceptual only** and demonstrate the interface pattern. They are not currently implemented and should not be used in production.
 
+## Production Hardening (V1.0-KMS-1)
+
+Production-ready KMS adapters are wrapped with a decorator stack that provides
+retry, circuit-breaking, and DEK caching:
+
+| Decorator | Default | Purpose |
+|-----------|---------|---------|
+| `RetryingKeyManager` | Enabled (30 s window) | Retries transient network errors |
+| `CircuitBreakerKeyManager` | Disabled | Fails fast during sustained outages |
+| `CachingKeyManager` | Disabled | Caches DEK unwrap results (read path) |
+| Health-check goroutine | Enabled (30 s interval) | Drives `gateway_kms_healthy` gauge |
+
+### HealthCheck contract per adapter
+
+| Adapter | HealthCheck implementation |
+|---------|--------------------------|
+| `cosmian` | KMIP `Get` on active key |
+| `memory` | Verifies key bytes are present and non-zero |
+| `self_contained` (AES) | Verifies `len(keys[activeVersion]) == 32` |
+| `self_contained` (RSA) | Verifies modulus consistency |
+| `aws` (V1.0-KMS-2) | `DescribeKey` — key state must be ENABLED |
+| `vault` (V1.0-KMS-3) | `GET /v1/<mount>/keys/<name>` — key must exist |
+
 ## Key Manager Interface
 
 The gateway uses the `KeyManager` interface from `internal/crypto/keymanager.go`:

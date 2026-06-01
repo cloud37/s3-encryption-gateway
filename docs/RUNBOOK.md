@@ -292,6 +292,35 @@ Recommended alert rules:
 - If the outage is prolonged, consider switching to a different KMS provider (requires config change and restart).
 - As a last resort, switch to password-only mode (no KMS) to restore service, then resolve the KMS issue.
 
+### kms-outage-degraded-mode
+
+**Scenario:** KMS is fully unavailable (network partition, KMS service down).
+
+**Behaviour under V1.0-KMS-1 harness:**
+- The retry wrapper will exhaust `max_elapsed_time` (default 30 s) per request,
+  then return an error.
+- If the circuit breaker is enabled (recommended), after `consecutive_failures`
+  failures (default 5) it trips open and all subsequent WrapKey/UnwrapKey calls
+  fail immediately with `ErrProviderUnavailable` (503 to clients). This prevents
+  goroutine pile-up during prolonged outages.
+- The DEK cache (if enabled) continues to serve previously-cached unwrap results
+  for up to `ttl` seconds (default 60 s). READ operations for recently-accessed
+  objects continue to succeed from cache; write operations (new PutObject,
+  UploadPart) fail immediately.
+- The health-check goroutine updates `gateway_kms_healthy` to 0, triggering the
+  `S3GatewayKMSUnhealthy` alert.
+
+**Recovery:**
+1. When the KMS recovers, the circuit breaker Half-Open probe succeeds and the
+   breaker closes automatically.
+2. The health-check goroutine updates `gateway_kms_healthy` to 1.
+3. No gateway restart is required.
+
+**Fail-closed guarantee:** Write operations (new object encryption) always
+require a successful `WrapKey` call; the DEK cache covers only reads. A
+gateway running with a downed KMS will accept GET requests for cached objects
+but reject PUT/POST operations. This is the correct degraded-mode posture.
+
 ---
 
 ### valkey-down

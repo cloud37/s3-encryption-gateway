@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- KMS production hardening: retry-with-backoff decorator (`RetryingKeyManager`),
+  circuit-breaker decorator (`CircuitBreakerKeyManager`), DEK unwrap cache
+  (`CachingKeyManager`), and periodic health-check goroutine (V1.0-KMS-1).
+- Four new Prometheus metrics: `gateway_kms_dek_cache_hits_total`,
+  `gateway_kms_dek_cache_misses_total`, `gateway_kms_circuit_breaker_state`,
+  `gateway_kms_retry_attempts_total`.
+- KMS outage degraded-mode runbook section in `docs/RUNBOOK.md`.
+
 ## [0.9.0] — 2026-05-28
 
 ### ⚠️ Repository Migration ⚠️

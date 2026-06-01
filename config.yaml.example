@@ -134,6 +134,40 @@ encryption:
     #     private_key_source: "file:/run/secrets/kek_rsa.pem"
     #     key_version: 1
 
+    # ---------------------------------------------------------------------------
+    # V1.0-KMS-1 — KMS production readiness (all fields optional)
+    # ---------------------------------------------------------------------------
+
+    # retry — exponential-backoff for transient KMS errors.
+    # Enabled by default with conservative defaults.
+    # retry:
+    #   enabled: true
+    #   initial_interval: "100ms"  # First retry delay (default: 100ms)
+    #   max_interval: "5s"         # Max per-attempt delay (default: 5s)
+    #   max_elapsed_time: "30s"    # Total retry window (default: 30s)
+    #   multiplier: 2.0            # Exponential backoff multiplier (default: 2.0)
+
+    # circuit_breaker — three-state fail-fast for sustained KMS outages.
+    # Disabled by default. Enable in production with KMS redundancy.
+    # circuit_breaker:
+    #   enabled: false
+    #   consecutive_failures: 5    # Trip after N failures (default: 5)
+    #   open_timeout: "30s"        # Stay open before probing (default: 30s)
+    #   success_threshold: 2       # Close after N probe successes (default: 2)
+
+    # dek_cache — LRU cache for DEK unwrap results (read-path acceleration).
+    # Disabled by default. Enable for workloads with high GET request volume.
+    # dek_cache:
+    #   enabled: false
+    #   ttl: "60s"                 # Cache validity duration (default: 60s)
+    #   max_entries: 1000          # LRU eviction threshold (default: 1000)
+    #   cleanup_interval: "30s"    # Background eviction sweep (default: TTL/2)
+
+    # health_check_interval — how often the KMS health-check goroutine probes.
+    # Default: 30s. Set to 0 to disable the goroutine entirely.
+    # Set via KMS_HEALTH_CHECK_INTERVAL env var.
+    # health_check_interval: "30s"
+
     cosmian:
       # Cosmian KMIP endpoint (supports both binary and JSON protocols)
       # RECOMMENDED: JSON/HTTP endpoint (tested and verified)
