@@ -734,3 +734,100 @@ func TestMetrics_IncDecMPUActiveUploads(t *testing.T) {
 	}
 	t.Error("gateway_mpu_active_uploads metric not found")
 }
+
+// ---- V1.0-KMS-1 metrics tests ---------------------------------------------
+
+// TestMetrics_KMSDEKCacheHits verifies the DEK cache hit counter emits labels.
+func TestMetrics_KMSDEKCacheHits(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.RecordKMSDEKCacheHit("cosmian")
+	m.RecordKMSDEKCacheHit("cosmian")
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_kms_dek_cache_hits_total" {
+			if got := mf.GetMetric()[0].GetCounter().GetValue(); got != 2.0 {
+				t.Errorf("gateway_kms_dek_cache_hits_total = %v, want 2.0", got)
+			}
+			return
+		}
+	}
+	t.Error("gateway_kms_dek_cache_hits_total not found")
+}
+
+// TestMetrics_KMSDEKCacheMisses verifies the DEK cache miss counter.
+func TestMetrics_KMSDEKCacheMisses(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.RecordKMSDEKCacheMiss("cosmian")
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_kms_dek_cache_misses_total" {
+			return
+		}
+	}
+	t.Error("gateway_kms_dek_cache_misses_total not found")
+}
+
+// TestMetrics_SetKMSCircuitBreakerState verifies the circuit breaker state gauge.
+func TestMetrics_SetKMSCircuitBreakerState(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.SetKMSCircuitBreakerState("cosmian", 0) // closed
+	m.SetKMSCircuitBreakerState("cosmian", 1) // open
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_kms_circuit_breaker_state" {
+			if got := mf.GetMetric()[0].GetGauge().GetValue(); got != 1.0 {
+				t.Errorf("gateway_kms_circuit_breaker_state = %v, want 1.0", got)
+			}
+			return
+		}
+	}
+	t.Error("gateway_kms_circuit_breaker_state not found")
+}
+
+// TestMetrics_RecordKMSRetryAttempt verifies the retry attempt counter.
+func TestMetrics_RecordKMSRetryAttempt(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+
+	m.RecordKMSRetryAttempt("cosmian", "wrap", "success")
+	m.RecordKMSRetryAttempt("cosmian", "wrap", "failure")
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_kms_retry_attempts_total" {
+			return
+		}
+	}
+	t.Error("gateway_kms_retry_attempts_total not found")
+}
+
+// TestMetrics_KMS1_NilSafe verifies nil-safe guards on all V1.0-KMS-1 helpers.
+func TestMetrics_KMS1_NilSafe(t *testing.T) {
+	var m *Metrics
+
+	m.RecordKMSDEKCacheHit("provider")
+	m.RecordKMSDEKCacheMiss("provider")
+	m.SetKMSCircuitBreakerState("provider", 0)
+	m.RecordKMSRetryAttempt("provider", "wrap", "success")
+}

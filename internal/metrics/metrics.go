@@ -109,6 +109,25 @@ type Metrics struct {
 	// Labels: provider ∈ {cosmian, aws, vault, memory, self_contained}
 	kmsHealthy *prometheus.GaugeVec
 
+	// V1.0-KMS-1 — KMS production readiness metrics.
+
+	// kmsDEKCacheHits counts successful DEK unwrap cache hits.
+	// Labels: provider
+	kmsDEKCacheHits *prometheus.CounterVec
+
+	// kmsDEKCacheMisses counts DEK unwrap cache misses (went to KMS).
+	// Labels: provider
+	kmsDEKCacheMisses *prometheus.CounterVec
+
+	// kmsCircuitBreakerState reports the current circuit-breaker state.
+	// Value: 0 = closed (normal), 1 = open (failing fast), 2 = half-open (probe).
+	// Labels: provider
+	kmsCircuitBreakerState *prometheus.GaugeVec
+
+	// kmsRetryAttemptsTotal counts total retry attempts by WrapKey/UnwrapKey.
+	// Labels: provider, operation ∈ {wrap, unwrap}, outcome ∈ {success, failure}
+	kmsRetryAttemptsTotal *prometheus.CounterVec
+
 	// metadataEncryptionEnabled reports whether encrypted-object-metadata
 	// (V1.0-CRYPTO-3) is active. Value: 1 = active, 0 = inactive.
 	metadataEncryptionEnabled prometheus.Gauge
@@ -496,6 +515,37 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 			},
 			[]string{"provider"},
 		),
+
+		// V1.0-KMS-1 — KMS production readiness metrics.
+		kmsDEKCacheHits: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_kms_dek_cache_hits_total",
+				Help: "Total number of DEK unwrap cache hits, labelled by provider.",
+			},
+			[]string{"provider"},
+		),
+		kmsDEKCacheMisses: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_kms_dek_cache_misses_total",
+				Help: "Total number of DEK unwrap cache misses (went to KMS), labelled by provider.",
+			},
+			[]string{"provider"},
+		),
+		kmsCircuitBreakerState: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "gateway_kms_circuit_breaker_state",
+				Help: "Current circuit-breaker state (0=closed, 1=open, 2=half-open), labelled by provider.",
+			},
+			[]string{"provider"},
+		),
+		kmsRetryAttemptsTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_kms_retry_attempts_total",
+				Help: "Total KMS retry attempts, labelled by provider, operation (wrap/unwrap), and outcome (success/failure).",
+			},
+			[]string{"provider", "operation", "outcome"},
+		),
+
 		metadataEncryptionEnabled: factory.NewGauge(
 			prometheus.GaugeOpts{
 				Name: "gateway_metadata_encryption_enabled",
@@ -999,6 +1049,42 @@ func (m *Metrics) SetKMSHealthy(provider string, healthy bool) {
 		val = 1.0
 	}
 	m.kmsHealthy.WithLabelValues(provider).Set(val)
+}
+
+// ---- V1.0-KMS-1 metric helpers --------------------------------------------
+
+// RecordKMSDEKCacheHit increments the DEK cache hit counter for the provider.
+func (m *Metrics) RecordKMSDEKCacheHit(provider string) {
+	if m == nil || m.kmsDEKCacheHits == nil {
+		return
+	}
+	m.kmsDEKCacheHits.WithLabelValues(provider).Inc()
+}
+
+// RecordKMSDEKCacheMiss increments the DEK cache miss counter for the provider.
+func (m *Metrics) RecordKMSDEKCacheMiss(provider string) {
+	if m == nil || m.kmsDEKCacheMisses == nil {
+		return
+	}
+	m.kmsDEKCacheMisses.WithLabelValues(provider).Inc()
+}
+
+// SetKMSCircuitBreakerState sets the circuit-breaker state gauge for the provider.
+// State: 0 = closed, 1 = open, 2 = half-open.
+func (m *Metrics) SetKMSCircuitBreakerState(provider string, state int) {
+	if m == nil || m.kmsCircuitBreakerState == nil {
+		return
+	}
+	m.kmsCircuitBreakerState.WithLabelValues(provider).Set(float64(state))
+}
+
+// RecordKMSRetryAttempt increments the KMS retry attempt counter.
+// operation ∈ {"wrap", "unwrap"}, outcome ∈ {"success", "failure"}.
+func (m *Metrics) RecordKMSRetryAttempt(provider, operation, outcome string) {
+	if m == nil || m.kmsRetryAttemptsTotal == nil {
+		return
+	}
+	m.kmsRetryAttemptsTotal.WithLabelValues(provider, operation, outcome).Inc()
 }
 
 // SetMetadataEncryptionEnabled sets the metadata encryption enabled gauge.
