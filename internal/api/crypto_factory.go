@@ -41,7 +41,43 @@ func cosmianFactory(_ context.Context, cfg map[string]any) (crypto.KeyManager, e
 // For providers "cosmian" and "kmip" it builds the typed options struct and
 // calls the registered factory; for "memory" and "hsm" it delegates directly
 // to the registry via [crypto.Open].
+//
+// If enabled in cfg, the returned KeyManager is wrapped with decorator layers
+// (innermost to outermost):
+//  1. RetryingKeyManager — exponential-backoff retry on transient errors
+//  2. CircuitBreakerKeyManager — fail-fast on consecutive failures
+//  3. CachingKeyManager — LRU cache for DEK unwrap results
 func BuildKeyManager(cfg *config.KeyManagerConfig, logger *logrus.Logger) (crypto.KeyManager, error) {
+	km, err := buildBaseKeyManager(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Layer 1: retry wrapper (innermost — retries before circuit-breaker sees result)
+	if cfg.Retry.Enabled {
+		km = crypto.NewRetryingKeyManager(km, toKMSRetryCfg(cfg.Retry))
+	}
+
+	// Layer 2: circuit-breaker (wraps retry so consecutive failures trip the breaker)
+	if cfg.CircuitBreaker.Enabled {
+		km = crypto.NewCircuitBreakerKeyManager(km, toKMSCircuitBreakerCfg(cfg.CircuitBreaker))
+	}
+
+	// Layer 3: DEK cache (outermost — catches cache hits before circuit-breaker and retry)
+	if cfg.DEKCache.Enabled {
+		km, err = crypto.NewCachingKeyManager(km, toDEKCacheCfg(cfg.DEKCache))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create DEK cache: %w", err)
+		}
+	}
+
+	return km, nil
+}
+
+// buildBaseKeyManager constructs the raw (undecorated) KeyManager from the
+// provider-specific configuration. This is the same logic that was originally
+// in BuildKeyManager before the decorator stack was added.
+func buildBaseKeyManager(cfg *config.KeyManagerConfig, logger *logrus.Logger) (crypto.KeyManager, error) {
 	_ = logger // reserved for future structured logging
 	provider := strings.ToLower(cfg.Provider)
 	if provider == "" {
@@ -72,6 +108,37 @@ func BuildKeyManager(cfg *config.KeyManagerConfig, logger *logrus.Logger) (crypt
 			return nil, fmt.Errorf("unsupported key manager provider %q: %w", provider, err)
 		}
 		return km, nil
+	}
+}
+
+// --- KMS decorator config conversion helpers ---------------------------------
+
+// toKMSRetryCfg converts config.KMSRetryConfig to crypto.RetryConfig.
+func toKMSRetryCfg(cfg config.KMSRetryConfig) crypto.RetryConfig {
+	return crypto.RetryConfig{
+		InitialInterval: cfg.InitialInterval,
+		MaxInterval:     cfg.MaxInterval,
+		MaxElapsedTime:  cfg.MaxElapsedTime,
+		Multiplier:      cfg.Multiplier,
+	}
+}
+
+// toKMSCircuitBreakerCfg converts config.KMSCircuitBreakerConfig to crypto.CircuitBreakerConfig.
+func toKMSCircuitBreakerCfg(cfg config.KMSCircuitBreakerConfig) crypto.CircuitBreakerConfig {
+	return crypto.CircuitBreakerConfig{
+		ConsecutiveFailures: cfg.ConsecutiveFailures,
+		OpenTimeout:         cfg.OpenTimeout,
+		SuccessThreshold:    cfg.SuccessThreshold,
+	}
+}
+
+// toDEKCacheCfg converts config.DEKCacheConfig to crypto.DEKCacheConfig.
+func toDEKCacheCfg(cfg config.DEKCacheConfig) crypto.DEKCacheConfig {
+	return crypto.DEKCacheConfig{
+		Enabled:         cfg.Enabled,
+		TTL:             cfg.TTL,
+		MaxEntries:      cfg.MaxEntries,
+		CleanupInterval: cfg.CleanupInterval,
 	}
 }
 
