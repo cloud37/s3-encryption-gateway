@@ -308,6 +308,11 @@ type KeyManagerConfig struct {
 	Cosmian        CosmianConfig        `yaml:"cosmian"`
 	Memory         MemoryKMConfig       `yaml:"memory"`
 	SelfContained  SelfContainedKMConfig `yaml:"self_contained"`
+	// V1.0-KMS-1 — KMS production readiness fields.
+	Retry              KMSRetryConfig          `yaml:"retry"`
+	CircuitBreaker     KMSCircuitBreakerConfig `yaml:"circuit_breaker"`
+	DEKCache           DEKCacheConfig          `yaml:"dek_cache"`
+	HealthCheckInterval time.Duration          `yaml:"health_check_interval" env:"KMS_HEALTH_CHECK_INTERVAL"`
 	// AWS        AWSKMSConfig  `yaml:"aws"`
 	// Vault      VaultConfig   `yaml:"vault"`
 }
@@ -368,6 +373,48 @@ type RotationPolicyConfig struct {
 	// This should match or exceed DualReadWindow in practice.
 	// Default: 0 (disabled, use DualReadWindow instead)
 	GraceWindow time.Duration `yaml:"grace_window" env:"KEY_MANAGER_ROTATION_GRACE_WINDOW"`
+}
+
+// V1.0-KMS-1 — KMS production readiness config structs.
+
+// KMSRetryConfig holds retry configuration for network-backed KMS adapters.
+type KMSRetryConfig struct {
+	// Enabled enables the retry wrapper. Default: true.
+	Enabled bool `yaml:"enabled" env:"KMS_RETRY_ENABLED"`
+	// InitialInterval is the wait before the first retry. Default: 100 ms.
+	InitialInterval time.Duration `yaml:"initial_interval" env:"KMS_RETRY_INITIAL_INTERVAL"`
+	// MaxInterval caps per-attempt delay. Default: 5 s.
+	MaxInterval time.Duration `yaml:"max_interval" env:"KMS_RETRY_MAX_INTERVAL"`
+	// MaxElapsedTime caps the total retry window. Default: 30 s.
+	// Set to 0 to retry indefinitely (ctx cancellation is the only stop).
+	MaxElapsedTime time.Duration `yaml:"max_elapsed_time" env:"KMS_RETRY_MAX_ELAPSED_TIME"`
+	// Multiplier is the exponential backoff multiplier. Default: 2.0.
+	Multiplier float64 `yaml:"multiplier" env:"KMS_RETRY_MULTIPLIER"`
+}
+
+// KMSCircuitBreakerConfig holds circuit-breaker configuration.
+type KMSCircuitBreakerConfig struct {
+	// Enabled enables the circuit-breaker wrapper. Default: false.
+	Enabled bool `yaml:"enabled" env:"KMS_CIRCUIT_BREAKER_ENABLED"`
+	// ConsecutiveFailures trips the breaker. Default: 5.
+	ConsecutiveFailures int `yaml:"consecutive_failures" env:"KMS_CIRCUIT_BREAKER_FAILURES"`
+	// OpenTimeout is the breaker-open duration. Default: 30 s.
+	OpenTimeout time.Duration `yaml:"open_timeout" env:"KMS_CIRCUIT_BREAKER_OPEN_TIMEOUT"`
+	// SuccessThreshold closes the breaker after N probe successes. Default: 2.
+	SuccessThreshold int `yaml:"success_threshold" env:"KMS_CIRCUIT_BREAKER_SUCCESS_THRESHOLD"`
+}
+
+// DEKCacheConfig holds configuration for the DEK unwrap cache.
+type DEKCacheConfig struct {
+	// Enabled enables the DEK unwrap cache. Default: false.
+	Enabled bool `yaml:"enabled" env:"KMS_DEK_CACHE_ENABLED"`
+	// TTL is the duration a cached DEK unwrap result is valid. Default: 60 s.
+	TTL time.Duration `yaml:"ttl" env:"KMS_DEK_CACHE_TTL"`
+	// MaxEntries is the maximum number of cached entries (LRU eviction). Default: 1000.
+	MaxEntries int `yaml:"max_entries" env:"KMS_DEK_CACHE_MAX_ENTRIES"`
+	// CleanupInterval is how often the background cleanup ticker runs.
+	// Default: TTL/2, minimum 5 s.
+	CleanupInterval time.Duration `yaml:"cleanup_interval" env:"KMS_DEK_CACHE_CLEANUP_INTERVAL"`
 }
 
 // CosmianConfig captures settings for the Cosmian KMIP integration.
@@ -1013,6 +1060,71 @@ func loadFromEnv(config *Config) {
 	if v := os.Getenv("KEY_MANAGER_ROTATION_GRACE_WINDOW"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			config.Encryption.KeyManager.RotationPolicy.GraceWindow = d
+		}
+	}
+	// V1.0-KMS-1 — KMS production readiness env vars.
+	if v := os.Getenv("KMS_RETRY_ENABLED"); v != "" {
+		config.Encryption.KeyManager.Retry.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("KMS_RETRY_INITIAL_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.Retry.InitialInterval = d
+		}
+	}
+	if v := os.Getenv("KMS_RETRY_MAX_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.Retry.MaxInterval = d
+		}
+	}
+	if v := os.Getenv("KMS_RETRY_MAX_ELAPSED_TIME"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.Retry.MaxElapsedTime = d
+		}
+	}
+	if v := os.Getenv("KMS_RETRY_MULTIPLIER"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
+			config.Encryption.KeyManager.Retry.Multiplier = n
+		}
+	}
+	if v := os.Getenv("KMS_CIRCUIT_BREAKER_ENABLED"); v != "" {
+		config.Encryption.KeyManager.CircuitBreaker.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("KMS_CIRCUIT_BREAKER_FAILURES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			config.Encryption.KeyManager.CircuitBreaker.ConsecutiveFailures = n
+		}
+	}
+	if v := os.Getenv("KMS_CIRCUIT_BREAKER_OPEN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.CircuitBreaker.OpenTimeout = d
+		}
+	}
+	if v := os.Getenv("KMS_CIRCUIT_BREAKER_SUCCESS_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			config.Encryption.KeyManager.CircuitBreaker.SuccessThreshold = n
+		}
+	}
+	if v := os.Getenv("KMS_DEK_CACHE_ENABLED"); v != "" {
+		config.Encryption.KeyManager.DEKCache.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("KMS_DEK_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.DEKCache.TTL = d
+		}
+	}
+	if v := os.Getenv("KMS_DEK_CACHE_MAX_ENTRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			config.Encryption.KeyManager.DEKCache.MaxEntries = n
+		}
+	}
+	if v := os.Getenv("KMS_DEK_CACHE_CLEANUP_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.DEKCache.CleanupInterval = d
+		}
+	}
+	if v := os.Getenv("KMS_HEALTH_CHECK_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.Encryption.KeyManager.HealthCheckInterval = d
 		}
 	}
 	if v := os.Getenv("COSMIAN_KMS_ENDPOINT"); v != "" {
@@ -1693,6 +1805,23 @@ func (c *Config) Validate() error {
 			}
 		default:
 			return fmt.Errorf("unsupported key manager provider: %s (supported: cosmian, kmip, memory, hsm, self_contained)", c.Encryption.KeyManager.Provider)
+		}
+
+		// V1.0-KMS-1 — KMS production readiness validation.
+		km := c.Encryption.KeyManager
+		if km.Retry.MaxElapsedTime > 0 && km.Retry.MaxInterval > km.Retry.MaxElapsedTime {
+			return fmt.Errorf("encryption.key_manager.retry.max_interval (%s) must be <= max_elapsed_time (%s) when max_elapsed_time is non-zero", km.Retry.MaxInterval, km.Retry.MaxElapsedTime)
+		}
+		if km.CircuitBreaker.Enabled && km.CircuitBreaker.ConsecutiveFailures < 1 {
+			return fmt.Errorf("encryption.key_manager.circuit_breaker.consecutive_failures must be >= 1 (got %d)", km.CircuitBreaker.ConsecutiveFailures)
+		}
+		if km.DEKCache.Enabled {
+			if km.DEKCache.MaxEntries < 1 {
+				return fmt.Errorf("encryption.key_manager.dek_cache.max_entries must be >= 1 (got %d)", km.DEKCache.MaxEntries)
+			}
+			if km.DEKCache.TTL <= 0 {
+				return fmt.Errorf("encryption.key_manager.dek_cache.ttl must be > 0 (got %s)", km.DEKCache.TTL)
+			}
 		}
 	}
 
