@@ -508,6 +508,14 @@ func main() {
 		}).Info("Using single password mode (no key rotation); PasswordKeyManager active for MPU DEK wrapping")
 	}
 
+	// V1.0-KMS-1: start periodic KMS health-check goroutine.
+	hcInterval := cfg.Encryption.KeyManager.HealthCheckInterval
+	if hcInterval == 0 {
+		hcInterval = 30 * time.Second
+	}
+	stopHC := crypto.StartKMSHealthCheck(context.Background(), keyManager, hcInterval)
+	defer stopHC()
+
 	// Initialize compression engine if enabled
 	var compressionEngine crypto.CompressionEngine
 	if cfg.Compression.Enabled {
@@ -614,6 +622,7 @@ func main() {
 	crypto.SetKMSDEKCacheMissObserver(m.RecordKMSDEKCacheMiss)
 	crypto.SetKMSCircuitBreakerStateObserver(m.SetKMSCircuitBreakerState)
 	crypto.SetKMSRetryAttemptObserver(m.RecordKMSRetryAttempt)
+	crypto.SetKMSHealthyObserver(m.SetKMSHealthy)
 
 	// V1.0-CRYPTO-3: load metadata encryption key.
 	var metadataKey []byte

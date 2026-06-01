@@ -10,10 +10,11 @@ package crypto
 // recording is a no-op.
 
 var (
-	recordKMSDEKCacheHitFn    func(provider string)
-	recordKMSDEKCacheMissFn   func(provider string)
+	recordKMSDEKCacheHitFn     func(provider string)
+	recordKMSDEKCacheMissFn    func(provider string)
 	setKMSCircuitBreakerStateFn func(provider string, state int)
-	recordKMSRetryAttemptFn   func(provider, operation, outcome string)
+	recordKMSRetryAttemptFn    func(provider, operation, outcome string)
+	setKMSHealthyFn             func(provider string, healthy bool)
 )
 
 // SetKMSDEKCacheHitObserver wires the DEK cache hit counter callback.
@@ -34,4 +35,9 @@ func SetKMSCircuitBreakerStateObserver(fn func(provider string, state int)) {
 // SetKMSRetryAttemptObserver wires the retry-attempt counter callback.
 func SetKMSRetryAttemptObserver(fn func(provider, operation, outcome string)) {
 	recordKMSRetryAttemptFn = fn
+}
+
+// SetKMSHealthyObserver wires the KMS health gauge callback.
+func SetKMSHealthyObserver(fn func(provider string, healthy bool)) {
+	setKMSHealthyFn = fn
 }
