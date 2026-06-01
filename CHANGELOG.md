@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **V1.0-PERF-1 — Scale & Throughput Guidance**: Named load profiles
+  (`make test-load-smoke`, `test-load-spike`, `test-load-high-throughput`)
+  and `bench-load-capture` for all four profiles. Shipped tuned HPA overlay
+  (`examples/values-hpa-tuned.yaml`) and KEDA `ScaledObject` example
+  (`examples/values-keda-example.yaml`). Published `docs/SCALING.md` with
+  empirical sizing tables, HPA configuration guidance, graceful-shutdown
+  formulae, and three gateway SLOs (availability 99.9%, p99 latency 500ms,
+  throughput 80% of linear). Load profile corpus committed under
+  `docs/perf/v1.0-perf-1/`. Updated `docs/PERFORMANCE.md` with cross-reference
+  and `docs/perf/v0.6-qa-1/slo-summary.md` with v1.0 SLO section.
+
 - **V1.0-COMPAT-1 — SDK/Tool Compatibility Matrix**: Automated smoke tests for
   AWS SDK Go v2, boto3, awscli, s5cmd, rclone, and minio-py against all local
   providers. Published `docs/SDK_COMPATIBILITY.md` with pass/fail and caveats.

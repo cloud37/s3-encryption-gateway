@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -136,6 +136,25 @@ SOAK_ENV = \
 	SOAK_OBJECT_SIZE=52428800 \
 	SOAK_PART_SIZE=10485760
 
+SMOKE_ENV = \
+	SOAK_WORKERS=3 \
+	SOAK_DURATION=10s \
+	SOAK_QPS=10 \
+	SOAK_OBJECT_SIZE=102400
+
+SPIKE_ENV = \
+	SOAK_WORKERS=50 \
+	SOAK_DURATION=60s \
+	SOAK_QPS=50 \
+	SOAK_OBJECT_SIZE=102400
+
+HIGH_THROUGHPUT_ENV = \
+	SOAK_WORKERS=10 \
+	SOAK_DURATION=300s \
+	SOAK_QPS=10 \
+	SOAK_OBJECT_SIZE=524288000 \
+	SOAK_PART_SIZE=52428800
+
 test-load-range:
 	@echo "Running range load tests (conformance suite, local providers, CI scale)..."
 	@go test -count=1 -tags=conformance -race -v -timeout 120s \
@@ -197,6 +216,50 @@ test-load-baseline:
 		-run 'TestConformance/.*/Load_' ./test/conformance/... \
 		2>&1 | tee testdata/baselines/soak_$(shell date +%Y%m%d_%H%M%S).log
 	@echo "Baseline log written to testdata/baselines/"
+
+# ── V1.0-PERF-1 Named load profile targets ──────────────────────────────────
+#
+# Three named profiles (smoke, spike, high-throughput) supplement the existing
+# soak profile (test-load-soak).  Each applies a different env-var preset:
+#
+#   smoke          3 workers, 10s, 10 QPS, 100 KiB objects  — quick CI gate
+#   spike         50 workers, 60s, 50 QPS, 100 KiB objects  — HPA trigger regime
+#   high-throughput 10 workers, 300s, 10 QPS, 500 MiB objects — bandwidth-bound
+#
+# bench-load-capture runs all four profiles (smoke + soak + spike +
+# high-throughput) sequentially, writing NDJSON output into
+# docs/perf/v1.0-perf-1/.
+
+test-load-smoke:
+	@echo "Running smoke load profile (fast CI gate)..."
+	@$(SMOKE_ENV) go test -count=1 -tags=conformance -v -timeout 120s \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+
+test-load-spike:
+	@echo "Running spike load profile (50 workers, 60s, 100 KiB objects)..."
+	@$(SPIKE_ENV) go test -count=1 -tags=conformance -v -timeout 300s \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+
+test-load-high-throughput:
+	@echo "Running high-throughput load profile (500 MiB objects)..."
+	@$(HIGH_THROUGHPUT_ENV) go test -count=1 -tags=conformance -v -timeout 0 \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+
+bench-load-capture:
+	@mkdir -p docs/perf/v1.0-perf-1
+	@$(SMOKE_ENV) SOAK_JSON_OUT=$(PWD)/docs/perf/v1.0-perf-1/smoke.ndjson \
+		go test -count=1 -tags=conformance -v -timeout 120s \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+	@$(SOAK_ENV) SOAK_JSON_OUT=$(PWD)/docs/perf/v1.0-perf-1/soak.ndjson \
+		go test -count=1 -tags=conformance -v -timeout 0 \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+	@$(SPIKE_ENV) SOAK_JSON_OUT=$(PWD)/docs/perf/v1.0-perf-1/spike.ndjson \
+		go test -count=1 -tags=conformance -v -timeout 300s \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+	@$(HIGH_THROUGHPUT_ENV) SOAK_JSON_OUT=$(PWD)/docs/perf/v1.0-perf-1/high-throughput.ndjson \
+		go test -count=1 -tags=conformance -v -timeout 0 \
+		-run 'TestConformance/minio/Load_' ./test/conformance/...
+	@echo "Load profiles captured to docs/perf/v1.0-perf-1/"
 
 # ── V0.6-QA-1 performance baseline targets ──────────────────────────────────
 #

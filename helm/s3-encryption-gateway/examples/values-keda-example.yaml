@@ -1,0 +1,55 @@
+# V1.0-PERF-1 — KEDA ScaledObject example for custom-metrics autoscaling.
+#
+# This is a standalone Kubernetes manifest (NOT a Helm template).  It shows
+# how to scale the gateway on http_requests_total rate via Prometheus adapter
+# when CPU utilisation is a poor proxy for request pressure (e.g. small-object,
+# high-IOPS workloads).
+#
+# Prerequisites:
+#   - KEDA v2.14+ installed in the cluster
+#   - Prometheus Operator with working ServiceMonitor for the gateway
+#   - The Prometheus server must be reachable at the serverAddress below
+#
+# Apply:
+#   kubectl apply -f helm/s3-encryption-gateway/examples/values-keda-example.yaml
+#
+# When to use KEDA instead of CPU-based HPA:
+#   - Workload is dominated by small objects (< 1 MiB) where CPU per request
+#     is near noise-floor.
+#   - Request rate is bursty with long idle periods — KEDA can scale to zero
+#     (minReplicaCount: 0) while CPU-based HPA cannot go below minReplicas.
+#   - You need faster reaction: KEDA's Prometheus scaler evaluates every
+#     15s (vs HPA's default 15s sync + 2×15s window for CPU-based metrics).
+
+# Tested with KEDA v2.14
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: s3-encryption-gateway
+spec:
+  scaleTargetRef:
+    name: s3-encryption-gateway
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 300
+  triggers:
+  - type: prometheus
+    metadata:
+      # Address of the in-cluster Prometheus server.
+      # Adjust namespace and port to match your Prometheus Operator deployment.
+      serverAddress: http://prometheus-operated.monitoring.svc:9090
+      # Metric name shown in KEDA logs and metrics.
+      metricName: s3_gateway_requests_per_second
+      # Scale when average requests per second per replica exceeds 100.
+      # Adjust based on your observed per-replica capacity:
+      #   threshold = (single_replica_max_throughput_req/s) × 0.8
+      threshold: "100"
+      # PromQL query: per-replica request rate averaged over 2m.
+      # The query divides the cluster-wide rate by the current pod count
+      # to derive a per-replica signal.
+      query: >
+        sum(rate(http_requests_total{
+          job="s3-encryption-gateway"
+        }[2m])) / count(kube_pod_info{
+          pod=~"s3-encryption-gateway-.*"
+        })

@@ -21,6 +21,8 @@ coverage.html
 
 # Benchmark output
 *.ndjson
+# Re-include V1.0-PERF-1 tracked NDJSON reference corpus
+!docs/perf/v1.0-perf-1/*.ndjson
 
 # Go workspace file
 go.work

@@ -1,0 +1,2 @@
+{"test":"Load_RangeRead","throughput_mbps":0.13442840576171874,"latency_ns":{"p50":74031857,"p95":79957239,"p99":94318099},"errors":0,"retries_total":0,"heap_inuse_max_bytes":7364608,"cpu_seconds":0}
+{"test":"Load_Multipart","throughput_mbps":150.00011444091797,"latency_ns":{"p50":30447892,"p95":36630117,"p99":44450207},"errors":0,"retries_total":0,"heap_inuse_max_bytes":45973504,"cpu_seconds":0}

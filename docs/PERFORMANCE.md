@@ -201,3 +201,7 @@ address them or ship the matching baseline refresh.
 - Roadmap "Performance baseline per provider" — [`docs/ROADMAP.md`](ROADMAP.md)
 - Plan — [`docs/plans/V0.6-QA-1-plan.md`](plans/V0.6-QA-1-plan.md)
 - SLO annex — [`docs/perf/v0.6-qa-1/slo-summary.md`](perf/v0.6-qa-1/slo-summary.md)
+- **V1.0-PERF-1 -- Horizontal Scaling Guide** — [`docs/SCALING.md`](SCALING.md).
+  Supplements the V0.6-QA-1 baseline with high-concurrency profiling data,
+  tuned HPA configuration, empirical sizing tables, and SLO definitions
+  for horizontal autoscaling.
