@@ -2,7 +2,7 @@
 
 ![GitHub Release](https://img.shields.io/github/v/release/cloud37/s3-encryption-gateway)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)](https://artifacthub.io/packages/search?repo=s3-encryption-gateway)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)]([https://artifacthub.io/packages/search?repo=s3-encryption-gateway](https://artifacthub.io/packages/helm/s3-encryption-gateway/s3-encryption-gateway))
 
 [![Conformance](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/conformance.yml/badge.svg)](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/conformance.yml)
 [![Security Scanning](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/security.yml/badge.svg)](https://github.com/cloud37/s3-encryption-gateway/actions/workflows/security.yml)
