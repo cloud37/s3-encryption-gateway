@@ -235,6 +235,14 @@ func TestConformance(t *testing.T) {
 			{"MGMT2_KDF_Mixed_AllClasses", 0, testMGMT2_KDF_Mixed_AllClasses},
 			{"MGMT2_KDF_GoldenPath", 0, testMGMT2_KDF_GoldenPath},
 
+			// V1.0-COMPAT-1 SDK/Tool compatibility smoke tests
+			{"Compat_AWSGoV2", provider.CapSDKAWSGoV2, testCompatSmoke_AWSGoV2},
+			{"Compat_Boto3", provider.CapSDKBoto3, testCompatSmoke_Boto3},
+			{"Compat_AWSCLI", provider.CapCLIAWSCLI, testCompatSmoke_AWSCLI},
+			{"Compat_S5cmd", provider.CapCLIS5cmd, testCompatSmoke_S5cmd},
+			{"Compat_Rclone", provider.CapCLIRclone, testCompatSmoke_Rclone},
+			{"Compat_MinIOPy", provider.CapSDKMinIOPy, testCompatSmoke_MinIOPy},
+
 			// V1.0-S3-2 S3 API feature parity
 			{"S3Compat_DeleteBucket", 0, testS3Compat_DeleteBucket},
 			{"S3Compat_ListBuckets", 0, testS3Compat_ListBuckets},
