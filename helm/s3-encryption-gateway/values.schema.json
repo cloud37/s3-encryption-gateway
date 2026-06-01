@@ -948,6 +948,41 @@
                   ]
                 },
                 "dualReadWindow": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Number of previous key versions to attempt on decrypt during a key rotation window." },
+                "retry": {
+                  "type": "object",
+                  "description": "Exponential-backoff retry for transient KMS errors (V1.0-KMS-1). Optional.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Enable retry wrapper (default: true)." },
+                    "initialInterval":     { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "First retry delay (Go duration, e.g. 100ms)." },
+                    "maxInterval":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Max per-attempt delay (Go duration, e.g. 5s)." },
+                    "maxElapsedTime":      { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Total retry window (Go duration, e.g. 30s). 0 = retry indefinitely." },
+                    "multiplier":          { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Exponential backoff multiplier (float, default: 2.0)." }
+                  }
+                },
+                "circuitBreaker": {
+                  "type": "object",
+                  "description": "Three-state fail-fast circuit breaker for sustained KMS outages (V1.0-KMS-1). Disabled by default.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Enable circuit-breaker wrapper (default: false)." },
+                    "consecutiveFailures": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Consecutive failures to trip breaker (default: 5)." },
+                    "openTimeout":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Time to stay open before Half-Open probe (Go duration, e.g. 30s)." },
+                    "successThreshold":    { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Consecutive probe successes to close breaker (default: 2)." }
+                  }
+                },
+                "dekCache": {
+                  "type": "object",
+                  "description": "LRU cache for DEK unwrap results (read-path acceleration, V1.0-KMS-1). Disabled by default.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled":          { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Enable DEK unwrap cache (default: false)." },
+                    "ttl":              { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Cache entry TTL (Go duration, e.g. 60s)." },
+                    "maxEntries":       { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Max cache entries before LRU eviction (default: 1000)." },
+                    "cleanupInterval":  { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Background eviction sweep interval (Go duration, e.g. 30s)." }
+                  }
+                },
+                "healthCheckInterval": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "KMS health-check goroutine interval (Go duration, e.g. 30s). 0 disables the goroutine." },
                 "cosmian": {
                   "type": "object",
                   "description": "Cosmian KMS provider configuration.",
