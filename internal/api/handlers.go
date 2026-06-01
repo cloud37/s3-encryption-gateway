@@ -2797,6 +2797,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	// to record the PartRecord without a second Valkey round-trip.
 	var encMPUState *mpu.UploadState
 	var encMPUPlainLen int64
+	var encMPUEncryptDuration time.Duration
 
 	if uploadState, isEnc, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil {
 		// Transient Valkey failure mid-upload — do NOT downgrade to plaintext.
@@ -2844,7 +2845,9 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Pass the pre-fetched state to avoid a second Valkey round-trip inside encryptMPUPart.
+		encryptStart := time.Now()
 		encReader, encLen, err := h.encryptMPUPartWithState(ctx, bucket, uploadID, int32(partNumber), r.Body, plainLen, uploadState)
+		encMPUEncryptDuration = time.Since(encryptStart)
 		if err != nil {
 			h.logger.WithError(err).WithFields(logrus.Fields{
 				"bucket":     bucket,
@@ -2979,6 +2982,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.metrics.RecordMPUStateStoreOp("AppendPart", "success", time.Since(opStart))
 			h.metrics.RecordMPUPart("success")
+			h.metrics.RecordEncryptionOperation(r.Context(), "encrypt", encMPUEncryptDuration, encMPUPlainLen)
 			if h.auditLogger != nil {
 				h.auditLogger.Log(&audit.AuditEvent{
 					EventType: audit.EventTypeMPUPart,
@@ -3620,12 +3624,16 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 	if err != nil {
 		return fmt.Errorf("writeMPUManifest: get engine: %w", err)
 	}
+	manifestPlainLen := int64(len(manifestJSON))
+	encryptStart := time.Now()
 	encReader, encMeta, err := engine.Encrypt(ctx, bytes.NewReader(manifestJSON), map[string]string{
 		"x-amz-meta-encryption-mpu-manifest": "true",
 	})
+	encryptDuration := time.Since(encryptStart)
 	if err != nil {
 		return fmt.Errorf("writeMPUManifest: encrypt manifest: %w", err)
 	}
+	h.metrics.RecordEncryptionOperation(ctx, "encrypt", encryptDuration, manifestPlainLen)
 
 	// Buffer the encrypted output so we can set Content-Length precisely.
 	encBytes, err := io.ReadAll(encReader)
