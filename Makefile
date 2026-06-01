@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -83,6 +83,14 @@ test-conformance-external:
 	@echo "Running conformance tests (external providers with credentials)..."
 	@GATEWAY_TEST_SKIP_MINIO=1 GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 \
 		go test -count=1 -tags=conformance -race -v ./test/conformance/...
+
+# V1.0-COMPAT-1 — SDK/Tool compatibility smoke tests (require Docker).
+# Runs against all local providers (MinIO, Garage, RustFS, SeaweedFS).
+test-conformance-compat:
+	@echo "Running SDK/tool compatibility smoke tests (local providers)..."
+	@GATEWAY_TEST_SKIP_EXTERNAL=1 \
+		go test -count=1 -tags=conformance -race -v -timeout 30m \
+		-run 'TestConformance/.*/Compat_' ./test/conformance/...
 
 # KMS integration conformance test — starts a Cosmian KMS container alongside
 # the S3 backend and exercises the full DEK wrap/unwrap path.
@@ -437,6 +445,7 @@ help:
 	@echo "  test-fips          - Run tests with FIPS build tag"
 	@echo "  test-fuzz          - Run fuzz tests (regression mode)"
 	@echo "  test-conformance   - Run tier-2 conformance tests (all providers; requires Docker)"
+	@echo "  test-conformance-compat - Run SDK/tool compatibility smoke tests (V1.0-COMPAT-1)"
 	@echo "  test-conformance-local  - Conformance: local providers (MinIO + Garage + RustFS + SeaweedFS)"
 	@echo "  test-conformance-external - Conformance: external providers with credentials"
 	@echo "  test-conformance-kms     - Conformance: KMS envelope encryption (MinIO + Cosmian KMS)"
