@@ -58,6 +58,32 @@ const (
 	CapObjectACL
 	// CapBucketEncryption indicates support for PutBucketEncryption / GetBucketEncryption.
 	CapBucketEncryption
+
+	// V1.0-COMPAT-1 — SDK/Tool compatibility matrix capability bits.
+
+	// CapSDKAWSGoV2 indicates the provider is suitable for the AWS SDK Go v2
+	// smoke test. Set on all local providers and external AWS S3.
+	CapSDKAWSGoV2 Capabilities = 1 << 20
+
+	// CapSDKBoto3 indicates the provider is suitable for the boto3 (Python)
+	// smoke test. Requires Docker (Python container).
+	CapSDKBoto3 Capabilities = 1 << 21
+
+	// CapCLIAWSCLI indicates the provider is suitable for the awscli smoke test.
+	// Requires Docker (awscli container).
+	CapCLIAWSCLI Capabilities = 1 << 22
+
+	// CapCLIS5cmd indicates the provider is suitable for the s5cmd smoke test.
+	// Requires Docker (s5cmd container).
+	CapCLIS5cmd Capabilities = 1 << 23
+
+	// CapCLIRclone indicates the provider is suitable for the rclone smoke test.
+	// Requires Docker (rclone container).
+	CapCLIRclone Capabilities = 1 << 24
+
+	// CapSDKMinIOPy indicates the provider is suitable for the minio-py (Python)
+	// smoke test. Requires Docker (Python container).
+	CapSDKMinIOPy Capabilities = 1 << 25
 )
 
 // capNames maps each bit to a human-readable label for Stringer output.
@@ -84,6 +110,14 @@ var capNames = []struct {
 	{CapBucketACL, "BucketACL"},
 	{CapObjectACL, "ObjectACL"},
 	{CapBucketEncryption, "BucketEncryption"},
+
+	// V1.0-COMPAT-1 — SDK/Tool compatibility matrix.
+	{CapSDKAWSGoV2, "SDKAWSGoV2"},
+	{CapSDKBoto3, "SDKBoto3"},
+	{CapCLIAWSCLI, "CLIAWSCLI"},
+	{CapCLIS5cmd, "CLIS5cmd"},
+	{CapCLIRclone, "CLIRclone"},
+	{CapSDKMinIOPy, "SDKMinIOPy"},
 }
 
 // String returns a human-readable description of the capabilities bitmap.

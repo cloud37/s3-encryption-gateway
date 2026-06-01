@@ -44,7 +44,13 @@ func (p *garageProvider) Capabilities() Capabilities {
 		CapVersioning |
 		CapEncryptedMPU |
 		CapKMSIntegration |
-		CapLoadTest
+		CapLoadTest |
+		CapSDKAWSGoV2 |
+		CapSDKBoto3 |
+		CapCLIAWSCLI |
+		CapCLIS5cmd |
+		CapCLIRclone |
+		CapSDKMinIOPy
 }
 
 func (p *garageProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }

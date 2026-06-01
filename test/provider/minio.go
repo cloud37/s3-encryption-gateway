@@ -40,7 +40,13 @@ func (p *minioProvider) Capabilities() Capabilities {
 		CapBatchDelete |
 		CapEncryptedMPU |
 		CapKMSIntegration |
-		CapLoadTest
+		CapLoadTest |
+		CapSDKAWSGoV2 |
+		CapSDKBoto3 |
+		CapCLIAWSCLI |
+		CapCLIS5cmd |
+		CapCLIRclone |
+		CapSDKMinIOPy
 }
 
 func (p *minioProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }

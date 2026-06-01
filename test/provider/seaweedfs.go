@@ -68,7 +68,13 @@ func (p *seaweedfsProvider) Capabilities() Capabilities {
 		CapKMSIntegration |
 		CapInlinePutTagging |
 		CapEncryptedMPU |
-		CapLoadTest
+		CapLoadTest |
+		CapSDKAWSGoV2 |
+		CapSDKBoto3 |
+		CapCLIAWSCLI |
+		CapCLIS5cmd |
+		CapCLIRclone |
+		CapSDKMinIOPy
 }
 
 func (p *seaweedfsProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }

@@ -65,7 +65,13 @@ func (p *rustfsProvider) Capabilities() Capabilities {
 		CapKMSIntegration |
 		CapInlinePutTagging |
 		CapEncryptedMPU |
-		CapLoadTest
+		CapLoadTest |
+		CapSDKAWSGoV2 |
+		CapSDKBoto3 |
+		CapCLIAWSCLI |
+		CapCLIS5cmd |
+		CapCLIRclone |
+		CapSDKMinIOPy
 }
 
 func (p *rustfsProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }
