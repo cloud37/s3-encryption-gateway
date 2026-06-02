@@ -56,6 +56,116 @@ func TestCopyProxyResponse(t *testing.T) {
 	}
 }
 
+// TestCopyProxyResponse_LifecycleHeaders_NotStripped verifies that lifecycle
+// response headers x-amz-expiration and x-amz-restore survive copyProxyResponse.
+func TestCopyProxyResponse_LifecycleHeaders_NotStripped(t *testing.T) {
+	backendResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"X-Amz-Expiration": []string{"expiry-date=\"Tue, 01 Jan 2025 00:00:00 GMT\", rule-id=\"expire-rule\""},
+			"X-Amz-Restore":    []string{"ongoing-request=\"false\", expiry-date=\"Tue, 01 Jan 2025 00:00:00 GMT\""},
+			"Content-Type":     []string{"application/octet-stream"},
+		},
+		Body: io.NopCloser(bytes.NewReader([]byte("data"))),
+	}
+
+	w := httptest.NewRecorder()
+	copyProxyResponse(w, backendResp)
+
+	result := w.Result()
+
+	if result.Header.Get("X-Amz-Expiration") == "" {
+		t.Error("x-amz-expiration header was stripped by copyProxyResponse")
+	}
+	if result.Header.Get("X-Amz-Restore") == "" {
+		t.Error("x-amz-restore header was stripped by copyProxyResponse")
+	}
+
+	exp := result.Header.Get("X-Amz-Expiration")
+	if !strings.Contains(exp, "expiry-date") || !strings.Contains(exp, "rule-id") {
+		t.Errorf("x-amz-expiration header value looks truncated: %q", exp)
+	}
+}
+
+// TestHandlePassthrough_LifecycleExpirationHeader_Forwarded verifies that
+// x-amz-expiration and x-amz-restore headers from a backend GET response
+// pass through the passthrough forwarding path.
+func TestHandlePassthrough_LifecycleExpirationHeader_Forwarded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-amz-expiration", "expiry-date=\"Tue, 01 Jan 2025 00:00:00 GMT\", rule-id=\"expire-rule\"")
+		w.Header().Set("x-amz-restore", "ongoing-request=\"false\", expiry-date=\"Tue, 01 Jan 2025 00:00:00 GMT\"")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data"))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	h := &Handler{
+		config: &config.Config{
+			Backend: config.BackendConfig{
+				Endpoint: backend.URL,
+				UseSSL:   false,
+			},
+		},
+		logger:  logger,
+		metrics: getTestMetrics(),
+	}
+
+	req := httptest.NewRequest("GET", "/test-bucket/test-key", nil)
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, req, "GetObject", "test-bucket", "test-key")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	if w.Header().Get("x-amz-expiration") == "" {
+		t.Error("x-amz-expiration header was stripped by handlePassthrough")
+	}
+	if w.Header().Get("x-amz-restore") == "" {
+		t.Error("x-amz-restore header was stripped by handlePassthrough")
+	}
+}
+
+// TestHandlePassthrough_RestoreHeader_Forwarded verifies that x-amz-restore
+// header passes through the forwarding path.
+func TestHandlePassthrough_RestoreHeader_Forwarded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-amz-restore", "ongoing-request=\"false\", expiry-date=\"Tue, 01 Jan 2025 00:00:00 GMT\"")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data"))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	h := &Handler{
+		config: &config.Config{
+			Backend: config.BackendConfig{
+				Endpoint: backend.URL,
+				UseSSL:   false,
+			},
+		},
+		logger:  logger,
+		metrics: getTestMetrics(),
+	}
+
+	req := httptest.NewRequest("GET", "/test-bucket/test-key", nil)
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, req, "GetObject", "test-bucket", "test-key")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	if w.Header().Get("x-amz-restore") == "" {
+		t.Error("x-amz-restore header was stripped by handlePassthrough")
+	}
+}
+
 func TestHandlePassthrough_BackendError(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
