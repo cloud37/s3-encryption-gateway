@@ -80,7 +80,7 @@ func TestHandleUploadPart_OversizePart_Refused(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	// Create a multipart upload first via the mock (skip the HTTP round-trip).
-	uploadID, err := mockClient.CreateMultipartUpload(context.Background(), "test-bucket", "big-obj", nil)
+	uploadID, err := mockClient.CreateMultipartUpload(context.Background(), "test-bucket", "big-obj", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestHandleUploadPart_AtCap_Succeeds(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	uploadID, err := mockClient.CreateMultipartUpload(context.Background(), "test-bucket", "boundary-obj", nil)
+	uploadID, err := mockClient.CreateMultipartUpload(context.Background(), "test-bucket", "boundary-obj", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 		bytes.NewReader(import_bytes),
 		encMeta,
 		&encLen,
-		"", nil,
+		"", nil, "", "", "", "", "",
 	)
 
 	// Issue a CopyObject request that would copy src-bucket/src-key →
@@ -240,7 +240,7 @@ func TestHandleGetObject_Streaming_BoundedHeap(t *testing.T) {
 		t.Fatalf("read encrypted: %v", err)
 	}
 	encLen := int64(encBuf.Len())
-	if err := mockClient.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil); err != nil {
+	if err := mockClient.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
@@ -274,7 +274,7 @@ func TestHandleUploadPart_Plaintext_SeekableWrapper(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	uploadID, err := mockClient.CreateMultipartUpload(context.Background(), "bkt", "key", nil)
+	uploadID, err := mockClient.CreateMultipartUpload(context.Background(), "bkt", "key", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("CreateMultipartUpload: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 		t.Fatalf("read encrypted: %v", err)
 	}
 	encLen := int64(encBuf.Len())
-	if err := mockClient.PutObject(context.Background(), "src-bkt", "src-key", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil); err != nil {
+	if err := mockClient.PutObject(context.Background(), "src-bkt", "src-key", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("PutObject source: %v", err)
 	}
 

@@ -33,14 +33,14 @@ import (
 
 // Client is the S3 backend client interface.
 type Client interface {
-	PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput) error
+	PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error
 	GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error)
 	DeleteObject(ctx context.Context, bucket, key string, versionID *string) error
 	HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error)
 	ListObjects(ctx context.Context, bucket, prefix string, opts ListOptions) (ListResult, error)
 
 	// Multipart upload operations
-	CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string) (string, error)
+	CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error)
 	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, reader io.Reader, contentLength *int64) (string, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []CompletedPart, lock *ObjectLockInput) (string, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
@@ -398,7 +398,7 @@ func validateEndpoint(endpoint string) error {
 }
 
 // PutObject uploads an object to S3.
-func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput) error {
+func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
 	ctx, span := c.tracer.Start(ctx, "S3.PutObject",
 		trace.WithAttributes(
 			attribute.String("s3.bucket", bucket),
@@ -443,6 +443,21 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 	}
 	if tags != "" {
 		input.Tagging = aws.String(tags)
+	}
+	if cannedACL != "" {
+		input.ACL = types.ObjectCannedACL(cannedACL)
+	}
+	if grantFullControl != "" {
+		input.GrantFullControl = aws.String(grantFullControl)
+	}
+	if grantRead != "" {
+		input.GrantRead = aws.String(grantRead)
+	}
+	if grantReadACP != "" {
+		input.GrantReadACP = aws.String(grantReadACP)
+	}
+	if grantWriteACP != "" {
+		input.GrantWriteACP = aws.String(grantWriteACP)
 	}
 
 	// For non-seekable readers (e.g. streaming chunked encrypted data), the
@@ -735,11 +750,26 @@ func extractMetadata(metadata map[string]string) map[string]string {
 }
 
 // CreateMultipartUpload initiates a multipart upload.
-func (c *s3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string) (string, error) {
+func (c *s3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	input := &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(bucket),
 		Key:      aws.String(key),
 		Metadata: convertMetadata(metadata),
+	}
+	if cannedACL != "" {
+		input.ACL = types.ObjectCannedACL(cannedACL)
+	}
+	if grantFullControl != "" {
+		input.GrantFullControl = aws.String(grantFullControl)
+	}
+	if grantRead != "" {
+		input.GrantRead = aws.String(grantRead)
+	}
+	if grantReadACP != "" {
+		input.GrantReadACP = aws.String(grantReadACP)
+	}
+	if grantWriteACP != "" {
+		input.GrantWriteACP = aws.String(grantWriteACP)
 	}
 
 	result, err := c.client.CreateMultipartUpload(ctx, input)

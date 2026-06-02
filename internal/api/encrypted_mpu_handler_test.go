@@ -48,7 +48,7 @@ func newMPUMockS3Client() *mpuMockS3Client {
 	}
 }
 
-func (m *mpuMockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput) error {
+func (m *mpuMockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return err
@@ -127,7 +127,7 @@ func (m *mpuMockS3Client) ListObjects(ctx context.Context, bucket, prefix string
 	return s3.ListResult{}, nil
 }
 
-func (m *mpuMockS3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string) (string, error) {
+func (m *mpuMockS3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	uploadID := fmt.Sprintf("upload-%s-%d", key, time.Now().UnixNano())

@@ -413,7 +413,7 @@ func TestProxyClient_NotImplemented(t *testing.T) {
 
 	ctx := context.Background()
 
-	if err := pc.PutObject(ctx, "b", "k", nil, nil, nil, "", nil); err == nil {
+	if err := pc.PutObject(ctx, "b", "k", nil, nil, nil, "", nil, "", "", "", "", ""); err == nil {
 		t.Error("PutObject() expected not-implemented error, got nil")
 	}
 
@@ -433,7 +433,7 @@ func TestProxyClient_NotImplemented(t *testing.T) {
 		t.Error("ListObjects() expected not-implemented error, got nil")
 	}
 
-	if _, err := pc.CreateMultipartUpload(ctx, "b", "k", nil); err == nil {
+	if _, err := pc.CreateMultipartUpload(ctx, "b", "k", nil, "", "", "", "", ""); err == nil {
 		t.Error("CreateMultipartUpload() expected not-implemented error, got nil")
 	}
 

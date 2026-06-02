@@ -1454,6 +1454,16 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract canned ACL header (x-amz-acl) and fine-grained grant headers.
+	// Forward verbatim to the backend; the gateway does not validate ACL values
+	// because it is a transparent proxy and different backends support different
+	// canned ACL strings (private, public-read, authenticated-read, etc.).
+	cannedACL := r.Header.Get("x-amz-acl")
+	grantFullControl := r.Header.Get("x-amz-grant-full-control")
+	grantRead := r.Header.Get("x-amz-grant-read")
+	grantReadACP := r.Header.Get("x-amz-grant-read-acp")
+	grantWriteACP := r.Header.Get("x-amz-grant-write-acp")
+
 	// Extract metadata from headers (preserve original metadata)
 	// Only include x-amz-meta-* headers - standard headers should NOT be included
 	// as they will cause S3 API errors when sent as metadata.
@@ -1666,7 +1676,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upload encrypted object with filtered metadata (streaming)
-	err = s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput)
+	err = s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
 		s3Err.WriteXML(w)
@@ -2370,6 +2380,14 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Extract canned ACL header (x-amz-acl) and fine-grained grant headers
+	// for CreateMultipartUpload. Forward verbatim to the backend.
+	cannedACL := r.Header.Get("x-amz-acl")
+	grantFullControl := r.Header.Get("x-amz-grant-full-control")
+	grantRead := r.Header.Get("x-amz-grant-read")
+	grantReadACP := r.Header.Get("x-amz-grant-read-acp")
+	grantWriteACP := r.Header.Get("x-amz-grant-write-acp")
+
 	// If encrypted MPU is enabled, pre-set markers in metadata so the final
 	// object automatically carries the manifest pointer (metadata is frozen at
 	// CreateMultipartUpload time on most S3 backends).
@@ -2379,7 +2397,7 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		metadata[crypto.MetaFallbackPointer] = key + ".mpu-manifest"
 	}
 
-	uploadID, err := s3Client.CreateMultipartUpload(ctx, bucket, key, metadata)
+	uploadID, err := s3Client.CreateMultipartUpload(ctx, bucket, key, metadata, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
 		s3Err.WriteXML(w)
@@ -3643,7 +3661,7 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 
 	companionKey := key + ".mpu-manifest"
 	encLen := int64(len(encBytes))
-	return s3Client.PutObject(ctx, bucket, companionKey, bytes.NewReader(encBytes), encMeta, &encLen, "", nil)
+	return s3Client.PutObject(ctx, bucket, companionKey, bytes.NewReader(encBytes), encMeta, &encLen, "", nil, "", "", "", "", "")
 }
 
 // unwrapMPUDEK unwraps the DEK stored in UploadState using the KeyManager.
@@ -4112,7 +4130,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 
 	// Upload encrypted copy with filtered metadata and known content length
 	encLen := int64(len(encryptedData))
-	err = s3Client.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(encryptedData), s3Metadata, &encLen, tagging, lockInput)
+	err = s3Client.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(encryptedData), s3Metadata, &encLen, tagging, lockInput, "", "", "", "", "")
 	if err != nil {
 		s3Err := TranslateError(err, dstBucket, dstKey)
 		s3Err.WriteXML(w)

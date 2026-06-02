@@ -116,7 +116,7 @@ func (p *ProxyClient) ForwardRequest(ctx context.Context, originalReq *http.Requ
 }
 
 // PutObject forwards a PUT request to the backend.
-func (p *ProxyClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput) error {
+func (p *ProxyClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
 	return fmt.Errorf("ProxyClient.PutObject not implemented - use ForwardRequest in handler")
 }
 
@@ -141,7 +141,7 @@ func (p *ProxyClient) ListObjects(ctx context.Context, bucket, prefix string, op
 }
 
 // CreateMultipartUpload is not implemented
-func (p *ProxyClient) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string) (string, error) {
+func (p *ProxyClient) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	return "", fmt.Errorf("ProxyClient.CreateMultipartUpload not implemented")
 }
 
