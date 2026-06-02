@@ -514,3 +514,70 @@ references this matrix.
 - Compression integration
 - Custom encryption algorithms
 - Advanced S3 features support
+
+---
+
+## Inline Header Passthrough
+
+The gateway forwards S3 standard inline headers transparently in most cases. The following tables document the exact disposition for PutObject and CreateMultipartUpload. Headers marked **Forwarded** reach the backend verbatim. Headers marked **Passed through verbatim** are forwarded with the re-signed request without being extracted into SDK struct fields.
+
+### PutObject Inline Headers
+
+| Header | Disposition | Mechanism | Notes |
+|---|---|---|---|
+| `x-amz-tagging` | **Forwarded** | Extracted, validated, passed to `PutObjectInput.Tagging` | |
+| `x-amz-acl` | **Forwarded** | Extracted, mapped to `types.ObjectCannedACL`, passed to `PutObjectInput.ACL` | |
+| `x-amz-grant-full-control` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantFullControl` | |
+| `x-amz-grant-read` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantRead` | |
+| `x-amz-grant-read-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantReadACP` | |
+| `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantWriteACP` | |
+| `x-amz-storage-class` | Passed through verbatim | Not extracted by gateway; forwarded on re-signed request | Provider quirk: MinIO ignores; AWS S3 respects |
+| `x-amz-server-side-encryption` | Passed through verbatim | Not extracted; backend applies its own SSE layer | Gateway performs client-side encryption independently |
+| `x-amz-object-lock-mode` | **Forwarded** | Extracted via `extractObjectLockInput`, passed to SDK | |
+| `x-amz-object-lock-retain-until-date` | **Forwarded** | As above | |
+| `x-amz-object-lock-legal-hold` | **Forwarded** | As above | |
+| `x-amz-meta-*` | **Forwarded** | Extracted as user metadata map | All user-defined metadata headers forwarded |
+| `Content-Type` | **Forwarded** | Standard header | |
+| `Content-Encoding` | **Forwarded** | Standard header | |
+| `Cache-Control` | **Forwarded** | Standard header | |
+
+### CreateMultipartUpload Inline Headers
+
+| Header | Disposition | Notes |
+|---|---|---|
+| `x-amz-acl` | **Forwarded** | Extracted, mapped to `CreateMultipartUploadInput.ACL` |
+| `x-amz-grant-full-control` | **Forwarded** | Extracted, passed to SDK `GrantFullControl` |
+| `x-amz-grant-read` | **Forwarded** | Extracted, passed to SDK `GrantRead` |
+| `x-amz-grant-read-acp` | **Forwarded** | Extracted, passed to SDK `GrantReadACP` |
+| `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to SDK `GrantWriteACP` |
+| `x-amz-tagging` | **Not forwarded** | Tags must be set via `?tagging` subresource after CompleteMultipartUpload. **Known limitation.** |
+| `x-amz-meta-*` | **Forwarded** | Extracted and passed to SDK |
+| `x-amz-server-side-encryption` | Passed through verbatim | Not extracted by gateway |
+
+### CopyObject ACL Note
+
+On CopyObject, the destination ACL is set independently of the source. The gateway passes empty strings for all ACL headers on the destination PutObject call (re-encrypt path). Callers must set `x-amz-acl` explicitly on CopyObject if they want a non-default ACL. This is consistent with S3 semantics where CopyObject does not copy ACLs by default.
+
+### Lifecycle Response Headers
+
+When a backend applies a lifecycle rule to an object, the following response headers are forwarded verbatim by `copyProxyResponse`. Only 8 hop-by-hop headers are stripped; all `x-amz-*` headers survive.
+
+| Header | Direction | Gateway Disposition |
+|---|---|---|
+| `x-amz-expiration` | Response | **Forwarded verbatim** |
+| `x-amz-restore` | Response | **Forwarded verbatim** |
+| `x-amz-delete-marker` | Response | **Forwarded verbatim** |
+
+### Provider Quirks
+
+| Feature | AWS S3 | MinIO (default) | Garage | Wasabi |
+|---|---|---|---|---|
+| `x-amz-acl` on PutObject | ✅ Full support | ⚠️ Default container requires IAM policy | ⚠️ Limited; `private` and `public-read` accepted | ✅ Full support |
+| `x-amz-grant-*` on PutObject | ✅ Full support | ❌ Not supported in default container | ❌ | ✅ Full support |
+| `x-amz-tagging` on PutObject | ✅ | ✅ | ✅ | ✅ |
+| `?tagging` subresource | ✅ | ✅ | ✅ | ✅ |
+| `?acl` subresource (bucket) | ✅ | ⚠️ Not in default cap bitmap | ⚠️ | ✅ |
+| `?acl` subresource (object) | ✅ | ⚠️ Same | ⚠️ | ✅ |
+| `?lifecycle` subresource | ✅ | ⚠️ Not in default cap bitmap | ✅ | ✅ |
+| `x-amz-expiration` response | ✅ | Returned when lifecycle rule matches | ✅ | ✅ |
+| `x-amz-storage-class` | ✅ | ⚠️ Ignored in most configs | ❌ | ✅ |
