@@ -77,7 +77,7 @@ func putEncryptedObject(t *testing.T, client s3.Client, eng crypto.EncryptionEng
 		metaMutate(encMeta)
 	}
 
-	if err := client.PutObject(ctx, bucket, key, bytes.NewReader(cipherdata), encMeta, nil, "", nil); err != nil {
+	if err := client.PutObject(ctx, bucket, key, bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("put object %s: %v", key, err)
 	}
 }
@@ -101,7 +101,7 @@ func putEncryptedObjectWithMeta(t *testing.T, client s3.Client, eng crypto.Encry
 		metaMutate(encMeta)
 	}
 
-	if err := client.PutObject(ctx, bucket, key, bytes.NewReader(cipherdata), encMeta, nil, "", nil); err != nil {
+	if err := client.PutObject(ctx, bucket, key, bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("put object %s: %v", key, err)
 	}
 }
@@ -532,7 +532,7 @@ func testMaint1_GoldenPath_AllBreakingChanges(t *testing.T, inst provider.Instan
 
 	ctx := context.Background()
 	if err := client.PutObject(ctx, bucket, prefix+"plain.txt", bytes.NewReader(wantPlain),
-		map[string]string{"Content-Type": "text/plain"}, nil, "", nil); err != nil {
+		map[string]string{"Content-Type": "text/plain"}, nil, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("put plaintext: %v", err)
 	}
 
@@ -981,7 +981,7 @@ func testMGMT2_KDF_Mixed_AllClasses(t *testing.T, inst provider.Instance) {
 	// Plaintext
 	ctx := context.Background()
 	if err := client.PutObject(ctx, bucket, prefix+"plain.txt", bytes.NewReader([]byte("mixed")),
-		map[string]string{"Content-Type": "text/plain"}, nil, "", nil); err != nil {
+		map[string]string{"Content-Type": "text/plain"}, nil, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("put plaintext: %v", err)
 	}
 

@@ -87,6 +87,10 @@ func TestConformance(t *testing.T) {
 			{"Tagging_Passthrough", provider.CapInlinePutTagging, testTaggingPassthrough},
 			{"Tagging_GetPut", provider.CapObjectTagging, testTaggingGetPut},
 
+			// V1.0-S3-1 ACL and lifecycle header passthrough.
+			{"ACL_InlinePassthrough", provider.CapObjectACL, testACLInlinePassthrough},
+			{"Lifecycle_HeaderPassthrough", provider.CapBucketLifecycle, testLifecycleHeaderPassthrough},
+
 				// Presigned URLs.
 				{"Presigned_Get", provider.CapPresignedURL, testPresignedGet},
 				{"Presigned_Put", provider.CapPresignedURL, testPresignedPut},
