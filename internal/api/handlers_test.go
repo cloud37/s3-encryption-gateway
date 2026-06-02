@@ -62,6 +62,18 @@ type mockS3Client struct {
 	retentions       map[string]*s3.RetentionConfig
 	legalHolds       map[string]string
 	lockConfigs      map[string]*s3.ObjectLockConfiguration
+
+	// ACL recording (V1.0-S3-1). Protected by locksMu.
+	lastCannedACL         string
+	lastGrantFullCtrl     string
+	lastGrantRead         string
+	lastGrantReadACP      string
+	lastGrantWriteACP     string
+	lastMPUCannedACL      string
+	lastMPUGrantFullCtrl  string
+	lastMPUGrantRead      string
+	lastMPUGrantReadACP   string
+	lastMPUGrantWriteACP  string
 }
 
 func newMockS3Client() *mockS3Client {
@@ -84,6 +96,11 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader
 	m.metadata[bucket+"/"+key] = metadata
 	m.locksMu.Lock()
 	m.lastPutLock = lock
+	m.lastCannedACL = cannedACL
+	m.lastGrantFullCtrl = grantFullControl
+	m.lastGrantRead = grantRead
+	m.lastGrantReadACP = grantReadACP
+	m.lastGrantWriteACP = grantWriteACP
 	m.locksMu.Unlock()
 	return nil
 }
@@ -241,6 +258,13 @@ func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, o
 }
 
 func (m *mockS3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
+	m.locksMu.Lock()
+	m.lastMPUCannedACL = cannedACL
+	m.lastMPUGrantFullCtrl = grantFullControl
+	m.lastMPUGrantRead = grantRead
+	m.lastMPUGrantReadACP = grantReadACP
+	m.lastMPUGrantWriteACP = grantWriteACP
+	m.locksMu.Unlock()
 	return "upload-id-123", nil
 }
 
@@ -459,6 +483,185 @@ func TestHandler_HandlePutObject(t *testing.T) {
 		})
 	}
 }
+
+// ---- V1.0-S3-1 ACL forwarding unit tests -----------------------------------
+
+// TestHandlePutObject_CannedACL_ForwardedToBackend verifies that a PUT request
+// with x-amz-acl: public-read causes the backend to receive the canned ACL.
+func TestHandlePutObject_CannedACL_ForwardedToBackend(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/test-key", bytes.NewReader([]byte("hello")))
+	req.Header.Set("x-amz-acl", "public-read")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mockClient.locksMu.Lock()
+	got := mockClient.lastCannedACL
+	mockClient.locksMu.Unlock()
+	if got != "public-read" {
+		t.Errorf("expected cannedACL 'public-read', got %q", got)
+	}
+}
+
+// TestHandlePutObject_GrantFullControl_ForwardedToBackend verifies that a PUT
+// request with x-amz-grant-full-control forwards the header to the backend.
+func TestHandlePutObject_GrantFullControl_ForwardedToBackend(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/test-key", bytes.NewReader([]byte("hello")))
+	req.Header.Set("x-amz-grant-full-control", "id=testuser")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mockClient.locksMu.Lock()
+	got := mockClient.lastGrantFullCtrl
+	mockClient.locksMu.Unlock()
+	if got != "id=testuser" {
+		t.Errorf("expected grantFullControl 'id=testuser', got %q", got)
+	}
+}
+
+// TestHandlePutObject_NoCannedACL_NoACLHeader verifies that no ACL header is
+// sent to the backend when none is provided in the request.
+func TestHandlePutObject_NoCannedACL_NoACLHeader(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/test-key", bytes.NewReader([]byte("hello")))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mockClient.locksMu.Lock()
+	canned := mockClient.lastCannedACL
+	grantFC := mockClient.lastGrantFullCtrl
+	grantR := mockClient.lastGrantRead
+	mockClient.locksMu.Unlock()
+	if canned != "" {
+		t.Errorf("expected empty cannedACL, got %q", canned)
+	}
+	if grantFC != "" {
+		t.Errorf("expected empty grantFullControl, got %q", grantFC)
+	}
+	if grantR != "" {
+		t.Errorf("expected empty grantRead, got %q", grantR)
+	}
+}
+
+// TestHandlePutObject_TaggingAndACL_BothForwarded verifies that tagging and ACL
+// headers coexist without interfering.
+func TestHandlePutObject_TaggingAndACL_BothForwarded(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/test-key", bytes.NewReader([]byte("hello")))
+	req.Header.Set("x-amz-acl", "public-read")
+	req.Header.Set("x-amz-tagging", "key1=val1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mockClient.locksMu.Lock()
+	canned := mockClient.lastCannedACL
+	mockClient.locksMu.Unlock()
+	if canned != "public-read" {
+		t.Errorf("expected cannedACL 'public-read', got %q", canned)
+	}
+}
+
+// TestHandleCreateMultipartUpload_CannedACL_ForwardedToBackend verifies that a
+// CreateMultipartUpload request with x-amz-acl forwards it to the backend.
+func TestHandleCreateMultipartUpload_CannedACL_ForwardedToBackend(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("POST", "/test-bucket/test-key?uploads", nil)
+	req.Header.Set("x-amz-acl", "public-read")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mockClient.locksMu.Lock()
+	got := mockClient.lastMPUCannedACL
+	mockClient.locksMu.Unlock()
+	if got != "public-read" {
+		t.Errorf("expected MPU cannedACL 'public-read', got %q", got)
+	}
+}
+
+// TestHandleCreateMultipartUpload_NoCannedACL_NoACLHeader verifies that no ACL
+// is sent for CreateMultipartUpload when none is provided.
+func TestHandleCreateMultipartUpload_NoCannedACL_NoACLHeader(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("POST", "/test-bucket/test-key?uploads", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mockClient.locksMu.Lock()
+	got := mockClient.lastMPUCannedACL
+	mockClient.locksMu.Unlock()
+	if got != "" {
+		t.Errorf("expected empty MPU cannedACL, got %q", got)
+	}
+}
+
+// ---- End V1.0-S3-1 ACL unit tests ------------------------------------------
 
 func TestHandler_HandleGetObject(t *testing.T) {
 	logger := logrus.New()
