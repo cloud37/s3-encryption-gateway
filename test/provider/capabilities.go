@@ -84,6 +84,8 @@ const (
 	// CapSDKMinIOPy indicates the provider is suitable for the minio-py (Python)
 	// smoke test. Requires Docker (Python container).
 	CapSDKMinIOPy Capabilities = 1 << 25
+
+	// Next available: 1 << 26
 )
 
 // capNames maps each bit to a human-readable label for Stringer output.
