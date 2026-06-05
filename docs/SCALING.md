@@ -78,7 +78,7 @@ its rate limits. The gateway's KMS adapter includes a client-side DEK cache
 
 The following table is derived from the **spike** load profile (50 workers,
 60 s, 100 KiB objects, MinIO Testcontainer backend -- see SS6.1). These are
-local MinIO numbers measured on a c5.2xlarge-class runner (8 vCPU, 16 GB
+local MinIO numbers measured on a local developer workstation (EndeavourOS, AMD64, ~48 GB RAM
 RAM). Absolute throughput values differ on your hardware; the **relative
 scaling ratios** are the primary signal.
 

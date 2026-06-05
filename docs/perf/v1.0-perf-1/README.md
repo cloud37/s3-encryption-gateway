@@ -31,8 +31,9 @@ Every line is a JSON object with the following fields:
 ## Runner Class
 
 All profiles were run against the MinIO Testcontainer backend on a
-c5.2xlarge-class runner (8 vCPU, 16 GB RAM). Numbers are not directly
-comparable across different runner classes.
+local developer workstation (EndeavourOS, AMD64, ~48 GB RAM, Docker via
+Testcontainers). Numbers are not directly comparable across different
+runner classes and hardware configurations.
 
 ## Regenerating
 

@@ -7,7 +7,7 @@ Garage, RustFS, and SeaweedFS require the full `performance-baseline`
 workflow on `main`.
 
 Last updated: 2026-06-05.
-Runner class: `github-ubuntu-latest` (8 vCPU, 16 GB, Docker via Testcontainers).
+Runner class: local developer workstation (EndeavourOS, AMD64, ~48 GB RAM, Docker via Testcontainers).
 
 ## Operation × Provider latency matrix (p95 / p99 in ms)
 
