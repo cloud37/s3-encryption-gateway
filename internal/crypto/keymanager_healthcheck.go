@@ -51,7 +51,7 @@ func probeOnce(ctx context.Context, km KeyManager) {
 	defer cancel()
 
 	err := km.HealthCheck(hctx)
-	if setKMSHealthyFn != nil {
-		setKMSHealthyFn(km.Provider(), err == nil)
+	if fn := getSetKMSHealthyFn(); fn != nil {
+		fn(km.Provider(), err == nil)
 	}
 }

@@ -103,14 +103,14 @@ func (r *RetryingKeyManager) WrapKey(ctx context.Context, plaintext []byte, meta
 			if isPermanentKMSError(err) {
 				return backoff.Permanent(err)
 			}
-			if recordKMSRetryAttemptFn != nil {
-				recordKMSRetryAttemptFn(r.inner.Provider(), "wrap", "failure")
+			if fn := getRecordKMSRetryAttemptFn(); fn != nil {
+				fn(r.inner.Provider(), "wrap", "failure")
 			}
 			return err
 		}
 		result = env
-		if recordKMSRetryAttemptFn != nil {
-			recordKMSRetryAttemptFn(r.inner.Provider(), "wrap", "success")
+		if fn := getRecordKMSRetryAttemptFn(); fn != nil {
+			fn(r.inner.Provider(), "wrap", "success")
 		}
 		return nil
 	}
@@ -130,14 +130,14 @@ func (r *RetryingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelop
 			if isPermanentKMSError(err) {
 				return backoff.Permanent(err)
 			}
-			if recordKMSRetryAttemptFn != nil {
-				recordKMSRetryAttemptFn(r.inner.Provider(), "unwrap", "failure")
+			if fn := getRecordKMSRetryAttemptFn(); fn != nil {
+				fn(r.inner.Provider(), "unwrap", "failure")
 			}
 			return err
 		}
 		result = pt
-		if recordKMSRetryAttemptFn != nil {
-			recordKMSRetryAttemptFn(r.inner.Provider(), "unwrap", "success")
+		if fn := getRecordKMSRetryAttemptFn(); fn != nil {
+			fn(r.inner.Provider(), "unwrap", "success")
 		}
 		return nil
 	}

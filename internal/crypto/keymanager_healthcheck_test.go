@@ -70,12 +70,15 @@ func TestStartKMSHealthCheck_InitialProbeFires(t *testing.T) {
 
 func TestStartKMSHealthCheck_SetsHealthyTrue(t *testing.T) {
 	var (
+		mu               sync.Mutex
 		recordedProvider string
 		recordedHealthy  bool
 	)
 	SetKMSHealthyObserver(func(provider string, h bool) {
+		mu.Lock()
 		recordedProvider = provider
 		recordedHealthy = h
+		mu.Unlock()
 	})
 	t.Cleanup(func() { SetKMSHealthyObserver(nil) })
 
@@ -86,18 +89,26 @@ func TestStartKMSHealthCheck_SetsHealthyTrue(t *testing.T) {
 	// Wait for at least one tick
 	time.Sleep(80 * time.Millisecond)
 
-	require.Equal(t, "memory", recordedProvider)
-	require.True(t, recordedHealthy)
+	mu.Lock()
+	p := recordedProvider
+	h := recordedHealthy
+	mu.Unlock()
+
+	require.Equal(t, "memory", p)
+	require.True(t, h)
 }
 
 func TestStartKMSHealthCheck_SetsHealthyFalse(t *testing.T) {
 	var (
+		mu               sync.Mutex
 		recordedProvider string
 		recordedHealthy  bool
 	)
 	SetKMSHealthyObserver(func(provider string, h bool) {
+		mu.Lock()
 		recordedProvider = provider
 		recordedHealthy = h
+		mu.Unlock()
 	})
 	t.Cleanup(func() { SetKMSHealthyObserver(nil) })
 
@@ -111,8 +122,13 @@ func TestStartKMSHealthCheck_SetsHealthyFalse(t *testing.T) {
 	// Wait for at least one tick
 	time.Sleep(80 * time.Millisecond)
 
-	require.Equal(t, "cosmian-kmip", recordedProvider)
-	require.False(t, recordedHealthy)
+	mu.Lock()
+	p := recordedProvider
+	h := recordedHealthy
+	mu.Unlock()
+
+	require.Equal(t, "cosmian-kmip", p)
+	require.False(t, h)
 }
 
 func TestStartKMSHealthCheck_StopExitsGoroutine(t *testing.T) {

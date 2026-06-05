@@ -171,8 +171,8 @@ func (c *CachingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelope
 		hit := make([]byte, len(entry.plaintext))
 		copy(hit, entry.plaintext)
 		c.mu.RUnlock()
-		if recordKMSDEKCacheHitFn != nil {
-			recordKMSDEKCacheHitFn(c.inner.Provider())
+		if fn := getRecordKMSDEKCacheHitFn(); fn != nil {
+			fn(c.inner.Provider())
 		}
 		return hit, nil
 	}
@@ -221,8 +221,8 @@ func (c *CachingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelope
 		c.evictLRU()
 	}
 
-	if recordKMSDEKCacheMissFn != nil {
-		recordKMSDEKCacheMissFn(c.inner.Provider())
+	if fn := getRecordKMSDEKCacheMissFn(); fn != nil {
+		fn(c.inner.Provider())
 	}
 
 	return pt, nil

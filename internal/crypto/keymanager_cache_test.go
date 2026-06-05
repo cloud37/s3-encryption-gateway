@@ -1,11 +1,15 @@
 package crypto
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -389,4 +393,72 @@ func TestCachingKeyManager_ReturnedCopyIsIndependent(t *testing.T) {
 	pt2, err := km.UnwrapKey(context.Background(), env, nil)
 	require.NoError(t, err)
 	require.Equal(t, byte('0'), pt2[0], "cache should return original data, not modified copy")
+}
+
+// TestCachingKeyManager_NoDEKInLogs verifies that no DEK plaintext material
+// appears in log output during cache operations. This is a regression guard
+// for the DoD requirement.
+func TestCachingKeyManager_NoDEKInLogs(t *testing.T) {
+	var buf bytes.Buffer
+	logrus.SetOutput(&buf)
+	logrus.SetLevel(logrus.DebugLevel)
+	defer func() {
+		logrus.SetOutput(nil)
+		logrus.SetLevel(logrus.InfoLevel)
+	}()
+
+	inner := &mockCacheKM{
+		provider:     "test",
+		unwrapResult: []byte("32byte-dek-plaintext-for-log-test-!"),
+	}
+	cfg := DefaultDEKCacheConfig()
+	cfg.Enabled = true
+	cfg.TTL = time.Minute
+
+	km, err := NewCachingKeyManager(inner, cfg)
+	require.NoError(t, err)
+
+	dek := make([]byte, 32)
+	_, err = rand.Read(dek)
+	require.NoError(t, err)
+
+	// Wrap a DEK (delegates to inner)
+	env, err := km.WrapKey(context.Background(), dek, nil)
+	require.NoError(t, err)
+
+	// Unwrap — cache miss
+	pt1, err := km.UnwrapKey(context.Background(), env, nil)
+	require.NoError(t, err)
+
+	// Unwrap again — cache hit
+	pt2, err := km.UnwrapKey(context.Background(), env, nil)
+	require.NoError(t, err)
+	require.Equal(t, pt1, pt2)
+
+	// Cache miss with a different envelope
+	env2 := &KeyEnvelope{Ciphertext: []byte("different-ct-for-miss")}
+	_, err = km.UnwrapKey(context.Background(), env2, nil)
+	require.NoError(t, err)
+
+	// Trigger eviction
+	cfg.MaxEntries = 1
+	km2, err := NewCachingKeyManager(inner, cfg)
+	require.NoError(t, err)
+	for i := 0; i < 5; i++ {
+		e := &KeyEnvelope{Ciphertext: []byte{byte(i), 0, 0}}
+		_, _ = km2.UnwrapKey(context.Background(), e, nil)
+	}
+
+	require.NoError(t, km.Close(context.Background()))
+	require.NoError(t, km2.Close(context.Background()))
+
+	logOutput := buf.String()
+
+	// No 8-character chunk of the DEK should appear in any log output
+	ptStr := string(inner.unwrapResult)
+	for _, chunk := range splitIntoChunks(ptStr, 8) {
+		if strings.Contains(logOutput, chunk) {
+			t.Errorf("log contains DEK substring %q", chunk)
+		}
+	}
 }

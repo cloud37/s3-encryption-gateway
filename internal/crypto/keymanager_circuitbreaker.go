@@ -188,7 +188,7 @@ func (cb *CircuitBreakerKeyManager) updateMetrics() {
 
 // updateMetricsLocked must be called with cb.mu held.
 func (cb *CircuitBreakerKeyManager) updateMetricsLocked() {
-	if setKMSCircuitBreakerStateFn != nil {
-		setKMSCircuitBreakerStateFn(cb.inner.Provider(), int(cb.state))
+	if fn := getSetKMSCircuitBreakerStateFn(); fn != nil {
+		fn(cb.inner.Provider(), int(cb.state))
 	}
 }
