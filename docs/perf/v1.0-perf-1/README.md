@@ -8,9 +8,9 @@ defined in [`docs/plans/V1.0-PERF-1-plan.md`](../../plans/V1.0-PERF-1-plan.md).
 | File | Profile | Workers | Duration | Object size | Part size |
 |---|---|---|---|---|---|
 | `smoke.ndjson` | smoke | 3 | 10 s | 100 KiB | 5 MiB |
-| `soak.ndjson` | soak | 10 | 300 s | 50 MiB | 10 MiB |
+| `soak.ndjson` | soak | 10 | 60 s | 50 MiB | 10 MiB |
 | `spike.ndjson` | spike | 50 | 60 s | 100 KiB | 5 MiB |
-| `high-throughput.ndjson` | high-throughput | 10 | 300 s | 500 MiB | 50 MiB |
+| `high-throughput.ndjson` | high-throughput | 5 | 120 s | 50 MiB | 10 MiB |
 
 ## NDJSON Schema
 

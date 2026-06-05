@@ -1,2 +1,2 @@
-{"test":"Load_RangeRead","throughput_mbps":0.13442840576171874,"latency_ns":{"p50":74031857,"p95":79957239,"p99":94318099},"errors":0,"retries_total":0,"heap_inuse_max_bytes":7364608,"cpu_seconds":0}
-{"test":"Load_Multipart","throughput_mbps":150.00011444091797,"latency_ns":{"p50":30447892,"p95":36630117,"p99":44450207},"errors":0,"retries_total":0,"heap_inuse_max_bytes":45973504,"cpu_seconds":0}
+{"test":"Load_RangeRead","throughput_mbps":0.13433074951171875,"latency_ns":{"p50":77302689,"p95":81635614,"p99":83636468},"errors":0,"retries_total":0,"heap_inuse_max_bytes":7315456,"cpu_seconds":0}
+{"test":"Load_Multipart","throughput_mbps":149.50011405944824,"latency_ns":{"p50":30689331,"p95":59524416,"p99":71037339},"errors":0,"retries_total":0,"heap_inuse_max_bytes":45916160,"cpu_seconds":0}

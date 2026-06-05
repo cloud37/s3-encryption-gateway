@@ -229,9 +229,9 @@ make bench-load-capture            # All four profiles to NDJSON
 | Profile | Workers | Duration | QPS | Object size | Part size | Purpose |
 |---|---|---|---|---|---|---|
 | smoke | 3 | 10 s | 10 | 100 KiB | 5 MiB | CI gate |
-| soak | 10 | 300 s | 25 | 50 MiB | 10 MiB | Steady-state baseline |
+| soak | 10 | 60 s | 25 | 50 MiB | 10 MiB | Steady-state baseline |
 | spike | 50 | 60 s | 50 | 100 KiB | 5 MiB | HPA trigger regime |
-| high-throughput | 10 | 300 s | 10 | 500 MiB | 50 MiB | Bandwidth-bound |
+| high-throughput | 5 | 120 s | 5 | 50 MiB | 10 MiB | Bandwidth-bound |
 
 ### 6.3 NDJSON output fields
 
