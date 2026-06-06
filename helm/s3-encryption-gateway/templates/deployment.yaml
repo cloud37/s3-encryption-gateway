@@ -78,6 +78,12 @@ spec:
         {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_SSL" "value" .Values.config.backend.useSSL.value "valueFrom" .Values.config.backend.useSSL.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_PATH_STYLE" "value" .Values.config.backend.usePathStyle.value "valueFrom" .Values.config.backend.usePathStyle.valueFrom) | nindent 8 }}
+        {{- if or .Values.config.backend.type.value .Values.config.backend.type.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_TYPE" "value" .Values.config.backend.type.value "valueFrom" .Values.config.backend.type.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.backend.azureAccountName.value .Values.config.backend.azureAccountName.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_AZURE_ACCOUNT_NAME" "value" .Values.config.backend.azureAccountName.value "valueFrom" .Values.config.backend.azureAccountName.valueFrom) | nindent 8 }}
+        {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_PASSWORD" "value" .Values.config.encryption.password.value "valueFrom" .Values.config.encryption.password.valueFrom) | nindent 8 }}
         {{- if or .Values.config.encryption.keyFile.value .Values.config.encryption.keyFile.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_KEY_FILE" "value" .Values.config.encryption.keyFile.value "valueFrom" .Values.config.encryption.keyFile.valueFrom) | nindent 8 }}

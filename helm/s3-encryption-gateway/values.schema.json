@@ -901,7 +901,9 @@
             "secretKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend secret access key. Optional when useClientCredentials is true." },
             "provider":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend provider identifier (e.g. aws, minio)." },
             "useSSL":               { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Use TLS for backend connections (\\\"true\\\"/\\\"false\\\")." },
-            "usePathStyle":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Force path-style S3 URLs (required for MinIO, Ceph, etc.)." }
+            "usePathStyle":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Force path-style S3 URLs (required for MinIO, Ceph, etc.)." },
+            "type":                 { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend transport type: s3, gcs, or azure." },
+            "azureAccountName":     { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Azure Blob Storage account name (used when type is azure and endpoint is not set)." }
           }
         },
 

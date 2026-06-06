@@ -45,6 +45,15 @@ backend:
   secret_key: ""   # Set via BACKEND_SECRET_KEY env var
   provider: ""  # Optional: provider name for reference (any S3-compatible API endpoint works)
   use_ssl: true
+  # backend.type selects the storage transport implementation.
+  # Supported values: "s3" (default), "gcs", "azure".
+  # See docs/BACKENDS.md for per-backend caveats.
+  # type: s3
+  #
+  # Azure Blob Storage backend settings (only used when type: "azure").
+  # azure:
+  #   account_name: ""  # e.g. "mystorageaccount"; used if endpoint is not set
+  #
   # filter_metadata_keys: []  # Optional: Comma-separated list of metadata keys to filter out
   #                           # Useful for S3 backends that reject certain metadata keys
   #                           # Set via BACKEND_FILTER_METADATA_KEYS env var

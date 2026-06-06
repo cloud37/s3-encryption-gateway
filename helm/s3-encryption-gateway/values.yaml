@@ -231,7 +231,18 @@ config:
       value: "true"
     usePathStyle:
       value: "false"
-
+    type:
+      value: ""
+      # valueFrom:
+      #   configMapKeyRef:
+      #     name: s3-encryption-gateway-config
+      #     key: backend-type
+    azureAccountName:
+      value: ""
+      # valueFrom:
+      #   configMapKeyRef:
+      #     name: s3-encryption-gateway-config
+      #     key: backend-azure-account-name
 
   # Encryption configuration
   encryption:

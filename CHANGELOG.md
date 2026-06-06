@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **V1.0-ECOSYS-1 — Additional Backends via Shims**: New `backend.type`
+  discriminator (`s3`, `gcs`, `azure`) with config validation and env-var
+  wiring. GCS shim (`gcsClient`) with automatic metadata key lowercasing,
+  32-part multipart-upload limit, and `CopyObject` LastModified fallback.
+  Azure shim (`azureClient`) with metadata size/key validation (8 KiB limit),
+  `BlobNotFound` → `NoSuchKey` mapping, and ObjectLock `NotImplemented` stubs.
+  Test providers for GCS (external, gated by env vars) and Azure/Azurite
+  (Testcontainers). Published `docs/BACKENDS.md` with per-backend caveat tables.
+  See `docs/plans/V1.0-ECOSYS-1-plan.md`.
+
 - **V1.0-PERF-1 — Scale & Throughput Guidance**: Named load profiles
   (`make test-load-smoke`, `test-load-spike`, `test-load-high-throughput`)
   and `bench-load-capture` for all four profiles. Shipped tuned HPA overlay
