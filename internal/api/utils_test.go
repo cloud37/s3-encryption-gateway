@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -261,3 +262,165 @@ func TestHandlePassthrough_BackendNotConfigured(t *testing.T) {
 		t.Errorf("expected InternalError in response, got: %s", body)
 	}
 }
+
+
+// --- getClientIP / getRequestID coverage ------------------------------------
+
+func TestGetClientIP_Fallback(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "192.168.1.1:12345"
+	ip := getClientIP(req)
+	if ip == "" {
+		t.Error("expected non-empty IP")
+	}
+}
+
+func TestGetRequestID_FromHeader(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Request-ID", "req-123")
+	id := getRequestID(req)
+	if id != "req-123" {
+		t.Errorf("expected req-123, got %s", id)
+	}
+}
+
+func TestGetRequestID_Empty(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	id := getRequestID(req)
+	if id != "" {
+		t.Errorf("expected empty, got %s", id)
+	}
+}
+
+
+// --- validateTags unit tests (V1.0-S3-1 coverage gap) -----------------------
+
+func TestValidateTags_Empty_ReturnsNil(t *testing.T) {
+	if err := validateTags(""); err != nil {
+		t.Errorf("expected nil for empty tags, got %v", err)
+	}
+}
+
+func TestValidateTags_ValidTags_ReturnsNil(t *testing.T) {
+	err := validateTags("key1=val1&key2=val2&key3=abc123ABC")
+	if err != nil {
+		t.Errorf("expected nil for valid tags, got %v", err)
+	}
+}
+
+func TestValidateTags_TooManyTags_ReturnsError(t *testing.T) {
+	tags := "k0=v0"
+	for i := 1; i <= 11; i++ {
+		tags += fmt.Sprintf("&k%d=v%d", i, i)
+	}
+	err := validateTags(tags)
+	if err == nil {
+		t.Fatal("expected error for >10 tags")
+	}
+	if !strings.Contains(err.Error(), "too many tags") {
+		t.Errorf("expected 'too many tags' error, got: %v", err)
+	}
+}
+
+func TestValidateTags_KeyTooLong_ReturnsError(t *testing.T) {
+	key := strings.Repeat("a", 129)
+	err := validateTags(key + "=val")
+	if err == nil {
+		t.Fatal("expected error for key >128 chars")
+	}
+	if !strings.Contains(err.Error(), "tag key too long") {
+		t.Errorf("expected 'tag key too long' error, got: %v", err)
+	}
+}
+
+func TestValidateTags_ValueTooLong_ReturnsError(t *testing.T) {
+	val := strings.Repeat("b", 257)
+	err := validateTags("key=" + val)
+	if err == nil {
+		t.Fatal("expected error for value >256 chars")
+	}
+	if !strings.Contains(err.Error(), "tag value too long") {
+		t.Errorf("expected 'tag value too long' error, got: %v", err)
+	}
+}
+
+func TestValidateTags_InvalidChars_Key_ReturnsError(t *testing.T) {
+	err := validateTags("key with spaces=val") // spaces not allowed
+	if err == nil {
+		t.Fatal("expected error for invalid key chars")
+	}
+	if !strings.Contains(err.Error(), "invalid characters") {
+		t.Errorf("expected 'invalid characters' error, got: %v", err)
+	}
+}
+
+func TestValidateTags_InvalidChars_Value_ReturnsError(t *testing.T) {
+	err := validateTags("key=val with spaces") // spaces not allowed
+	if err == nil {
+		t.Fatal("expected error for invalid value chars")
+	}
+	if !strings.Contains(err.Error(), "invalid characters") {
+		t.Errorf("expected 'invalid characters' error, got: %v", err)
+	}
+}
+
+func TestValidateTags_InvalidFormat_ReturnsError(t *testing.T) {
+	// Malformed query string: stray '%' causes url.ParseQuery to fail.
+	err := validateTags("key=val%ZZ")
+	if err == nil {
+		t.Fatal("expected error for malformed tagging header")
+	}
+}
+
+// --- isValidTagChars unit tests ---------------------------------------------
+
+func TestIsValidTagChars_ValidChars_ReturnsTrue(t *testing.T) {
+	if !isValidTagChars("abc123ABC+=-._:/") {
+		t.Error("expected true for valid characters")
+	}
+}
+
+func TestIsValidTagChars_InvalidChars_ReturnsFalse(t *testing.T) {
+	if isValidTagChars("hello world") {
+		t.Error("expected false for string with spaces")
+	}
+	if isValidTagChars("test@domain") {
+		t.Error("expected false for string with @")
+	}
+	if isValidTagChars("foo\tbar") {
+		t.Error("expected false for string with tab")
+	}
+	// Empty string is trivially valid (no invalid characters found).
+	// The function returns true for empty input.
+}
+
+// --- forwardSignatureV4Request edge case (backend errors) -------------------
+
+// TestHandlePassthrough_BackendConnectionRefused verifies the gateway returns
+// a BadGateway error when the backend is unreachable.
+func TestHandlePassthrough_BackendConnectionRefused(t *testing.T) {
+	// Use a local port that nothing is listening on.
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	h := &Handler{
+		config: &config.Config{
+			Backend: config.BackendConfig{
+				Endpoint: "http://127.0.0.1:1", // Port 1 is reserved; connection will be refused
+				UseSSL:   false,
+			},
+		},
+		logger:  logger,
+		metrics: getTestMetrics(),
+	}
+
+	// GET request that triggers forwardSignatureV4Request path.
+	req := httptest.NewRequest("GET", "/test-bucket/test-key", nil)
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, req, "GetObject", "test-bucket", "test-key")
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 BadGateway, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+

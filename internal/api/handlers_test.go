@@ -661,6 +661,35 @@ func TestHandleCreateMultipartUpload_NoCannedACL_NoACLHeader(t *testing.T) {
 	}
 }
 
+
+// TestHandler_HandlePutObject_InvalidACL_Forwarded verifies that unknown ACL
+// values are forwarded as-is (the gateway does not validate ACL strings).
+func TestHandler_HandlePutObject_InvalidACL_Forwarded(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/test-bucket/test-key", bytes.NewReader([]byte("hello")))
+	req.Header.Set("x-amz-acl", "nonexistent-canned-acl")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (gateway forwards to backend), got %d", w.Code)
+	}
+
+	mockClient.locksMu.Lock()
+	got := mockClient.lastCannedACL
+	mockClient.locksMu.Unlock()
+	if got != "nonexistent-canned-acl" {
+		t.Errorf("expected ACL forwarded as-is, got %q", got)
+	}
+}
+
 // ---- End V1.0-S3-1 ACL unit tests ------------------------------------------
 
 func TestHandler_HandleGetObject(t *testing.T) {
