@@ -290,6 +290,17 @@ func TestValidateReloadSafety(t *testing.T) {
 			expectError: true,
 			errorMsg:    "backend.provider cannot be changed during hot reload",
 		},
+		{
+			name: "backend type change rejected",
+			oldConfig: &Config{
+				Backend: BackendConfig{Type: BackendTypeS3},
+			},
+			newConfig: &Config{
+				Backend: BackendConfig{Type: BackendTypeGCS},
+			},
+			expectError: true,
+			errorMsg:    "backend.type cannot be changed during hot reload",
+		},
 	}
 
 	for _, tt := range tests {

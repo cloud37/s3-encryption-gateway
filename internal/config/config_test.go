@@ -381,6 +381,73 @@ func TestConfig_Validate(t *testing.T) {
 	}
 }
 
+// ---- V1.0-ECOSYS-1 BackendType tests ---------------------------------
+
+func TestConfig_BackendType_Unknown_Rejected(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Backend.Type = BackendType("invalid_type")
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for unknown backend type, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown backend.type") {
+		t.Errorf("expected error about unknown backend.type, got: %v", err)
+	}
+}
+
+func TestConfig_BackendType_Azure_RequiresEndpointOrAccountName(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Backend.Type = BackendTypeAzure
+	cfg.Backend.Endpoint = ""
+	cfg.Backend.Azure.AccountName = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for azure type without endpoint/account_name, got nil")
+	}
+	if !strings.Contains(err.Error(), "requires either backend.endpoint or backend.azure.account_name") {
+		t.Errorf("expected error about endpoint/account_name requirement, got: %v", err)
+	}
+
+	// With account name set, validation should pass
+	cfg.Backend.Azure.AccountName = "mystorageaccount"
+	err = cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected no error when account_name is set, got: %v", err)
+	}
+
+	// With endpoint set, validation should pass
+	cfg.Backend.Azure.AccountName = ""
+	cfg.Backend.Endpoint = "https://test.blob.core.windows.net"
+	err = cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected no error when endpoint is set, got: %v", err)
+	}
+}
+
+func TestConfig_BackendType_S3_DefaultsEmpty(t *testing.T) {
+	// Empty type should be treated as S3 — no additional validation error.
+	cfg := minValidConfig()
+	cfg.Backend.Type = ""
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected no error for empty backend type (default s3), got: %v", err)
+	}
+
+	// Explicit s3 should also pass
+	cfg.Backend.Type = BackendTypeS3
+	err = cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected no error for explicit s3 type, got: %v", err)
+	}
+
+	// GCS should also pass
+	cfg.Backend.Type = BackendTypeGCS
+	err = cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected no error for gcs type, got: %v", err)
+	}
+}
+
 // ---- V1.0-AUTH-1 GatewayCredential tests ---------------------------------
 
 func TestConfig_Validate_EmptyCredentials(t *testing.T) {
