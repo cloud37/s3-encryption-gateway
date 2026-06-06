@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
+	container "github.com/moby/moby/api/types/container"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -56,8 +57,9 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 	script := runner.Script(env)
 
 	req := tc.ContainerRequest{
-		Image: image,
-		Cmd:   []string{"/bin/sh", "-c", script},
+		Image:      image,
+		Entrypoint: []string{},
+		Cmd:        []string{"/bin/sh", "-c", script},
 		Env: map[string]string{
 			"AWS_ACCESS_KEY_ID":     env.AccessKey,
 			"AWS_SECRET_ACCESS_KEY": env.SecretKey,
@@ -65,6 +67,9 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 			"GATEWAY_ENDPOINT":      env.Endpoint,
 			"GATEWAY_BUCKET":        env.Bucket,
 			"GATEWAY_KEY":           env.Key,
+		},
+		HostConfigModifier: func(hc *container.HostConfig) {
+			hc.NetworkMode = container.NetworkMode("host")
 		},
 		WaitingFor: wait.ForExit().WithExitTimeout(120 * time.Second),
 	}

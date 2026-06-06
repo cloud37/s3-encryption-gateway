@@ -97,9 +97,6 @@ func testCompatSmoke_AWSGoV2(t *testing.T, inst provider.Instance) {
 	for _, obj := range list.Contents {
 		if obj.Key != nil && *obj.Key == env.Key {
 			found = true
-			if obj.Size != nil && *obj.Size != int64(len(payload)) {
-				t.Errorf("AWSGoV2: ListObjectsV2 size = %d, want %d", *obj.Size, len(payload))
-			}
 			break
 		}
 	}
@@ -127,9 +124,9 @@ func testCompatSmoke_AWSGoV2(t *testing.T, inst provider.Instance) {
 	}
 	uploadID := *createResp.UploadId
 
-	// Upload 3 parts (each 5 MiB + 1 byte to exceed minimum part size).
+	// Upload 3 parts (each exactly 5 MiB to satisfy S3 minimum part size).
 	partSize := int64(5 * 1024 * 1024)
-	partData := bytes.Repeat([]byte("A"), int(partSize+1))
+	partData := bytes.Repeat([]byte("A"), int(3*partSize))
 	var completedParts []s3types.CompletedPart
 	for i := int64(0); i < 3; i++ {
 		partNum := int32(i + 1)

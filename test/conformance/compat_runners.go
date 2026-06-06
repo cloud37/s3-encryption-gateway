@@ -76,7 +76,7 @@ func (r *awscliRunner) Script(env sdkTestEnv) string {
 		"aws s3 cp s3://%[1]s/%[2]s /tmp/testfile-dl --endpoint-url \"$GATEWAY_ENDPOINT\"\n"+
 		"diff /tmp/testfile /tmp/testfile-dl || { echo 'FATAL: downloaded file differs'; exit 1; }\n"+
 		"# ListObjectsV2 via s3 ls\n"+
-		"aws s3 ls s3://%[1]s/ --endpoint-url \"$GATEWAY_ENDPOINT\" | grep -q %[2]s || { echo 'FATAL: key not found in list'; exit 1; }\n"+
+		"aws s3 ls s3://%[1]s/ --recursive --endpoint-url \"$GATEWAY_ENDPOINT\" | grep -q %[2]s || { echo 'FATAL: key not found in list'; exit 1; }\n"+
 		"# DeleteObject via s3 rm\n"+
 		"aws s3 rm s3://%[1]s/%[2]s --endpoint-url \"$GATEWAY_ENDPOINT\"\n"+
 		"echo 'awscli:OK'\n",
@@ -98,20 +98,21 @@ func (r *awscliRunner) AssertOutput(code int, out, _ string) error {
 type s5cmdRunner struct{}
 
 func (r *s5cmdRunner) Name() string  { return "s5cmd" }
-func (r *s5cmdRunner) Image() string { return "peak/s5cmd:v2.3.0" }
+func (r *s5cmdRunner) Image() string { return "peakcom/s5cmd:v2.3.0" }
 
 func (r *s5cmdRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf("set -e\n"+
 		"echo 'compat-test-data' > /tmp/testfile\n"+
 		"# PutObject via cp\n"+
-		"s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" cp /tmp/testfile s3://%[1]s/%[2]s\n"+
+		"/s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" cp /tmp/testfile s3://%[1]s/%[2]s\n"+
 		"# GetObject via cp\n"+
-		"s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" cp s3://%[1]s/%[2]s /tmp/testfile-dl\n"+
+		"/s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" cp s3://%[1]s/%[2]s /tmp/testfile-dl\n"+
 		"diff /tmp/testfile /tmp/testfile-dl || { echo 'FATAL: downloaded file differs'; exit 1; }\n"+
-		"# ListObjects via ls (s5cmd ls prints ETags; just check key presence)\n"+
-		"s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" ls s3://%[1]s/ | grep -q %[2]s || { echo 'FATAL: key not found'; exit 1; }\n"+
+		"# ListObjects via ls — s5cmd uses delimiter \"/\" by default, so\n"+
+		"# ls with the full key path is used to confirm presence.\n"+
+		"/s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" ls \"s3://%[1]s/%[2]s\" || { echo 'FATAL: key not found'; exit 1; }\n"+
 		"# DeleteObject via rm\n"+
-		"s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" rm s3://%[1]s/%[2]s\n"+
+		"/s5cmd --endpoint-url \"$GATEWAY_ENDPOINT\" rm s3://%[1]s/%[2]s\n"+
 		"echo 's5cmd:OK'\n",
 		env.Bucket, env.Key)
 }
@@ -141,13 +142,14 @@ func (r *rcloneRunner) Script(env sdkTestEnv) string {
 		"echo 'compat-test-data' > /tmp/testfile\n"+
 		"# Configure rclone via env vars (RCLONE_CONFIG_<name>_<key>)\n"+
 		"export RCLONE_CONFIG_GWS3_TYPE=s3\n"+
-		"export RCLONE_CONFIG_GWS3_PROVIDER=AWS\n"+
+		"export RCLONE_CONFIG_GWS3_PROVIDER=Minio\n"+
 		"export RCLONE_CONFIG_GWS3_ENDPOINT=\"$GATEWAY_ENDPOINT\"\n"+
 		"export RCLONE_CONFIG_GWS3_ENV_AUTH=false\n"+
 		"export RCLONE_CONFIG_GWS3_ACCESS_KEY_ID=\"$AWS_ACCESS_KEY_ID\"\n"+
 		"export RCLONE_CONFIG_GWS3_SECRET_ACCESS_KEY=\"$AWS_SECRET_ACCESS_KEY\"\n"+
 		"export RCLONE_CONFIG_GWS3_REGION=us-east-1\n"+
 		"export RCLONE_CONFIG_GWS3_S3_COPY_CUTOFF=0\n"+
+		"export RCLONE_CONFIG_GWS3_NO_CHECK_BUCKET=true\n"+
 		"# PutObject via copyto\n"+
 		"rclone copyto /tmp/testfile GWS3:%[1]s/%[2]s\n"+
 		"# GetObject via copyto (download)\n"+
