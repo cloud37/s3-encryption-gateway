@@ -60,6 +60,29 @@ func (c *Config) ResolvedCredentials() []GatewayCredential {
 }
 
 // BackendConfig holds S3 backend configuration.
+
+// BackendType selects the storage transport implementation.
+//
+// Invariants:
+//   - "" (empty) and "s3" both resolve to the AWS SDK v2 S3 client (default).
+//   - "gcs" resolves to the GCS S3-compatible shim.
+//   - "azure" resolves to the Azure Blob S3-compatible shim.
+//   - Any other value is rejected by config.Validate().
+type BackendType string
+
+const (
+	BackendTypeS3    BackendType = "s3"
+	BackendTypeGCS   BackendType = "gcs"
+	BackendTypeAzure BackendType = "azure"
+)
+
+// AzureConfig holds Azure-specific backend settings.
+type AzureConfig struct {
+	// AccountName is the Azure storage account name.
+	// Used to construct the endpoint when cfg.Endpoint is not set.
+	AccountName string `yaml:"account_name" env:"BACKEND_AZURE_ACCOUNT_NAME"`
+}
+
 type BackendConfig struct {
 	Endpoint     string `yaml:"endpoint" env:"BACKEND_ENDPOINT"`
 	Region       string `yaml:"region" env:"BACKEND_REGION"`
@@ -70,6 +93,12 @@ type BackendConfig struct {
 	UsePathStyle bool   `yaml:"use_path_style" env:"BACKEND_USE_PATH_STYLE"`
 	// Compatibility options for backends with metadata restrictions
 	FilterMetadataKeys []string `yaml:"filter_metadata_keys" env:"BACKEND_FILTER_METADATA_KEYS"` // Comma-separated list of metadata keys to filter out
+	// Type selects the backend transport: "s3" (default), "gcs", or "azure".
+	// Empty string is treated as "s3".
+	Type BackendType `yaml:"type" env:"BACKEND_TYPE"`
+	// Azure holds Azure-specific backend settings.
+	// Only consulted when Type == "azure".
+	Azure AzureConfig `yaml:"azure"`
 	// Retry governs the S3 backend retry policy (V0.6-PERF-2).
 	// All fields are optional; zero values fall back to the DefaultBackendRetry* constants.
 	Retry BackendRetryConfig `yaml:"retry"`
@@ -965,6 +994,13 @@ func loadFromEnv(config *Config) {
 			config.Backend.FilterMetadataKeys[i] = strings.TrimSpace(config.Backend.FilterMetadataKeys[i])
 		}
 	}
+	// V1.0-ECOSYS-1 — backend type env vars.
+	if v := os.Getenv("BACKEND_TYPE"); v != "" {
+		config.Backend.Type = BackendType(v)
+	}
+	if v := os.Getenv("BACKEND_AZURE_ACCOUNT_NAME"); v != "" {
+		config.Backend.Azure.AccountName = v
+	}
 	// V0.6-PERF-2 — backend retry config env vars.
 	if v := os.Getenv("BACKEND_RETRY_MODE"); v != "" {
 		config.Backend.Retry.Mode = v
@@ -1665,6 +1701,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("backend.secret_key is required")
 	}
 
+	// Validate backend type
+	switch c.Backend.Type {
+	case "", BackendTypeS3, BackendTypeGCS:
+		// valid
+	case BackendTypeAzure:
+		if c.Backend.Endpoint == "" && c.Backend.Azure.AccountName == "" {
+			return fmt.Errorf("backend.type \"azure\" requires either backend.endpoint or backend.azure.account_name to be set")
+		}
+	default:
+		return fmt.Errorf("unknown backend.type %q (must be \"s3\", \"gcs\", or \"azure\")", c.Backend.Type)
+	}
+
 	if c.Encryption.Password == "" && c.Encryption.KeyFile == "" {
 		return fmt.Errorf("either encryption.password or encryption.key_file is required")
 	}
@@ -2236,6 +2284,9 @@ func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
 	// Backend settings that affect encryption/decryption compatibility
 	if old.Backend.Provider != new.Backend.Provider {
 		return fmt.Errorf("backend.provider cannot be changed during hot reload")
+	}
+	if old.Backend.Type != new.Backend.Type {
+		return fmt.Errorf("backend.type cannot be changed during hot reload")
 	}
 
 	// Admin settings — listener is only started/stopped at process start

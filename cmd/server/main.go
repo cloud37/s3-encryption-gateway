@@ -415,14 +415,18 @@ func main() {
 		logger.Warn("backend retry config: " + w)
 	}
 
-	// Initialize S3 client.
-	// V0.6-PERF-2: always use ClientFactory so the retry policy is applied.
-	factory := s3.NewClientFactory(&cfg.Backend, s3.WithMetrics(m))
-	s3Client, err := factory.GetClient()
+	// Initialize S3 backend client.
+	// V1.0-ECOSYS-1: use NewBackendClient which dispatches on cfg.Backend.Type.
+	s3Client, err := s3.NewBackendClient(&cfg.Backend, s3.WithMetrics(m))
 	if err != nil {
-		logger.WithError(err).Fatal("Failed to create S3 client")
+		logger.WithError(err).Fatal("Failed to create S3 backend client")
+	}
+	backendType := string(cfg.Backend.Type)
+	if backendType == "" {
+		backendType = "s3"
 	}
 	logger.WithFields(logrus.Fields{
+		"backend_type":    backendType,
 		"retry_mode":      cfg.Backend.Retry.Mode,
 		"max_attempts":    cfg.Backend.Retry.MaxAttempts,
 		"initial_backoff": cfg.Backend.Retry.InitialBackoff,

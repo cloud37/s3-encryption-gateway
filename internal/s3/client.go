@@ -364,6 +364,41 @@ func NewClient(cfg *config.BackendConfig) (Client, error) {
 	return factory.GetClient()
 }
 
+// ErrNotImplemented is returned by shim adapters when a backend does not
+// support the requested S3 operation.  Callers should surface this as an
+// HTTP NotImplemented (501) response.
+var ErrNotImplemented = fmt.Errorf("operation not implemented by backend")
+
+// NewInvalidArgument returns an error suitable for S3 InvalidArgument responses.
+func NewInvalidArgument(message string) error {
+	return fmt.Errorf("InvalidArgument: %s", message)
+}
+
+// NewBackendClient constructs the appropriate backend Client from cfg.
+// Callers must not type-assert the returned Client; all behaviour is expressed
+// through the Client interface.
+//
+// Invariants:
+//   - Returns a non-nil Client on success.
+//   - Returns an error if cfg.Type == "azure" and cfg.Azure.AccountName is empty
+//     and cfg.Endpoint is empty.
+//   - For "s3" and "gcs" the embedded ClientFactory handles credential
+//     validation (access key and secret key must be non-empty).
+//   - context.Context is not accepted because client construction is
+//     synchronous; it is callers' responsibility to cancel with a deadline.
+func NewBackendClient(cfg *config.BackendConfig, opts ...ClientFactoryOption) (Client, error) {
+	switch cfg.Type {
+	case "", config.BackendTypeS3:
+		return NewClientFactory(cfg, opts...).GetClient()
+	case config.BackendTypeGCS:
+		return newGCSClient(cfg, opts...)
+	case config.BackendTypeAzure:
+		return newAzureClient(cfg, opts...)
+	default:
+		return nil, fmt.Errorf("unknown backend type %q", cfg.Type)
+	}
+}
+
 // normalizeEndpoint normalizes the endpoint URL.
 func normalizeEndpoint(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)

@@ -162,8 +162,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	if o.backendTransport != nil {
 		factoryOpts = append(factoryOpts, s3.WithHTTPTransport(o.backendTransport))
 	}
-	factory := s3.NewClientFactory(&cfg.Backend, factoryOpts...)
-	s3Client, err := factory.GetClient()
+	s3Client, err := s3.NewBackendClient(&cfg.Backend, factoryOpts...)
 	if err != nil {
 		listener.Close()
 		t.Fatalf("harness.StartGateway: create S3 client: %v", err)
