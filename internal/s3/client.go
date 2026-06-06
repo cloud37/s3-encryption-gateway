@@ -33,7 +33,7 @@ import (
 
 // Client is the S3 backend client interface.
 type Client interface {
-	PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error
+	PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error)
 	GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error)
 	DeleteObject(ctx context.Context, bucket, key string, versionID *string) error
 	HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error)
@@ -398,7 +398,7 @@ func validateEndpoint(endpoint string) error {
 }
 
 // PutObject uploads an object to S3.
-func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
+func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	ctx, span := c.tracer.Start(ctx, "S3.PutObject",
 		trace.WithAttributes(
 			attribute.String("s3.bucket", bucket),
@@ -473,14 +473,14 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 		))
 	}
 
-	_, err := c.client.PutObject(ctx, input, putOpts...)
+	resp, err := c.client.PutObject(ctx, input, putOpts...)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to put object %s/%s: %w", bucket, key, err)
+		return "", fmt.Errorf("failed to put object %s/%s: %w", bucket, key, err)
 	}
 
 	span.SetStatus(codes.Ok, "")
-	return nil
+	return aws.ToString(resp.ETag), nil
 }
 
 // GetObject retrieves an object from S3.

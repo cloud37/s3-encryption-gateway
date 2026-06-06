@@ -24,11 +24,11 @@ func newMockS3ForVerify() *mockS3ForVerify {
 	}
 }
 
-func (m *mockS3ForVerify) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
+func (m *mockS3ForVerify) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	data, _ := io.ReadAll(reader)
 	m.objects[bucket+"/"+key] = data
 	m.metadata[bucket+"/"+key] = metadata
-	return nil
+	return "", nil
 }
 
 func (m *mockS3ForVerify) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
@@ -79,7 +79,7 @@ func TestVerify_Success(t *testing.T) {
 	cipherdata, _ := io.ReadAll(encReader)
 
 	mock := newMockS3ForVerify()
-	_ = mock.PutObject(context.Background(), "b", "k", bytes.NewReader(cipherdata), meta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "b", "k", bytes.NewReader(cipherdata), meta, nil, "", nil, "", "", "", "", "")
 
 	if err := Verify(context.Background(), mock, eng, "b", "k", plaintext); err != nil {
 		t.Errorf("Verify failed: %v", err)
@@ -102,7 +102,7 @@ func TestVerify_Tampered(t *testing.T) {
 	cipherdata[10] ^= 0xFF
 
 	mock := newMockS3ForVerify()
-	_ = mock.PutObject(context.Background(), "b", "k", bytes.NewReader(cipherdata), meta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "b", "k", bytes.NewReader(cipherdata), meta, nil, "", nil, "", "", "", "", "")
 
 	if err := Verify(context.Background(), mock, eng, "b", "k", plaintext); err == nil {
 		t.Error("expected Verify to fail on tampered object")

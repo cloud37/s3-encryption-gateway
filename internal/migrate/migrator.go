@@ -15,7 +15,7 @@ import (
 
 // S3Client is the minimal S3 interface needed by the migration tool.
 type S3Client interface {
-	PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error
+	PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error)
 	GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error)
 	HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error)
 	DeleteObject(ctx context.Context, bucket, key string, versionID *string) error

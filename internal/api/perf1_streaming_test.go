@@ -175,7 +175,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 	encLen := int64(len(import_bytes))
 	encMeta["Content-Length"] = fmt.Sprintf("%d", encLen)
 
-	_ = mockClient.PutObject(
+	_, _ = mockClient.PutObject(
 		context.Background(),
 		"src-bucket", "src-key",
 		bytes.NewReader(import_bytes),
@@ -239,8 +239,8 @@ func TestHandleGetObject_Streaming_BoundedHeap(t *testing.T) {
 	if _, err := encBuf.ReadFrom(encReader); err != nil {
 		t.Fatalf("read encrypted: %v", err)
 	}
-	encLen := int64(encBuf.Len())
-	if err := mockClient.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
+	 encLen := int64(encBuf.Len())
+	if _, err := mockClient.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
@@ -328,8 +328,8 @@ func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 	if _, err := encBuf.ReadFrom(encReader); err != nil {
 		t.Fatalf("read encrypted: %v", err)
 	}
-	encLen := int64(encBuf.Len())
-	if err := mockClient.PutObject(context.Background(), "src-bkt", "src-key", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
+	 encLen := int64(encBuf.Len())
+	if _, err := mockClient.PutObject(context.Background(), "src-bkt", "src-key", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("PutObject source: %v", err)
 	}
 

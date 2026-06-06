@@ -48,10 +48,10 @@ func newMPUMockS3Client() *mpuMockS3Client {
 	}
 }
 
-func (m *mpuMockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
+func (m *mpuMockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return err
+		return "", err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -61,7 +61,7 @@ func (m *mpuMockS3Client) PutObject(ctx context.Context, bucket, key string, rea
 		cp[k] = v
 	}
 	m.metadata[bucket+"/"+key] = cp
-	return nil
+	return "", nil
 }
 
 func (m *mpuMockS3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {

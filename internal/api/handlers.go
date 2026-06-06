@@ -1676,7 +1676,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upload encrypted object with filtered metadata (streaming)
-	err = s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
+	etag, err := s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
 		s3Err.WriteXML(w)
@@ -1690,6 +1690,9 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+	}
 	w.WriteHeader(http.StatusOK)
 	h.metrics.RecordS3Operation(r.Context(), "PutObject", bucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
@@ -2253,8 +2256,16 @@ func applyRangeRequest(data []byte, rangeHeader string) ([]byte, error) {
 		}
 	}
 
-	// Validate range
-	if start < 0 || start >= dataLen || end < start || end >= dataLen {
+	// Validate and saturate range.
+	// S3 returns the available bytes when end exceeds the object size
+	// (RFC 7233 §4.2).  An out-of-range start is still rejected.
+	if start < 0 || start >= dataLen {
+		return nil, fmt.Errorf("range not satisfiable: %d-%d (size: %d)", start, end, dataLen)
+	}
+	if end >= dataLen {
+		end = dataLen - 1
+	}
+	if end < start {
 		return nil, fmt.Errorf("range not satisfiable: %d-%d (size: %d)", start, end, dataLen)
 	}
 
@@ -3661,7 +3672,8 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 
 	companionKey := key + ".mpu-manifest"
 	encLen := int64(len(encBytes))
-	return s3Client.PutObject(ctx, bucket, companionKey, bytes.NewReader(encBytes), encMeta, &encLen, "", nil, "", "", "", "", "")
+	_, err = s3Client.PutObject(ctx, bucket, companionKey, bytes.NewReader(encBytes), encMeta, &encLen, "", nil, "", "", "", "", "")
+	return err
 }
 
 // unwrapMPUDEK unwraps the DEK stored in UploadState using the KeyManager.
@@ -4130,7 +4142,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 
 	// Upload encrypted copy with filtered metadata and known content length
 	encLen := int64(len(encryptedData))
-	err = s3Client.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(encryptedData), s3Metadata, &encLen, tagging, lockInput, "", "", "", "", "")
+	_, err = s3Client.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(encryptedData), s3Metadata, &encLen, tagging, lockInput, "", "", "", "", "")
 	if err != nil {
 		s3Err := TranslateError(err, dstBucket, dstKey)
 		s3Err.WriteXML(w)

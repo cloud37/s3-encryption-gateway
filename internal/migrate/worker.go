@@ -53,7 +53,7 @@ func (m *Migrator) migrateObject(ctx context.Context, bucket, key string, class 
 	contentLength := fi.Size()
 
 	// Step 5: PutObject (atomic overwrite)
-	if err := m.S3Client.PutObject(ctx, bucket, key, encFile, encMeta, &contentLength, "", nil, "", "", "", "", ""); err != nil {
+	if _, err := m.S3Client.PutObject(ctx, bucket, key, encFile, encMeta, &contentLength, "", nil, "", "", "", "", ""); err != nil {
 		return fmt.Errorf("put object failed: %w", err)
 	}
 

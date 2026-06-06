@@ -87,9 +87,9 @@ func newMockS3Client() *mockS3Client {
 	}
 }
 
-func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
+func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	if err := m.errors[bucket+"/"+key+"/put"]; err != nil {
-		return err
+		return "", err
 	}
 	data, _ := io.ReadAll(reader)
 	m.objects[bucket+"/"+key] = data
@@ -102,7 +102,7 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader
 	m.lastGrantReadACP = grantReadACP
 	m.lastGrantWriteACP = grantWriteACP
 	m.locksMu.Unlock()
-	return nil
+	return "", nil
 }
 
 func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
@@ -303,7 +303,7 @@ func (m *mockS3Client) CopyObject(ctx context.Context, dstBucket, dstKey string,
 	// Put as destination. Pass the received lock through so the
 	// destination PutObject records it as lastPutLock as well (mirrors
 	// real-world behaviour).
-	if err := m.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(data), metadata, nil, "", lock, "", "", "", "", ""); err != nil {
+	if _, err := m.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(data), metadata, nil, "", lock, "", "", "", "", ""); err != nil {
 		return "", nil, err
 	}
 

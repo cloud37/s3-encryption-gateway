@@ -31,16 +31,16 @@ func newMockS3ForMigrate() *mockS3ForMigrate {
 	}
 }
 
-func (m *mockS3ForMigrate) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
+func (m *mockS3ForMigrate) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.errors[bucket+"/"+key+"/put"]; err != nil {
-		return err
+		return "", err
 	}
 	data, _ := io.ReadAll(reader)
 	m.objects[bucket+"/"+key] = data
 	m.metadata[bucket+"/"+key] = metadata
-	return nil
+	return "", nil
 }
 
 func (m *mockS3ForMigrate) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
@@ -139,7 +139,7 @@ func setupMockWithObjects(t *testing.T, objs map[string]map[string]string) *mock
 			t.Fatalf("encrypt %s: %v", key, err)
 		}
 		cipherdata, _ := io.ReadAll(encReader)
-		_ = mock.PutObject(context.Background(), "bucket", key, bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+		_, _ = mock.PutObject(context.Background(), "bucket", key, bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 	}
 	return mock
 }
@@ -161,7 +161,7 @@ func TestMigrator_ClassA_XOR_RoundTrip(t *testing.T) {
 
 	// Force legacy metadata (remove HKDF flag)
 	delete(encMeta, crypto.MetaIVDerivation)
-	_ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client:       mock,
@@ -204,7 +204,7 @@ func TestMigrator_DryRun_NoWrites(t *testing.T) {
 	}
 	cipherdata, _ := io.ReadAll(encReader)
 	delete(encMeta, crypto.MetaIVDerivation)
-	_ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 
 	// Capture original metadata.
 	origMeta, _ := mock.HeadObject(context.Background(), "bucket", "obj1", nil)
@@ -254,7 +254,7 @@ func TestBackfillLegacyNoAAD_TagsCandidate(t *testing.T) {
 		t.Fatalf("encrypt A: %v", err)
 	}
 	cA, _ := io.ReadAll(rA)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(cA), mA, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(cA), mA, nil, "", nil, "", "", "", "", "")
 
 	// Object B: plaintext — skipped (no MetaEncrypted).
 	mock.objects["bucket/obj-b"] = []byte("plaintext")
@@ -268,7 +268,7 @@ func TestBackfillLegacyNoAAD_TagsCandidate(t *testing.T) {
 	}
 	cC, _ := io.ReadAll(rC)
 	mC[crypto.MetaLegacyNoAAD] = "true"
-	_ = mock.PutObject(context.Background(), "bucket", "obj-c", bytes.NewReader(cC), mC, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-c", bytes.NewReader(cC), mC, nil, "", nil, "", "", "", "", "")
 
 	// Object D: chunked — skipped (not a CLASS B candidate).
 	plainD := []byte("object d")
@@ -278,7 +278,7 @@ func TestBackfillLegacyNoAAD_TagsCandidate(t *testing.T) {
 		t.Fatalf("encrypt D: %v", err)
 	}
 	cD, _ := io.ReadAll(rD)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-d", bytes.NewReader(cD), mD, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-d", bytes.NewReader(cD), mD, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client: mock,
@@ -321,7 +321,7 @@ func TestBackfillLegacyNoAAD_DryRun_NoCopyObject(t *testing.T) {
 		t.Fatalf("encrypt A: %v", err)
 	}
 	cA, _ := io.ReadAll(rA)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(cA), mA, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(cA), mA, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client: mock,
@@ -355,7 +355,7 @@ func TestMigrator_Resume(t *testing.T) {
 		encReader, encMeta, _ := eng.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
 		cipherdata, _ := io.ReadAll(encReader)
 		delete(encMeta, crypto.MetaIVDerivation)
-		_ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+		_, _ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 	}
 
 	stateFile := t.TempDir() + "/state.json"
@@ -403,14 +403,14 @@ func TestMigrator_Filter_Sec2Only(t *testing.T) {
 	r1, m1, _ := eng.Encrypt(context.Background(), bytes.NewReader(p1), nil)
 	c1, _ := io.ReadAll(r1)
 	delete(m1, crypto.MetaIVDerivation)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(c1), m1, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(c1), m1, nil, "", nil, "", "", "", "", "")
 
 	// Class B (no-AAD legacy) object — non-chunked, legacy flag
 	p2 := []byte("class b")
 	m2 := map[string]string{crypto.MetaLegacyNoAAD: "true"}
 	r2, m2enc, _ := eng.Encrypt(context.Background(), bytes.NewReader(p2), m2)
 	c2, _ := io.ReadAll(r2)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-b", bytes.NewReader(c2), m2enc, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-b", bytes.NewReader(c2), m2enc, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client:       mock,
@@ -457,7 +457,7 @@ func TestMigrator_ClassB_NoAAD_RoundTrip(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	cipherdata, _ := io.ReadAll(encReader)
-	_ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client:       mock,
@@ -507,7 +507,7 @@ func TestMigrator_ClassC_FallbackV1_RoundTrip(t *testing.T) {
 	encMeta[crypto.MetaFallbackMode] = "true"
 	delete(encMeta, crypto.MetaFallbackVersion)
 	delete(encMeta, crypto.MetaIVDerivation)
-	_ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 
 	// Use the real engine as target; for source we rely on the real engine's
 	// Decrypt which will try the fallback path.  Because the ciphertext is a
@@ -558,7 +558,7 @@ func TestMigrator_Idempotency(t *testing.T) {
 	}
 	cipherdata, _ := io.ReadAll(encReader)
 	delete(encMeta, crypto.MetaIVDerivation)
-	_ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 
 	stateFile := t.TempDir() + "/state.json"
 	m := &Migrator{
@@ -613,7 +613,7 @@ func TestMigrator_FailedObject_Continue(t *testing.T) {
 		encReader, encMeta, _ := eng.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
 		cipherdata, _ := io.ReadAll(encReader)
 		delete(encMeta, crypto.MetaIVDerivation)
-		_ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+		_, _ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 	}
 
 	// Inject a failure on obj2 GetObject.
@@ -699,7 +699,7 @@ func TestMigrator_ClassD_KDFParams_RoundTrip(t *testing.T) {
 	}
 	cipherdata, _ := io.ReadAll(encReader)
 	delete(encMeta, crypto.MetaKDFParams)
-	_ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj1", bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client:       mock,
@@ -745,14 +745,14 @@ func TestMigrator_FilterKDF_SkipsOtherClasses(t *testing.T) {
 	cA, _ := io.ReadAll(rA)
 	delete(mA, crypto.MetaKDFParams)
 	delete(mA, crypto.MetaIVDerivation)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(cA), mA, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-a", bytes.NewReader(cA), mA, nil, "", nil, "", "", "", "", "")
 
 	// ClassD object: encrypted, delete MetaKDFParams only
 	pD := []byte("class d")
 	rD, mD, _ := eng100k.Encrypt(context.Background(), bytes.NewReader(pD), nil)
 	cD, _ := io.ReadAll(rD)
 	delete(mD, crypto.MetaKDFParams)
-	_ = mock.PutObject(context.Background(), "bucket", "obj-d", bytes.NewReader(cD), mD, nil, "", nil, "", "", "", "", "")
+	_, _ = mock.PutObject(context.Background(), "bucket", "obj-d", bytes.NewReader(cD), mD, nil, "", nil, "", "", "", "", "")
 
 	m := &Migrator{
 		S3Client:       mock,
@@ -803,7 +803,7 @@ func TestMigrator_ClassD_Migrate_100k_to_600k(t *testing.T) {
 		encReader, encMeta, _ := eng100k.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
 		cipherdata, _ := io.ReadAll(encReader)
 		delete(encMeta, crypto.MetaKDFParams)
-		_ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+		_, _ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 	}
 
 	m := &Migrator{
@@ -847,7 +847,7 @@ func TestMigrator_ClassD_Idempotency(t *testing.T) {
 		encReader, encMeta, _ := eng100k.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
 		cipherdata, _ := io.ReadAll(encReader)
 		delete(encMeta, crypto.MetaKDFParams)
-		_ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
+		_, _ = mock.PutObject(context.Background(), "bucket", fmt.Sprintf("obj%d", i), bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", "")
 	}
 
 	stateFile := t.TempDir() + "/state.json"

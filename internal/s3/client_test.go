@@ -33,14 +33,14 @@ func newMockClient() *mockClient {
 	}
 }
 
-func (m *mockClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) error {
+func (m *mockClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return err
+		return "", err
 	}
 	m.objects[bucket+"/"+key] = data
 	m.metadata[bucket+"/"+key] = metadata
-	return nil
+	return "", nil
 }
 
 func (m *mockClient) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, map[string]string, error) {
@@ -93,7 +93,7 @@ func TestMockClient_PutGet(t *testing.T) {
 	data := []byte("test data")
 	metadata := map[string]string{"content-type": "text/plain"}
 
-    err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), metadata, nil, "", nil, "", "", "", "", "")
+    _, err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), metadata, nil, "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject failed: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestMockClient_DeleteObject(t *testing.T) {
 	key := "test-key"
 	data := []byte("test data")
 
-    err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", "")
+    _, err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject failed: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestS3Client_PutObject_Success(t *testing.T) {
 	client := buildTestS3Client(t, transport)
 
 	body := bytes.NewReader([]byte("test data"))
-	err := client.PutObject(context.Background(), "test-bucket", "test-key",
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
 		body, nil, nil, "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject() error: %v", err)
@@ -584,8 +584,8 @@ func TestS3Client_PutObject_WithMetadata(t *testing.T) {
 		"x-amz-meta-encrypted": "true",
 		"x-amz-meta-algorithm": "AES256-GCM",
 	}
-	err := client.PutObject(context.Background(), "test-bucket", "test-key",
-		bytes.NewReader([]byte("data")), meta, nil, "", nil, "", "", "", "", "")
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
+		bytes.NewReader([]byte("data")), meta, aws.Int64(4), "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject() with metadata error: %v", err)
 	}
@@ -1079,7 +1079,7 @@ func TestS3Client_PutObject_WithTags(t *testing.T) {
 	transport := &fakeS3Transport{handler: fakeS3Mux()}
 	client := buildTestS3Client(t, transport)
 
-	err := client.PutObject(context.Background(), "test-bucket", "test-key",
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
 		bytes.NewReader([]byte("data")), nil, nil, "key1=val1&key2=val2", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject() with tags error: %v", err)
@@ -1093,7 +1093,7 @@ func TestS3Client_PutObject_WithContentLength(t *testing.T) {
 
 	data := []byte("hello")
 	cl := int64(len(data))
-	err := client.PutObject(context.Background(), "test-bucket", "test-key",
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
 		bytes.NewReader(data), nil, &cl, "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject() with content length error: %v", err)

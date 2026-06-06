@@ -413,7 +413,7 @@ func TestProxyClient_NotImplemented(t *testing.T) {
 
 	ctx := context.Background()
 
-	if err := pc.PutObject(ctx, "b", "k", nil, nil, nil, "", nil, "", "", "", "", ""); err == nil {
+	if _, err := pc.PutObject(ctx, "b", "k", nil, nil, nil, "", nil, "", "", "", "", ""); err == nil {
 		t.Error("PutObject() expected not-implemented error, got nil")
 	}
 
