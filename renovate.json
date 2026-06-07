@@ -5,5 +5,14 @@
   ],
   "assignees": [
     "kenchrcum"
+  ],
+  "packageRules": [
+    {
+      "description": "Enable Renovate to propose Go version bumps in go.mod",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "rangeStrategy": "bump"
+    }
   ]
 }
