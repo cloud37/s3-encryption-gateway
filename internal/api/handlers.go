@@ -721,18 +721,6 @@ func (h *Handler) getEncryptionEngine(bucket string) (crypto.EncryptionEngine, e
 	// Apply policy to a copy of config
 	effectiveConfig := policy.ApplyToConfig(h.config)
 
-	// Reconstruct components
-	var compressionEngine crypto.CompressionEngine
-	if effectiveConfig.Compression.Enabled {
-		compressionEngine = crypto.NewCompressionEngine(
-			effectiveConfig.Compression.Enabled,
-			effectiveConfig.Compression.MinSize,
-			effectiveConfig.Compression.ContentTypes,
-			effectiveConfig.Compression.Algorithm,
-			effectiveConfig.Compression.Level,
-		)
-	}
-
 	// Use password from effective config
 	// Note: If password came from file and wasn't in config struct, we might have issues if policy doesn't specify it.
 	// We assume main.go populated config struct or policy provides it.
@@ -751,7 +739,6 @@ func (h *Handler) getEncryptionEngine(bucket string) (crypto.EncryptionEngine, e
 
 	engine, err := crypto.NewEngineWithChunking(
 		[]byte(password),
-		compressionEngine,
 		effectiveConfig.Encryption.PreferredAlgorithm,
 		effectiveConfig.Encryption.SupportedAlgorithms,
 		chunkedMode,
@@ -1897,10 +1884,6 @@ func isEncryptionMetadata(key string) bool {
 		"x-amz-meta-encryption-auth-tag",
 		"x-amz-meta-encryption-original-size",
 		"x-amz-meta-encryption-original-etag",
-		"x-amz-meta-encryption-compression",
-		"x-amz-meta-compression-enabled",
-		"x-amz-meta-compression-algorithm",
-		"x-amz-meta-compression-original-size",
 		// Chunked encryption metadata
 		"x-amz-meta-encryption-chunked",
 		"x-amz-meta-encryption-chunk-size",

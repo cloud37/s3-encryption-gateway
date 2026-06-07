@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"strings"
 	"testing"
 )
 
@@ -19,7 +18,7 @@ func TestEngine_MetadataFallback(t *testing.T) {
 		CompactionStrategy:  "base64url",
 	}
 
-	encEngine, err := NewEngineWithProvider([]byte("test-password-123456789"), nil, "", nil, "default")
+	encEngine, err := NewEngineWithProvider([]byte("test-password-123456789"), "", nil, "default")
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -150,7 +149,7 @@ func TestEngine_FallbackDetection(t *testing.T) {
 				CompactionStrategy:  "base64url",
 			}
 
-			encEngine, err := NewEngineWithProvider([]byte("test-password-123"), nil, "", nil, "default")
+			encEngine, err := NewEngineWithProvider([]byte("test-password-123"), "", nil, "default")
 			if err != nil {
 				t.Fatalf("Failed to create engine: %v", err)
 			}
@@ -242,77 +241,7 @@ func TestMetadataJSONEncoding(t *testing.T) {
 	}
 }
 
-func TestEngine_FallbackWithCompression(t *testing.T) {
-	// Create compression engine
-	compressionEngine := NewCompressionEngine(true, 100, []string{"text/", "application/json"}, "gzip", 6)
 
-	// Create engine with compression
-	profile := &ProviderProfile{
-		Name:                "test-small-limits",
-		UserMetadataLimit:   50,
-		SystemMetadataLimit: 0,
-		TotalHeaderLimit:    100,
-		SupportsLongKeys:    true,
-		CompactionStrategy:  "base64url",
-	}
-
-	encEngine, err := NewEngineWithProvider([]byte("test-password-123456789"), compressionEngine, "", nil, "default")
-	if err != nil {
-		t.Fatalf("Failed to create engine: %v", err)
-	}
-
-	concreteEngine, ok := encEngine.(*engine)
-	if !ok {
-		t.Fatalf("Failed to type assert to concrete engine")
-	}
-	concreteEngine.providerProfile = profile
-	concreteEngine.compactor = NewMetadataCompactor(profile)
-
-	// Create large metadata to force fallback
-	largeMetadata := map[string]string{
-		"Content-Type":         "application/json",
-		"x-amz-meta-large-key": strings.Repeat("x", 100),
-	}
-
-	// Test with compressible data
-	testData := []byte(strings.Repeat("compressible data ", 100))
-
-	reader := bytes.NewReader(testData)
-	encryptedReader, encMetadata, err := encEngine.Encrypt(context.Background(), reader, largeMetadata)
-	if err != nil {
-		t.Fatalf("Encrypt() failed: %v", err)
-	}
-
-	// Verify fallback mode
-	if encMetadata[MetaFallbackMode] != "true" {
-		t.Errorf("Expected fallback mode for compression + large metadata")
-	}
-
-	// Read and decrypt
-	encryptedData, err := ReadAll(encryptedReader)
-	if err != nil {
-		t.Fatalf("Failed to read encrypted data: %v", err)
-	}
-
-	decryptReader, decMetadata, err := encEngine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
-	if err != nil {
-		t.Fatalf("Decrypt() failed: %v", err)
-	}
-
-	decryptedData, err := ReadAll(decryptReader)
-	if err != nil {
-		t.Fatalf("Failed to read decrypted data: %v", err)
-	}
-
-	if !bytes.Equal(decryptedData, testData) {
-		t.Errorf("Data integrity check failed")
-	}
-
-	// Verify metadata
-	if decMetadata["Content-Type"] != "application/json" {
-		t.Errorf("Content-Type not preserved")
-	}
-}
 
 // ReadAll is a helper to read all data from a reader (avoids import issues)
 func ReadAll(r io.Reader) ([]byte, error) {

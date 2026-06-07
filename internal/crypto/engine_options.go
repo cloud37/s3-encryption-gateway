@@ -144,8 +144,8 @@ func SetWrappedMetadataKey(enc EncryptionEngine, envelope *KeyEnvelope) {
 //	eng, err := crypto.NewEngineWithOpts(password, nil,
 //	    crypto.WithKeyManager(myKeyManager),
 //	)
-func NewEngineWithOpts(password []byte, compressionEngine CompressionEngine, opts ...Option) (EncryptionEngine, error) {
-	eng, err := NewEngineWithChunkingAndProvider(password, compressionEngine, "", nil, false, DefaultChunkSize, "default", DefaultPBKDF2Iterations)
+func NewEngineWithOpts(password []byte, opts ...Option) (EncryptionEngine, error) {
+	eng, err := NewEngineWithChunkingAndProvider(password, "", nil, false, DefaultChunkSize, "default", DefaultPBKDF2Iterations)
 	if err != nil {
 		return nil, err
 	}

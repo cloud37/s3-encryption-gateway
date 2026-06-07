@@ -520,23 +520,6 @@ func main() {
 	stopHC := crypto.StartKMSHealthCheck(context.Background(), keyManager, hcInterval)
 	defer stopHC()
 
-	// Initialize compression engine if enabled
-	var compressionEngine crypto.CompressionEngine
-	if cfg.Compression.Enabled {
-		compressionEngine = crypto.NewCompressionEngine(
-			cfg.Compression.Enabled,
-			cfg.Compression.MinSize,
-			cfg.Compression.ContentTypes,
-			cfg.Compression.Algorithm,
-			cfg.Compression.Level,
-		)
-		logger.WithFields(logrus.Fields{
-			"enabled":   cfg.Compression.Enabled,
-			"algorithm": cfg.Compression.Algorithm,
-			"min_size":  cfg.Compression.MinSize,
-		}).Info("Compression enabled")
-	}
-
 	// Log hardware acceleration info
 	hwInfo := crypto.GetHardwareAccelerationInfo(&cfg.Encryption.Hardware)
 	logger.WithFields(logrus.Fields{
@@ -607,7 +590,6 @@ func main() {
 
 	encryptionEngine, err = crypto.NewEngineWithOpts(
 		activePassword,
-		compressionEngine,
 		engineOpts...,
 	)
 	// Zero the upstream password copy now that the engine owns its own defensive copy.

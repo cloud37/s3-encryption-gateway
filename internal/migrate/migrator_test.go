@@ -126,7 +126,7 @@ func hasPrefix(s, prefix string) bool {
 
 func setupMockWithObjects(t *testing.T, objs map[string]map[string]string) *mockS3ForMigrate {
 	t.Helper()
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -145,7 +145,7 @@ func setupMockWithObjects(t *testing.T, objs map[string]map[string]string) *mock
 }
 
 func TestMigrator_ClassA_XOR_RoundTrip(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestMigrator_ClassA_XOR_RoundTrip(t *testing.T) {
 }
 
 func TestMigrator_DryRun_NoWrites(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestMigrator_DryRun_NoWrites(t *testing.T) {
 }
 
 func TestBackfillLegacyNoAAD_TagsCandidate(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, false, 0)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, false, 0)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestBackfillLegacyNoAAD_TagsCandidate(t *testing.T) {
 
 	// Object D: chunked — skipped (not a CLASS B candidate).
 	plainD := []byte("object d")
-	engChunked, _ := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	engChunked, _ := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	rD, mD, err := engChunked.Encrypt(context.Background(), bytes.NewReader(plainD), nil)
 	if err != nil {
 		t.Fatalf("encrypt D: %v", err)
@@ -309,7 +309,7 @@ func TestBackfillLegacyNoAAD_TagsCandidate(t *testing.T) {
 }
 
 func TestBackfillLegacyNoAAD_DryRun_NoCopyObject(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, false, 0)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, false, 0)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestBackfillLegacyNoAAD_DryRun_NoCopyObject(t *testing.T) {
 }
 
 func TestMigrator_Resume(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestMigrator_Resume(t *testing.T) {
 }
 
 func TestMigrator_Filter_Sec2Only(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestMigrator_Filter_Sec2Only(t *testing.T) {
 }
 
 func TestMigrator_ClassB_NoAAD_RoundTrip(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, false, 0)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, false, 0)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestMigrator_ClassB_NoAAD_RoundTrip(t *testing.T) {
 }
 
 func TestMigrator_ClassC_FallbackV1_RoundTrip(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestMigrator_ClassC_FallbackV1_RoundTrip(t *testing.T) {
 }
 
 func TestMigrator_Idempotency(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestMigrator_Idempotency(t *testing.T) {
 }
 
 func TestMigrator_FailedObject_Continue(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -682,11 +682,11 @@ func TestMigrator_InvalidGatewayVersion(t *testing.T) {
 
 
 func TestMigrator_ClassD_KDFParams_RoundTrip(t *testing.T) {
-	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 100000)
+	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 100000)
 	if err != nil {
 		t.Fatalf("failed to create 100k engine: %v", err)
 	}
-	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 600000)
+	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 600000)
 	if err != nil {
 		t.Fatalf("failed to create 600k engine: %v", err)
 	}
@@ -728,11 +728,11 @@ func TestMigrator_ClassD_KDFParams_RoundTrip(t *testing.T) {
 }
 
 func TestMigrator_FilterKDF_SkipsOtherClasses(t *testing.T) {
-	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 100000)
+	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 100000)
 	if err != nil {
 		t.Fatalf("failed to create 100k engine: %v", err)
 	}
-	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 600000)
+	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 600000)
 	if err != nil {
 		t.Fatalf("failed to create 600k engine: %v", err)
 	}
@@ -788,11 +788,11 @@ func TestMigrator_FilterKDF_SkipsOtherClasses(t *testing.T) {
 }
 
 func TestMigrator_ClassD_Migrate_100k_to_600k(t *testing.T) {
-	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 100000)
+	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 100000)
 	if err != nil {
 		t.Fatalf("failed to create 100k engine: %v", err)
 	}
-	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 600000)
+	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 600000)
 	if err != nil {
 		t.Fatalf("failed to create 600k engine: %v", err)
 	}
@@ -832,11 +832,11 @@ func TestMigrator_ClassD_Migrate_100k_to_600k(t *testing.T) {
 }
 
 func TestMigrator_ClassD_Idempotency(t *testing.T) {
-	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 100000)
+	eng100k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 100000)
 	if err != nil {
 		t.Fatalf("failed to create 100k engine: %v", err)
 	}
-	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), nil, "", nil, true, crypto.DefaultChunkSize, "default", 600000)
+	eng600k, err := crypto.NewEngineWithChunkingAndProvider([]byte("test-migrate-password-1234"), "", nil, true, crypto.DefaultChunkSize, "default", 600000)
 	if err != nil {
 		t.Fatalf("failed to create 600k engine: %v", err)
 	}

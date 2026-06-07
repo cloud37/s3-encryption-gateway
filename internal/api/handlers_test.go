@@ -1223,7 +1223,7 @@ func TestHandler_HandleListObjects_MarkerNotDuplicated(t *testing.T) {
 // TestContentRangeMapping tests Content-Range and Content-Length header mapping for range requests
 func TestContentRangeMapping(t *testing.T) {
 	// Create a crypto engine that supports chunking and range decryption
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, 16*1024)
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

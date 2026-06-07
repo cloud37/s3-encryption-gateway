@@ -107,43 +107,7 @@ func testChunkedRangedRead_Large(t *testing.T, inst provider.Instance) {
 	}
 }
 
-// testCompression_RoundTrip verifies that the Phase E streaming compression
-// implementation (gzip io.Pipe in Compress, gzip.Reader in Decompress) correctly
-// round-trips compressible data through the full gateway pipeline.
-// 200 KiB of highly compressible text is used so the gzip writer flushes
-// non-trivially and the gzip reader must decompress all data.
-//
-// V0.6-PERF-1 Phase E regression guard.
-func testCompression_RoundTrip(t *testing.T, inst provider.Instance) {
-	t.Helper()
-	// Start a gateway with gzip compression enabled.
-	// MinSize defaults to 0 via the harness (WithCompression sets Enabled=true
-	// and Algorithm; MinSize stays 0 so even small objects are compressed).
-	gw := harness.StartGateway(t, inst,
-		harness.WithCompression("gzip"),
-		harness.WithConfigMutator(func(cfg *config.Config) {
-			cfg.Compression.MinSize = 0
-			cfg.Compression.Level = 6
-		}),
-	)
 
-	// 200 KiB of highly compressible text.
-	const payloadLen = 200 * 1024
-	payload := bytes.Repeat(
-		[]byte("the quick brown fox jumps over the lazy dog. "),
-		payloadLen/45+1,
-	)
-	payload = payload[:payloadLen]
-
-	key := uniqueKey(t)
-	put(t, gw, inst.Bucket, key, payload)
-	got := get(t, gw, inst.Bucket, key)
-
-	if !bytes.Equal(got, payload) {
-		t.Errorf("Compression_RoundTrip mismatch: got %d bytes, want %d bytes",
-			len(got), len(payload))
-	}
-}
 
 // testUploadPart_OversizeCap verifies that the gateway returns HTTP 413
 // EntityTooLarge when a plaintext UploadPart request body exceeds

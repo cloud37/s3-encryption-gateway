@@ -7,14 +7,14 @@ import (
 // TestWithKeyManager_SetsManager verifies that the WithKeyManager option sets
 // the kmsManager field on the engine when a non-nil KeyManager is provided.
 func TestWithKeyManager_SetsManager(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-for-engine-options"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-for-engine-options"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
 
 	km := NewInMemoryKeyManagerForTestDefault()
 
-	eng2, err := NewEngineWithOpts([]byte("test-password-for-engine-options"), nil, WithKeyManager(km))
+	eng2, err := NewEngineWithOpts([]byte("test-password-for-engine-options"), WithKeyManager(km))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() with WithKeyManager error: %v", err)
 	}
@@ -32,13 +32,13 @@ func TestWithKeyManager_SetsManager(t *testing.T) {
 // does not change the engine's kmsManager (nil guard).
 func TestWithKeyManager_NilIsNoop(t *testing.T) {
 	// Create engine without a key manager
-	eng, err := NewEngineWithOpts([]byte("test-password-key-mgr-noop"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-key-mgr-noop"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
 
 	// Apply a nil KeyManager option — should be a no-op
-	eng2, err := NewEngineWithOpts([]byte("test-password-key-mgr-noop"), nil, WithKeyManager(nil))
+	eng2, err := NewEngineWithOpts([]byte("test-password-key-mgr-noop"), WithKeyManager(nil))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() with nil KeyManager error: %v", err)
 	}
@@ -56,7 +56,6 @@ func TestNewEngineWithOpts_MultipleOptions(t *testing.T) {
 
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-multi-opts"),
-		nil,
 		WithKeyManager(km),
 	)
 	if err != nil {
@@ -70,7 +69,7 @@ func TestNewEngineWithOpts_MultipleOptions(t *testing.T) {
 // TestNewEngineWithOpts_ValidPassword verifies that NewEngineWithOpts with a
 // valid password and no additional options returns a usable EncryptionEngine.
 func TestNewEngineWithOpts_ValidPassword(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("valid-password-at-least-20-chars"), nil)
+	eng, err := NewEngineWithOpts([]byte("valid-password-at-least-20-chars"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -87,7 +86,6 @@ func TestNewEngineWithOpts_ValidPassword(t *testing.T) {
 func TestWithPreferredAlgorithm(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-preferred-alg-password"),
-		nil,
 		WithPreferredAlgorithm("AES-256-GCM"),
 	)
 	if err != nil {
@@ -108,7 +106,6 @@ func TestWithPreferredAlgorithm(t *testing.T) {
 func TestWithPreferredAlgorithm_EmptyIsNoop(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-preferred-alg-noop-password"),
-		nil,
 		WithPreferredAlgorithm("AES-256-GCM"),
 		WithPreferredAlgorithm(""),
 	)
@@ -128,7 +125,6 @@ func TestWithSupportedAlgorithms(t *testing.T) {
 	algs := []string{"AES-256-GCM", "ChaCha20-Poly1305"}
 	eng, err := NewEngineWithOpts(
 		[]byte("test-supported-algs-password"),
-		nil,
 		WithSupportedAlgorithms(algs),
 	)
 	if err != nil {
@@ -151,7 +147,6 @@ func TestWithSupportedAlgorithms_EmptyIsNoop(t *testing.T) {
 	algs := []string{"AES-256-GCM"}
 	eng, err := NewEngineWithOpts(
 		[]byte("test-supported-algs-noop"),
-		nil,
 		WithSupportedAlgorithms(algs),
 		WithSupportedAlgorithms([]string{}),
 	)
@@ -169,7 +164,6 @@ func TestWithSupportedAlgorithms_EmptyIsNoop(t *testing.T) {
 func TestWithProvider(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-provider-password"),
-		nil,
 		WithProvider("default"),
 	)
 	if err != nil {
@@ -184,7 +178,6 @@ func TestWithProvider(t *testing.T) {
 func TestWithProvider_EmptyIsNoop(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-provider-noop-password"),
-		nil,
 		WithProvider(""),
 	)
 	if err != nil {
@@ -200,7 +193,6 @@ func TestWithProvider_EmptyIsNoop(t *testing.T) {
 func TestWithKDFAlgorithm_EmptyIsNoop(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-kdf-noop-password"),
-		nil,
 		WithKDFAlgorithm("pbkdf2-sha256"),
 		WithKDFAlgorithm(""),
 	)
@@ -218,7 +210,6 @@ func TestWithKDFAlgorithm_EmptyIsNoop(t *testing.T) {
 func TestWithArgon2idParams_ZeroIsNoop(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-argon2id-noop-password"),
-		nil,
 		WithArgon2idParams(2, 19456, 1),
 		WithArgon2idParams(0, 0, 0),
 	)
@@ -234,7 +225,7 @@ func TestWithArgon2idParams_ZeroIsNoop(t *testing.T) {
 // TestCreateCipher_ValidKey verifies that createCipher succeeds with a 32-byte
 // AES-256 key and returns a non-nil AEAD (covers the 0% createCipher function).
 func TestCreateCipher_ValidKey(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-createcipher-password"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-createcipher-password"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -253,7 +244,7 @@ func TestCreateCipher_ValidKey(t *testing.T) {
 // TestCreateCipher_InvalidKeySize verifies that createCipher returns an error
 // for a key of an incorrect size.
 func TestCreateCipher_InvalidKeySize(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-createcipher-invalid-password"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-createcipher-invalid-password"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -269,7 +260,7 @@ func TestCreateCipher_InvalidKeySize(t *testing.T) {
 // TestDeriveKeyWithParams_InvalidSaltSize verifies that an incorrect salt size
 // returns an error (covers the invalid-salt-size branch of deriveKeyWithParams).
 func TestDeriveKeyWithParams_InvalidSaltSize(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-derivekeyparams-password"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-derivekeyparams-password"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -286,7 +277,7 @@ func TestDeriveKeyWithParams_InvalidSaltSize(t *testing.T) {
 // TestDeriveKeyWithParams_UnsupportedAlgorithm verifies that an unknown algorithm
 // returns an error (covers the default/unsupported branch of deriveKeyWithParams).
 func TestDeriveKeyWithParams_UnsupportedAlgorithm(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-derivekeyparams-unknown-password"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-derivekeyparams-unknown-password"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -346,7 +337,7 @@ func TestGetRotationState_NonEngine(t *testing.T) {
 // TestGenerateNonceForAlgorithm_UnknownAlgorithm verifies that an unsupported
 // algorithm returns an error from generateNonceForAlgorithm.
 func TestGenerateNonceForAlgorithm_UnknownAlgorithm(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-nonce-password"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-nonce-password"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -360,7 +351,7 @@ func TestGenerateNonceForAlgorithm_UnknownAlgorithm(t *testing.T) {
 // TestIsEncrypted_NotEncrypted verifies that metadata without encryption keys
 // returns false (covers the false branch of IsEncrypted).
 func TestIsEncrypted_NotEncrypted(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-isencrypted-password"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-isencrypted-password"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}

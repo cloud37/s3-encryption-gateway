@@ -22,10 +22,10 @@ func (e *engine) encryptMetadata(encMeta map[string]string) (string, error) {
 		return "", fmt.Errorf("metadata key not configured")
 	}
 
-	// Extract encryption and compression metadata subset.
+	// Extract encryption metadata subset.
 	subset := make(map[string]string)
 	for k, v := range encMeta {
-		if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+		if IsEncryptionMetadata(k) {
 			subset[k] = v
 		}
 	}

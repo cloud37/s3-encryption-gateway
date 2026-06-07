@@ -99,7 +99,7 @@ func (m *Migrator) Migrate(ctx context.Context, bucket, prefix string) error {
 		if len(m.Password) == 0 {
 			return fmt.Errorf("SourceEngine is nil and SourceIterations is set, but Password is empty")
 		}
-		m.SourceEngine, err = crypto.NewEngineWithOpts(m.Password, nil,
+		m.SourceEngine, err = crypto.NewEngineWithOpts(m.Password,
 			crypto.WithPBKDF2Iterations(m.SourceIterations))
 		if err != nil {
 			return fmt.Errorf("failed to build source engine: %w", err)
@@ -109,7 +109,7 @@ func (m *Migrator) Migrate(ctx context.Context, bucket, prefix string) error {
 		if len(m.Password) == 0 {
 			return fmt.Errorf("TargetEngine is nil and TargetIterations is set, but Password is empty")
 		}
-		m.TargetEngine, err = crypto.NewEngineWithOpts(m.Password, nil,
+		m.TargetEngine, err = crypto.NewEngineWithOpts(m.Password,
 			crypto.WithPBKDF2Iterations(m.TargetIterations))
 		if err != nil {
 			return fmt.Errorf("failed to build target engine: %w", err)

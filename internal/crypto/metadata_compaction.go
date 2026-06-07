@@ -26,7 +26,7 @@ func (c *MetadataCompactor) CompactMetadata(metadata map[string]string) (map[str
 
 	// Copy non-encryption metadata as-is
 	for key, value := range metadata {
-		if !IsEncryptionMetadata(key) && !IsCompressionMetadata(key) {
+		if !IsEncryptionMetadata(key) {
 			compacted[key] = value
 		}
 	}
@@ -133,21 +133,10 @@ func (c *MetadataCompactor) compactEncryptionMetadata(metadata map[string]string
 			compacted[MetaEncryptedMetadataCompact] = v // encrypted metadata blob
 		}
 
-		// Compression metadata (only if present)
-		if v := metadata[MetaCompressionEnabled]; v != "" && v != "false" {
-			compacted["x-amz-meta-ce"] = v // compression enabled
-			if v := metadata[MetaCompressionAlgorithm]; v != "" {
-				compacted["x-amz-meta-ca"] = v // compression algorithm
-			}
-			if v := metadata[MetaCompressionOriginalSize]; v != "" {
-				compacted["x-amz-meta-cos"] = v // compression original size
-			}
-		}
-
 	} else {
 		// No compaction - copy as-is
 		for key, value := range metadata {
-			if IsEncryptionMetadata(key) || IsCompressionMetadata(key) {
+			if IsEncryptionMetadata(key) {
 				compacted[key] = value
 			}
 		}
@@ -214,19 +203,10 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 		if v := metadata[MetaEncryptedMetadataCompact]; v != "" {
 			expanded[MetaEncryptedMetadata] = v
 		}
-		if v := metadata["x-amz-meta-ce"]; v != "" {
-			expanded[MetaCompressionEnabled] = v
-			if v := metadata["x-amz-meta-ca"]; v != "" {
-				expanded[MetaCompressionAlgorithm] = v
-			}
-			if v := metadata["x-amz-meta-cos"]; v != "" {
-				expanded[MetaCompressionOriginalSize] = v
-			}
-		}
 	} else {
 		// No expansion needed - copy encryption metadata as-is
 		for key, value := range metadata {
-			if IsEncryptionMetadata(key) || IsCompressionMetadata(key) {
+			if IsEncryptionMetadata(key) {
 				expanded[key] = value
 			}
 		}
@@ -245,8 +225,7 @@ func (c *MetadataCompactor) isCompactedKey(key string) bool {
 		"x-amz-meta-e", "x-amz-meta-a", "x-amz-meta-s", "x-amz-meta-i",
 		"x-amz-meta-os", "x-amz-meta-oe", "x-amz-meta-c", "x-amz-meta-cs",
 		"x-amz-meta-cc", "x-amz-meta-m", "x-amz-meta-kv", "x-amz-meta-wk",
-		"x-amz-meta-kid", "x-amz-meta-kp", "x-amz-meta-ce",
-		"x-amz-meta-ca", "x-amz-meta-cos", "x-amz-meta-kdf",
+		"x-amz-meta-kid", "x-amz-meta-kp", "x-amz-meta-kdf",
 		MetaEncryptedMetadataCompact,
 	}
 

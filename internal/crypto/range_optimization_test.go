@@ -414,7 +414,7 @@ func TestCalculateEncryptedRangeForPlaintextRange(t *testing.T) {
 // TestRangeDecryptionEdgeCases covers all edge cases for range-optimized decryption
 func TestRangeDecryptionEdgeCases(t *testing.T) {
 	// Create test engine
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), nil, "", nil, true, 16*1024) // 16KB chunks
+	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024) // 16KB chunks
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestRangeDecryptionContentRangeMapping(t *testing.T) {
 
 // TestRangeDecryptionAuthenticationVerification tests that authentication tags are properly verified
 func TestRangeDecryptionAuthenticationVerification(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), nil, "", nil, true, 16*1024)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -827,7 +827,7 @@ func TestRangeDecryptionAuthenticationVerification(t *testing.T) {
 
 // TestRangeDecryptionChunkAlignment tests that only required chunks are processed
 func TestRangeDecryptionChunkAlignment(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), nil, "", nil, true, 16*1024)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

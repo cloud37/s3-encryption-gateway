@@ -101,7 +101,7 @@ func BenchmarkEncryptWithMemoryKM(b *testing.B) {
 	}
 	b.Cleanup(func() { _ = km.Close(context.Background()) })
 
-	eng, err := NewEngineWithOpts([]byte("test-password-123456"), nil, WithKeyManager(km))
+	eng, err := NewEngineWithOpts([]byte("test-password-123456"), WithKeyManager(km))
 	if err != nil {
 		b.Fatal(err)
 	}

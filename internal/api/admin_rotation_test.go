@@ -70,7 +70,7 @@ func setupMemoryKMAndEngine(t *testing.T) (crypto.EncryptionEngine, crypto.KeyMa
 
 	eng, err := crypto.NewEngineWithChunking(
 		[]byte("test-password1234"),
-		nil, "", nil, false, 0,
+		"", nil, false, 0,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func TestAdminRotateStartCommit_Happy(t *testing.T) {
 	km := crypto.NewInMemoryKeyManagerForTestWithKeys(masterKey1, 1)
 	km.AddVersion(context.Background(), 2, masterKey2)
 
-	eng, err := crypto.NewEngineWithChunking([]byte("test-password1234"), nil, "", nil, false, 0)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-password1234"), "", nil, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestAdminRotateStart_ConflictOnSecond(t *testing.T) {
 	km := crypto.NewInMemoryKeyManagerForTestWithKeys(masterKey1, 1)
 	km.AddVersion(context.Background(), 2, masterKey2)
 
-	eng, err := crypto.NewEngineWithChunking([]byte("test-password1234"), nil, "", nil, false, 0)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-password1234"), "", nil, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestAdminRotateAbort_FromDraining(t *testing.T) {
 	km := crypto.NewInMemoryKeyManagerForTestWithKeys(masterKey1, 1)
 	km.AddVersion(context.Background(), 2, masterKey2)
 
-	eng, err := crypto.NewEngineWithChunking([]byte("test-password1234"), nil, "", nil, false, 0)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-password1234"), "", nil, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

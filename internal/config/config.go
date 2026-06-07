@@ -28,7 +28,6 @@ type Config struct {
 	ProxiedBucket  string               `yaml:"proxied_bucket" env:"PROXIED_BUCKET"` // If set, only this bucket will be accessible
 	Backend        BackendConfig        `yaml:"backend"`
 	Encryption     EncryptionConfig     `yaml:"encryption"`
-	Compression    CompressionConfig    `yaml:"compression"`
 	Cache          CacheConfig          `yaml:"cache"`
 	Audit          AuditConfig          `yaml:"audit"`
 	TLS            TLSConfig            `yaml:"tls"`
@@ -463,15 +462,6 @@ type CosmianKeyReference struct {
 	Version int    `yaml:"version"`
 }
 
-// CompressionConfig holds compression settings.
-type CompressionConfig struct {
-	Enabled      bool     `yaml:"enabled" env:"COMPRESSION_ENABLED"`
-	MinSize      int64    `yaml:"min_size" env:"COMPRESSION_MIN_SIZE"`
-	ContentTypes []string `yaml:"content_types" env:"COMPRESSION_CONTENT_TYPES"`
-	Algorithm    string   `yaml:"algorithm" env:"COMPRESSION_ALGORITHM"`
-	Level        int      `yaml:"level" env:"COMPRESSION_LEVEL"`
-}
-
 // TLSConfig holds TLS configuration.
 type TLSConfig struct {
 	Enabled  bool   `yaml:"enabled" env:"TLS_ENABLED"`
@@ -838,12 +828,6 @@ func LoadConfig(path string) (*Config, error) {
 				MaxBackoff:     DefaultBackendRetryMaxBackoff,
 				Jitter:         DefaultBackendRetryJitter,
 			},
-		},
-		Compression: CompressionConfig{
-			Enabled:   false,
-			MinSize:   1024,
-			Algorithm: "gzip",
-			Level:     6,
 		},
 		Server: ServerConfig{
 			ReadTimeout:              0, // Disable; ReadHeaderTimeout (10s) guards against slow-loris; ReadTimeout would kill long response streams
@@ -2268,17 +2252,6 @@ func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
 	}
 	if old.Encryption.Hardware.EnableARMv8AES != new.Encryption.Hardware.EnableARMv8AES {
 		return fmt.Errorf("encryption.hardware.enable_armv8_aes cannot be changed during hot reload")
-	}
-
-	// Compression settings - changing these could affect existing encrypted data
-	if old.Compression.Enabled != new.Compression.Enabled {
-		return fmt.Errorf("compression.enabled cannot be changed during hot reload")
-	}
-	if old.Compression.Algorithm != new.Compression.Algorithm {
-		return fmt.Errorf("compression.algorithm cannot be changed during hot reload")
-	}
-	if old.Compression.Level != new.Compression.Level {
-		return fmt.Errorf("compression.level cannot be changed during hot reload")
 	}
 
 	// Backend settings that affect encryption/decryption compatibility

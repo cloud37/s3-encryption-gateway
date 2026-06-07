@@ -107,10 +107,6 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 				Argon2id: o.argon2idParams,
 			},
 		},
-		Compression: config.CompressionConfig{
-			Enabled:   o.compressionEnabled,
-			Algorithm: o.compressionAlgo,
-		},
 	}
 
 	// Apply WithAuth credentials before extraConfig so extraConfig can override.
@@ -172,20 +168,8 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	}
 
 	// Encryption engine.
-	var compressionEngine crypto.CompressionEngine
-	if cfg.Compression.Enabled {
-		compressionEngine = crypto.NewCompressionEngine(
-			cfg.Compression.Enabled,
-			cfg.Compression.MinSize,
-			cfg.Compression.ContentTypes,
-			cfg.Compression.Algorithm,
-			cfg.Compression.Level,
-		)
-	}
-
 	encryptionEngine, err := crypto.NewEngineWithOpts(
 		[]byte(o.encryptionPassword),
-		compressionEngine,
 		crypto.WithPBKDF2Iterations(o.pbkdf2Iterations),
 		crypto.WithChunking(o.chunkedMode),
 		crypto.WithKDFAlgorithm(o.kdfAlgorithm),

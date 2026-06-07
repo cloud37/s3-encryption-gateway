@@ -398,7 +398,7 @@ func TestEngine_OriginalETagPreservation(t *testing.T) {
 
 
 func TestEncryptDecrypt_DefaultIterations(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestEncryptDecrypt_DefaultIterations(t *testing.T) {
 }
 
 func TestEncryptDecrypt_ExplicitIterations_100k(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(100000))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestEncryptDecrypt_ExplicitIterations_100k(t *testing.T) {
 }
 
 func TestEncryptDecrypt_ExplicitIterations_600k(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(600000))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(600000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestEncryptDecrypt_ExplicitIterations_600k(t *testing.T) {
 }
 
 func TestDecrypt_LegacyAbsentKDFParams(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(100000))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -508,11 +508,11 @@ func TestDecrypt_LegacyAbsentKDFParams(t *testing.T) {
 }
 
 func TestDecrypt_CrossIteration_100k_to_600k(t *testing.T) {
-	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(100000))
+	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(600000))
+	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(600000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -539,11 +539,11 @@ func TestDecrypt_CrossIteration_100k_to_600k(t *testing.T) {
 }
 
 func TestDecrypt_CrossIteration_600k_to_100k(t *testing.T) {
-	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(100000))
+	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(600000))
+	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(600000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestDecrypt_CrossIteration_600k_to_100k(t *testing.T) {
 }
 
 func TestEncrypt_WritesKDFParamsMetadata(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestEncrypt_WritesKDFParamsMetadata(t *testing.T) {
 }
 
 func TestEncrypt_WritesKDFParamsMetadata_CustomIter(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(750000))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(750000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -600,7 +600,7 @@ func TestEncrypt_WritesKDFParamsMetadata_CustomIter(t *testing.T) {
 }
 
 func TestChunked_EncryptDecrypt_KDFParams(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithChunking(true))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithChunking(true))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -630,11 +630,11 @@ func TestChunked_EncryptDecrypt_KDFParams(t *testing.T) {
 }
 
 func TestDecrypt_AbsentMetadata_FallbackIs100k(t *testing.T) {
-	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(100000))
+	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithPBKDF2Iterations(600000))
+	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), WithPBKDF2Iterations(600000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -663,11 +663,11 @@ func TestDecrypt_AbsentMetadata_FallbackIs100k(t *testing.T) {
 }
 
 func TestChunked_CrossIteration(t *testing.T) {
-	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithChunking(true), WithChunkSize(DefaultChunkSize), WithPBKDF2Iterations(100000))
+	eng100k, err := NewEngineWithOpts([]byte("test-password-12345"), WithChunking(true), WithChunkSize(DefaultChunkSize), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithChunking(true), WithChunkSize(DefaultChunkSize), WithPBKDF2Iterations(600000))
+	eng600k, err := NewEngineWithOpts([]byte("test-password-12345"), WithChunking(true), WithChunkSize(DefaultChunkSize), WithPBKDF2Iterations(600000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -697,7 +697,7 @@ func TestChunked_CrossIteration(t *testing.T) {
 }
 
 func TestChunked_LegacyAbsentKDFParams(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil, WithChunking(true), WithPBKDF2Iterations(100000))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithChunking(true), WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestEncryptDecrypt_Argon2id(t *testing.T) {
 	if FIPSEnabled() {
 		t.Skip("argon2id is not approved in FIPS builds")
 	}
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"),
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(2, 19456, 1),
 	)
@@ -761,7 +761,7 @@ func TestEncryptDecrypt_Argon2id(t *testing.T) {
 
 func TestEncryptDecrypt_Argon2id_LegacyPBKDF2Read(t *testing.T) {
 	// Encrypt with PBKDF2 (default), decrypt with argon2id-configured engine.
-	pbkdf2Engine, err := NewEngineWithOpts([]byte("test-password-12345"), nil)
+	pbkdf2Engine, err := NewEngineWithOpts([]byte("test-password-12345"))
 	if err != nil {
 		t.Fatalf("Failed to create PBKDF2 engine: %v", err)
 	}
@@ -777,7 +777,7 @@ func TestEncryptDecrypt_Argon2id_LegacyPBKDF2Read(t *testing.T) {
 	}
 
 	// Decrypt with argon2id-configured engine (reads algorithm from metadata).
-	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"),
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(2, 19456, 1),
 	)
@@ -802,7 +802,7 @@ func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
 		t.Skip("argon2id is not approved in FIPS builds")
 	}
 	// Encrypt with argon2id, decrypt with PBKDF2-configured engine (reads algorithm from metadata).
-	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+	argon2idEngine, err := NewEngineWithOpts([]byte("test-password-12345"),
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(2, 19456, 1),
 	)
@@ -821,7 +821,7 @@ func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
 	}
 
 	// Decrypt with PBKDF2 engine (reads argon2id from metadata).
-	pbkdf2Engine, err := NewEngineWithOpts([]byte("test-password-12345"), nil)
+	pbkdf2Engine, err := NewEngineWithOpts([]byte("test-password-12345"))
 	if err != nil {
 		t.Fatalf("Failed to create PBKDF2 engine: %v", err)
 	}
@@ -842,7 +842,7 @@ func TestEncrypt_WritesArgon2idMetadata(t *testing.T) {
 	if FIPSEnabled() {
 		t.Skip("argon2id is not approved in FIPS builds")
 	}
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"),
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(3, 32768, 2),
 	)
@@ -866,7 +866,7 @@ func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
 	if FIPSEnabled() {
 		t.Skip("argon2id is not approved in FIPS builds")
 	}
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), nil,
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"),
 		WithChunking(true),
 		WithKDFAlgorithm("argon2id"),
 		WithArgon2idParams(2, 19456, 1),
@@ -910,7 +910,6 @@ func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
 	}
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-chacha20poly1305"),
-		nil,
 		WithPreferredAlgorithm(AlgorithmChaCha20Poly1305),
 	)
 	if err != nil {
@@ -948,7 +947,6 @@ func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
 	}
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-chacha20-nonchunked"),
-		nil,
 		WithPreferredAlgorithm(AlgorithmChaCha20Poly1305),
 		WithChunking(false),
 	)
@@ -1002,7 +1000,6 @@ func TestEngine_Decrypt_WithAESKEKManager(t *testing.T) {
 
 	eng, err := NewEngineWithOpts(
 		[]byte("engine-aes-kek-test-password"),
-		nil,
 		WithKeyManager(km),
 	)
 	if err != nil {
@@ -1064,7 +1061,6 @@ func TestEngine_Decrypt_WithRSAKEKManager(t *testing.T) {
 
 	eng, err := NewEngineWithOpts(
 		[]byte("engine-rsa-kek-test-password"),
-		nil,
 		WithKeyManager(km),
 	)
 	if err != nil {

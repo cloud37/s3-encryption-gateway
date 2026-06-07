@@ -61,7 +61,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 	var rkm crypto.RotatableKeyManager = km
 
 	// Create engine with key manager
-	eng, err := crypto.NewEngineWithOpts([]byte("integration-test-password-abcdef"), nil, crypto.WithKeyManager(km))
+	eng, err := crypto.NewEngineWithOpts([]byte("integration-test-password-abcdef"), crypto.WithKeyManager(km))
 	require.NoError(t, err)
 
 	// Create S3 client

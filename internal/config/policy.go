@@ -15,7 +15,6 @@ type PolicyConfig struct {
 	ID          string             `yaml:"id"`
 	Buckets     []string           `yaml:"buckets"` // Glob patterns for bucket names
 	Encryption  *EncryptionConfig  `yaml:"encryption,omitempty"`
-	Compression *CompressionConfig `yaml:"compression,omitempty"`
 	RateLimit   *RateLimitConfig   `yaml:"rate_limit,omitempty"`
 	// RequireEncryption, when true, mandates that every object stored in
 	// matching buckets must be encrypted. It enables hard-refusal semantics
@@ -142,10 +141,6 @@ func (p *PolicyConfig) ApplyToConfig(base *Config) *Config {
 		}
 
 		newConfig.Encryption = enc
-	}
-
-	if p.Compression != nil {
-		newConfig.Compression = *p.Compression
 	}
 
 	if p.RateLimit != nil {

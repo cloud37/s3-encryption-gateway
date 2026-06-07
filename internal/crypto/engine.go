@@ -39,10 +39,7 @@ const (
 	MetaAuthTag                 = "x-amz-meta-encryption-auth-tag"
 	MetaOriginalSize            = "x-amz-meta-encryption-original-size"
 	MetaOriginalETag            = "x-amz-meta-encryption-original-etag"
-	MetaCompression             = "x-amz-meta-encryption-compression"
-	MetaCompressionEnabled      = "x-amz-meta-compression-enabled"
-	MetaCompressionAlgorithm    = "x-amz-meta-compression-algorithm"
-	MetaCompressionOriginalSize = "x-amz-meta-compression-original-size"
+
 	MetaWrappedKeyCiphertext    = "x-amz-meta-encryption-wrapped-key"
 	MetaKMSKeyID                = "x-amz-meta-encryption-kms-id"
 	MetaKMSProvider             = "x-amz-meta-encryption-kms-provider"
@@ -116,7 +113,6 @@ type engine struct {
 	pbkdf2Iterations int // configurable, default DefaultPBKDF2Iterations
 	kdfAlgorithm     KDFAlgorithm // selected KDF for new objects, default KDFAlgPBKDF2SHA256
 	argon2idParams   Argon2idConfig
-	compressionEngine   CompressionEngine
 	preferredAlgorithm  string
 	supportedAlgorithms []string
 	// Chunked encryption settings
@@ -147,31 +143,26 @@ type engine struct {
 // The password is used to derive encryption keys using PBKDF2 with
 // the default iteration count (600,000) and a random salt per object.
 func NewEngine(password []byte) (EncryptionEngine, error) {
-	return NewEngineWithCompression(password, nil)
-}
-
-// NewEngineWithCompression creates a new encryption engine with compression support.
-func NewEngineWithCompression(password []byte, compressionEngine CompressionEngine) (EncryptionEngine, error) {
-	return NewEngineWithOptions(password, compressionEngine, "", nil)
+	return NewEngineWithOptions(password, "", nil)
 }
 
 // NewEngineWithOptions creates a new encryption engine with full options.
-func NewEngineWithOptions(password []byte, compressionEngine CompressionEngine, preferredAlgorithm string, supportedAlgorithms []string) (EncryptionEngine, error) {
-	return NewEngineWithProvider(password, compressionEngine, preferredAlgorithm, supportedAlgorithms, "default")
+func NewEngineWithOptions(password []byte, preferredAlgorithm string, supportedAlgorithms []string) (EncryptionEngine, error) {
+	return NewEngineWithProvider(password, preferredAlgorithm, supportedAlgorithms, "default")
 }
 
 // NewEngineWithProvider creates a new encryption engine with provider-specific settings.
-func NewEngineWithProvider(password []byte, compressionEngine CompressionEngine, preferredAlgorithm string, supportedAlgorithms []string, provider string) (EncryptionEngine, error) {
-	return NewEngineWithChunkingAndProvider(password, compressionEngine, preferredAlgorithm, supportedAlgorithms, false, DefaultChunkSize, provider, DefaultPBKDF2Iterations)
+func NewEngineWithProvider(password []byte, preferredAlgorithm string, supportedAlgorithms []string, provider string) (EncryptionEngine, error) {
+	return NewEngineWithChunkingAndProvider(password, preferredAlgorithm, supportedAlgorithms, false, DefaultChunkSize, provider, DefaultPBKDF2Iterations)
 }
 
 // NewEngineWithChunking creates a new encryption engine with chunked mode support.
-func NewEngineWithChunking(password []byte, compressionEngine CompressionEngine, preferredAlgorithm string, supportedAlgorithms []string, chunkedMode bool, chunkSize int) (EncryptionEngine, error) {
-	return NewEngineWithChunkingAndProvider(password, compressionEngine, preferredAlgorithm, supportedAlgorithms, chunkedMode, chunkSize, "default", DefaultPBKDF2Iterations)
+func NewEngineWithChunking(password []byte, preferredAlgorithm string, supportedAlgorithms []string, chunkedMode bool, chunkSize int) (EncryptionEngine, error) {
+	return NewEngineWithChunkingAndProvider(password, preferredAlgorithm, supportedAlgorithms, chunkedMode, chunkSize, "default", DefaultPBKDF2Iterations)
 }
 
 // NewEngineWithChunkingAndProvider creates a new encryption engine with chunked mode and provider support.
-func NewEngineWithChunkingAndProvider(password []byte, compressionEngine CompressionEngine, preferredAlgorithm string, supportedAlgorithms []string, chunkedMode bool, chunkSize int, provider string, pbkdf2Iterations int) (EncryptionEngine, error) {
+func NewEngineWithChunkingAndProvider(password []byte, preferredAlgorithm string, supportedAlgorithms []string, chunkedMode bool, chunkSize int, provider string, pbkdf2Iterations int) (EncryptionEngine, error) {
 	if len(password) == 0 {
 		return nil, fmt.Errorf("encryption password cannot be empty")
 	}
@@ -229,7 +220,6 @@ func NewEngineWithChunkingAndProvider(password []byte, compressionEngine Compres
 			Memory:  19456,
 			Threads: 1,
 		},
-		compressionEngine:   compressionEngine,
 		preferredAlgorithm:  preferredAlgorithm,
 		supportedAlgorithms: supportedAlgorithms,
 		chunkedMode:         chunkedMode,
@@ -456,21 +446,6 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	// []byte, so we must buffer the compressed output — but the plaintext
 	// buffer is no longer replicated.
 	var toEncryptReader io.Reader = bytes.NewReader(plaintext)
-	compressionMetadata := make(map[string]string)
-	if e.compressionEngine != nil {
-		compressedReader, compMeta, err := e.compressionEngine.Compress(bytes.NewReader(plaintext), contentType, originalSize)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to compress data: %w", err)
-		}
-		if compMeta != nil {
-			// Compression was applied; compressedReader is now a streaming pipe.
-			// Set toEncryptReader to the compressed stream; io.ReadAll below will
-			// drain it in one pass — no intermediate bytes.NewReader wrapper needed.
-			compressionMetadata = compMeta
-			toEncryptReader = compressedReader
-		}
-		// If compression wasn't applied, compMeta will be nil and we continue with original
-	}
 
 	// Determine algorithm to use (preferred algorithm for new encryptions)
 	algorithm := e.preferredAlgorithm
@@ -545,11 +520,6 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 			encMetadata[k] = v
 		}
 	}
-	if compressionMetadata != nil {
-		for k, v := range compressionMetadata {
-			encMetadata[k] = v
-		}
-	}
 	encMetadata[MetaEncrypted] = "true"
 	encMetadata[MetaAlgorithm] = algorithm
 	encMetadata[MetaKeySalt] = encodeBase64(salt)
@@ -584,7 +554,7 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		}
 		// Remove all encryption/compression keys from the cleartext map.
 		for k := range encMetadata {
-			if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+			if IsEncryptionMetadata(k) {
 				delete(encMetadata, k)
 			}
 		}
@@ -871,26 +841,12 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 	// plaintext directly — no intermediate ReadAll → bytes.NewReader needed.
 	// For non-compressed objects, plaintext is used directly.
 	var finalReader io.Reader = bytes.NewReader(plaintext)
-	if e.compressionEngine != nil {
-		decompressedReader, err := e.compressionEngine.Decompress(bytes.NewReader(plaintext), expandedMetadata)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decompress data: %w", err)
-		}
-		finalReader = decompressedReader
-		// V1.0-SEC-M05: bound decompressed output to prevent decompression bombs
-		if originalSizeStr, ok := expandedMetadata[MetaCompressionOriginalSize]; ok {
-			if originalSize, err := strconv.ParseInt(originalSizeStr, 10, 64); err == nil && originalSize > 0 {
-				limit := originalSize + 65536 // 64 KiB tolerance for format overhead
-				finalReader = io.LimitReader(finalReader, limit)
-			}
-		}
-	}
 
 	// Prepare decrypted metadata (remove encryption and compression markers)
 	decMetadata := make(map[string]string)
 	for k, v := range expandedMetadata {
 		// Skip encryption-related and compression-related metadata
-		if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+		if IsEncryptionMetadata(k) {
 			continue
 		}
 		decMetadata[k] = v
@@ -968,7 +924,7 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 			return nil, nil, fmt.Errorf("encrypt metadata: %w", err)
 		}
 		for k := range encMetadata {
-			if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+			if IsEncryptionMetadata(k) {
 				delete(encMetadata, k)
 			}
 		}
@@ -1275,7 +1231,7 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 
 	// Copy original user metadata (non-encryption, non-compression keys)
 	for k, v := range fullMetadata {
-		if !IsEncryptionMetadata(k) && !IsCompressionMetadata(k) {
+		if !IsEncryptionMetadata(k) {
 			minimalMetadata[k] = v
 		}
 	}
@@ -1626,32 +1582,7 @@ func (e *engine) needsMetadataFallback(metadata map[string]string) bool {
 
 // encryptWithMetadataFallback encrypts data with metadata stored in object body
 func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[string]string, contentType string, originalSize int64, originalETag string) (io.Reader, map[string]string, error) {
-	// Apply compression if enabled (same logic as normal encryption).
-	// Read the (possibly compressed) payload into a single byte slice so we
-	// can build the AEAD plaintext in one allocation and avoid holding
-	// multiple full-size copies of the object.
-	data := plaintext
-	compressionMetadata := make(map[string]string)
-	if e.compressionEngine != nil {
-		compressedReader, compMeta, err := e.compressionEngine.Compress(bytes.NewReader(plaintext), contentType, originalSize)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to compress data: %w", err)
-		}
-		if compMeta != nil {
-			// Compression was applied and was beneficial.
-			compressionMetadata = compMeta
-			compressedData, err := io.ReadAll(compressedReader)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to read compressed data: %w", err)
-			}
-			data = compressedData
-		}
-	}
-
-	// Merge compression metadata into full metadata
-	for k, v := range compressionMetadata {
-		fullMetadata[k] = v
-	}
+		data := plaintext
 
 	// Generate encryption parameters
 	salt, err := e.generateSalt()
@@ -1736,7 +1667,7 @@ func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[
 
 	// Copy original user metadata
 	for k, v := range fullMetadata {
-		if !IsEncryptionMetadata(k) && !IsCompressionMetadata(k) {
+		if !IsEncryptionMetadata(k) {
 			minimalMetadata[k] = v
 		}
 	}
@@ -1931,28 +1862,14 @@ func (e *engine) decryptFallbackV1(reader io.Reader, metadata map[string]string)
 		return nil, nil, fmt.Errorf("failed to decode metadata from fallback: %w", err)
 	}
 
-	// Apply decompression if needed
+		// Apply decompression if needed — compression removed in V1.0-MAINT-2
 	var finalReader io.Reader = bytes.NewReader(actualData)
-	if e.compressionEngine != nil {
-		decompressedReader, err := e.compressionEngine.Decompress(bytes.NewReader(actualData), fullMetadata)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decompress data: %w", err)
-		}
-		finalReader = decompressedReader
-		// V1.0-SEC-M05: bound decompressed output to prevent decompression bombs
-		if originalSizeStr, ok := fullMetadata[MetaCompressionOriginalSize]; ok {
-			if originalSize, err := strconv.ParseInt(originalSizeStr, 10, 64); err == nil && originalSize > 0 {
-				limit := originalSize + 65536 // 64 KiB tolerance for format overhead
-				finalReader = io.LimitReader(finalReader, limit)
-			}
-		}
-	}
 
 	// Prepare decrypted metadata (remove encryption and compression markers)
 	decMetadata := make(map[string]string)
 	for k, v := range fullMetadata {
 		// Skip encryption-related and compression-related metadata
-		if IsEncryptionMetadata(k) || IsCompressionMetadata(k) {
+		if IsEncryptionMetadata(k) {
 			continue
 		}
 		decMetadata[k] = v
@@ -2018,14 +1935,6 @@ func IsEncryptionMetadata(key string) bool {
 		key == MetaIVDerivation ||
 		key == MetaLegacyNoAAD ||
 		key == MetaKDFParams
-}
-
-// IsCompressionMetadata checks if a metadata key is related to compression.
-func IsCompressionMetadata(key string) bool {
-	return key == MetaCompression ||
-		key == MetaCompressionEnabled ||
-		key == MetaCompressionAlgorithm ||
-		key == MetaCompressionOriginalSize
 }
 
 // buildAADLegacy is the old pipe-delimited AAD format.

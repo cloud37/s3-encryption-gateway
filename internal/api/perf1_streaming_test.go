@@ -214,7 +214,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 func TestHandleGetObject_Streaming_BoundedHeap(t *testing.T) {
 	chunkedEngine, err := crypto.NewEngineWithChunking(
 		[]byte("test-password-perf1-123456"),
-		nil, "", nil, true, 0,
+		"", nil, true, 0,
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunking: %v", err)
@@ -305,7 +305,7 @@ func TestHandleUploadPart_Plaintext_SeekableWrapper(t *testing.T) {
 func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 	chunkedEngine, err := crypto.NewEngineWithChunking(
 		[]byte("test-password-perf1-123456"),
-		nil, "", nil, true, 0,
+		"", nil, true, 0,
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunking: %v", err)

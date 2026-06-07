@@ -25,9 +25,6 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 		MetaChunkedFormat:               "true",
 		MetaChunkSize:                   "65536",
 		MetaManifest:                    "dGVzdC1tYW5pZmVzdA==", // base64 "test-manifest"
-		MetaCompressionEnabled:          "true",
-		MetaCompressionAlgorithm:        "gzip",
-		MetaCompressionOriginalSize:     "2048",
 	}
 
 	compacted, err := compactor.CompactMetadata(originalMetadata)
@@ -48,9 +45,6 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 		"x-amz-meta-c":                   "true",           // chunked
 		"x-amz-meta-cs":                  "65536",          // chunk size
 		"x-amz-meta-m":                   "dGVzdC1tYW5pZmVzdA==", // manifest
-		"x-amz-meta-ce":                  "true",           // compression enabled
-		"x-amz-meta-ca":                  "gzip",           // compression algorithm
-		"x-amz-meta-cos":                 "2048",           // compression original size
 	}
 
 	if !reflect.DeepEqual(compacted, expectedCompacted) {
@@ -78,9 +72,6 @@ func TestMetadataCompactor_ExpandMetadata(t *testing.T) {
 		"x-amz-meta-c":                   "true",           // chunked
 		"x-amz-meta-cs":                  "65536",          // chunk size
 		"x-amz-meta-m":                   "dGVzdC1tYW5pZmVzdA==", // manifest
-		"x-amz-meta-ce":                  "true",           // compression enabled
-		"x-amz-meta-ca":                  "gzip",           // compression algorithm
-		"x-amz-meta-cos":                 "2048",           // compression original size
 	}
 
 	expanded, err := compactor.ExpandMetadata(compactedMetadata)
@@ -101,9 +92,6 @@ func TestMetadataCompactor_ExpandMetadata(t *testing.T) {
 		MetaChunkedFormat:               "true",
 		MetaChunkSize:                   "65536",
 		MetaManifest:                    "dGVzdC1tYW5pZmVzdA==",
-		MetaCompressionEnabled:          "true",
-		MetaCompressionAlgorithm:        "gzip",
-		MetaCompressionOriginalSize:     "2048",
 	}
 
 	if !reflect.DeepEqual(expanded, expectedExpanded) {
@@ -131,9 +119,6 @@ func TestMetadataCompactor_RoundTrip(t *testing.T) {
 		MetaChunkedFormat:               "true",
 		MetaChunkSize:                   "65536",
 		MetaManifest:                    "dGVzdC1tYW5pZmVzdA==",
-		MetaCompressionEnabled:          "true",
-		MetaCompressionAlgorithm:        "gzip",
-		MetaCompressionOriginalSize:     "2048",
 	}
 
 	// Compact then expand

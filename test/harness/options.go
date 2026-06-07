@@ -27,8 +27,6 @@ type options struct {
 	// already set by the caller).
 	encryptedMPUBucket  string
 	headObjectOverride  func(bucket, key string) *int64
-	compressionEnabled  bool
-	compressionAlgo     string
 	logLevel            string
 	extraConfig         func(*config.Config)
 	// pbkdf2Iterations overrides the default PBKDF2 iteration count (600k).
@@ -123,15 +121,6 @@ func WithEncryptedMPUForBucket(bucketGlob string) Option {
 // fn must return nil to leave Content-Length unmodified.
 func WithHeadObjectOverride(fn func(bucket, key string) *int64) Option {
 	return func(o *options) { o.headObjectOverride = fn }
-}
-
-// WithCompression enables compression with the given algorithm
-// (e.g. "gzip", "zstd"). An empty algorithm uses the default.
-func WithCompression(algorithm string) Option {
-	return func(o *options) {
-		o.compressionEnabled = true
-		o.compressionAlgo = algorithm
-	}
 }
 
 // WithLogLevel sets the gateway logger level (default "error" in tests).

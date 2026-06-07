@@ -103,10 +103,6 @@ backend:
   secret_key: test-secret
 encryption:
   password: test-password
-compression:
-  enabled: false
-  algorithm: gzip
-  level: 6
 auth:
   credentials:
     - access_key: "gateway-key"
@@ -267,17 +263,6 @@ func TestValidateReloadSafety(t *testing.T) {
 			},
 			expectError: true,
 			errorMsg:    "encryption.chunked_mode cannot be changed during hot reload",
-		},
-		{
-			name: "compression enabled change rejected",
-			oldConfig: &Config{
-				Compression: CompressionConfig{Enabled: false},
-			},
-			newConfig: &Config{
-				Compression: CompressionConfig{Enabled: true},
-			},
-			expectError: true,
-			errorMsg:    "compression.enabled cannot be changed during hot reload",
 		},
 		{
 			name: "backend provider change rejected",

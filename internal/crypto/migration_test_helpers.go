@@ -10,7 +10,7 @@ package crypto
 // (test/migration) can construct ClassC objects end-to-end against real S3
 // backends such as MinIO.
 func NewTestEngineWithFallbackProfile(password []byte, chunkedMode bool) (EncryptionEngine, error) {
-	eng, err := NewEngineWithChunkingAndProvider(password, nil, "", nil, chunkedMode, DefaultChunkSize, "default", DefaultPBKDF2Iterations)
+	eng, err := NewEngineWithChunkingAndProvider(password, "", nil, chunkedMode, DefaultChunkSize, "default", DefaultPBKDF2Iterations)
 	if err != nil {
 		return nil, err
 	}

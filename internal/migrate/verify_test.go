@@ -66,7 +66,7 @@ func (m *mockS3ForVerify) CopyObject(ctx context.Context, dstBucket, dstKey stri
 }
 
 func TestVerify_Success(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-password-verify-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-password-verify-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestVerify_Success(t *testing.T) {
 }
 
 func TestVerify_Tampered(t *testing.T) {
-	eng, err := crypto.NewEngineWithChunking([]byte("test-password-verify-1234"), nil, "", nil, true, crypto.DefaultChunkSize)
+	eng, err := crypto.NewEngineWithChunking([]byte("test-password-verify-1234"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}

@@ -23,7 +23,6 @@ func TestEncryptWithMetadataEncryption_Enabled(t *testing.T) {
 
 	engine, err := crypto.NewEngineWithOpts(
 		[]byte("test-password-at-least-12-chars"),
-		nil,
 		crypto.WithMetadataKey(metaKey),
 	)
 	if err != nil {
@@ -166,7 +165,6 @@ func TestDecryptWithMetadataEncryption_BackwardCompat(t *testing.T) {
 
 	engineWithMeta, err := crypto.NewEngineWithOpts(
 		[]byte("test-password-at-least-12-chars"),
-		nil,
 		crypto.WithMetadataKey(metaKey),
 	)
 	if err != nil {
@@ -198,7 +196,6 @@ func TestEncryptWithMetadataEncryption_Compaction(t *testing.T) {
 
 	engine, err := crypto.NewEngineWithOpts(
 		[]byte("test-password-at-least-12-chars"),
-		nil,
 		crypto.WithMetadataKey(metaKey),
 		crypto.WithProvider("minio"),
 	)
@@ -257,7 +254,6 @@ func TestEncryptWithMetadataEncryption_FallbackV1(t *testing.T) {
 	// Use a provider with a tiny header limit to force fallback.
 	engine, err := crypto.NewEngineWithOpts(
 		[]byte("test-password-at-least-12-chars"),
-		nil,
 		crypto.WithMetadataKey(metaKey),
 		crypto.WithProvider("default"), // default has no compaction, small limit
 	)
@@ -312,7 +308,6 @@ func TestEncryptWithMetadataEncryption_FallbackV2(t *testing.T) {
 	// with large metadata.
 	engine, err := crypto.NewEngineWithOpts(
 		[]byte("test-password-at-least-12-chars"),
-		nil,
 		crypto.WithMetadataKey(metaKey),
 		crypto.WithChunking(true),
 		crypto.WithProvider("default"),
@@ -365,7 +360,6 @@ func TestIsEncrypted_WithCompactedEncryptedMetadata(t *testing.T) {
 
 	engine, err := crypto.NewEngineWithOpts(
 		[]byte("test-password-at-least-12-chars"),
-		nil,
 		crypto.WithMetadataKey(metaKey),
 	)
 	if err != nil {

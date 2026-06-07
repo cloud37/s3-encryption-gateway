@@ -9,7 +9,7 @@ import (
 
 func BenchmarkChunkedEncrypt_Parallel(b *testing.B) {
 	chunkSize := 64 * 1024 // 64KB
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), nil, "", nil, true, chunkSize)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, chunkSize)
 	if err != nil {
 		b.Fatalf("Failed to create engine: %v", err)
 	}
@@ -41,7 +41,7 @@ func BenchmarkChunkedEncrypt_Parallel(b *testing.B) {
 
 func BenchmarkChunkedDecrypt_Parallel(b *testing.B) {
 	chunkSize := 64 * 1024 // 64KB
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), nil, "", nil, true, chunkSize)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, chunkSize)
 	if err != nil {
 		b.Fatalf("Failed to create engine: %v", err)
 	}

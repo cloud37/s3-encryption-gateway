@@ -121,7 +121,6 @@ func TestConformance(t *testing.T) {
 		// introduce correctness regressions against real backends.
 		{"PERF1_CopyObject_LargeChunked", 0, testCopyObject_LargeChunked},
 		{"PERF1_ChunkedRangedRead_Large", 0, testChunkedRangedRead_Large},
-		{"PERF1_Compression_RoundTrip", 0, testCompression_RoundTrip},
 		{"PERF1_UploadPart_OversizeCap", provider.CapMultipartUpload, testUploadPart_OversizeCap},
 
 		// Encrypted multipart uploads (ADR-0009 / V0.6-SEC-3).

@@ -1629,12 +1629,6 @@ func TestValidateReloadSafety_Coverage(t *testing.T) {
 			wantMsg: "admin.tls.enabled",
 		},
 		{
-			name:    "compression.enabled changed",
-			mutate:  func(c *Config) { c.Compression.Enabled = true },
-			wantErr: true,
-			wantMsg: "compression.enabled",
-		},
-		{
 			name:    "listen_addr change allowed",
 			mutate:  func(c *Config) { c.ListenAddr = ":9090" },
 			wantErr: false,

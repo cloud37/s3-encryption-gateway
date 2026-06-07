@@ -237,7 +237,6 @@ func buildEngines(cfg *config.Config, sourceKeyVer, targetKeyVer int) (crypto.En
 	// TODO: support per-version key resolvers when KMS rotation is used.
 	engine, err := crypto.NewEngineWithChunking(
 		[]byte(password),
-		nil, // compression engine — can be added later
 		cfg.Encryption.PreferredAlgorithm,
 		cfg.Encryption.SupportedAlgorithms,
 		cfg.Encryption.ChunkedMode,

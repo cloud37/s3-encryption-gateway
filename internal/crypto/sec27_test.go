@@ -41,7 +41,6 @@ func newChunkedFallbackEngine(t *testing.T) (*engine, *ProviderProfile) {
 
 	enc, err := NewEngineWithChunkingAndProvider(
 		[]byte("sec27-test-password-2026"),
-		nil,
 		"",
 		nil,
 		true,  // chunkedMode = true
@@ -183,7 +182,7 @@ func TestSEC27_BackwardCompatibility_LegacyV1(t *testing.T) {
 		SupportsLongKeys:    true,
 		CompactionStrategy:  "base64url",
 	}
-	legacyEnc, err := NewEngineWithProvider([]byte("sec27-test-password-2026"), nil, "", nil, "default")
+	legacyEnc, err := NewEngineWithProvider([]byte("sec27-test-password-2026"), "", nil, "default")
 	if err != nil {
 		t.Fatalf("NewEngineWithProvider: %v", err)
 	}
@@ -212,7 +211,7 @@ func TestSEC27_BackwardCompatibility_LegacyV1(t *testing.T) {
 
 	// Now decrypt using the updated engine — must still work (backward compat).
 	updatedEnc, err := NewEngineWithChunkingAndProvider(
-		[]byte("sec27-test-password-2026"), nil, "", nil, true, 65536, "default", DefaultPBKDF2Iterations,
+		[]byte("sec27-test-password-2026"), "", nil, true, 65536, "default", DefaultPBKDF2Iterations,
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunkingAndProvider: %v", err)

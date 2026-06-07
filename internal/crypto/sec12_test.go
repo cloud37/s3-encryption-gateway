@@ -41,7 +41,7 @@ func TestSEC12_Encrypt_KMSShortKey(t *testing.T) {
 	}
 	defer func() { generateDataKey = oldGen }()
 
-	eng, err := NewEngineWithOpts([]byte("test-password-123456"), nil, WithKeyManager(&shortKeyManager{}))
+	eng, err := NewEngineWithOpts([]byte("test-password-123456"), WithKeyManager(&shortKeyManager{}))
 	require.NoError(t, err)
 
 	_, _, err = eng.Encrypt(context.Background(), strings.NewReader("hello world"), nil)
@@ -53,14 +53,14 @@ func TestSEC12_Encrypt_KMSShortKey(t *testing.T) {
 func TestSEC12_Decrypt_KMSShortKey(t *testing.T) {
 	// Encrypt with a correct KMS first so we have valid metadata.
 	goodKM := NewInMemoryKeyManagerForTestDefault()
-	goodEng, err := NewEngineWithOpts([]byte("test-password-123456"), nil, WithKeyManager(goodKM))
+	goodEng, err := NewEngineWithOpts([]byte("test-password-123456"), WithKeyManager(goodKM))
 	require.NoError(t, err)
 
 	reader, meta, err := goodEng.Encrypt(context.Background(), strings.NewReader("hello world"), nil)
 	require.NoError(t, err)
 
 	// Decrypt with a short-key KMS.
-	badEng, err := NewEngineWithOpts([]byte("test-password-123456"), nil, WithKeyManager(&shortKeyManager{}))
+	badEng, err := NewEngineWithOpts([]byte("test-password-123456"), WithKeyManager(&shortKeyManager{}))
 	require.NoError(t, err)
 
 	_, _, err = badEng.Decrypt(context.Background(), reader, meta)
@@ -76,7 +76,7 @@ func TestSEC12_EncryptChunked_KMSShortKey(t *testing.T) {
 	}
 	defer func() { generateDataKey = oldGen }()
 
-	eng, err := NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, DefaultChunkSize)
+	eng, err := NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, DefaultChunkSize)
 	require.NoError(t, err)
 	e := eng.(*engine)
 	e.kmsManager = &shortKeyManager{}
@@ -90,7 +90,7 @@ func TestSEC12_EncryptChunked_KMSShortKey(t *testing.T) {
 func TestSEC12_DecryptChunked_KMSShortKey(t *testing.T) {
 	// Encrypt with a correct KMS in chunked mode.
 	goodKM := NewInMemoryKeyManagerForTestDefault()
-	goodEng, err := NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, DefaultChunkSize)
+	goodEng, err := NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, DefaultChunkSize)
 	require.NoError(t, err)
 	goodEng.(*engine).kmsManager = goodKM
 
@@ -98,7 +98,7 @@ func TestSEC12_DecryptChunked_KMSShortKey(t *testing.T) {
 	require.NoError(t, err)
 
 	// Decrypt with a short-key KMS.
-	badEng, err := NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, DefaultChunkSize)
+	badEng, err := NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, DefaultChunkSize)
 	require.NoError(t, err)
 	badEng.(*engine).kmsManager = &shortKeyManager{}
 
@@ -111,7 +111,7 @@ func TestSEC12_DecryptChunked_KMSShortKey(t *testing.T) {
 func TestSEC12_DecryptRange_KMSShortKey(t *testing.T) {
 	// Encrypt with a correct KMS in chunked mode.
 	goodKM := NewInMemoryKeyManagerForTestDefault()
-	goodEng, err := NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, DefaultChunkSize)
+	goodEng, err := NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, DefaultChunkSize)
 	require.NoError(t, err)
 	goodEng.(*engine).kmsManager = goodKM
 
@@ -125,7 +125,7 @@ func TestSEC12_DecryptRange_KMSShortKey(t *testing.T) {
 	require.NoError(t, err)
 
 	// Decrypt range with a short-key KMS.
-	badEng, err := NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, DefaultChunkSize)
+	badEng, err := NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, DefaultChunkSize)
 	require.NoError(t, err)
 	badEng.(*engine).kmsManager = &shortKeyManager{}
 
@@ -140,7 +140,7 @@ func TestSEC12_DecryptRange_KMSShortKey(t *testing.T) {
 // TestSEC12_KMSHappyPath_32ByteKey verifies that a correct 32-byte KMS key works.
 func TestSEC12_KMSHappyPath_32ByteKey(t *testing.T) {
 	km := NewInMemoryKeyManagerForTestDefault()
-	eng, err := NewEngineWithOpts([]byte("test-password-123456"), nil, WithKeyManager(km))
+	eng, err := NewEngineWithOpts([]byte("test-password-123456"), WithKeyManager(km))
 	require.NoError(t, err)
 
 	plaintext := "hello, V1.0-SEC-12 world!"
@@ -171,7 +171,7 @@ func TestSEC12_DeriveKey_Always32Bytes(t *testing.T) {
 // TestSEC12_PasswordOnly_NoPaddingPathReaches confirms password-only encrypt/decrypt
 // round-trips successfully and never touches the former padding code.
 func TestSEC12_PasswordOnly_NoPaddingPathReaches(t *testing.T) {
-	eng, err := NewEngineWithChunking([]byte("test-password-123456"), nil, "", nil, true, DefaultChunkSize)
+	eng, err := NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, DefaultChunkSize)
 	require.NoError(t, err)
 
 	plaintext := strings.Repeat("A", 1024*1024) // 1 MB object

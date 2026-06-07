@@ -15,7 +15,7 @@ import (
 // TestChunkedEncryptReader_Close verifies that Close returns nil and is safe
 // to call multiple times.
 func TestChunkedEncryptReader_Close(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), nil, "", nil, true, DefaultChunkSize)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestChunkedEncryptReader_Close(t *testing.T) {
 // TestChunkedDecryptReader_Close verifies that the decrypt reader's Close
 // returns nil.
 func TestChunkedDecryptReader_Close(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), nil, "", nil, true, DefaultChunkSize)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestPasswordKeyManager_Provider(t *testing.T) {
 // ---- engine.GetKeyManager --------------------------------------------------
 
 func TestGetKeyManager_NoManager(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-for-getkey"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-for-getkey"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestGetKeyManager_NoManager(t *testing.T) {
 
 func TestGetKeyManager_WithManager(t *testing.T) {
 	km := NewInMemoryKeyManagerForTestDefault()
-	eng, err := NewEngineWithOpts([]byte("test-password-for-getkey2"), nil, WithKeyManager(km))
+	eng, err := NewEngineWithOpts([]byte("test-password-for-getkey2"), WithKeyManager(km))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestGetKeyManager_WithManager(t *testing.T) {
 // ---- engine.GetRotationState -----------------------------------------------
 
 func TestGetRotationState_InitialisesIfNil(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-rotation-state"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-rotation-state"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestGetRotationState_InitialisesIfNil(t *testing.T) {
 
 func TestNewEngineWithChunkingAndProvider(t *testing.T) {
 	eng, err := NewEngineWithChunkingAndProvider(
-		[]byte("test-password-chunk-provider123"), nil, "", nil, true, DefaultChunkSize, "default", DefaultPBKDF2Iterations,
+		[]byte("test-password-chunk-provider123"), "", nil, true, DefaultChunkSize, "default", DefaultPBKDF2Iterations,
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunkingAndProvider: %v", err)
@@ -244,7 +244,7 @@ func TestMemoryKeyManager_AdditionalCoverage(t *testing.T) {
 // ---- range_decrypt.Close ---------------------------------------------------
 
 func TestRangeDecryptReader_Close(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), nil, "", nil, true, 16*1024)
+	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestBufferPool_HitRateMissCase(t *testing.T) {
 // ---- engine.Decrypt: unencrypted pass-through ------------------------------
 
 func TestEngine_Decrypt_NotEncrypted(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-decrypt-noenc"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-decrypt-noenc"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestEngine_EncryptDecrypt_WithInMemoryKeyManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInMemoryKeyManager: %v", err)
 	}
-	eng, err := NewEngineWithOpts([]byte("test-password-base-long-enough"), nil, WithKeyManager(km))
+	eng, err := NewEngineWithOpts([]byte("test-password-base-long-enough"), WithKeyManager(km))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts with km: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestEngine_EncryptDecrypt_LegacyMode(t *testing.T) {
 
 func TestEngine_Encrypt_MultiChunk(t *testing.T) {
 	chunkSize := 16 * 1024 // 16KB chunks
-	eng, err := NewEngineWithChunking([]byte("test-password-multichunk-123456"), nil, "", nil, true, chunkSize)
+	eng, err := NewEngineWithChunking([]byte("test-password-multichunk-123456"), "", nil, true, chunkSize)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunking: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestEngine_Encrypt_MultiChunk(t *testing.T) {
 // ---- engine.IsEncrypted (additional cases) ---------------------------------
 
 func TestEngine_IsEncrypted_Additional(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-isencrypted-long"), nil)
+	eng, err := NewEngineWithOpts([]byte("test-password-isencrypted-long"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts: %v", err)
 	}
@@ -580,27 +580,4 @@ func TestMemoryKeyManager_UnwrapKey_TamperedCiphertext(t *testing.T) {
 	}
 }
 
-// ---- compression.ShouldCompress uncovered branch ---------------------------
 
-func TestCompressionEngine_ShouldCompress_FalseWhenDisabled(t *testing.T) {
-	// When compression is disabled, ShouldCompress should return false.
-	ce := NewCompressionEngine(false, 1024, nil, "gzip", 6)
-	if ce.ShouldCompress(10_000, "image/png") {
-		t.Error("ShouldCompress should be false when compression disabled")
-	}
-}
-
-func TestCompressionEngine_ShouldCompress_LargeFile(t *testing.T) {
-	ce := NewCompressionEngine(true, 1024, []string{"application/json"}, "gzip", 6)
-	// Content type that is compressible, large size.
-	result := ce.ShouldCompress(100_000, "application/json")
-	_ = result // just ensure no panic
-}
-
-func TestCompressionEngine_ShouldCompress_SmallFileBelowThreshold(t *testing.T) {
-	ce := NewCompressionEngine(true, 10_000, nil, "gzip", 6)
-	// File smaller than minSize should not be compressed.
-	if ce.ShouldCompress(100, "application/json") {
-		t.Error("ShouldCompress should be false when size < minSize")
-	}
-}

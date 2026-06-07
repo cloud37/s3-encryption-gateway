@@ -25,7 +25,7 @@ import (
 // UploadState (V1.0-SEC-25).
 func TestMPU_InitAlgorithm_ThreadsPreferredAlgorithm(t *testing.T) {
 	// Build a handler with a ChaCha20-Poly1305 preferred engine.
-	engine, err := crypto.NewEngineWithOptions([]byte(mpuTestPassword), nil, crypto.AlgorithmChaCha20Poly1305, nil)
+	engine, err := crypto.NewEngineWithOptions([]byte(mpuTestPassword), crypto.AlgorithmChaCha20Poly1305, nil)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -105,7 +105,7 @@ encrypt_multipart_uploads: true
 // TestMPU_ChaCha20Poly1305_EndToEnd verifies a full upload → complete → GET
 // round-trip when the engine is configured for ChaCha20-Poly1305.
 func TestMPU_ChaCha20Poly1305_EndToEnd(t *testing.T) {
-	engine, err := crypto.NewEngineWithOptions([]byte(mpuTestPassword), nil, crypto.AlgorithmChaCha20Poly1305, nil)
+	engine, err := crypto.NewEngineWithOptions([]byte(mpuTestPassword), crypto.AlgorithmChaCha20Poly1305, nil)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}

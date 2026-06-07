@@ -134,7 +134,7 @@ func filterUserMetadata(meta map[string]string) map[string]string {
 	}
 	userMeta := make(map[string]string, len(meta))
 	for k, v := range meta {
-		if crypto.IsEncryptionMetadata(k) || crypto.IsCompressionMetadata(k) {
+		if crypto.IsEncryptionMetadata(k) {
 			continue
 		}
 		userMeta[k] = v
