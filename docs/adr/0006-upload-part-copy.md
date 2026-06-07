@@ -254,6 +254,9 @@ through the content-type filter will grow by ≤ ~20 bytes (gzip header
 overhead). The content-type exclusion list (`image/*`, `video/*`, etc.)
 prevents this from being a concern in practice.
 
+> **Superseded by V1.0-MAINT-2:** The entire compression feature was removed
+> in v1.0. See `docs/plans/V1.0-MAINT-2-plan.md`.
+
 ### `MaxLegacyCopySourceBytes` now enforced on `handleCopyObject`
 
 Previously only enforced in `uploadPartCopyLegacy`. V0.6-PERF-1 adds the

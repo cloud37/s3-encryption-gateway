@@ -303,15 +303,11 @@ See [`docs/KMS_COMPATIBILITY.md`](docs/KMS_COMPATIBILITY.md) for detailed docume
 
 ### Compression
 
-Optional pre-encryption compression reduces storage costs and transfer times for compressible data.
+Built-in pre-encryption compression was removed in v1.0. For users who need
+compression, we recommend external composition:
 
-```yaml
-compression:
-  enabled: false
-  min_size: 1024
-  content_types: ["text/", "application/json", "application/xml"]
-  algorithm: "gzip"
-  level: 6
+```
+client → s4 (https://github.com/abyo-software/s4) → s3-encryption-gateway → storage
 ```
 
 ### Rate Limiting
@@ -663,12 +659,8 @@ encryption:
 #     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"
 #     # encrypt_state: true  # default: true
 
-compression:
-  enabled: false
-  min_size: 1024
-  content_types: ["text/", "application/json", "application/xml"]
-  algorithm: "gzip"
-  level: 6
+# NOTE: built-in compression was removed in v1.0 (V1.0-MAINT-2).
+# Use external composition: client → s4 → s3-encryption-gateway → storage
 
 rate_limit:
   enabled: false
@@ -816,7 +808,6 @@ sequenceDiagram
   participant Gateway
   participant S3
   Client->>Gateway: PUT /bucket/key plaintext
-  Gateway->>Gateway: optional compress
   Gateway->>Gateway: generate per-object DEK, wrap with KEK
   Gateway->>Gateway: encrypt AES-GCM or ChaCha20-Poly1305
   Gateway->>S3: PUT /bucket/key ciphertext + metadata

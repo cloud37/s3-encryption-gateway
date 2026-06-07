@@ -319,11 +319,6 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `config.compression.enabled` | Enable transparent compression before encryption | `"false"` |
-| `config.compression.minSize` | Minimum object size to compress (bytes) | `"1024"` |
-| `config.compression.contentTypes` | Comma-separated content types to compress | `"text/plain,application/json,application/xml"` |
-| `config.compression.algorithm` | Compression algorithm | `"gzip"` |
-| `config.compression.level` | Compression level (1–9) | `"6"` |
 
 #### Server Configuration
 
@@ -793,7 +788,7 @@ policies:
 
 Each entry maps 1:1 to `PolicyConfig` (`internal/config/policy.go`). All
 fields are supported: `encrypt_multipart_uploads`, `require_encryption`,
-`disallow_lock_bypass`, and per-bucket `encryption` / `compression` /
+`disallow_lock_bypass`, and per-bucket `encryption` /
 `rate_limit` overrides.
 
 #### Production (external Valkey, TLS)

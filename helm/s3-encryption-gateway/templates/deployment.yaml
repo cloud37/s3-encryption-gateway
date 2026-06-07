@@ -184,13 +184,6 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "COMPRESSION_ENABLED" "value" .Values.config.compression.enabled.value "valueFrom" .Values.config.compression.enabled.valueFrom) | nindent 8 }}
-        {{- if .Values.config.compression.enabled.value }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "COMPRESSION_MIN_SIZE" "value" .Values.config.compression.minSize.value "valueFrom" .Values.config.compression.minSize.valueFrom) | nindent 8 }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "COMPRESSION_CONTENT_TYPES" "value" .Values.config.compression.contentTypes.value "valueFrom" .Values.config.compression.contentTypes.valueFrom) | nindent 8 }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "COMPRESSION_ALGORITHM" "value" .Values.config.compression.algorithm.value "valueFrom" .Values.config.compression.algorithm.valueFrom) | nindent 8 }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "COMPRESSION_LEVEL" "value" .Values.config.compression.level.value "valueFrom" .Values.config.compression.level.valueFrom) | nindent 8 }}
-        {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_READ_TIMEOUT" "value" .Values.config.server.readTimeout.value "valueFrom" .Values.config.server.readTimeout.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_WRITE_TIMEOUT" "value" .Values.config.server.writeTimeout.value "valueFrom" .Values.config.server.writeTimeout.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_IDLE_TIMEOUT" "value" .Values.config.server.idleTimeout.value "valueFrom" .Values.config.server.idleTimeout.valueFrom) | nindent 8 }}

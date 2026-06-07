@@ -247,16 +247,6 @@ encryption:
 #     ttl_seconds: 604800
 #     pool_size: 16
 
-compression:
-  enabled: false
-  min_size: 1024
-  content_types:
-    - "text/plain"
-    - "application/json"
-    - "application/xml"
-  algorithm: "gzip"
-  level: 6
-
 server:
   read_timeout: "0s"   # Disabled; read_header_timeout guards slow-loris; non-zero value kills large object streams
   write_timeout: "0s"  # Disabled; gateway streams arbitrarily large S3 objects

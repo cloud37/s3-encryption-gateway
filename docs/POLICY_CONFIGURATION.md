@@ -1,6 +1,6 @@
 # Policy Configuration
 
-The S3 Encryption Gateway supports per-bucket or per-tenant configuration through policy files. This allows you to apply different encryption keys, compression settings, or rate limits depending on the bucket being accessed.
+The S3 Encryption Gateway supports per-bucket or per-tenant configuration through policy files. This allows you to apply different encryption keys or rate limits depending on the bucket being accessed.
 
 ## Overview
 
@@ -24,11 +24,7 @@ encryption:                     # (Optional) Override encryption settings
     provider: "cosmian"
     # ... other key manager settings
 
-compression:                    # (Optional) Override compression settings
-  enabled: true
-  algorithm: "zstd"
-  min_size: 1024
-  content_types:
+  # compression removed in v1.0 — compress upstream with s4
     - "application/json"
 
 rate_limit:                     # (Optional) Override rate limit settings
@@ -67,10 +63,7 @@ When a policy matches a bucket, it applies overrides to the base configuration u
     *   `key_manager`: Overridden if `enabled` is true or `provider` is set in policy.
     *   Other fields (like `chunked_mode`, `chunk_size`) are preserved from the base configuration unless the implementation is updated to merge them.
 
-2.  **Compression**:
-    *   The entire `compression` section is replaced if specified in the policy.
-
-3.  **Rate Limit**:
+2.  **Rate Limit**:
     *   The entire `rate_limit` section is replaced if specified in the policy.
 
 ## Example Scenarios
@@ -95,18 +88,13 @@ encryption:
   password: "globex-secret-key"
 ```
 
-### Scenario 2: Archive Compression
+### Scenario 2: Archive Compression (Removed in v1.0)
 
-You want to enforce compression for specific archive buckets to save space.
+Built-in compression was removed in V1.0-MAINT-2. For archive compression,
+compose with s4 upstream:
 
-**Policy: Archives** (`archive-policy.yaml`)
-```yaml
-id: "archives"
-buckets: ["*-archive", "backup-*"]
-compression:
-  enabled: true
-  algorithm: "gzip"
-  level: 9
+```
+client → s4 → s3-encryption-gateway → storage
 ```
 
 ## Kubernetes Deployment

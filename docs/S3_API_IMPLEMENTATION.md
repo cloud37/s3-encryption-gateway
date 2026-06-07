@@ -466,10 +466,10 @@ for the full rationale. High-level contract:
 Unsupported providers return `501 NotImplemented`; the response
 references this matrix.
 
-### Compression
-- **Client compression**: Encrypt after compression
-- **Backend compression**: Handle if backend compresses
-- **Metadata**: Track compression status
+### Compression (Removed in v1.0)
+
+Built-in compression was removed in V1.0-MAINT-2. For client-side compression,
+compose with s4 upstream.
 
 ## Testing Strategy
 

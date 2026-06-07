@@ -1121,32 +1121,6 @@
           }
         },
 
-        "compression": {
-          "type": "object",
-          "description": "Response compression settings.",
-          "additionalProperties": false,
-          "properties": {
-            "enabled":      { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Enable compression (\\\"true\\\"/\\\"false\\\")." },
-            "minSize":      { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Minimum response size in bytes before compression is applied." },
-            "contentTypes": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Comma-separated MIME types eligible for compression." },
-            "algorithm": {
-              "allOf": [
-                { "$ref": "#/$defs/configValue" },
-                {
-                  "properties": {
-                    "value": {
-                      "type": ["string", "null"],
-                      "enum": ["gzip", "zstd", "br", null],
-                      "description": "Compression algorithm."
-                    }
-                  }
-                }
-              ]
-            },
-            "level":        { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Compression level (1-9 for gzip; algorithm-specific)." }
-          }
-        },
-
         "server": {
           "type": "object",
           "description": "HTTP server timeout configuration.",
@@ -1462,11 +1436,6 @@
         "encryption": {
           "type": "object",
           "description": "Per-bucket encryption overrides (password, algorithm, key manager). Optional.",
-          "additionalProperties": true
-        },
-        "compression": {
-          "type": "object",
-          "description": "Per-bucket compression overrides. Optional.",
           "additionalProperties": true
         },
         "rate_limit": {

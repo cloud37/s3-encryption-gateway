@@ -263,6 +263,22 @@ active. A backfill step is required **before** migration:
   supported.
 - **Cross-bucket migration** is planned for a future release.
 
+## Removing Compression (v1.0+)
+
+Objects written with `compression.enabled: true` carry the
+`x-amz-meta-compression-enabled: true` marker. Gateway versions ≥ the release
+that removes compression **will not decompress them** and will return the raw
+gzip bytes to clients. Before upgrading, for each affected object: download
+(decrypt) it through the *old* gateway, then re-upload it through a gateway
+with compression disabled (or any version, since default is off). Use
+`s3eg-migrate` to enumerate objects; filter on the compression marker.
+
+For users who still need compression, we recommend external composition:
+
+```
+client → s4 (https://github.com/abyo-software/s4) → s3-encryption-gateway → storage
+```
+
 ## Upgrading KDF parameters
 
 Objects written before V1.0-SEC-H03 were encrypted with PBKDF2-SHA256 at
