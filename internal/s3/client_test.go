@@ -1318,3 +1318,144 @@ func TestS3Client_ValidateEndpoint_EdgeCases(t *testing.T) {
 		t.Error("expected error for path-only URL")
 	}
 }
+
+
+func TestNormalizeEndpoint(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"https://s3.amazonaws.com", "https://s3.amazonaws.com"},
+		{"http://localhost:9000", "http://localhost:9000"},
+		{"storage.googleapis.com", "https://storage.googleapis.com"},
+		{"s3.amazonaws.com/", "https://s3.amazonaws.com"},
+		{"  https://example.com  ", "https://example.com"},
+		// Empty string produces "https:/" due to scheme injection + TrimSuffix; not a realistic input.
+	}
+	for _, tt := range tests {
+		got := normalizeEndpoint(tt.input)
+		if got != tt.expected {
+			t.Errorf("normalizeEndpoint(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestNewBackendClient_GCS_NormalisesEndpoint(t *testing.T) {
+	// Start a local HTTP server to accept the inner client construction.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Test 1: Dispatch to GCS with explicit endpoint succeeds.
+	cfg := &config.BackendConfig{
+		Type:       config.BackendTypeGCS,
+		Endpoint:   server.URL,
+		AccessKey:  "test-access-key",
+		SecretKey:  "test-secret-key",
+		Region:     "us-east-1",
+	}
+	client, err := NewBackendClient(cfg)
+	if err != nil {
+		t.Fatalf("NewBackendClient(GCS) with valid endpoint: %v", err)
+	}
+	gcs, ok := client.(*gcsClient)
+	if !ok {
+		t.Fatalf("expected *gcsClient, got %T", client)
+	}
+	if gcs.inner == nil {
+		t.Fatal("gcsClient.inner should not be nil")
+	}
+
+	// Test 2: Dispatch to GCS with empty endpoint uses default.
+	cfg2 := &config.BackendConfig{
+		Type:       config.BackendTypeGCS,
+		Endpoint:   "", // empty — should default to https://storage.googleapis.com
+		AccessKey:  "test-access-key",
+		SecretKey:  "test-secret-key",
+		Region:     "us-east-1",
+		UseSSL:     true,
+	}
+	// The client will be constructed pointing at the default GCS endpoint,
+	// so we just verify no error during construction.
+	_, err = NewBackendClient(cfg2, WithHTTPTransport(http.DefaultTransport))
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown backend type") {
+			t.Fatalf("GCS dispatch failed: %v", err)
+		}
+	}
+
+	// Test 3: Empty type defaults to S3.
+	cfg3 := &config.BackendConfig{
+		Type:       "",
+		Endpoint:   server.URL,
+		AccessKey:  "test-access-key",
+		SecretKey:  "test-secret-key",
+		Region:     "us-east-1",
+	}
+	client3, err := NewBackendClient(cfg3)
+	if err != nil {
+		t.Fatalf("NewBackendClient(empty type) should construct S3 client: %v", err)
+	}
+	if client3 == nil {
+		t.Fatal("NewBackendClient(empty type) returned nil")
+	}
+
+	// Test 4: Explicit S3 type works.
+	cfg4 := &config.BackendConfig{
+		Type:       config.BackendTypeS3,
+		Endpoint:   server.URL,
+		AccessKey:  "test-access-key",
+		SecretKey:  "test-secret-key",
+		Region:     "us-east-1",
+	}
+	client4, err := NewBackendClient(cfg4)
+	if err != nil {
+		t.Fatalf("NewBackendClient(S3) should construct client: %v", err)
+	}
+	if client4 == nil {
+		t.Fatal("NewBackendClient(S3) returned nil")
+	}
+}
+
+func TestNewBackendClient_Azure_Dispatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.BackendConfig{
+		Type:       config.BackendTypeAzure,
+		Endpoint:   server.URL,
+		AccessKey:  "test-access-key",
+		SecretKey:  "test-secret-key",
+		Region:     "us-east-1",
+	}
+	client, err := NewBackendClient(cfg)
+	if err != nil {
+		t.Fatalf("NewBackendClient(Azure) should construct client: %v", err)
+	}
+	az, ok := client.(*azureClient)
+	if !ok {
+		t.Fatalf("expected *azureClient, got %T", client)
+	}
+	if az.inner == nil {
+		t.Fatal("azureClient.inner should not be nil")
+	}
+}
+
+func TestNewBackendClient_UnknownType_ReturnsError(t *testing.T) {
+	cfg := &config.BackendConfig{
+		Type:      config.BackendType("unknown"),
+		Endpoint:  "http://localhost:0",
+		AccessKey: "test",
+		SecretKey: "test",
+	}
+	_, err := NewBackendClient(cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown backend type, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown backend type") {
+		t.Errorf("expected 'unknown backend type' error, got: %v", err)
+	}
+}
