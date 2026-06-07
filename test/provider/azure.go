@@ -123,8 +123,8 @@ func (p *azureProvider) startAzurite(ctx context.Context, t *testing.T) Instance
 	inst := Instance{
 		Endpoint:     endpoint,
 		Region:       "us-east-1",
-		AccessKey:    "devstoreaccount1",
-		SecretKey:    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+		AccessKey:    "devstoreaccount1",         // #nosec G101 -- Azurite well-known emulator credential
+		SecretKey:    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==", // #nosec G101 -- Azurite well-known emulator credential
 		Bucket:       bucket,
 		ProviderName: p.Name(),
 	}
