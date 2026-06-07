@@ -416,7 +416,7 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	}
 
 	// Legacy buffered mode for backward compatibility
-	// Read the plaintext first to get size and content type (needed for compression decision)
+	// Read the plaintext first to get size and content type.
 	plaintext, err := io.ReadAll(reader)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -434,17 +434,9 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		contentType = metadata["Content-Type"]
 	}
 
-	// Compute original ETag from original (uncompressed) data
-	// This must be done before compression potentially changes the data
+	// Compute original ETag from plaintext data.
 	originalETag := computeETag(plaintext)
 
-	// V0.6-PERF-1 Phase F: Apply compression if enabled and applicable.
-	// The intermediate bytes.NewReader(compressedData) double-buffer is
-	// eliminated: Compress (Phase E) now returns a streaming pipe reader, so
-	// we can read compressed bytes directly into the gcm.Seal call below via a
-	// single io.ReadAll. For legacy single-AEAD mode, gcm.Seal requires a
-	// []byte, so we must buffer the compressed output — but the plaintext
-	// buffer is no longer replicated.
 	var toEncryptReader io.Reader = bytes.NewReader(plaintext)
 
 	// Determine algorithm to use (preferred algorithm for new encryptions)
@@ -544,15 +536,15 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	}
 
 	// V1.0-CRYPTO-3: encrypt metadata blob if metadata key is configured.
-	// This replaces all individual encryption/compression metadata keys with
-	// a single AES-256-GCM sealed blob under MetaEncryptedMetadata.
+	// This replaces all individual encryption metadata keys with a single
+	// AES-256-GCM sealed blob under MetaEncryptedMetadata.
 	if e.metadataKey != nil {
 		blob, err := e.encryptMetadata(encMetadata)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, nil, fmt.Errorf("encrypt metadata: %w", err)
 		}
-		// Remove all encryption/compression keys from the cleartext map.
+		// Remove all encryption keys from the cleartext map.
 		for k := range encMetadata {
 			if IsEncryptionMetadata(k) {
 				delete(encMetadata, k)
@@ -576,8 +568,7 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	}
 	gcm := aeadCipher.(cipher.AEAD) // For backward compatibility with existing code
 
-	// Read data to encrypt (may be compressed). Single allocation: drains the
-	// streaming compression pipe (or the original plaintext bytes.Reader) directly.
+	// Read data to encrypt. Single allocation: drains the plaintext bytes.Reader directly.
 	dataToEncrypt, err := io.ReadAll(toEncryptReader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read data for encryption: %w", err)
@@ -836,16 +827,11 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 		return nil, nil, fmt.Errorf("failed to decrypt data (algorithm=%s, keySize=%d, ivSize=%d, ciphertextSize=%d): %w", algorithm, len(key), len(iv), len(ciphertext), openErr)
 	}
 
-	// V0.6-PERF-1 Phase F: Apply decompression if compression was used.
-	// Decompress (Phase E) now returns a streaming gzip.Reader wrapping the
-	// plaintext directly — no intermediate ReadAll → bytes.NewReader needed.
-	// For non-compressed objects, plaintext is used directly.
 	var finalReader io.Reader = bytes.NewReader(plaintext)
 
-	// Prepare decrypted metadata (remove encryption and compression markers)
+	// Prepare decrypted metadata (strip encryption markers).
 	decMetadata := make(map[string]string)
 	for k, v := range expandedMetadata {
-		// Skip encryption-related and compression-related metadata
 		if IsEncryptionMetadata(k) {
 			continue
 		}
@@ -1229,7 +1215,7 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 		minimalMetadata[MetaWrappedKeyCiphertext] = encodeBase64(envelope.Ciphertext)
 	}
 
-	// Copy original user metadata (non-encryption, non-compression keys)
+	// Copy original user metadata (non-encryption keys).
 	for k, v := range fullMetadata {
 		if !IsEncryptionMetadata(k) {
 			minimalMetadata[k] = v
@@ -1862,13 +1848,11 @@ func (e *engine) decryptFallbackV1(reader io.Reader, metadata map[string]string)
 		return nil, nil, fmt.Errorf("failed to decode metadata from fallback: %w", err)
 	}
 
-		// Apply decompression if needed — compression removed in V1.0-MAINT-2
 	var finalReader io.Reader = bytes.NewReader(actualData)
 
-	// Prepare decrypted metadata (remove encryption and compression markers)
+	// Prepare decrypted metadata (strip encryption markers).
 	decMetadata := make(map[string]string)
 	for k, v := range fullMetadata {
-		// Skip encryption-related and compression-related metadata
 		if IsEncryptionMetadata(k) {
 			continue
 		}

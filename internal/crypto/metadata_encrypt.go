@@ -9,13 +9,13 @@ import (
 	"io"
 )
 
-// encryptMetadata encrypts the encryption/compression metadata subset into a
-// single AES-256-GCM sealed blob. Only keys matching IsEncryptionMetadata or
-// IsCompressionMetadata are included in the encrypted payload. The returned
-// string is a base64-encoded blob containing nonce || ciphertext || tag.
+// encryptMetadata encrypts the encryption metadata subset into a single
+// AES-256-GCM sealed blob. Only keys matching IsEncryptionMetadata are
+// included in the encrypted payload. The returned string is a base64-encoded
+// blob containing nonce || ciphertext || tag.
 //
-// Callers must remove the individual encryption/compression keys from the
-// metadata map after calling this function and store the returned blob under
+// Callers must remove the individual encryption keys from the metadata map
+// after calling this function and store the returned blob under
 // MetaEncryptedMetadata.
 func (e *engine) encryptMetadata(encMeta map[string]string) (string, error) {
 	if e.metadataKey == nil {
@@ -60,7 +60,7 @@ func (e *engine) encryptMetadata(encMeta map[string]string) (string, error) {
 // decryptMetadata decrypts an encrypted metadata blob produced by
 // encryptMetadata. It expects a base64-encoded blob containing
 // nonce || ciphertext || tag. The returned map contains the individual
-// encryption/compression metadata keys.
+// encryption metadata keys.
 func (e *engine) decryptMetadata(blob string) (map[string]string, error) {
 	if e.metadataKey == nil {
 		return nil, fmt.Errorf("metadata key not configured")

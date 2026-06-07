@@ -141,7 +141,7 @@ func SetWrappedMetadataKey(enc EncryptionEngine, envelope *KeyEnvelope) {
 //
 // Example:
 //
-//	eng, err := crypto.NewEngineWithOpts(password, nil,
+//	eng, err := crypto.NewEngineWithOpts(password,
 //	    crypto.WithKeyManager(myKeyManager),
 //	)
 func NewEngineWithOpts(password []byte, opts ...Option) (EncryptionEngine, error) {
