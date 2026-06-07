@@ -1,4 +1,4 @@
-package migrate
+package audit
 
 import (
 	"testing"
@@ -172,10 +172,6 @@ func TestClassify_ClassD_LegacyKDF_Chunked(t *testing.T) {
 }
 
 func TestClassify_ClassModern_WithExplicitLowerKDFParams(t *testing.T) {
-	// An object with an explicit "pbkdf2-sha256:100000" KDF params value is
-	// ClassModern — the presence of any KDF params means the encryption
-	// algorithm is known and recorded. Migrating based on iteration count
-	// is handled by SourceIterations in the Migrator, not by class.
 	meta := map[string]string{
 		crypto.MetaEncrypted: "true",
 		crypto.MetaAlgorithm: crypto.AlgorithmAES256GCM,
@@ -187,7 +183,6 @@ func TestClassify_ClassModern_WithExplicitLowerKDFParams(t *testing.T) {
 }
 
 func TestClassify_ClassModern_WithDefaultKDFParams(t *testing.T) {
-	// An object with the current default iteration count is ClassModern.
 	meta := map[string]string{
 		crypto.MetaEncrypted: "true",
 		crypto.MetaAlgorithm: crypto.AlgorithmAES256GCM,
@@ -201,30 +196,6 @@ func TestClassify_ClassModern_WithDefaultKDFParams(t *testing.T) {
 func TestClassToString_ClassD(t *testing.T) {
 	if got := ClassToString(ClassD_LegacyKDF); got != "class_d_legacy_kdf" {
 		t.Errorf("ClassToString(ClassD_LegacyKDF) = %q, want class_d_legacy_kdf", got)
-	}
-}
-
-func TestFilterKDF_AllowsClassD(t *testing.T) {
-	if !FilterKDF.IsAllowed(ClassD_LegacyKDF) {
-		t.Error("FilterKDF should allow ClassD_LegacyKDF")
-	}
-}
-
-func TestFilterKDF_SkipsModern(t *testing.T) {
-	if FilterKDF.IsAllowed(ClassModern) {
-		t.Error("FilterKDF should not allow ClassModern")
-	}
-}
-
-func TestFilterKDF_SkipsClassA(t *testing.T) {
-	if FilterKDF.IsAllowed(ClassA_XOR) {
-		t.Error("FilterKDF should not allow ClassA_XOR")
-	}
-}
-
-func TestFilterAll_AllowsClassD(t *testing.T) {
-	if !FilterAll.IsAllowed(ClassD_LegacyKDF) {
-		t.Error("FilterAll should allow ClassD_LegacyKDF")
 	}
 }
 

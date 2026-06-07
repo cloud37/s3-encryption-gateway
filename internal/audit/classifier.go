@@ -1,10 +1,10 @@
-package migrate
+package audit
 
 import (
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 )
 
-// ObjectClass represents the classification of an S3 object for migration purposes.
+// ObjectClass represents the classification of an S3 object for audit purposes.
 type ObjectClass int
 
 const (
@@ -42,7 +42,7 @@ func ClassToString(c ObjectClass) string {
 	}
 }
 
-// ClassifyObject inspects object metadata and returns its migration class.
+// ClassifyObject inspects object metadata and returns its classification.
 //
 // Classification rules (from V1.0-MAINT-1 plan §2.3):
 //
@@ -107,10 +107,7 @@ func ClassifyObject(meta map[string]string) ObjectClass {
 
 	// Class D — legacy KDF: MetaKDFParams is absent, meaning the object was
 	// encrypted before KDF params were recorded (legacy 100k PBKDF2, no
-	// explicit params stored). Objects with an explicit MetaKDFParams value
-	// (even one with a sub-default iteration count) are ClassModern — the
-	// iteration count is driven by SourceIterations in the Migrator, not by
-	// the pure class.
+	// explicit params stored).
 	if meta[crypto.MetaKDFParams] == "" {
 		return ClassD_LegacyKDF
 	}
@@ -118,8 +115,8 @@ func ClassifyObject(meta map[string]string) ObjectClass {
 	return ClassModern
 }
 
-// NeedsMigration reports whether an object of the given class should be
-// processed by the migration tool.
+// NeedsMigration reports whether an object of the given class needed migration.
+// Retained for compatibility; audit tools may use this to flag objects.
 func NeedsMigration(c ObjectClass) bool {
 	switch c {
 	case ClassA_XOR, ClassB_NoAAD, ClassC_Fallback_XOR, ClassC_Fallback_HKDF, ClassD_LegacyKDF:
@@ -128,5 +125,3 @@ func NeedsMigration(c ObjectClass) bool {
 		return false
 	}
 }
-
-
