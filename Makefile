@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -419,6 +419,26 @@ docker-push-fips:
 	@echo "Pushing FIPS Docker image..."
 	@docker push $(IMAGE_NAME):$(IMAGE_TAG)-fips
 
+# docker-buildx — build multi-arch image locally (requires Docker buildx)
+# Usage: make docker-buildx VERSION=1.0.0
+docker-buildx:
+	@echo "Building multi-arch Docker image (linux/amd64, linux/arm64)..."
+	@docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		-t $(IMAGE_NAME):$(IMAGE_TAG) \
+		--load .
+	@echo "Multi-arch image built: $(IMAGE_NAME):$(IMAGE_TAG)"
+
+# sbom — generate SPDX-JSON SBOM for the local Docker image using syft
+# Requires: syft installed (go install github.com/anchore/syft/cmd/syft@latest)
+# Usage: make sbom IMAGE_NAME=cloud37io/s3-encryption-gateway IMAGE_TAG=latest
+sbom:
+	@echo "Generating SBOM for $(IMAGE_NAME):$(IMAGE_TAG)..."
+	@syft $(IMAGE_NAME):$(IMAGE_TAG) -o spdx-json=sbom.spdx.json
+	@echo "SBOM written to sbom.spdx.json"
+
 # Run all tests including integration
 docker-all: docker-build docker-push docker-build-fips docker-push-fips
 
@@ -452,6 +472,7 @@ install-tools:
 	@go install golang.org/x/tools/cmd/goimports@latest
 	@go install golang.org/x/vuln/cmd/govulncheck@latest
 	@go install github.com/securego/gosec/v2/cmd/gosec@latest
+	@go install github.com/anchore/syft/cmd/syft@latest
 
 # Generate test coverage report (legacy target)
 coverage:
@@ -539,6 +560,8 @@ help:
 	@echo "  docker-push        - Push Docker image"
 	@echo "  docker-build-fips  - Build FIPS Docker image"
 	@echo "  docker-push-fips   - Push FIPS Docker image"
+	@echo "  docker-buildx      - Build multi-arch Docker image via buildx (requires docker buildx)"
+	@echo "  sbom               - Generate SPDX-JSON SBOM via syft (requires syft)"
 	@echo "  profile-image      - Build non-stripped image for pprof (V0.6-OBS-1)"
 	@echo "  security-scan      - Run govulncheck + gosec security scan"
 	@echo "  gosec              - Run gosec static analysis security scan"

@@ -270,3 +270,23 @@ jobs:
           cd helm
           helm package s3-encryption-gateway
           ls -la *.tgz
+
+  artifact-hub-check:
+    name: Artifact Hub metadata check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check mandatory Artifact Hub annotations
+        run: |
+          set -euo pipefail
+          CHART="helm/s3-encryption-gateway/Chart.yaml"
+          for key in \
+            "artifacthub.io/category" \
+            "artifacthub.io/license" \
+            "artifacthub.io/images"; do
+            if ! grep -q "${key}" "${CHART}"; then
+              echo "ERROR: Missing mandatory Artifact Hub annotation: ${key}"
+              exit 1
+            fi
+          done
+          echo "All mandatory Artifact Hub annotations present."
