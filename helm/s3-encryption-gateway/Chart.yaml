@@ -13,6 +13,28 @@ maintainers:
   - name: kenchrcum
     url: https://github.com/kenchrcum
 type: application
+annotations:
+  artifacthub.io/category: security
+  artifacthub.io/license: MIT
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/signKey: |
+    fingerprint: keyless
+    url: https://github.com/cloud37/s3-encryption-gateway
+  artifacthub.io/images: |
+    - name: s3-encryption-gateway
+      image: docker.io/cloud37io/s3-encryption-gateway:0.9.0
+      whitelisted: true
+    - name: s3-encryption-gateway-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.9.0-fips
+      whitelisted: true
+  artifacthub.io/changes: |
+    - kind: added
+      description: Multi-arch images (linux/amd64, linux/arm64) published to Docker Hub
+    - kind: added
+      description: SLSA provenance and SBOM attestations via cosign keyless signing
+    - kind: added
+      description: Artifact Hub listing with full metadata and image references
+  artifacthub.io/containsSecurityUpdates: "false"
 version: 0.9.0
 appVersion: "0.9.0"
 dependencies:
