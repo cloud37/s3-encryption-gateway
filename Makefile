@@ -25,9 +25,15 @@ build-fips:
 		-ldflags="-w -s -X main.version=$(VERSION) -X main.commit=$(COMMIT)" \
 		-o bin/$(BINARY_NAME)-fips-$(VERSION) ./cmd/server
 
-# Build the migration tool binary
+# Build the CLI audit tool binary
+cli:
+	@echo "Building s3eg-cli..."
+	@CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION) -X main.commit=$(COMMIT)" \
+		-o bin/s3eg-cli-$(VERSION) ./cmd/cli
+
+# Deprecated: s3eg-migrate shim (prints deprecation notice)
 migrate:
-	@echo "Building s3eg-migrate..."
+	@echo "Building s3eg-migrate (deprecated shim)..."
 	@CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION) -X main.commit=$(COMMIT)" \
 		-o bin/s3eg-migrate-$(VERSION) ./cmd/migrate
 
@@ -38,9 +44,16 @@ build-multiarch:
 	@GOOS=linux  GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/$(BINARY_NAME)-linux-arm64  ./cmd/server
 	@GOOS=darwin GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/$(BINARY_NAME)-darwin-arm64 ./cmd/server
 
-# Build multi-arch migration binaries
+# Build multi-arch CLI audit tool binaries
+cli-multiarch:
+	@echo "Building s3eg-cli for multiple architectures..."
+	@GOOS=linux  GOARCH=amd64  CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/s3eg-cli-linux-amd64  ./cmd/cli
+	@GOOS=linux  GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/s3eg-cli-linux-arm64  ./cmd/cli
+	@GOOS=darwin GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/s3eg-cli-darwin-arm64 ./cmd/cli
+
+# Deprecated multi-arch shim build (prints deprecation notice)
 migrate-multiarch:
-	@echo "Building s3eg-migrate for multiple architectures..."
+	@echo "Building s3eg-migrate (deprecated shim) for multiple architectures..."
 	@GOOS=linux  GOARCH=amd64  CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/s3eg-migrate-linux-amd64  ./cmd/migrate
 	@GOOS=linux  GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/s3eg-migrate-linux-arm64  ./cmd/migrate
 	@GOOS=darwin GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/s3eg-migrate-darwin-arm64 ./cmd/migrate
@@ -523,8 +536,10 @@ help:
 	@echo "  build              - Build the binary"
 	@echo "  build-multiarch    - Build the binary for linux/amd64, linux/arm64, darwin/arm64"
 	@echo "  build-fips         - Build FIPS-compliant binary"
-	@echo "  migrate            - Build the s3eg-migrate tool"
-	@echo "  migrate-multiarch  - Build s3eg-migrate for linux/amd64, linux/arm64, darwin/arm64"
+	@echo "  cli                - Build the s3eg-cli audit tool"
+	@echo "  cli-multiarch      - Build s3eg-cli for linux/amd64, linux/arm64, darwin/arm64"
+	@echo "  migrate            - [deprecated] Build s3eg-migrate shim"
+	@echo "  migrate-multiarch  - [deprecated] Build s3eg-migrate shim for multiple archs"
 	@echo "  test               - Run tier-1 unit tests (-race)"
 	@echo "  test-fips          - Run tests with FIPS build tag"
 	@echo "  test-fuzz          - Run fuzz tests (regression mode)"

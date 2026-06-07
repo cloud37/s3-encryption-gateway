@@ -123,7 +123,11 @@ jobs:
           GOOS=linux  GOARCH=amd64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3-encryption-gateway-linux-amd64  ./cmd/server
           GOOS=linux  GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3-encryption-gateway-linux-arm64  ./cmd/server
           GOOS=darwin GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3-encryption-gateway-darwin-arm64 ./cmd/server
-          # Migration tool
+          # CLI audit tool (s3eg-cli)
+          GOOS=linux  GOARCH=amd64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3eg-cli-linux-amd64  ./cmd/cli
+          GOOS=linux  GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3eg-cli-linux-arm64  ./cmd/cli
+          GOOS=darwin GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3eg-cli-darwin-arm64 ./cmd/cli
+          # Deprecated migration shim (prints deprecation notice)
           GOOS=linux  GOARCH=amd64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3eg-migrate-linux-amd64  ./cmd/migrate
           GOOS=linux  GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3eg-migrate-linux-arm64  ./cmd/migrate
           GOOS=darwin GOARCH=arm64  CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=${CHART_VERSION} -X main.commit=${{ github.sha }}" -o bin/s3eg-migrate-darwin-arm64 ./cmd/migrate
