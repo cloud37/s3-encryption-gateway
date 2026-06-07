@@ -1117,7 +1117,8 @@
                   }
                 }
               }
-            }
+            },
+            "allowUnmarkedNoAADFallback": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Permit no-AAD decryption fallback for objects lacking the marker. Default: false (fail-closed). Enable only during controlled recovery windows. Set via ENCRYPTION_ALLOW_UNMARKED_NO_AAD_FALLBACK." }
           }
         },
 

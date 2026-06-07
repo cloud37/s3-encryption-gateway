@@ -577,6 +577,7 @@ func main() {
 		crypto.WithProvider("default"),
 		crypto.WithPBKDF2Iterations(cfg.Encryption.KDF.PBKDF2.Iterations),
 		crypto.WithKDFAlgorithm(cfg.Encryption.KDF.Algorithm),
+		crypto.WithAllowUnmarkedNoAADFallback(cfg.Encryption.AllowUnmarkedNoAADFallback),
 	}
 	if cfg.Encryption.KDF.Algorithm == "argon2id" {
 		engineOpts = append(engineOpts,

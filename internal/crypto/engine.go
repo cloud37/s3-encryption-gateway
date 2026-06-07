@@ -136,6 +136,11 @@ type engine struct {
 	metadataKeyWrapped *KeyEnvelope
 	// V1.0-OBS-1 G8: optional observer for encrypted object size distribution.
 	observeEncryptedObjectBytes func(n int64)
+
+	// allowUnmarkedNoAAD, when true, permits the no-AAD decryption fallback for
+	// objects without the MetaLegacyNoAAD marker. Default false (fail-closed).
+	// Used for controlled recovery windows. See V1.0-CLI-2 Phase D.
+	allowUnmarkedNoAAD bool
 }
 
 // NewEngine creates a new encryption engine with the given password.
@@ -815,7 +820,7 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 		// marked legacy objects. This prevents an attacker with backend
 		// write access from bypassing the AAD integrity check by
 		// tampering with metadata.
-		if expandedMetadata[MetaLegacyNoAAD] == "true" {
+		if expandedMetadata[MetaLegacyNoAAD] == "true" || e.allowUnmarkedNoAAD {
 			if pt, err2 := gcm.Open(nil, iv, ciphertext, nil); err2 == nil {
 				plaintext = pt
 				openErr = nil

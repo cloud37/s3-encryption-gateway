@@ -102,6 +102,7 @@ encryption:
     - "ChaCha20-Poly1305"
   chunked_mode: true  # Enable chunked/streaming encryption (default: true)
   chunk_size: 65536   # Chunk size in bytes (default: 65536 = 64KB). Range: 16KB-1MB
+  allow_unmarked_no_aad_fallback: false  # Permit no-AAD decryption for objects lacking the marker (default: false; SEC-4 fail-closed)
   key_manager:
     enabled: false  # Set to true to enable key rotation/KMS mode (default: single password mode)
     provider: "cosmian"  # KMS provider (v0.6+):

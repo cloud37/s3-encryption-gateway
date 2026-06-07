@@ -259,6 +259,13 @@ config:
       #   secretKeyRef:
       #     name: s3-encryption-gateway-secrets
       #     key: encryption-key-file
+    allowUnmarkedNoAADFallback:
+      value: "false"
+      valueFrom: {}
+      # valueFrom:
+      #   configMapKeyRef:
+      #     name: s3-encryption-gateway-config
+      #     key: encryption-allow-unmarked-no-aad-fallback
     preferredAlgorithm:
       value: "AES256-GCM"
       valueFrom: {}

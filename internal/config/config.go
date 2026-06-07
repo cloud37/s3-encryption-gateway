@@ -299,6 +299,14 @@ type EncryptionConfig struct {
 	// MetadataEncryptionKey is an inline key (min 128 chars, SHA-256 hashed to 32 bytes).
 	// Mutually exclusive with MetadataEncryptionKeyFile and KMS wrapping.
 	MetadataEncryptionKey string `yaml:"metadata_encryption_key" env:"ENCRYPTION_METADATA_KEY"`
+
+	// AllowUnmarkedNoAADFallback, when true, permits the gateway to attempt the
+	// no-AAD decryption fallback for objects that LACK the x-amz-meta-enc-legacy-no-aad
+	// marker. Default false (fail-closed): preserves the SEC-4 property that an
+	// attacker with backend write access cannot strip AAD by deleting the marker.
+	// Operators enable this only during a controlled re-encryption recovery window
+	// (GET-through-gateway -> PUT-through-gateway).
+	AllowUnmarkedNoAADFallback bool `yaml:"allow_unmarked_no_aad_fallback" env:"ENCRYPTION_ALLOW_UNMARKED_NO_AAD_FALLBACK"`
 }
 
 // HardwareConfig holds hardware acceleration configuration.

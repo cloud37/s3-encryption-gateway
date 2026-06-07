@@ -110,6 +110,15 @@ func WithMetadataKey(key []byte) Option {
 	}
 }
 
+// WithAllowUnmarkedNoAADFallback sets whether the engine should attempt the
+// no-AAD decryption fallback for objects that lack the MetaLegacyNoAAD marker.
+// Default false (fail-closed). Enable only during controlled recovery windows.
+func WithAllowUnmarkedNoAADFallback(b bool) Option {
+	return func(e *engine) {
+		e.allowUnmarkedNoAAD = b
+	}
+}
+
 // WithWrappedMetadataKey sets the metadata encryption key via a KeyEnvelope
 // that will be unwrapped by the KeyManager at startup (V1.0-CRYPTO-3).
 func WithWrappedMetadataKey(envelope *KeyEnvelope) Option {
