@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **V1.0-CLI-2 — Gateway-Aware Audit Tooling (`s3eg-cli`)**: New read-only
+  audit binary with three sub-commands (`inspect`, `verify-key`,
+  `list-algorithm`). Replaces the removed `s3eg-migrate` offline migration
+  tool. Re-encryption now uses the GET-through-gateway → PUT-through-gateway
+  pattern. Adds `encryption.allow_unmarked_no_aad_fallback` config flag
+  (default false) for controlled no-AAD recovery. `s3eg-migrate` retained as
+  a deprecation shim. See `docs/plans/V1.0-CLI-2-plan.md`.
+
+- **V1.0-ECOSYS-1 — Additional Backends via Shims**: New `backend.type`
 - **V1.0-ECOSYS-1 — Additional Backends via Shims**: New `backend.type`
   discriminator (`s3`, `gcs`, `azure`) with config validation and env-var
   wiring. GCS shim (`gcsClient`) with automatic metadata key lowercasing,

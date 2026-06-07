@@ -182,7 +182,7 @@ When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to 
 
 Envelope encryption removes key derivation from the per-request hot path: a random per-object Data Encryption Key (DEK) is wrapped with a Key Encryption Key (KEK). The KEK is loaded once at startup. This is **50–76× faster than PBKDF2 600k** and is the recommended path for all production deployments. See [`docs/ENCRYPTION_MODES.md`](docs/ENCRYPTION_MODES.md) for performance benchmarks.
 
-> **Migrating from password-only?** Set `encryption.password` to your existing password and enable `key_manager`. The gateway reads the password for objects encrypted before the switch and uses the KEK for all new objects — no data migration required. To re-encrypt existing objects, use the [`s3eg-migrate`](docs/ENCRYPTION_MODES.md#migration-between-modes) tool.
+> **Migrating from password-only?** Set `encryption.password` to your existing password and enable `key_manager`. The gateway reads the password for objects encrypted before the switch and uses the KEK for all new objects — no data migration required. To re-encrypt existing objects, use the **GET-through-gateway → PUT-through-gateway** pattern with any standard S3 client. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for details.
 
 Three variants are supported:
 
@@ -871,7 +871,7 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 
 ### Shipped in v0.7
 
-- **Offline migration tool (`s3eg-migrate`)** — re-encrypts or re-seals existing objects in place for KDF-parameter migrations (V1.0-MAINT-1)
+- **Audit tool (`s3eg-cli`)** — read-only backend-envelope inspection: inspect, verify-key, list-algorithm (V1.0-CLI-2). Replaces the removed `s3eg-migrate` (now deprecated). For re-encryption use **GET-through-gateway → PUT-through-gateway**; see [`docs/MIGRATION.md`](docs/MIGRATION.md).
 - **Configurable PBKDF2 iterations + per-object KDF metadata** (V1.0-SEC-H03) — iteration count recorded in object metadata; mixed-iteration deployments decrypt correctly
 - **Large MPU streaming fixes** — `ReadTimeout` set to 0 (same as `WriteTimeout`) to prevent timeout kills on multi-hundred-MiB downloads; active write-deadline refresh during long streams; network errors distinguished from tamper on streaming (#135)
 - **Constant-time credential comparison** — timing-safe comparison for all credential checks
