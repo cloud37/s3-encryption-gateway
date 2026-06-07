@@ -1,11 +1,14 @@
 # Build stage
-FROM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 # STRIP_SYMBOLS controls binary symbol-table stripping.
 # Set to "false" to produce a symbolicated binary for pprof profiling.
 # Default is "true" (stripped) for production images.
 # V0.6-OBS-1: see docs/OBSERVABILITY.md §"Runtime Profiling" for usage.
 ARG STRIP_SYMBOLS=true
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG TARGETARCH
 ARG VERSION
 ARG COMMIT
 
@@ -30,12 +33,12 @@ RUN if [ "${STRIP_SYMBOLS}" = "false" ]; then \
     else \
         LDFLAGS="-w -s -X main.version=${VERSION:-dev} -X main.commit=${COMMIT:-unknown}"; \
     fi && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
     -trimpath \
     -ldflags="${LDFLAGS}" \
     -o /bin/s3-encryption-gateway \
     ./cmd/server && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
     -trimpath \
     -ldflags="${LDFLAGS}" \
     -o /bin/s3-encryption-gateway-healthcheck \

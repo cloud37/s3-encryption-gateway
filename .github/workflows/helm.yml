@@ -140,28 +140,95 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Build Docker image and run Trivy vulnerability scan ─────────────────
-      - name: Build Docker image
+      # ── Build and push multi-arch Docker images, SBOM, and cosign attestation ────
+      - name: Set up QEMU
         if: steps.version_check.outputs.already_released == 'false'
-        run: |
-          IMAGE_TAG="ghcr.io/${{ github.repository }}:${{ github.sha }}"
-          docker build -t "${IMAGE_TAG}" .
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
         id: build_image
-        shell: bash
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            cloud37io/s3-encryption-gateway:${{ steps.version_check.outputs.chart_version }}
+            cloud37io/s3-encryption-gateway:latest
+          build-args: |
+            VERSION=${{ steps.version_check.outputs.chart_version }}
+            COMMIT=${{ github.sha }}
+
+      - name: Build and push FIPS image (linux/amd64 only)
+        id: build_fips_image
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.fips
+          platforms: linux/amd64
+          push: true
+          tags: |
+            cloud37io/s3-encryption-gateway:${{ steps.version_check.outputs.chart_version }}-fips
+          build-args: |
+            VERSION=${{ steps.version_check.outputs.chart_version }}
+            COMMIT=${{ github.sha }}
 
       - name: Trivy container scan
         if: steps.version_check.outputs.already_released == 'false'
+        uses: aquasecurity/trivy-action@v0.30.0
+        with:
+          image-ref: cloud37io/s3-encryption-gateway:${{ steps.version_check.outputs.chart_version }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+      - name: Generate SBOM
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: anchore/sbom-action@v0
+        with:
+          image: cloud37io/s3-encryption-gateway:${{ steps.version_check.outputs.chart_version }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM to release
+        if: steps.version_check.outputs.already_released == 'false'
         run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest \
-            image \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --exit-code 1 \
-            ${{ steps.build_image.outputs.image_tag }}
-        shell: bash
+          gh release upload "${{ steps.version_check.outputs.release_tag }}" \
+            sbom.spdx.json \
+            --repo "${{ github.repository }}" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign and attest image with cosign (keyless OIDC)
+        if: steps.version_check.outputs.already_released == 'false'
+        run: |
+          IMAGE_DIGEST="index.docker.io/cloud37io/s3-encryption-gateway@${{ steps.build_image.outputs.digest }}"
+          cosign sign --yes "${IMAGE_DIGEST}"
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${IMAGE_DIGEST}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
 
       - name: Copy chart README to gh-pages
         if: steps.version_check.outputs.already_released == 'false'
