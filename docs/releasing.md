@@ -97,16 +97,11 @@ settings (Settings → Secrets → Actions):
 
 ## Post-Release
 
-### Artifact Hub Registration
+### Artifact Hub
 
-If this is the first release with Artifact Hub annotations, register the
-Helm repository at [artifacthub.io](https://artifacthub.io):
+The chart is already registered on Artifact Hub at:
+<https://artifacthub.io/packages/helm/s3-encryption-gateway/s3-encryption-gateway>
 
-1. Sign in with a GitHub account.
-2. Go to "Add Repository".
-3. Repository name: `s3-encryption-gateway`
-4. Repository URL: `https://cloud37.github.io/s3-encryption-gateway`
-5. Kind: `Helm chart`
-
-It may take 24–48 hours for Artifact Hub to index the chart after
-registration.
+The Artifact Hub annotations in `Chart.yaml` (category, license, images, changes)
+control how the listing is displayed. Update `artifacthub.io/changes` before
+each release to describe new features and fixes.
