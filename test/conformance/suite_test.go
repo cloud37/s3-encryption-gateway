@@ -191,20 +191,6 @@ func TestConformance(t *testing.T) {
 			{"OBS1_DataPlaneNoPprofRoutes", 0, testOBS1_DataPlaneHasNoPprofRoutes},
 			{"OBS1_MetricEmitted", 0, testOBS1_MetricEmitted},
 
-			// V1.0-MAINT-1 offline migration tool — runs against every provider.
-			// These tests write objects directly to the S3 backend, run s3eg-migrate,
-			// and verify via HeadObject / GetObject.
-			{"MAINT1_SEC2_XOR_to_HKDF", 0, testMaint1_SEC2_XOR_to_HKDF},
-			{"MAINT1_Mixed_AllClasses", 0, testMaint1_Mixed_AllClasses},
-			{"MAINT1_DryRun_ReportsCorrectly", 0, testMaint1_DryRun_ReportsCorrectly},
-			{"MAINT1_Idempotency_E2E", 0, testMaint1_Idempotency_E2E},
-			{"MAINT1_Resume_E2E", 0, testMaint1_Resume_E2E},
-			{"MAINT1_GatewayVersion_Invalid", 0, testMaint1_GatewayVersion_Invalid},
-			{"MAINT1_StateFile_VersionMismatch", 0, testMaint1_StateFile_VersionMismatch},
-			{"MAINT1_GoldenPath_AllBreakingChanges", 0, testMaint1_GoldenPath_AllBreakingChanges},
-			{"MAINT1_DryRun_Scan", 0, testMaint1_DryRun_Scan},
-			{"MAINT1_VerifyAfterWrite", 0, testMaint1_VerifyAfterWrite},
-
 			// V1.0-SEC-H03 KDF iteration conformance.
 			{"KDF_Default600k_RoundTrip", 0, testKDF_Default600k_RoundTrip},
 			{"KDF_LegacyRead_100k", 0, testKDF_LegacyRead_100k},
@@ -229,14 +215,6 @@ func TestConformance(t *testing.T) {
 			{"Auth_PresignedURL_Expired", 0, testAuth_PresignedURL_Expired},
 			{"Auth_MultiCredential", 0, testAuth_MultiCredential},
 			{"Auth_ProxiedBucketFilter", 0, testAuth_ProxiedBucketFilter},
-
-			// V1.0-MGMT-2 KDF iteration migration.
-			{"MGMT2_KDF_DryRun_DetectsClassD", 0, testMGMT2_KDF_DryRun_DetectsClassD},
-			{"MGMT2_KDF_Migrate_100k_to_600k", 0, testMGMT2_KDF_Migrate_100k_to_600k},
-			{"MGMT2_KDF_Idempotency", 0, testMGMT2_KDF_Idempotency},
-			{"MGMT2_KDF_FilterKDF_SkipsOtherClasses", 0, testMGMT2_KDF_FilterKDF_SkipsOtherClasses},
-			{"MGMT2_KDF_Mixed_AllClasses", 0, testMGMT2_KDF_Mixed_AllClasses},
-			{"MGMT2_KDF_GoldenPath", 0, testMGMT2_KDF_GoldenPath},
 
 			// V1.0-COMPAT-1 SDK/Tool compatibility smoke tests
 			{"Compat_AWSGoV2", provider.CapSDKAWSGoV2, testCompatSmoke_AWSGoV2},

@@ -4,6 +4,7 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
+	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // keySeq provides unique keys within a test run.
@@ -110,4 +115,60 @@ func getRange(t *testing.T, gw *harness.Gateway, bucket, key string, start, end 
 			key, start, end, resp.StatusCode, string(body))
 	}
 	return body
+}
+
+// newS3Client creates an internal S3 client from a provider instance.
+// Used by tests that write objects directly to the backend (bypassing the gateway).
+func newS3Client(t *testing.T, inst provider.Instance) s3.Client {
+	t.Helper()
+	cfg := &config.BackendConfig{
+		Endpoint:     inst.Endpoint,
+		Region:       inst.Region,
+		AccessKey:    inst.AccessKey,
+		SecretKey:    inst.SecretKey,
+		Provider:     inst.ProviderName,
+		UseSSL:       false,
+		UsePathStyle: true,
+	}
+	client, err := s3.NewClient(cfg)
+	if err != nil {
+		t.Fatalf("newS3Client: %v", err)
+	}
+	return client
+}
+
+// putEncryptedObject encrypts plaintext and stores it in the bucket via the
+// internal S3 client. metaMutate allows test-specific metadata modifications
+// (e.g. deleting a field to simulate legacy formats).
+func putEncryptedObject(t *testing.T, client s3.Client, eng crypto.EncryptionEngine, bucket, key string, plaintext []byte, metaMutate func(map[string]string)) {
+	t.Helper()
+	ctx := context.Background()
+
+	encReader, encMeta, err := eng.Encrypt(ctx, bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("encrypt %s: %v", key, err)
+	}
+	cipherdata, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("read encrypted %s: %v", key, err)
+	}
+
+	if metaMutate != nil {
+		metaMutate(encMeta)
+	}
+
+	if _, err := client.PutObject(ctx, bucket, key, bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put object %s: %v", key, err)
+	}
+}
+
+// headMeta reads object metadata via HeadObject.
+func headMeta(t *testing.T, client s3.Client, bucket, key string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	meta, err := client.HeadObject(ctx, bucket, key, nil)
+	if err != nil {
+		t.Fatalf("head object %s: %v", key, err)
+	}
+	return meta
 }
