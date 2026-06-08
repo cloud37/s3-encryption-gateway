@@ -8,6 +8,7 @@ bin/
 *.dylib
 /server
 /migrate
+/cli
 
 # Test binary
 *.test
