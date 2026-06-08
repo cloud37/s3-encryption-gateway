@@ -109,17 +109,13 @@ func createBucketS3(ctx context.Context, t *testing.T, inst Instance) {
 		awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(inst.AccessKey, inst.SecretKey, ""),
 		),
-		awsconfig.WithEndpointResolverWithOptions(
-			aws.EndpointResolverWithOptionsFunc(func(service, region string, opts ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{URL: inst.Endpoint, HostnameImmutable: true}, nil
-			}),
-		),
 	)
 	if err != nil {
 		t.Fatalf("createBucketS3: load config: %v", err)
 	}
 
 	svc := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(inst.Endpoint)
 		o.UsePathStyle = true
 	})
 

@@ -19,7 +19,7 @@ var kdfTestPassword = []byte("test-encryption-password-123456")
 // newEngine100k creates an engine using the legacy 100k PBKDF2 iteration count.
 func newEngine100k(t *testing.T) crypto.EncryptionEngine {
 	t.Helper()
-	eng, err := crypto.NewEngineWithOpts(kdfTestPassword, nil, crypto.WithPBKDF2Iterations(100000))
+	eng, err := crypto.NewEngineWithOpts(kdfTestPassword, crypto.WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("newEngine100k: %v", err)
 	}
@@ -30,7 +30,7 @@ func newEngine100k(t *testing.T) crypto.EncryptionEngine {
 // PBKDF2 iteration count.
 func newEngine100kChunked(t *testing.T) crypto.EncryptionEngine {
 	t.Helper()
-	eng, err := crypto.NewEngineWithOpts(kdfTestPassword, nil, crypto.WithChunking(true), crypto.WithPBKDF2Iterations(100000))
+	eng, err := crypto.NewEngineWithOpts(kdfTestPassword, crypto.WithChunking(true), crypto.WithPBKDF2Iterations(100000))
 	if err != nil {
 		t.Fatalf("newEngine100kChunked: %v", err)
 	}
@@ -147,7 +147,7 @@ func testKDF_Chunked_LegacyRead(t *testing.T, inst provider.Instance) {
 // password and default argon2id parameters.
 func newEngineArgon2id(t *testing.T) crypto.EncryptionEngine {
 	t.Helper()
-	eng, err := crypto.NewEngineWithOpts(kdfTestPassword, nil,
+	eng, err := crypto.NewEngineWithOpts(kdfTestPassword,
 		crypto.WithKDFAlgorithm("argon2id"),
 		crypto.WithArgon2idParams(2, 19456, 1),
 	)

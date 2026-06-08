@@ -13,11 +13,12 @@ import (
 )
 
 func init() {
-	// Always register azureProvider; it falls back to Azurite container when
-	// GATEWAY_TEST_AZURE_ENDPOINT is not set (requires Docker).
-	if os.Getenv("GATEWAY_TEST_SKIP_AZURE") == "" {
-		Register(&azureProvider{})
+	// Skip Azure in local-only mode; Azurite does not support the S3 protocol.
+	// Requires GATEWAY_TEST_AZURE_ENDPOINT to be set for real Azure integration testing.
+	if os.Getenv("GATEWAY_TEST_SKIP_AZURE") != "" || os.Getenv("GATEWAY_TEST_SKIP_EXTERNAL") != "" {
+		return
 	}
+	Register(&azureProvider{})
 }
 
 // azureProvider implements Provider for Azure Blob Storage via its
@@ -62,7 +63,8 @@ func (p *azureProvider) Start(ctx context.Context, t *testing.T) Instance {
 	if external := os.Getenv("GATEWAY_TEST_AZURE_ENDPOINT"); external != "" {
 		return p.startExternal(ctx, external, t)
 	}
-	return p.startAzurite(ctx, t)
+	t.Skip("azure provider: GATEWAY_TEST_AZURE_ENDPOINT not set (Azurite does not support the S3 protocol)")
+	return Instance{}
 }
 
 func (p *azureProvider) startExternal(ctx context.Context, endpoint string, t *testing.T) Instance {
