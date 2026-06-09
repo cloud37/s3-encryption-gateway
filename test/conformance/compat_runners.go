@@ -135,30 +135,23 @@ func (r *rcloneRunner) Name() string  { return "rclone" }
 func (r *rcloneRunner) Image() string { return "rclone/rclone:1.68" }
 
 func (r *rcloneRunner) Script(env sdkTestEnv) string {
-	// rclone config is injected via environment variables.
-	// The --s3-copy-cutoff=0 flag ensures server-side copy does not fall back
-	// to client-side copy.
+	// Use --s3-* flags directly with :s3: remote syntax instead of
+	// RCLONE_CONFIG_* env vars. This avoids portability issues with
+	// the multi-line config env-var approach (GAP-COMPAT1-2).
+	//
+	// The shell function `r()` factors out the repeated flag set.
 	return fmt.Sprintf("set -e\n"+
 		"echo 'compat-test-data' > /tmp/testfile\n"+
-		"# Configure rclone via env vars (RCLONE_CONFIG_<name>_<key>)\n"+
-		"export RCLONE_CONFIG_GWS3_TYPE=s3\n"+
-		"export RCLONE_CONFIG_GWS3_PROVIDER=Minio\n"+
-		"export RCLONE_CONFIG_GWS3_ENDPOINT=\"$GATEWAY_ENDPOINT\"\n"+
-		"export RCLONE_CONFIG_GWS3_ENV_AUTH=false\n"+
-		"export RCLONE_CONFIG_GWS3_ACCESS_KEY_ID=\"$AWS_ACCESS_KEY_ID\"\n"+
-		"export RCLONE_CONFIG_GWS3_SECRET_ACCESS_KEY=\"$AWS_SECRET_ACCESS_KEY\"\n"+
-		"export RCLONE_CONFIG_GWS3_REGION=us-east-1\n"+
-		"export RCLONE_CONFIG_GWS3_S3_COPY_CUTOFF=0\n"+
-		"export RCLONE_CONFIG_GWS3_NO_CHECK_BUCKET=true\n"+
+		"r() { rclone --s3-provider=Minio --s3-endpoint=\"$GATEWAY_ENDPOINT\" --s3-env-auth=false --s3-access-key-id=\"$AWS_ACCESS_KEY_ID\" --s3-secret-access-key=\"$AWS_SECRET_ACCESS_KEY\" --s3-region=us-east-1 --s3-no-check-bucket=true --s3-copy-cutoff=0 \"$@\"; }\n"+
 		"# PutObject via copyto\n"+
-		"rclone copyto /tmp/testfile GWS3:%[1]s/%[2]s\n"+
+		"r copyto /tmp/testfile :s3:%[1]s/%[2]s\n"+
 		"# GetObject via copyto (download)\n"+
-		"rclone copyto GWS3:%[1]s/%[2]s /tmp/testfile-dl\n"+
+		"r copyto :s3:%[1]s/%[2]s /tmp/testfile-dl\n"+
 		"diff /tmp/testfile /tmp/testfile-dl || { echo 'FATAL: downloaded file differs'; exit 1; }\n"+
 		"# ListObjects via ls\n"+
-		"rclone ls GWS3:%[1]s/ | grep -q %[2]s || { echo 'FATAL: key not found'; exit 1; }\n"+
+		"r ls :s3:%[1]s/ | grep -q %[2]s || { echo 'FATAL: key not found'; exit 1; }\n"+
 		"# DeleteObject via deletefile\n"+
-		"rclone deletefile GWS3:%[1]s/%[2]s\n"+
+		"r deletefile :s3:%[1]s/%[2]s\n"+
 		"echo 'rclone:OK'\n",
 		env.Bucket, env.Key)
 }

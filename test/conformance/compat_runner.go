@@ -35,7 +35,7 @@ type sdkToolRunner interface {
 // sdkTestEnv carries the gateway endpoint and credentials for injection into
 // the container environment.
 type sdkTestEnv struct {
-	Endpoint  string // e.g. "http://172.17.0.1:8080" (gateway, not backend)
+	Endpoint  string // e.g. "http://127.0.0.1:8080" (gateway, not backend)
 	Region    string
 	AccessKey string
 	SecretKey string
@@ -46,6 +46,14 @@ type sdkTestEnv struct {
 // runToolContainer launches a Docker container running the given SDK/CLI tool
 // and asserts its output. It injects the test environment as environment
 // variables and captures stdout/stderr for diagnostics.
+//
+// GAP-COMPAT1-4 — Network mode: containers use --network=host so they share
+// the host's network namespace. This means 127.0.0.1 inside the container
+// reaches the host's loopback directly, and no Docker bridge IP resolution
+// is needed. This approach is portable across Linux Docker variants
+// (rootless, native). macOS/Windows Docker Desktop does not support host
+// networking; those platforms should use testcontainers' port mapping or
+// host.docker.internal instead.
 func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, env sdkTestEnv) error {
 	t.Helper()
 
@@ -135,5 +143,3 @@ func newUniqueTestEnv(t *testing.T, inst provider.Instance) (*harness.Gateway, s
 		Key:       compatUniqueKey(t),
 	}
 }
-
-
