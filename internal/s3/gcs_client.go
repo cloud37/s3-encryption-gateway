@@ -22,6 +22,9 @@ import (
 //
 // GCS's CopyObject response does not include LastModified in the
 // CopyObjectResult body; the shim substitutes time.Now() when it is zero.
+// Compile-time assertion: *gcsClient implements Client.
+var _ Client = (*gcsClient)(nil)
+
 type gcsClient struct {
 	inner Client
 }
@@ -40,6 +43,9 @@ func newGCSClient(cfg *config.BackendConfig, opts ...ClientFactoryOption) (Clien
 	inner, err := NewClientFactory(&cfgCopy, opts...).GetClient()
 	if err != nil {
 		return nil, fmt.Errorf("gcs: construct inner client: %w", err)
+	}
+	if inner == nil {
+		return nil, fmt.Errorf("gcs: inner client is nil")
 	}
 	return &gcsClient{inner: inner}, nil
 }

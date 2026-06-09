@@ -124,10 +124,8 @@ func TestAzureClient_ObjectLock_ReturnsNotImplemented(t *testing.T) {
 			if tt.err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(tt.err.Error(), "not implemented") &&
-				!strings.Contains(tt.err.Error(), "NotImplemented") &&
-				!errors.Is(tt.err, ErrNotImplemented) {
-				t.Errorf("expected NotImplemented error, got: %v", tt.err)
+			if !errors.Is(tt.err, ErrNotImplemented) {
+				t.Errorf("errors.Is(err, ErrNotImplemented) = false for %v", tt.err)
 			}
 		})
 	}

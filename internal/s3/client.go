@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -367,7 +368,10 @@ func NewClient(cfg *config.BackendConfig) (Client, error) {
 // ErrNotImplemented is returned by shim adapters when a backend does not
 // support the requested S3 operation.  Callers should surface this as an
 // HTTP NotImplemented (501) response.
-var ErrNotImplemented = fmt.Errorf("operation not implemented by backend")
+// ErrNotImplemented is returned by shim adapters when a backend does not
+// support the requested S3 operation. Callers use errors.Is(err, ErrNotImplemented)
+// to detect this condition and surface an HTTP NotImplemented (501) response.
+var ErrNotImplemented = errors.New("operation not supported by this backend")
 
 // NewInvalidArgument returns an error suitable for S3 InvalidArgument responses.
 func NewInvalidArgument(message string) error {

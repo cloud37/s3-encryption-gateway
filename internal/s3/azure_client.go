@@ -19,6 +19,9 @@ import (
 //     dollar sign ($), and period (.).
 //   - Error code "BlobNotFound" should be mapped to S3 "NoSuchKey".
 //   - Object Lock operations are not supported.
+// Compile-time assertion: *azureClient implements Client.
+var _ Client = (*azureClient)(nil)
+
 type azureClient struct {
 	inner Client
 }
@@ -42,6 +45,9 @@ func newAzureClient(cfg *config.BackendConfig, opts ...ClientFactoryOption) (Cli
 	inner, err := NewClientFactory(&cfgCopy, opts...).GetClient()
 	if err != nil {
 		return nil, fmt.Errorf("azure: construct inner client: %w", err)
+	}
+	if inner == nil {
+		return nil, fmt.Errorf("azure: inner client is nil")
 	}
 	return &azureClient{inner: inner}, nil
 }
