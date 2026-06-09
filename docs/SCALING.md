@@ -165,6 +165,11 @@ for a complete `ScaledObject` manifest.
 | Large objects (> 10 MiB), throughput-bound | CPU-based HPA |
 | Known request rate per replica | KEDA with Prometheus trigger |
 
+> **Prerequisite:** The example's PromQL query uses `kube_pod_info` (from
+> `kube-state-metrics`) as its divisor. This component must be deployed in
+> your cluster. If `kube-state-metrics` is not available, replace the divisor
+> with a static pod count or use KEDA's built-in replica count.
+
 ### 4.3 Behaviour tuning asymmetry
 
 | Direction | Stabilisation window | Rate limit | Rationale |
@@ -320,7 +325,10 @@ Memory reclaimed on CompleteMultipartUpload or after 7 days (TTL eviction).
 ## 10. References
 
 1. Ibryam, B. & Huss, R., *Kubernetes Patterns, 2nd Ed.* (O'Reilly, 2023).
-2. Burns, B. et al., *Kubernetes: Up and Running, 3rd Ed.* (O'Reilly, 2022).
+2. Burns, B. et al., *Kubernetes Best Practices, 2nd Ed.* (O'Reilly, 2023).
+   Provides the graceful-shutdown formula and `terminationGracePeriodSeconds`
+   sizing guidance in §5.1.
+   <https://learning.oreilly.com/library/view/kubernetes-best-practices/9781098142872/>
 3. Beyer, B. et al., *Site Reliability Engineering* (O'Reilly, 2016).
 4. Plotka, B., *Efficient Go* (O'Reilly, 2022).
 5. KEDA Prometheus scaler: <https://keda.sh/docs/2.14/scalers/prometheus/>

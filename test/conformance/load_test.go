@@ -21,6 +21,7 @@ package conformance
 //	SOAK_OBJECT_SIZE  int (bytes)   object size                    default: 102400  / soak: 52428800 (50 MiB)
 //	SOAK_CHUNK_SIZE   int (bytes)   encryption chunk size          default: 65536
 //	SOAK_PART_SIZE    int (bytes)   multipart part size (≥5 MiB)  default: 5242880
+//	SOAK_JSON_OUT     string        NDJSON output path (V0.6-QA-1) default: ""
 
 import (
 	"bytes"
@@ -49,6 +50,7 @@ type loadTestParams struct {
 	objectSize int64 // bytes
 	chunkSize  int64 // encryption chunk size (bytes)
 	partSize   int64 // multipart part size (bytes; S3 requires ≥ 5 MiB for all but last)
+	jsonOut    string // NDJSON output path for SLO summary records (V0.6-QA-1)
 }
 
 // resolveLoadParams reads environment variables and applies them on top of the
@@ -73,6 +75,9 @@ func resolveLoadParams(ci loadTestParams) loadTestParams {
 	}
 	if v := envInt64("SOAK_PART_SIZE"); v > 0 {
 		p.partSize = v
+	}
+	if v := os.Getenv("SOAK_JSON_OUT"); v != "" {
+		p.jsonOut = v
 	}
 	return p
 }
@@ -309,7 +314,7 @@ func runWorkers(t *testing.T, p loadTestParams, fn workFn) {
 }
 
 // reportResults logs a summary, asserts the pass criteria, and — when
-// SOAK_JSON_OUT is set — appends a SummaryRecord to that file (V0.6-QA-1).
+// p.jsonOut is set — appends a SummaryRecord to that file (V0.6-QA-1).
 //
 // heapMax comes from a HeapSampler started before runWorkers; pass 0 when
 // no sampler is wired (older call sites).
@@ -326,9 +331,8 @@ func reportResults(t *testing.T, label string, p loadTestParams, res *loadResult
 		t.Errorf("%s: %d/%d requests failed", label, res.failed, res.total)
 	}
 
-	// V0.6-QA-1 Phase A: emit structured summary when requested.
-	jsonPath := os.Getenv("SOAK_JSON_OUT")
-	if jsonPath == "" {
+	// V0.6-QA-1 Phase A: emit structured summary when requested (resolved via SOAK_JSON_OUT env var in resolveLoadParams).
+	if p.jsonOut == "" {
 		return
 	}
 
@@ -361,8 +365,8 @@ func reportResults(t *testing.T, label string, p loadTestParams, res *loadResult
 		HeapInuseMaxBytes: heapMax,
 		CPUSeconds:        0, // Linux-only; kept at 0 for now — see plan §3.2.
 	}
-	if err := AppendJSONRecord(jsonPath, rec); err != nil {
-		t.Logf("%s: AppendJSONRecord(%q): %v", label, jsonPath, err)
+	if err := AppendJSONRecord(p.jsonOut, rec); err != nil {
+		t.Logf("%s: AppendJSONRecord(%q): %v", label, p.jsonOut, err)
 	}
 }
 

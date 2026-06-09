@@ -9,6 +9,9 @@
 #   - KEDA v2.14+ installed in the cluster
 #   - Prometheus Operator with working ServiceMonitor for the gateway
 #   - The Prometheus server must be reachable at the serverAddress below
+#   - kube-state-metrics must be deployed (provides `kube_pod_info` metric used
+#     in the PromQL query divisor). If absent, replace divisor with a static
+#     pod count or use KEDA's built-in replica count.
 #
 # Apply:
 #   kubectl apply -f helm/s3-encryption-gateway/examples/values-keda-example.yaml
