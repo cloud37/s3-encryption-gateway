@@ -191,6 +191,13 @@ jobs:
             VERSION=${{ steps.version_check.outputs.chart_version }}
             COMMIT=${{ github.sha }}
 
+      - name: Log in to Docker Hub (for Trivy pull)
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Trivy container scan
         if: steps.version_check.outputs.already_released == 'false'
         uses: aquasecurity/trivy-action@v0.30.0
@@ -231,8 +238,6 @@ jobs:
             --predicate sbom.spdx.json \
             --type spdxjson \
             "${IMAGE_DIGEST}"
-        env:
-          COSIGN_EXPERIMENTAL: "1"
 
       - name: Copy chart README to gh-pages
         if: steps.version_check.outputs.already_released == 'false'
