@@ -147,7 +147,7 @@ jobs:
       # ── Build and push multi-arch Docker images, SBOM, and cosign attestation ────
       - name: Set up QEMU
         if: steps.version_check.outputs.already_released == 'false'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         if: steps.version_check.outputs.already_released == 'false'
