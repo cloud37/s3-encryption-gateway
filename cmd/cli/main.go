@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
@@ -94,6 +96,12 @@ func buildAuditClient(configPath string, logger *slog.Logger) audit.AuditClient 
 		os.Exit(1)
 	}
 
+	// The encryption password is not needed by the read-only audit tool.
+	// Zero it immediately to prevent residual key material in memory.
+	// See GAP-CLI2-1 / Serious Cryptography 2nd Ed. Ch. 3.
+	zeroPasswordString(&cfg.Encryption.Password)
+	zeroPasswordString(&cfg.Encryption.MetadataEncryptionKey)
+
 	client, err := s3.NewClient(&cfg.Backend)
 	if err != nil {
 		logger.Error("failed to create S3 client", "error", err)
@@ -101,6 +109,24 @@ func buildAuditClient(configPath string, logger *slog.Logger) audit.AuditClient 
 	}
 
 	return client
+}
+
+// zeroPasswordString overwrites the backing array of a Go string with zeros
+// to prevent residual key material from remaining in process memory.
+// This is necessary because Go strings are immutable and cannot be zeroed
+// through normal assignment.
+func zeroPasswordString(s *string) {
+	if s == nil || *s == "" {
+		return
+	}
+	hdr := (*reflect.StringHeader)(unsafe.Pointer(s))
+	if hdr.Data != 0 {
+		b := unsafe.Slice((*byte)(unsafe.Pointer(hdr.Data)), hdr.Len)
+		for i := range b {
+			b[i] = 0
+		}
+	}
+	*s = ""
 }
 
 func parseSharedFlags(fs *flag.FlagSet, args []string) (configPath, logLevel, outputFormat string) {
