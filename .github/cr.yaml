@@ -17,5 +17,5 @@ charts-repo-url: https://github.com/cloud37/s3-encryption-gateway/releases/downl
 release-name-template: "{{ .Name }}-{{ .Version }}"
 
 # Options
-prerelease: false
+prerelease: true
 debug: true
