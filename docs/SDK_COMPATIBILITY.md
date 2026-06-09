@@ -29,7 +29,7 @@ conformance tests in CI.
 | boto3 | 1.35 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | awscli | 2.22 | ✅ | ✅ | ⚠️ | ✅ | ✅ | ✅ | ✅ | HeadObject via `s3api` |
 | s5cmd | 2.3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ETag caveat |
-| rclone | 1.68 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | Needs `--s3-copy-cutoff=0` |
+| rclone | 1.68 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | Needs `--s3-copy-cutoff=1` |
 | minio-py | 7.2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 
 ## Tool Version Policy
@@ -64,7 +64,7 @@ expose version IDs for server-side copy).
 
 ### rclone — Server-Side Copy
 
-rclone requires `--s3-copy-cutoff=0` to force server-side copy instead of
+rclone requires `--s3-copy-cutoff=1` to force server-side copy instead of
 falling back to client-side copy (download-then-upload). Without this flag,
 rclone downloads the object and re-uploads it, which bypasses the gateway's
 server-side copy passthrough. The smoke test applies this flag automatically.

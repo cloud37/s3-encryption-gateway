@@ -142,7 +142,7 @@ func (r *rcloneRunner) Script(env sdkTestEnv) string {
 	// The shell function `r()` factors out the repeated flag set.
 	return fmt.Sprintf("set -e\n"+
 		"echo 'compat-test-data' > /tmp/testfile\n"+
-		"r() { rclone --s3-provider=Minio --s3-endpoint=\"$GATEWAY_ENDPOINT\" --s3-env-auth=false --s3-access-key-id=\"$AWS_ACCESS_KEY_ID\" --s3-secret-access-key=\"$AWS_SECRET_ACCESS_KEY\" --s3-region=us-east-1 --s3-no-check-bucket=true --s3-copy-cutoff=0 \"$@\"; }\n"+
+		"r() { rclone --s3-provider=Minio --s3-endpoint=\"$GATEWAY_ENDPOINT\" --s3-env-auth=false --s3-access-key-id=\"$AWS_ACCESS_KEY_ID\" --s3-secret-access-key=\"$AWS_SECRET_ACCESS_KEY\" --s3-region=us-east-1 --s3-no-check-bucket=true --s3-copy-cutoff=1 \"$@\"; }\n"+
 		"# PutObject via copyto\n"+
 		"r copyto /tmp/testfile :s3:%[1]s/%[2]s\n"+
 		"# GetObject via copyto (download)\n"+
