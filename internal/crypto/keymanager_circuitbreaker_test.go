@@ -265,3 +265,42 @@ func TestCircuitBreaker_Close_SetsOpenState(t *testing.T) {
 	_, err := cb.WrapKey(context.Background(), []byte("pt"), nil)
 	require.ErrorIs(t, err, ErrProviderUnavailable)
 }
+
+func TestCircuitBreaker_Close_Idempotent(t *testing.T) {
+	inner := &mockCbKM{provider: "test"}
+	cfg := DefaultCircuitBreakerConfig()
+
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
+
+	// First Close should succeed
+	require.NoError(t, cb.Close(context.Background()))
+
+	// Second Close should also succeed (idempotent)
+	require.NoError(t, cb.Close(context.Background()))
+
+	// Operations still fail with ErrProviderUnavailable
+	_, err := cb.WrapKey(context.Background(), []byte("pt"), nil)
+	require.ErrorIs(t, err, ErrProviderUnavailable)
+}
+
+func TestCircuitBreaker_Close_NoRecoveryAfterClose(t *testing.T) {
+	inner := &mockCbKM{
+		provider:       "test",
+		failWrapsUntil: 100,
+		wrapErr:        errors.New("kms error"),
+	}
+	cfg := DefaultCircuitBreakerConfig()
+	cfg.ConsecutiveFailures = 2
+	cfg.OpenTimeout = 10 * time.Millisecond // short timeout
+
+	cb := NewCircuitBreakerKeyManager(inner, cfg)
+
+	// Close the breaker permanently
+	require.NoError(t, cb.Close(context.Background()))
+
+	// Even after OpenTimeout elapses, it should NOT transition to Half-Open
+	time.Sleep(20 * time.Millisecond)
+
+	_, err := cb.WrapKey(context.Background(), []byte("pt"), nil)
+	require.ErrorIs(t, err, ErrProviderUnavailable, "breaker must not recover after Close")
+}

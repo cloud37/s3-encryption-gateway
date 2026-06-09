@@ -155,6 +155,20 @@ func (c *CachingKeyManager) WrapKey(ctx context.Context, plaintext []byte, metad
 	return c.inner.WrapKey(ctx, plaintext, metadata)
 }
 
+// promoteToFront moves fp to the end of lruOrder (most recently used).
+// Must be called with c.mu write-locked.
+func (c *CachingKeyManager) promoteToFront(fp [32]byte) {
+	for i := range c.lruOrder {
+		if c.lruOrder[i] == fp {
+			if i < len(c.lruOrder)-1 {
+				c.lruOrder = append(c.lruOrder[:i], c.lruOrder[i+1:]...)
+				c.lruOrder = append(c.lruOrder, fp)
+			}
+			return
+		}
+	}
+}
+
 // UnwrapKey checks the cache first, then delegates to the inner KeyManager on miss.
 func (c *CachingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelope, metadata map[string]string) ([]byte, error) {
 	if !c.cfg.Enabled || envelope == nil {
@@ -171,6 +185,10 @@ func (c *CachingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelope
 		hit := make([]byte, len(entry.plaintext))
 		copy(hit, entry.plaintext)
 		c.mu.RUnlock()
+		// Promote fingerprint to most recently used (separate write lock)
+		c.mu.Lock()
+		c.promoteToFront(fp)
+		c.mu.Unlock()
 		if fn := getRecordKMSDEKCacheHitFn(); fn != nil {
 			fn(c.inner.Provider())
 		}
@@ -190,15 +208,14 @@ func (c *CachingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelope
 
 	// Double-check if another goroutine already cached this
 	if existing, ok := c.entries[fp]; ok {
-		// Entry already exists (race) — use existing, zeroize our copy
-		// Actually, we just got a fresh pt from inner, we should store it.
-		// But zeroize the existing one if it's different.
+		// Entry already exists (race) — promote and reuse the existing entry
 		if !time.Now().After(existing.expiresAt) {
+			c.promoteToFront(fp)
 			zeroBytes(pt)
 			hit := make([]byte, len(existing.plaintext))
 			copy(hit, existing.plaintext)
-			if recordKMSDEKCacheHitFn != nil {
-				recordKMSDEKCacheHitFn(c.inner.Provider())
+			if fn := getRecordKMSDEKCacheHitFn(); fn != nil {
+				fn(c.inner.Provider())
 			}
 			return hit, nil
 		}

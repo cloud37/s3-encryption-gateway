@@ -169,6 +169,60 @@ func TestCachingKeyManager_LRU_EvictedEntryZeroized(t *testing.T) {
 	require.False(t, ok1, "env1 should be evicted from cache")
 }
 
+// TestCachingKeyManager_LRU_ReordersOnHit verifies that a cache-hit entry is
+// promoted to most-recently-used and is not evicted before older non-hit entries.
+func TestCachingKeyManager_LRU_ReordersOnHit(t *testing.T) {
+	inner := &mockCacheKM{
+		provider:     "test",
+		unwrapResult: []byte("32byte-dek-plaintext-xxxxxxxxxx"),
+	}
+	cfg := DefaultDEKCacheConfig()
+	cfg.Enabled = true
+	cfg.TTL = time.Hour
+	cfg.MaxEntries = 3 // only fits 3 entries
+
+	km, err := NewCachingKeyManager(inner, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = km.Close(context.Background()) })
+
+	envA := &KeyEnvelope{Ciphertext: []byte("ct-a")}
+	envB := &KeyEnvelope{Ciphertext: []byte("ct-b")}
+	envC := &KeyEnvelope{Ciphertext: []byte("ct-c")}
+
+	// Insert A, B, C
+	_, _ = km.UnwrapKey(context.Background(), envA, nil)
+	_, _ = km.UnwrapKey(context.Background(), envB, nil)
+	_, _ = km.UnwrapKey(context.Background(), envC, nil)
+
+	// Access A again — it should become most recently used
+	_, err = km.UnwrapKey(context.Background(), envA, nil)
+	require.NoError(t, err)
+
+	// Now insert D — this should evict the least recently used, which is B
+	envD := &KeyEnvelope{Ciphertext: []byte("ct-d")}
+	_, err = km.UnwrapKey(context.Background(), envD, nil)
+	require.NoError(t, err)
+
+	// A and C should still be present; B should be evicted
+	fpA := cacheFingerprint([]byte("ct-a"))
+	fpB := cacheFingerprint([]byte("ct-b"))
+	fpC := cacheFingerprint([]byte("ct-c"))
+	fpD := cacheFingerprint([]byte("ct-d"))
+
+	ckm := km.(*CachingKeyManager)
+	ckm.mu.RLock()
+	_, okA := ckm.entries[fpA]
+	_, okB := ckm.entries[fpB]
+	_, okC := ckm.entries[fpC]
+	_, okD := ckm.entries[fpD]
+	ckm.mu.RUnlock()
+
+	require.True(t, okA, "A was accessed most recently, should be cached")
+	require.False(t, okB, "B was least recently used, should be evicted")
+	require.True(t, okC, "C was recently used, should be cached")
+	require.True(t, okD, "D was just inserted, should be cached")
+}
+
 func TestCachingKeyManager_Close_ZeroizesAllEntries(t *testing.T) {
 	inner := &mockCacheKM{
 		provider:     "test",

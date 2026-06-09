@@ -51,6 +51,8 @@ func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
 //     On success → Closed; on failure → Open with reset timer.
 //   - Failure threshold: ConsecutiveFailures consecutive errors trip the breaker.
 //   - SuccessThreshold: consecutive successes in Half-Open to close the breaker.
+//   - After Close, all operations permanently return ErrProviderUnavailable
+//     (breaker cannot recover to Half-Open after Close). Idempotent.
 type CircuitBreakerKeyManager struct {
 	inner KeyManager
 	cfg   CircuitBreakerConfig
@@ -60,6 +62,7 @@ type CircuitBreakerKeyManager struct {
 	failures  int
 	successes int
 	openedAt  time.Time
+	closed    bool // permanent shutdown; overrides all state transitions
 }
 
 // Compile-time assertion that CircuitBreakerKeyManager implements KeyManager.
@@ -111,9 +114,16 @@ func (cb *CircuitBreakerKeyManager) ActiveKeyVersion(ctx context.Context) (int, 
 	return cb.inner.ActiveKeyVersion(ctx)
 }
 
-// Close delegates to the inner KeyManager and transitions to Open state.
+// Close delegates to the inner KeyManager and permanently closes the circuit.
+// Subsequent WrapKey/UnwrapKey calls return ErrProviderUnavailable regardless
+// of state transitions. Idempotent.
 func (cb *CircuitBreakerKeyManager) Close(ctx context.Context) error {
 	cb.mu.Lock()
+	if cb.closed {
+		cb.mu.Unlock()
+		return nil
+	}
+	cb.closed = true
 	cb.state = cbStateOpen
 	cb.openedAt = time.Now()
 	cb.mu.Unlock()
@@ -125,6 +135,10 @@ func (cb *CircuitBreakerKeyManager) Close(ctx context.Context) error {
 func (cb *CircuitBreakerKeyManager) allowRequest() error {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+
+	if cb.closed {
+		return fmt.Errorf("keymanager/circuitbreaker: %w", ErrProviderUnavailable)
+	}
 
 	switch cb.state {
 	case cbStateClosed:
