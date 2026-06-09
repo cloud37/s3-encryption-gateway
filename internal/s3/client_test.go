@@ -1100,6 +1100,64 @@ func TestS3Client_PutObject_WithContentLength(t *testing.T) {
 	}
 }
 
+
+// TestS3Client_PutObject_WithACL verifies that the ACL header is sent to the
+// backend as a PUT request header. The SDK encodes the canned ACL in the
+// request; we verify the backend receives it.
+func TestS3Client_PutObject_WithACL(t *testing.T) {
+	var gotACL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			gotACL = r.Header.Get("x-amz-acl")
+			w.Header().Set("ETag", `"test-etag"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	transport := &fakeS3Transport{handler: mux}
+	client := buildTestS3Client(t, transport)
+
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
+		bytes.NewReader([]byte("data")), nil, nil, "", nil, "public-read", "", "", "", "")
+	if err != nil {
+		t.Fatalf("PutObject() with ACL error: %v", err)
+	}
+
+	if gotACL == "" {
+		t.Error("x-amz-acl header was not sent to backend")
+	}
+}
+
+// TestS3Client_PutObject_BackendRejectsInvalidACL verifies that when the
+// backend rejects an invalid canned ACL with a 400 error, the SDK surfaces
+// the error to the caller (deterministic error contract).
+func TestS3Client_PutObject_BackendRejectsInvalidACL(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			// Simulate a backend that rejects an invalid ACL value.
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`<?xml version="1.0"?><Error><Code>InvalidArgument</Code><Message>Invalid canned ACL</Message></Error>`))
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	transport := &fakeS3Transport{handler: mux}
+	client := buildTestS3Client(t, transport)
+
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
+		bytes.NewReader([]byte("data")), nil, nil, "", nil, "invalid-acl-value", "", "", "", "")
+	if err == nil {
+		t.Fatal("expected error for invalid ACL rejected by backend, got nil")
+	}
+	if !strings.Contains(err.Error(), "InvalidArgument") && !strings.Contains(err.Error(), "400") {
+		t.Errorf("expected InvalidArgument or 400 error, got: %v", err)
+	}
+}
+
 // TestS3Client_HeadObject_WithVersionID verifies versionId is passed.
 func TestS3Client_HeadObject_WithVersionID(t *testing.T) {
 	transport := &fakeS3Transport{handler: fakeS3Mux()}
