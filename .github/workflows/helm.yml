@@ -227,7 +227,7 @@ jobs:
 
       - name: Install cosign
         if: steps.version_check.outputs.already_released == 'false'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign and attest image with cosign (keyless OIDC)
         if: steps.version_check.outputs.already_released == 'false'
