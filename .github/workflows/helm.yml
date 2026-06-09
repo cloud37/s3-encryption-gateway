@@ -200,7 +200,7 @@ jobs:
 
       - name: Trivy container scan
         if: steps.version_check.outputs.already_released == 'false'
-        uses: aquasecurity/trivy-action@v0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: cloud37io/s3-encryption-gateway:${{ steps.version_check.outputs.chart_version }}
           severity: HIGH,CRITICAL
