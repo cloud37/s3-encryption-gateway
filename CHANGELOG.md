@@ -7,24 +7,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- **V1.0-CLI-2 — Gateway-Aware Audit Tooling (`s3eg-cli`)**: New read-only
-  audit binary with three sub-commands (`inspect`, `verify-key`,
-  `list-algorithm`). Replaces the removed `s3eg-migrate` offline migration
-  tool. Re-encryption now uses the GET-through-gateway → PUT-through-gateway
-  pattern. Adds `encryption.allow_unmarked_no_aad_fallback` config flag
-  (default false) for controlled no-AAD recovery. `s3eg-migrate` retained as
-  a deprecation shim. See `docs/plans/V1.0-CLI-2-plan.md`.
 
-- **V1.0-ECOSYS-1 — Additional Backends via Shims**: New `backend.type`
-- **V1.0-ECOSYS-1 — Additional Backends via Shims**: New `backend.type`
-  discriminator (`s3`, `gcs`, `azure`) with config validation and env-var
-  wiring. GCS shim (`gcsClient`) with automatic metadata key lowercasing,
-  32-part multipart-upload limit, and `CopyObject` LastModified fallback.
-  Azure shim (`azureClient`) with metadata size/key validation (8 KiB limit),
-  `BlobNotFound` → `NoSuchKey` mapping, and ObjectLock `NotImplemented` stubs.
-  Test providers for GCS (external, gated by env vars) and Azure/Azurite
-  (Testcontainers). Published `docs/BACKENDS.md` with per-backend caveat tables.
-  See `docs/plans/V1.0-ECOSYS-1-plan.md`.
+### Security
+
+### Fixed
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+## [0.10.0] — 2026-06-09
+
+### ⚠️ Breaking ⚠️
+
+- **Built-in compression removed (V1.0-MAINT-2)**: The `compression` config
+  stanza, `CompressionEngine`, compression metadata constants, and
+  decompression-bomb guard are removed. All `NewEngine*` constructors and
+  `NewEngineWithOpts` no longer accept a `compressionEngine` parameter.
+  Users who need compressed+encrypted objects should compose with
+  [s4](https://github.com/abyo-software/s4) before the gateway:
+
+  ```
+  client → s4 → s3-encryption-gateway → storage
+  ```
+
+  **Migration**: objects stored with `x-amz-meta-compression-enabled: true`
+  must be re-uploaded (decrypt via old gateway version, re-upload
+  uncompressed) before upgrading. See `docs/MIGRATION.md`.
+
+- **`s3eg-migrate` offline migration tool removed (V1.0-CLI-2)**: The
+  gateway-bypassing `s3eg-migrate` binary (batch re-encryption,
+  `BackfillLegacyNoAAD`, KDF migration) is replaced by the read-only
+  `s3eg-cli` audit tool. Re-encrypt legacy objects through the gateway
+  using any standard S3 client:
+
+  ```
+  aws s3 cp s3://bucket/key - --endpoint-url $GATEWAY | \
+    aws s3 cp - s3://bucket/key --endpoint-url $GATEWAY
+  ```
+
+  The gateway decrypts on GET via fallback paths and re-encrypts on PUT with
+  current parameters. `s3eg-migrate` is retained as a deprecation shim.
+  See `docs/MIGRATION.md` and `docs/S3_CLI_TOOLS.md`.
+
+### Added
+
+- **V1.0-KMS-1 — KMS Production Readiness**: Retry-with-backoff decorator
+  (`RetryingKeyManager`), circuit-breaker decorator
+  (`CircuitBreakerKeyManager`) with three-state fail-fast, DEK unwrap cache
+  (`CachingKeyManager`) using true LRU with hit-time reordering, and periodic
+  health-check goroutine. Four new Prometheus metrics:
+  `gateway_kms_dek_cache_hits_total`, `gateway_kms_dek_cache_misses_total`,
+  `gateway_kms_circuit_breaker_state`, `gateway_kms_retry_attempts_total`.
+  KMS outage degraded-mode runbook section in `docs/RUNBOOK.md`.
+  See `docs/plans/V1.0-KMS-1-plan.md`.
+
+- **V1.0-S3-1 — ACL and Lifecycle Header Passthrough**: `PutObject` and
+  `CreateMultipartUpload` now forward ACL inline headers
+  (`x-amz-acl`, `x-amz-grant-*`) to the backend. Lifecycle headers
+  (`x-amz-storage-class`, `x-amz-website-redirect-location`,
+  `x-amz-server-side-encryption-*`, `x-amz-object-lock-*`) are passed through
+  on PUT operations. Updated inline header passthrough feature matrix in
+  `docs/S3_API_IMPLEMENTATION.md`. See `docs/plans/V1.0-S3-1-plan.md`.
+
+- **V1.0-COMPAT-1 — SDK/Tool Compatibility Matrix**: Automated smoke tests for
+  AWS SDK Go v2, boto3, awscli, s5cmd, rclone, and minio-py against all local
+  providers. Published `docs/SDK_COMPATIBILITY.md` with pass/fail and caveats.
+  CI `compat-matrix` job added to conformance workflow.
+  See `docs/plans/V1.0-COMPAT-1-plan.md`.
 
 - **V1.0-PERF-1 — Scale & Throughput Guidance**: Named load profiles
   (`make test-load-smoke`, `test-load-spike`, `test-load-high-throughput`)
@@ -36,32 +88,85 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   throughput 80% of linear). Load profile corpus committed under
   `docs/perf/v1.0-perf-1/`. Updated `docs/PERFORMANCE.md` with cross-reference
   and `docs/perf/v0.6-qa-1/slo-summary.md` with v1.0 SLO section.
+  See `docs/plans/V1.0-PERF-1-plan.md`.
 
-- **V1.0-COMPAT-1 — SDK/Tool Compatibility Matrix**: Automated smoke tests for
-  AWS SDK Go v2, boto3, awscli, s5cmd, rclone, and minio-py against all local
-  providers. Published `docs/SDK_COMPATIBILITY.md` with pass/fail and caveats.
-  CI `compat-matrix` job added to conformance workflow.
+- **V1.0-OPS-1 — Supply-chain & Publishing**: Multi-arch images (linux/amd64,
+  linux/arm64) published to Docker Hub via docker buildx; FIPS image
+  (linux/amd64) published to Docker Hub with `-fips` tag suffix; SPDX-JSON
+  SBOM generated by syft and attached to GitHub release assets; cosign keyless
+  OIDC attestation on Docker Hub image digest (SLSA provenance); Artifact Hub
+  annotations added to Chart.yaml; Artifact Hub annotation CI gate added to
+  helm-test.yml; `make docker-buildx` and `make sbom` targets added for local
+  developer parity. See `docs/plans/V1.0-OPS-1-plan.md`.
 
-- KMS production hardening: retry-with-backoff decorator (`RetryingKeyManager`),
-  circuit-breaker decorator (`CircuitBreakerKeyManager`), DEK unwrap cache
-  (`CachingKeyManager`), and periodic health-check goroutine (V1.0-KMS-1).
-- Four new Prometheus metrics: `gateway_kms_dek_cache_hits_total`,
-  `gateway_kms_dek_cache_misses_total`, `gateway_kms_circuit_breaker_state`,
-  `gateway_kms_retry_attempts_total`.
-- KMS outage degraded-mode runbook section in `docs/RUNBOOK.md`.
+- **V1.0-ECOSYS-1 — Additional Backends via Shims**: New `backend.type`
+  discriminator (`s3`, `gcs`, `azure`) with config validation and env-var
+  wiring. GCS shim (`gcsClient`) with automatic metadata key lowercasing,
+  32-part multipart-upload limit, and `CopyObject` LastModified fallback.
+  Azure shim (`azureClient`) with metadata size/key validation (8 KiB limit),
+  `BlobNotFound` → `NoSuchKey` mapping, and ObjectLock `NotImplemented` stubs.
+  Test providers for GCS (external, gated by env vars) and Azure/Azurite
+  (Testcontainers). Published `docs/BACKENDS.md` with per-backend caveat
+  tables. Compile-time `var _ Client = ...` assertions verify all shims
+  satisfy the S3 client interface. See `docs/plans/V1.0-ECOSYS-1-plan.md`.
 
-### Operations / CI
-
-- **V1.0-OPS-1 — Supply-chain & Publishing**: Multi-arch images (linux/amd64, linux/arm64) published to Docker Hub via docker buildx; FIPS image (linux/amd64) published to Docker Hub with `-fips` tag suffix; SPDX-JSON SBOM generated by syft and attached to GitHub release assets; cosign keyless OIDC attestation on Docker Hub image digest (SLSA provenance); Artifact Hub annotations added to Chart.yaml; Artifact Hub annotation CI gate added to helm-test.yml; `make docker-buildx` and `make sbom` targets added for local developer parity. See `docs/plans/V1.0-OPS-1-plan.md`.
+- **V1.0-CLI-2 — Gateway-Aware Audit Tooling (`s3eg-cli`)**: New read-only
+  audit binary with three sub-commands (`inspect`, `verify-key`,
+  `list-algorithm`). Replaces the removed `s3eg-migrate` offline migration
+  tool. Re-encryption now uses the GET-through-gateway → PUT-through-gateway
+  pattern. Adds `encryption.allow_unmarked_no_aad_fallback` config flag
+  (default false) for controlled no-AAD recovery. `s3eg-migrate` retained as
+  a deprecation shim. See `docs/plans/V1.0-CLI-2-plan.md`.
 
 ### Removed
 
-- **Built-in compression feature (V1.0-MAINT-2)**: The `compression` config
-  stanza, `CompressionEngine`, compression metadata constants, and the
-  V1.0-SEC-M05 decompression-bomb guard are removed. All `NewEngine*`
-  constructors and `NewEngineWithOpts` no longer accept a `compressionEngine`
-  parameter. See `docs/MIGRATION.md` for upgrading objects stored with
-  compression.
+- **V1.0-CLI-1 — Developer CLI (rejected)**: The proposed `presign`, `put`,
+  `get`, `head` CLI commands are fully covered by existing S3-compatible tools
+  (`awscli`, `s5cmd`, `mc`). No gateway-specific wrapper binary is needed.
+  Superseded by `docs/S3_CLI_TOOLS.md` and V1.0-CLI-2.
+
+### Fixed
+
+- **KMS-1 LRU ordering and close safety**: `CachingKeyManager` LRU upgraded
+  from slice-based FIFO to `container/list`-based true LRU with hit-time
+  reordering. Added `sync.Once` guard on `close(stopCleanup)` for double-close
+  safety. Added `closed bool` flag to `CircuitBreakerKeyManager` to prevent
+  Open→Half-Open recovery after `Close()`.
+
+- **Auth: remove `AWSSecretAccessKey` extraction from URL query parameters**:
+  SigV2 secret-key extraction from `?AWSAccessKeyId=...` query parameters
+  (Method 1) is no longer supported. Only presigned-URL signatures (Method 2)
+  and Authorization headers (Method 3) are recognised.
+
+- **MPU part and manifest encryption metrics**: `gateway_encrypted_object_bytes`
+  and `gateway_decrypted_object_bytes` are now correctly incremented for
+  multipart-upload part uploads and manifest creations.
+
+- **`ErrNotImplemented` tightened for backend shims**: GCS and Azure shims use
+  a typed sentinel error (`errors.New`), allowing callers to detect unsupported
+  operations via `errors.Is`.
+
+- **Rclone compatibility**: bumped `--s3-copy-cutoff` from 0 to 1 for rclone
+  1.68 minimum compatibility.
+
+- **KDF legacy read nil-pointer**: fixed nil-pointer dereference in
+  legacy-KDF-iteration fallback path when KDF params metadata is absent.
+
+### CI & Dependencies
+
+- Go version bumped to 1.26.4; CI images updated.
+- Updated `github.com/aws/aws-sdk-go-v2` to v1.42.0, `aws-sdk-go-v2/service/s3`
+  to v1.103.3, `aws-sdk-go-v2/config` to v1.32.24,
+  `aws-sdk-go-v2/credentials` to v1.19.23.
+- Updated `github.com/aws/smithy-go` to v1.27.2.
+- Updated `golang.org/x/crypto` to v0.53.0.
+- Updated `github.com/cenkalti/backoff` from v4 to v5 (v5.0.3).
+- Updated `github.com/ovh/kmip-go` to v0.9.1.
+- Updated `github.com/moby/moby/api` to v1.54.2 (for Azurite Testcontainers).
+- Updated `docker/setup-qemu-action` to v4, `docker/setup-buildx-action` to v4,
+  `docker/login-action` to v4, `docker/build-push-action` to v7.
+- Updated `sigstore/cosign-installer` to v4.
+- Updated `aquasecurity/trivy-action` to v0.36.0.
 
 ## [0.9.0] — 2026-05-28
 
