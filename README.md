@@ -319,11 +319,6 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `config.compression.enabled` | Enable transparent compression before encryption | `"false"` |
-| `config.compression.minSize` | Minimum object size to compress (bytes) | `"1024"` |
-| `config.compression.contentTypes` | Comma-separated content types to compress | `"text/plain,application/json,application/xml"` |
-| `config.compression.algorithm` | Compression algorithm | `"gzip"` |
-| `config.compression.level` | Compression level (1–9) | `"6"` |
 
 #### Server Configuration
 
@@ -427,7 +422,7 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
-| `image.tag` | Container image tag | `"0.9.0"` |
+| `image.tag` | Container image tag | `"0.10.0-rc1"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override the chart name portion of resource names | `""` |
@@ -793,7 +788,7 @@ policies:
 
 Each entry maps 1:1 to `PolicyConfig` (`internal/config/policy.go`). All
 fields are supported: `encrypt_multipart_uploads`, `require_encryption`,
-`disallow_lock_bypass`, and per-bucket `encryption` / `compression` /
+`disallow_lock_bypass`, and per-bucket `encryption` /
 `rate_limit` overrides.
 
 #### Production (external Valkey, TLS)
@@ -1098,7 +1093,7 @@ helm install gw-blue . \
 
 # Green side (new version):
 helm install gw-green . \
-  --set image.tag=v0.9.0 \
+  --set image.tag=v0.10.0-rc1 \
   --values examples/values-green.yaml \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
 
@@ -1184,7 +1179,7 @@ helm uninstall my-gateway
 
 5. **TLS**: Enable TLS on the gateway listener (`config.tls.enabled`) and use cert-manager for automatic certificate rotation.
 
-6. **FIPS**: Use `image.tag: 0.9.0-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
+6. **FIPS**: Use `image.tag: 0.10.0-rc1-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
 
 ## Troubleshooting
 
