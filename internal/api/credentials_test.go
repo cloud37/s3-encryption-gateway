@@ -3,36 +3,21 @@ package api
 import (
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 )
 
-func TestExtractCredentials_QueryParameters(t *testing.T) {
+func TestExtractCredentials_PresignedURL(t *testing.T) {
 	tests := []struct {
-		name                string
-		queryParams         map[string]string
-		wantAccessKey       string
-		wantSecretKey       string
-		wantErr             bool
-		wantFromQueryParam  bool
+		name          string
+		queryParams   map[string]string
+		wantAccessKey string
+		wantErr       bool
 	}{
 		{
-			name:                "valid query parameters",
-			queryParams:         map[string]string{"AWSAccessKeyId": "AKIAIOSFODNN7EXAMPLE", "AWSSecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
-			wantAccessKey:       "AKIAIOSFODNN7EXAMPLE",
-			wantSecretKey:       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-			wantErr:             false,
-			wantFromQueryParam:  true,
-		},
-		{
-			name:        "missing access key",
-			queryParams: map[string]string{"AWSSecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
-			wantErr:     true,
-		},
-		{
-			name:        "missing secret key",
-			queryParams: map[string]string{"AWSAccessKeyId": "AKIAIOSFODNN7EXAMPLE"},
-			wantErr:     true,
+			name:          "valid presigned URL",
+			queryParams:   map[string]string{"X-Amz-Credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"},
+			wantAccessKey: "AKIAIOSFODNN7EXAMPLE",
+			wantErr:       false,
 		},
 		{
 			name:        "empty query parameters",
@@ -62,12 +47,6 @@ func TestExtractCredentials_QueryParameters(t *testing.T) {
 				if creds.AccessKey != tt.wantAccessKey {
 					t.Errorf("ExtractCredentials() AccessKey = %v, want %v", creds.AccessKey, tt.wantAccessKey)
 				}
-				if creds.SecretKey != tt.wantSecretKey {
-					t.Errorf("ExtractCredentials() SecretKey = %v, want %v", creds.SecretKey, tt.wantSecretKey)
-				}
-				if creds.FromQueryParam != tt.wantFromQueryParam {
-					t.Errorf("ExtractCredentials() FromQueryParam = %v, want %v", creds.FromQueryParam, tt.wantFromQueryParam)
-				}
 			}
 		})
 	}
@@ -75,28 +54,22 @@ func TestExtractCredentials_QueryParameters(t *testing.T) {
 
 func TestExtractCredentials_AuthorizationHeader(t *testing.T) {
 	tests := []struct {
-		name                string
-		authHeader          string
-		wantAccessKey       string
-		wantSecretKey       string
-		wantErr             bool
-		wantFromQueryParam  bool
+		name          string
+		authHeader    string
+		wantAccessKey string
+		wantErr       bool
 	}{
 		{
-			name:                "AWS Signature V4",
-			authHeader:          "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-date, Signature=...",
-			wantAccessKey:       "AKIAIOSFODNN7EXAMPLE",
-			wantSecretKey:       "", // Only access key extracted from header
-			wantErr:             false,
-			wantFromQueryParam:  false,
+			name:          "AWS Signature V4",
+			authHeader:    "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-date, Signature=...",
+			wantAccessKey: "AKIAIOSFODNN7EXAMPLE",
+			wantErr:       false,
 		},
 		{
-			name:                "Legacy AWS signature",
-			authHeader:          "AWS AKIAIOSFODNN7EXAMPLE:signature",
-			wantAccessKey:       "AKIAIOSFODNN7EXAMPLE",
-			wantSecretKey:       "",
-			wantErr:             false,
-			wantFromQueryParam:  false,
+			name:          "Legacy AWS signature",
+			authHeader:    "AWS AKIAIOSFODNN7EXAMPLE:signature",
+			wantAccessKey: "AKIAIOSFODNN7EXAMPLE",
+			wantErr:       false,
 		},
 		{
 			name:       "invalid authorization header",
@@ -113,7 +86,7 @@ func TestExtractCredentials_AuthorizationHeader(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := &http.Request{
-				URL:  &url.URL{},
+				URL:    &url.URL{},
 				Header: make(http.Header),
 			}
 			if tt.authHeader != "" {
@@ -133,12 +106,6 @@ func TestExtractCredentials_AuthorizationHeader(t *testing.T) {
 				if creds.AccessKey != tt.wantAccessKey {
 					t.Errorf("ExtractCredentials() AccessKey = %v, want %v", creds.AccessKey, tt.wantAccessKey)
 				}
-				if creds.SecretKey != tt.wantSecretKey {
-					t.Errorf("ExtractCredentials() SecretKey = %v, want %v", creds.SecretKey, tt.wantSecretKey)
-				}
-				if creds.FromQueryParam != tt.wantFromQueryParam {
-					t.Errorf("ExtractCredentials() FromQueryParam = %v, want %v", creds.FromQueryParam, tt.wantFromQueryParam)
-				}
 			}
 		})
 	}
@@ -146,15 +113,24 @@ func TestExtractCredentials_AuthorizationHeader(t *testing.T) {
 
 func TestHasCredentials(t *testing.T) {
 	tests := []struct {
-		name    string
-		req     *http.Request
-		want    bool
+		name string
+		req  *http.Request
+		want bool
 	}{
 		{
-			name: "has query parameters",
+			name: "has AWSAccessKeyId query param",
 			req: &http.Request{
 				URL: &url.URL{
-					RawQuery: "AWSAccessKeyId=AKIA&AWSSecretAccessKey=secret",
+					RawQuery: "AWSAccessKeyId=AKIA",
+				},
+			},
+			want: true,
+		},
+		{
+			name: "has presigned URL",
+			req: &http.Request{
+				URL: &url.URL{
+					RawQuery: "X-Amz-Credential=AKIA/20130524/us-east-1/s3/aws4_request",
 				},
 			},
 			want: true,
@@ -172,7 +148,7 @@ func TestHasCredentials(t *testing.T) {
 		{
 			name: "no credentials",
 			req: &http.Request{
-				URL: &url.URL{},
+				URL:    &url.URL{},
 				Header: make(http.Header),
 			},
 			want: false,
@@ -192,8 +168,18 @@ func TestHasCredentials(t *testing.T) {
 func buildQueryString(params map[string]string) string {
 	var parts []string
 	for k, v := range params {
-		parts = append(parts, k+"="+url.QueryEscape(v))
+		parts = append(parts, k+"="+v)
 	}
-	return strings.Join(parts, "&")
+	return buildRawQuery(parts)
 }
 
+func buildRawQuery(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	result := parts[0]
+	for i := 1; i < len(parts); i++ {
+		result += "&" + parts[i]
+	}
+	return result
+}

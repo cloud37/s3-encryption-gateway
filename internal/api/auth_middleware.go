@@ -124,15 +124,6 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 					writeS3ClientError(w, r, ErrSignatureMismatch, r.Method)
 					return
 				}
-				// Warn when credentials were submitted in the query string
-				// (legacy SigV2 query-param style). The secret key travelled
-				// in the URL and may have been logged by intermediaries
-				// (proxies, CDNs, browser history).
-				if creds.FromQueryParam {
-					logger.WithField("access_key", creds.AccessKey).Warn(
-						"SigV2 request with credentials in query string; " +
-							"secret key was exposed to intermediaries")
-				}
 				sigErr = ValidateSignatureV2(r, secretKey, clockSkew)
 			} else {
 				// Credentials were extracted but no recognizable signature format
