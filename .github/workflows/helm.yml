@@ -163,7 +163,7 @@ jobs:
       - name: Build and push multi-arch image
         id: build_image
         if: steps.version_check.outputs.already_released == 'false'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -179,7 +179,7 @@ jobs:
       - name: Build and push FIPS image (linux/amd64 only)
         id: build_fips_image
         if: steps.version_check.outputs.already_released == 'false'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.fips
