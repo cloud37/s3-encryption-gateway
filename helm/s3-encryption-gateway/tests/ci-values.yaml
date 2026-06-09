@@ -33,9 +33,7 @@ config:
       value: "AES256-GCM"
     supportedAlgorithms:
       value: "AES256-GCM"
-  compression:
-    enabled:
-      value: "false"
+
   server:
     readTimeout:
       value: "0s"

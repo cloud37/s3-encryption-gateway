@@ -1,6 +1,0 @@
-# bad-compression-algorithm.yaml — compression.algorithm.value must be gzip, zstd, or br.
-# Expected error substring: "Must be one of"
-config:
-  compression:
-    algorithm:
-      value: "lz4"
