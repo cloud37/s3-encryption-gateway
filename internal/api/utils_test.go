@@ -423,4 +423,100 @@ func TestHandlePassthrough_BackendConnectionRefused(t *testing.T) {
 	}
 }
 
+// TestHandlePassthrough_StripsClientAuthAndReSigns verifies that
+// handlePassthrough strips the client's Authorization header and re-signs the
+// request with backend credentials before forwarding to the backend.
+// Regression test for the passthrough path breaking when the client sends an
+// Authorization header (which is always the case since V1.0-AUTH-1).
+func TestHandlePassthrough_StripsClientAuthAndReSigns(t *testing.T) {
+	backendAccessKey := "backend-access-key"
+	backendSecretKey := "backend-secret-key"
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authz := r.Header.Get("Authorization")
+		if authz == "" {
+			t.Error("backend received no Authorization header; expected gateway-signed request")
+		}
+		if !strings.Contains(authz, "Credential="+backendAccessKey) {
+			t.Errorf("backend Authorization missing expected backend credential %q, got %q", backendAccessKey, authz)
+		}
+		if strings.Contains(authz, "client-access-key") {
+			t.Error("backend Authorization still contains client access key; client auth was not stripped")
+		}
+		if r.Header.Get("X-Amz-Date") == "" {
+			t.Error("backend missing X-Amz-Date header; request was not re-signed")
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	h := &Handler{
+		config: &config.Config{
+			Backend: config.BackendConfig{
+				Endpoint:  backend.URL,
+				AccessKey: backendAccessKey,
+				SecretKey: backendSecretKey,
+				Region:    "us-east-1",
+				UseSSL:    false,
+			},
+		},
+		logger:  logger,
+		metrics: getTestMetrics(),
+	}
+
+	req := httptest.NewRequest("GET", "/test-bucket?uploads", nil)
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=client-access-key/20260610/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc123")
+	req.Header.Set("X-Amz-Date", "20260610T000000Z")
+	req.Header.Set("X-Amz-Content-Sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, req, "ListMultipartUploads", "test-bucket", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandlePassthrough_NegativeContentLength_NoPanic verifies that a backend
+// response with ContentLength == -1 (chunked encoding, no Content-Length
+// header) does not trigger a Prometheus counter panic.
+func TestHandlePassthrough_NegativeContentLength_NoPanic(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ListMultipartUploadsResult/>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.PanicLevel)
+	h := &Handler{
+		config: &config.Config{
+			Backend: config.BackendConfig{
+				Endpoint:  backend.URL,
+				AccessKey: "ak",
+				SecretKey: "sk",
+				Region:    "us-east-1",
+				UseSSL:    false,
+			},
+		},
+		logger:  logger,
+		metrics: getTestMetrics(),
+	}
+
+	req := httptest.NewRequest("GET", "/test-bucket?uploads", nil)
+	w := httptest.NewRecorder()
+
+	// This must not panic even though httptest.ResponseRecorder reports
+	// ContentLength -1 for chunked responses without an explicit header.
+	h.handlePassthrough(w, req, "ListMultipartUploads", "test-bucket", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 

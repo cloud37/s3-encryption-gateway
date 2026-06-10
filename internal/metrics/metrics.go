@@ -715,7 +715,9 @@ func (m *Metrics) RecordHTTPRequest(ctx context.Context, method, path string, st
 	}
 
 	// No exemplars for byte counters usually
-	m.httpRequestBytes.WithLabelValues(method, label).Add(float64(bytes))
+	if bytes > 0 {
+		m.httpRequestBytes.WithLabelValues(method, label).Add(float64(bytes))
+	}
 }
 
 // sanitizePathLabel reduces high-cardinality paths to stable labels.

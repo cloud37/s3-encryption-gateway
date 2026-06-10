@@ -176,11 +176,49 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 	proxyReq.Header = r.Header.Clone()
 	proxyReq.Host = u.Host
 	proxyReq.Header.Set("Host", u.Host)
+	// Strip client authentication artifacts so the gateway can re-sign with its
+	// own backend credentials. Forwarding the client's Authorization header (or
+	// presigned query parameters) to the backend is never correct: the client's
+	// signature is bound to the original Host header and will fail against the
+	// backend. V1.0-AUTH-1 removed useClientCredentials; the gateway always
+	// authenticates to the backend with configured credentials.
+	proxyReq.Header.Del("Authorization")
+	proxyReq.Header.Del("X-Amz-Content-Sha256")
+	proxyReq.Header.Del("X-Amz-Date")
+	proxyReq.Header.Del("X-Amz-Security-Token")
+
+	if proxyReq.URL != nil {
+		q := proxyReq.URL.Query()
+		presignedParams := []string{
+			"X-Amz-Signature",
+			"X-Amz-Credential",
+			"X-Amz-Date",
+			"X-Amz-Expires",
+			"X-Amz-SignedHeaders",
+			"X-Amz-Algorithm",
+			"X-Amz-Security-Token",
+		}
+		hadPresigned := false
+		for _, p := range presignedParams {
+			if q.Has(p) {
+				hadPresigned = true
+				q.Del(p)
+			}
+		}
+		// Only re-encode when presigned params were actually removed.
+		// Unconditional re-encoding changes the raw format (e.g.
+		// "tagging" becomes "tagging=") which breaks some S3 backends'
+		// query string expectations for value-less parameters.
+		if hadPresigned {
+			proxyReq.URL.RawQuery = q.Encode()
+		}
+	}
+
 	if len(bodyBytes) > 0 {
 		proxyReq.ContentLength = int64(len(bodyBytes))
 	}
 
-	if proxyReq.Header.Get("Authorization") == "" && h.config.Backend.AccessKey != "" {
+	if h.config.Backend.AccessKey != "" {
 		bodyHash := sha256.Sum256(bodyBytes)
 		payloadHash := hex.EncodeToString(bodyHash[:])
 
@@ -251,7 +289,14 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 	defer resp.Body.Close()
 
 	copyProxyResponse(w, resp)
-	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), resp.ContentLength)
+	// resp.ContentLength is -1 when the backend uses chunked transfer
+	// encoding (no Content-Length header). Prometheus counters panic on
+	// negative Add, so clamp to 0.
+	bytesOut := resp.ContentLength
+	if bytesOut < 0 {
+		bytesOut = 0
+	}
+	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), bytesOut)
 	if h.auditLogger != nil {
 		h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), true, nil, time.Since(start))
 	}
