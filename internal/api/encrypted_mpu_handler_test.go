@@ -124,7 +124,31 @@ func (m *mpuMockS3Client) DeleteObject(ctx context.Context, bucket, key string, 
 }
 
 func (m *mpuMockS3Client) ListObjects(ctx context.Context, bucket, prefix string, opts s3.ListOptions) (s3.ListResult, error) {
-	return s3.ListResult{}, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var objects []s3.ObjectInfo
+	maxKeys := int32(1000)
+	if opts.MaxKeys > 0 {
+		maxKeys = opts.MaxKeys
+	}
+	for k, data := range m.objects {
+		bk := bucket + "/"
+		if !strings.HasPrefix(k, bk) {
+			continue
+		}
+		key := k[len(bk):]
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		objects = append(objects, s3.ObjectInfo{
+			Key:  key,
+			Size: int64(len(data)), // raw stored size (may be ciphertext)
+		})
+		if int32(len(objects)) >= maxKeys {
+			break
+		}
+	}
+	return s3.ListResult{Objects: objects}, nil
 }
 
 func (m *mpuMockS3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
@@ -147,6 +171,18 @@ func (m *mpuMockS3Client) UploadPart(ctx context.Context, bucket, key, uploadID 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.parts[fmt.Sprintf("%s|%s|%s|%d", bucket, key, uploadID, partNumber)] = data
+	// Simulate Ceph/S3 multipart upload: the in-progress data object is visible
+	// via ListObjects with the accumulated (ciphertext) size of all uploaded parts.
+	// This mirrors what statList() in Docker Distribution's S3 driver observes.
+	var total []byte
+	for pn := int32(1); ; pn++ {
+		pd, ok := m.parts[fmt.Sprintf("%s|%s|%s|%d", bucket, key, uploadID, pn)]
+		if !ok {
+			break
+		}
+		total = append(total, pd...)
+	}
+	m.objects[bucket+"/"+key] = total
 	return fmt.Sprintf("\"%032x\"", partNumber), nil
 }
 
@@ -178,7 +214,24 @@ func (m *mpuMockS3Client) AbortMultipartUpload(ctx context.Context, bucket, key,
 }
 
 func (m *mpuMockS3Client) ListParts(ctx context.Context, bucket, key, uploadID string) ([]s3.PartInfo, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var parts []s3.PartInfo
+	prefix := fmt.Sprintf("%s|%s|%s|", bucket, key, uploadID)
+	for k, data := range m.parts {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		var pn int32
+		fmt.Sscanf(k[len(prefix):], "%d", &pn)
+		parts = append(parts, s3.PartInfo{
+			PartNumber:   pn,
+			ETag:         fmt.Sprintf("\"%032x\"", pn),
+			Size:         int64(len(data)), // Ceph reports encrypted size
+			LastModified: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	return parts, nil
 }
 
 func (m *mpuMockS3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *s3.ObjectLockInput) (string, map[string]string, error) {
@@ -1404,5 +1457,478 @@ encrypt_multipart_uploads: true
 	want := append(append([]byte(nil), part1...), part2...)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("plaintext mismatch: want %d bytes, got %d bytes", len(want), len(got))
+	}
+}
+
+
+// TestMPU_ListParts_ReturnsPlaintextSizes verifies that when an encrypted MPU
+// upload has parts, the ListParts response returns the *plaintext* sizes from
+// Valkey rather than the encrypted sizes reported by the backend. This is
+// required for S3 clients like Docker Distribution that track offsets based on
+// the sizes returned by ListParts and compare them against their own plaintext
+// byte counters.
+func TestMPU_ListParts_ReturnsPlaintextSizes(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "lp-plain-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "lp-plain-bucket", "obj.bin"
+	plainData := bytes.Repeat([]byte("Z"), 1024*1024+7) // 1 MiB + 7 bytes
+
+	// Create
+	req := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Create: %d %s", w.Code, w.Body.String())
+	}
+	uploadID := extractUploadID(t, w.Body.String())
+
+	// UploadPart — gateway encrypts the body; mock stores ciphertext.
+	req = httptest.NewRequest("PUT",
+		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID),
+		bytes.NewReader(plainData))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(plainData)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UploadPart: %d %s", w.Code, w.Body.String())
+	}
+
+	// Verify the mock stored *encrypted* data (larger than plaintext).
+	encSize := int64(len(mockClient.parts[fmt.Sprintf("%s|%s|%s|1", bucket, key, uploadID)]))
+	if encSize <= int64(len(plainData)) {
+		t.Fatalf("expected encrypted size > plaintext size, got enc=%d plain=%d", encSize, len(plainData))
+	}
+
+	// ListParts — must report plaintext size, NOT encrypted size.
+	req = httptest.NewRequest("GET",
+		fmt.Sprintf("/%s/%s?uploadId=%s", bucket, key, uploadID), nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListParts: %d %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	// Extract <Size> value for Part 1.
+	pi := strings.Index(body, "<Size>")
+	if pi == -1 {
+		t.Fatalf("no <Size> element in ListParts response: %s", body)
+	}
+	pei := strings.Index(body[pi:], "</Size>")
+	if pei == -1 {
+		t.Fatalf("no closing </Size> in ListParts response: %s", body)
+	}
+	sizeStr := body[pi+len("<Size>") : pi+pei]
+	gotSize, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid size %q in ListParts: %v", sizeStr, err)
+	}
+
+	if gotSize != int64(len(plainData)) {
+		t.Errorf("ListParts returned size %d, want plaintext size %d (encrypted was %d)",
+			gotSize, len(plainData), encSize)
+	}
+}
+
+// TestMPU_HeadObject_ReturnsPlaintextSize verifies that HeadObject returns
+// the plaintext Content-Length (TotalPlainSize from the .mpu-manifest companion
+// object) for MPU-encrypted objects — not the ciphertext size stored in Ceph/S3.
+//
+// This regression test covers the Harbor "blob invalid length" failure where
+// Docker Distribution's S3 driver calls StatObject (HeadObject) after
+// CompleteMultipartUpload to verify the uploaded blob size matches the
+// expected plaintext byte count.
+func TestMPU_HeadObject_ReturnsPlaintextSize(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "head-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "head-bucket", "blob.bin"
+
+	// Two parts: 1 MiB + 512 KiB.
+	part1 := bytes.Repeat([]byte("A"), 1*1024*1024)
+	part2 := bytes.Repeat([]byte("B"), 512*1024)
+	totalPlainSize := int64(len(part1) + len(part2))
+
+	// ── Create ───────────────────────────────────────────────────────────────
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("CreateMultipartUpload: %d %s", w.Code, w.Body.String())
+	}
+	uploadID := extractUploadID(t, w.Body.String())
+
+	// ── Upload parts ─────────────────────────────────────────────────────────
+	var etags []string
+	for i, part := range [][]byte{part1, part2} {
+		req := httptest.NewRequest("PUT",
+			fmt.Sprintf("/%s/%s?partNumber=%d&uploadId=%s", bucket, key, i+1, uploadID),
+			bytes.NewReader(part))
+		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(part)))
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("UploadPart %d: %d %s", i+1, w.Code, w.Body.String())
+		}
+		etags = append(etags, w.Header().Get("ETag"))
+	}
+
+	// ── Complete ─────────────────────────────────────────────────────────────
+	var partsXML strings.Builder
+	partsXML.WriteString(`<?xml version="1.0"?><CompleteMultipartUpload>`)
+	for i, etag := range etags {
+		partsXML.WriteString(fmt.Sprintf(`<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag))
+	}
+	partsXML.WriteString(`</CompleteMultipartUpload>`)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(partsXML.String())))
+	if w.Code != http.StatusOK {
+		t.Fatalf("CompleteMultipartUpload: %d %s", w.Code, w.Body.String())
+	}
+
+	// ── HeadObject — must return plaintext size ───────────────────────────────
+	// This simulates what Docker Distribution / Harbor does after
+	// CompleteMultipartUpload to verify the blob size.
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("HEAD", "/"+bucket+"/"+key, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("HeadObject: %d %s", w.Code, w.Body.String())
+	}
+
+	cl := w.Header().Get("Content-Length")
+	if cl == "" {
+		t.Fatal("HeadObject: missing Content-Length header")
+	}
+	gotSize, err := strconv.ParseInt(cl, 10, 64)
+	if err != nil {
+		t.Fatalf("HeadObject: invalid Content-Length %q: %v", cl, err)
+	}
+	if gotSize != totalPlainSize {
+		t.Errorf("HeadObject Content-Length = %d, want plaintext size %d (ciphertext would be larger)",
+			gotSize, totalPlainSize)
+	}
+}
+
+// TestMPU_ListObjects_InProgressReturnsPlaintextSize covers the Docker
+// Distribution statList() path: a GET /{bucket}?max-keys=1&prefix=...data
+// is issued while a multipart upload is in progress. Ceph reports the
+// accumulated ciphertext size; the gateway must substitute the sum of
+// plaintext part sizes from Valkey so clients track the correct offset.
+//
+// Without this fix, Docker Distribution's blobWriter.Size() returns an
+// inflated ciphertext offset, causing Harbor to reject the PUT finalise
+// request with "blob invalid length".
+func TestMPU_ListObjects_InProgressReturnsPlaintextSize(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "lst-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "lst-bucket", "docker/registry/v2/repos/lib/alpine/_uploads/abc123/data"
+	plainData := bytes.Repeat([]byte("Z"), 2*1024*1024) // 2 MiB plaintext
+
+	// ── Create ────────────────────────────────────────────────────────────────
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("CreateMultipartUpload: %d %s", w.Code, w.Body.String())
+	}
+	uploadID := extractUploadID(t, w.Body.String())
+
+	// ── Upload one part ───────────────────────────────────────────────────────
+	req := httptest.NewRequest("PUT",
+		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID),
+		bytes.NewReader(plainData))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(plainData)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UploadPart: %d %s", w.Code, w.Body.String())
+	}
+
+	// ── ListObjects (the statList() call) ────────────────────────────────────
+	// The mock now stores the concatenated ciphertext as the object body for
+	// ListObjects to return. Our handler must substitute the plaintext size.
+	listURL := fmt.Sprintf("/%s?max-keys=1&prefix=%s", bucket, key)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", listURL, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListObjects: %d %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	// Extract <Size> from the XML response.
+	si := strings.Index(body, "<Size>")
+	if si == -1 {
+		t.Fatalf("no <Size> in ListObjects response: %s", body)
+	}
+	sei := strings.Index(body[si:], "</Size>")
+	if sei == -1 {
+		t.Fatalf("no closing </Size> in ListObjects response: %s", body)
+	}
+	sizeStr := body[si+len("<Size>") : si+sei]
+	gotSize, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid <Size> %q: %v", sizeStr, err)
+	}
+
+	if gotSize != int64(len(plainData)) {
+		t.Errorf("ListObjects in-progress MPU <Size> = %d, want plaintext %d (ciphertext is larger due to GCM overhead)",
+			gotSize, len(plainData))
+	}
+}
+
+// TestMPU_ListObjects_CompletedReturnsPlaintextSize covers the statList()
+// path AFTER CompleteMultipartUpload: Valkey state is deleted on Complete,
+// so the gateway must fall back to reading TotalPlainSize from the
+// .mpu-manifest companion object (written before CompleteMultipartUpload).
+//
+// This is the exact path triggered by Docker Distribution's validateBlob():
+//   Stat(_uploads/{uuid}/data) → statHead() fails → statList() →
+//   ListObjectsV2(max-keys=1,prefix=...data) → <Size> must be plaintext.
+func TestMPU_ListObjects_CompletedReturnsPlaintextSize(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "lstc-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "lstc-bucket", "docker/registry/v2/repos/lib/alpine/_uploads/def456/data"
+	part1 := bytes.Repeat([]byte("X"), 1*1024*1024) // 1 MiB
+	part2 := bytes.Repeat([]byte("Y"), 512*1024)    // 512 KiB
+	totalPlainSize := int64(len(part1) + len(part2))
+
+	// ── Create ────────────────────────────────────────────────────────────────
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("Create: %d %s", w.Code, w.Body.String())
+	}
+	uploadID := extractUploadID(t, w.Body.String())
+
+	// ── Upload parts ─────────────────────────────────────────────────────────
+	var etags []string
+	for i, part := range [][]byte{part1, part2} {
+		req := httptest.NewRequest("PUT",
+			fmt.Sprintf("/%s/%s?partNumber=%d&uploadId=%s", bucket, key, i+1, uploadID),
+			bytes.NewReader(part))
+		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(part)))
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("UploadPart %d: %d %s", i+1, w.Code, w.Body.String())
+		}
+		etags = append(etags, w.Header().Get("ETag"))
+	}
+
+	// ── Complete ─────────────────────────────────────────────────────────────
+	var partsXML strings.Builder
+	partsXML.WriteString(`<?xml version="1.0"?><CompleteMultipartUpload>`)
+	for i, etag := range etags {
+		partsXML.WriteString(fmt.Sprintf(`<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag))
+	}
+	partsXML.WriteString(`</CompleteMultipartUpload>`)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(partsXML.String())))
+	if w.Code != http.StatusOK {
+		t.Fatalf("Complete: %d %s", w.Code, w.Body.String())
+	}
+
+	// After Complete, Valkey state is deleted. The mock's ListObjects now
+	// returns the assembled (ciphertext) object size. The gateway must use
+	// the .mpu-manifest companion to return the correct plaintext size.
+
+	listURL := fmt.Sprintf("/%s?max-keys=1&prefix=%s", bucket, key)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", listURL, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListObjects: %d %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	si := strings.Index(body, "<Size>")
+	if si == -1 {
+		t.Fatalf("no <Size> in ListObjects response: %s", body)
+	}
+	sei := strings.Index(body[si:], "</Size>")
+	if sei == -1 {
+		t.Fatalf("no closing </Size>: %s", body)
+	}
+	sizeStr := body[si+len("<Size>") : si+sei]
+	gotSize, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid <Size> %q: %v", sizeStr, err)
+	}
+	if gotSize != totalPlainSize {
+		t.Errorf("ListObjects post-Complete <Size> = %d, want plaintext %d", gotSize, totalPlainSize)
+	}
+}
+
+// TestMPU_UploadPartCopy_FromMPUSource covers Harbor's moveBlob() path for
+// large blobs (>100 MiB): after the staging upload (_uploads/{uuid}/data)
+// is assembled via CompleteMultipartUpload, Harbor copies it to the final
+// content-addressed location (blobs/sha256/.../data) using UploadPartCopy.
+// The gateway must recognise the MPU-encrypted source (MetaMPUEncrypted=true),
+// classify it as SourceClassMPUEncrypted, decrypt it via the manifest, and
+// re-encrypt into the destination MPU upload — NOT reject it as "plaintext".
+func TestMPU_UploadPartCopy_FromMPUSource(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "mbl-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	srcBucket := "mbl-bucket"
+	srcKey := "docker/registry/v2/repositories/library/alpine/_uploads/abc-move/data"
+	dstBucket := "mbl-bucket"
+	dstKey := "docker/registry/v2/blobs/sha256/ab/abcdef1234/data"
+
+	// Plain content to encrypt and store as an MPU-encrypted object.
+	plainContent := bytes.Repeat([]byte("M"), 2*1024*1024) // 2 MiB
+
+	// ── Stage 1: upload the source as an encrypted MPU ───────────────────────
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+srcBucket+"/"+srcKey+"?uploads=", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("src Create: %d %s", w.Code, w.Body.String())
+	}
+	srcUploadID := extractUploadID(t, w.Body.String())
+
+	req := httptest.NewRequest("PUT",
+		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", srcBucket, srcKey, srcUploadID),
+		bytes.NewReader(plainContent))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(plainContent)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("src UploadPart: %d %s", w.Code, w.Body.String())
+	}
+	srcETag := w.Header().Get("ETag")
+
+	completeXML := fmt.Sprintf(`<?xml version="1.0"?><CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, srcETag)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+srcBucket+"/"+srcKey+"?uploadId="+srcUploadID, strings.NewReader(completeXML)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("src Complete: %d %s", w.Code, w.Body.String())
+	}
+
+	// ── Stage 2: start a destination MPU and copy from source ────────────────
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+dstBucket+"/"+dstKey+"?uploads=", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("dst Create: %d %s", w.Code, w.Body.String())
+	}
+	dstUploadID := extractUploadID(t, w.Body.String())
+
+	// UploadPartCopy: copy the MPU-encrypted source into destination part 1.
+	// x-amz-copy-source header must be /{bucket}/{key}.
+	copyReq := httptest.NewRequest("PUT",
+		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", dstBucket, dstKey, dstUploadID), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+srcBucket+"/"+srcKey)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, copyReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UploadPartCopy from MPU source: %d %s", w.Code, w.Body.String())
+	}
+
+	// ── Stage 3: complete and verify by downloading ───────────────────────────
+	copyETag := ""
+	if ei := strings.Index(w.Body.String(), "<ETag>"); ei != -1 {
+		if ee := strings.Index(w.Body.String()[ei:], "</ETag>"); ee != -1 {
+			copyETag = w.Body.String()[ei+len("<ETag>") : ei+ee]
+		}
+	}
+	if copyETag == "" {
+		t.Fatalf("no ETag in UploadPartCopy response: %s", w.Body.String())
+	}
+
+	completeXML = fmt.Sprintf(`<?xml version="1.0"?><CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, copyETag)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+dstBucket+"/"+dstKey+"?uploadId="+dstUploadID, strings.NewReader(completeXML)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("dst Complete: %d %s", w.Code, w.Body.String())
+	}
+
+	// Download from destination and verify content matches original plaintext.
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/"+dstBucket+"/"+dstKey, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("dst GET: %d %s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), plainContent) {
+		t.Errorf("content mismatch after UploadPartCopy from MPU source: got %d bytes, want %d",
+			w.Body.Len(), len(plainContent))
+	}
+}
+
+// TestMPU_CopyObject_FromMPUSource covers Harbor's moveBlob() path for
+// SMALL blobs (≤ MultipartCopyThresholdSize, typically 32 MiB): after the
+// staging upload (_uploads/{uuid}/data) is assembled, Harbor copies it to
+// the content-addressed location via CopyObject (single-operation copy),
+// NOT UploadPartCopy.
+//
+// The gateway's handleCopyObject must detect MetaMPUEncrypted=true on the
+// source, decrypt via decryptMPUObject, then re-encrypt into the destination.
+// Without this fix, the ciphertext bytes are forwarded as "plaintext" and
+// harbor-core receives garbled data ('^' as first byte).
+func TestMPU_CopyObject_FromMPUSource(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "cpo-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	srcBucket := "cpo-bucket"
+	srcKey := "docker/registry/v2/repositories/lib/alpine/_uploads/smblob/data"
+	dstBucket := "cpo-bucket"
+	dstKey := "docker/registry/v2/blobs/sha256/ab/abcdef9876/data"
+
+	// Small blob — 10 KiB, simulating an image config blob.
+	plainContent := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers"}}`)
+	// Pad to make the test realistic.
+	for len(plainContent) < 10*1024 {
+		plainContent = append(plainContent, plainContent...)
+	}
+	plainContent = plainContent[:10*1024]
+
+	// ── Upload source as encrypted MPU ────────────────────────────────────────
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+srcBucket+"/"+srcKey+"?uploads=", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("src Create: %d %s", w.Code, w.Body.String())
+	}
+	srcUploadID := extractUploadID(t, w.Body.String())
+
+	req := httptest.NewRequest("PUT",
+		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", srcBucket, srcKey, srcUploadID),
+		bytes.NewReader(plainContent))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(plainContent)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("src UploadPart: %d %s", w.Code, w.Body.String())
+	}
+	srcETag := w.Header().Get("ETag")
+
+	completeXML := fmt.Sprintf(`<?xml version="1.0"?><CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, srcETag)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+srcBucket+"/"+srcKey+"?uploadId="+srcUploadID, strings.NewReader(completeXML)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("src Complete: %d %s", w.Code, w.Body.String())
+	}
+
+	// ── CopyObject: simulate Harbor's small-blob moveBlob() ──────────────────
+	copyReq := httptest.NewRequest("PUT", "/"+dstBucket+"/"+dstKey, nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+srcBucket+"/"+srcKey)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, copyReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CopyObject from MPU source: %d %s", w.Code, w.Body.String())
+	}
+
+	// ── GET destination and verify plaintext content ──────────────────────────
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/"+dstBucket+"/"+dstKey, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("dst GET: %d %s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), plainContent) {
+		t.Errorf("CopyObject from MPU source: content mismatch: got %d bytes, want %d; first byte: 0x%02x",
+			w.Body.Len(), len(plainContent), w.Body.Bytes()[0])
 	}
 }

@@ -223,8 +223,21 @@ func TestHandleListParts_ValidRequest(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "ListPartsResult") {
-		t.Errorf("expected ListPartsResult in body, got: %s", w.Body.String())
+	body := w.Body.String()
+	if !strings.Contains(body, "ListPartsResult") {
+		t.Errorf("expected ListPartsResult in body, got: %s", body)
+	}
+	// Regression: IsTruncated must always be present (even when false).
+	// Docker Distribution's S3 driver dereferences IsTruncated without a nil
+	// check, so omitting it causes a nil-pointer panic on the client.
+	if !strings.Contains(body, "<IsTruncated>") {
+		t.Errorf("expected IsTruncated element in ListParts response, got: %s", body)
+	}
+	if !strings.Contains(body, "<MaxParts>") {
+		t.Errorf("expected MaxParts element in ListParts response, got: %s", body)
+	}
+	if !strings.Contains(body, "<PartNumberMarker>") {
+		t.Errorf("expected PartNumberMarker element in ListParts response, got: %s", body)
 	}
 }
 

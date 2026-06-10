@@ -30,6 +30,12 @@ const (
 	SourceClassPlaintext SourceClass = iota
 	SourceClassChunked
 	SourceClassLegacy
+	// SourceClassMPUEncrypted is an object that was assembled via the gateway's
+	// encrypted multipart upload path (MetaMPUEncrypted = "true"). Its bytes are
+	// a concatenation of independently AEAD-encrypted chunks whose DEK + manifest
+	// live in the companion .mpu-manifest object. It must be decrypted via
+	// decryptMPUObject before being re-encrypted into the destination upload.
+	SourceClassMPUEncrypted
 )
 
 // String returns the short metric-safe label for a SourceClass.
@@ -39,6 +45,8 @@ func (c SourceClass) String() string {
 		return "chunked"
 	case SourceClassLegacy:
 		return "legacy"
+	case SourceClassMPUEncrypted:
+		return "mpu_encrypted"
 	default:
 		return "plaintext"
 	}
@@ -319,6 +327,12 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		case SourceClassLegacy:
 			copyResult, bytesCopied, strategyErr = h.uploadPartCopyLegacy(ctx, s3Client, bucket, key, uploadID, int32(partNumber),
 				srcBucket, srcKey, srcVersionID, srcRange, sourceClass.Size, maxLegacyCap)
+
+		case SourceClassMPUEncrypted:
+			// Copy an MPU-encrypted source into a non-encrypted-MPU destination.
+			// Decrypt the source via its manifest and forward the plaintext part.
+			copyResult, bytesCopied, strategyErr = h.uploadPartCopyFromMPUSource(ctx, s3Client, bucket, key, uploadID, int32(partNumber),
+				srcBucket, srcKey, srcVersionID, srcRange, maxLegacyCap)
 		}
 	}
 
@@ -443,6 +457,14 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		sourceClass.IsEncrypted = true
 	} else if metadata[crypto.MetaEncrypted] == "true" {
 		sourceClass.Class = SourceClassLegacy
+		sourceClass.IsEncrypted = true
+	} else if metadata[crypto.MetaMPUEncrypted] == "true" {
+		// Object was assembled via the gateway's encrypted multipart upload
+		// path. Its ciphertext is a concatenation of AEAD-encrypted chunks;
+		// the plaintext DEK and manifest live in a companion .mpu-manifest
+		// object. Must not be treated as plaintext — doing so would read
+		// raw ciphertext into the destination and corrupt the data.
+		sourceClass.Class = SourceClassMPUEncrypted
 		sourceClass.IsEncrypted = true
 	}
 
@@ -790,6 +812,40 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypted chunked range exceeds maximum copy-part size (%d bytes)", maxChunkedCap)
 		}
 
+	case SourceClassMPUEncrypted:
+		// The source is an MPU-encrypted object. Decrypt it fully using the
+		// companion .mpu-manifest, then use the plaintext as the copy payload.
+		// This covers Harbor's moveBlob() path which copies the staging upload
+		// (_uploads/{uuid}/data) to the content-addressed blob location via
+		// UploadPartCopy.
+		srcMeta, err := s3Client.HeadObject(ctx, srcBucket, srcKey, srcVersionID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: head mpu source: %w", err)
+		}
+		r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
+		if err != nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get mpu source: %w", err)
+		}
+		defer r.Close()
+		decR, err := h.decryptMPUObject(ctx, srcBucket, srcKey, srcMeta, r, s3Client)
+		if err != nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypt mpu source: %w", err)
+		}
+		plaintextData, err = io.ReadAll(io.LimitReader(decR, maxLegacyCap+1))
+		if err != nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: read decrypted mpu source: %w", err)
+		}
+		if int64(len(plaintextData)) > maxLegacyCap {
+			return nil, 0, errLegacySourceTooLarge
+		}
+		if srcRange != nil {
+			start, end := srcRange.First, srcRange.Last
+			if end >= int64(len(plaintextData)) {
+				end = int64(len(plaintextData)) - 1
+			}
+			plaintextData = plaintextData[start : end+1]
+		}
+
 	case SourceClassLegacy:
 		srcEngine, err := h.getEncryptionEngine(srcBucket)
 		if err != nil {
@@ -880,4 +936,55 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		ETag:         etag,
 		LastModified: time.Now(),
 	}, int64(len(plaintextData)), nil
+}
+
+// uploadPartCopyFromMPUSource handles UploadPartCopy when the source is an
+// MPU-encrypted object (SourceClassMPUEncrypted) and the destination is NOT
+// an encrypted-MPU bucket. It decrypts the source via its companion manifest
+// and uploads the plaintext as a raw UploadPart to the destination.
+func (h *Handler) uploadPartCopyFromMPUSource(
+	ctx context.Context,
+	s3Client s3.Client,
+	dstBucket, dstKey, uploadID string,
+	partNumber int32,
+	srcBucket, srcKey string,
+	srcVersionID *string,
+	srcRange *s3.CopyPartRange,
+	maxCap int64,
+) (*s3.CopyPartResult, int64, error) {
+	srcMeta, err := s3Client.HeadObject(ctx, srcBucket, srcKey, srcVersionID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: head: %w", err)
+	}
+	r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: get: %w", err)
+	}
+	defer r.Close()
+
+	decR, err := h.decryptMPUObject(ctx, srcBucket, srcKey, srcMeta, r, s3Client)
+	if err != nil {
+		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: decrypt: %w", err)
+	}
+	plainData, err := io.ReadAll(io.LimitReader(decR, maxCap+1))
+	if err != nil {
+		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: read: %w", err)
+	}
+	if int64(len(plainData)) > maxCap {
+		return nil, 0, errLegacySourceTooLarge
+	}
+	if srcRange != nil {
+		start, end := srcRange.First, srcRange.Last
+		if end >= int64(len(plainData)) {
+			end = int64(len(plainData)) - 1
+		}
+		plainData = plainData[start : end+1]
+	}
+	bytesCopied := int64(len(plainData))
+	etag, err := s3Client.UploadPart(ctx, dstBucket, dstKey, uploadID, partNumber,
+		bytes.NewReader(plainData), &bytesCopied)
+	if err != nil {
+		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: upload: %w", err)
+	}
+	return &s3.CopyPartResult{ETag: etag}, bytesCopied, nil
 }

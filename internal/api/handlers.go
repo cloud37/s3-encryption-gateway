@@ -1848,11 +1848,30 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Restore original size if available
+	// Restore original size if available.
+	// Priority: single-PUT encryption metadata > MPU manifest > raw backend size.
 	if originalSize, ok := metadata["x-amz-meta-encryption-original-size"]; ok {
 		filteredMetadata["Content-Length"] = originalSize
 	} else if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok {
 		filteredMetadata["Content-Length"] = originalSize
+	} else if metadata[crypto.MetaMPUEncrypted] == "true" {
+		// MPU-encrypted object: the backend size is the sum of all encrypted
+		// parts (ciphertext). The plaintext total is stored in the companion
+		// .mpu-manifest object. Fetch it and substitute the correct size so
+		// clients (e.g. Docker Distribution / Harbor) can verify blob lengths.
+		manifestKey := metadata[crypto.MetaFallbackPointer]
+		if manifestKey == "" {
+			manifestKey = key + ".mpu-manifest"
+		}
+		if plainSize, manifestErr := h.readMPUManifestTotalPlainSize(ctx, bucket, manifestKey, s3Client); manifestErr == nil {
+			filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
+		} else {
+			h.logger.WithError(manifestErr).WithFields(logrus.Fields{
+				"bucket":       bucket,
+				"key":          key,
+				"manifestKey":  manifestKey,
+			}).Warn("HeadObject: failed to read MPU manifest for size translation; returning ciphertext size")
+		}
 	}
 
 	// Restore original ETag if available
@@ -2009,12 +2028,57 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NOTE: ListObjects returns backend (ciphertext) sizes and ETags.
-	// Per-object HEAD translation was removed because it caused an
-	// N-fold latency explosion (one HEAD per listed object).
-	// Accurate plaintext size and ETag are available via HeadObject
-	// and GetObject, which decrypt the metadata on a per-object basis.
-	// See docs/limitations.md (or README) for details.
+	// NOTE: ListObjects returns backend (ciphertext) sizes and ETags for
+	// completed single-PUT encrypted objects. Per-object HEAD translation is
+	// NOT done for the general case because it causes an N-fold latency
+	// explosion (one HEAD per listed object).
+	//
+	// However, Docker Distribution's S3 storage driver calls ListObjects with
+	// max-keys=1 (statList) to determine the byte size of a blob upload object
+	// — both while the upload is in progress AND after CompleteMultipartUpload
+	// (when statHead/HeadObject returns an AWS error). The returned <Size> is
+	// compared against the in-memory plaintext byte counter (w.size), so any
+	// ciphertext inflation causes "blob invalid length".
+	//
+	// We apply plaintext-size translation in two phases:
+	//   Phase 1 – In-progress uploads: Valkey state store holds per-part
+	//             PlainLen values; sum them up. This covers the PATCH path.
+	//   Phase 2 – Completed uploads: Valkey state is deleted on Complete.
+	//             Read TotalPlainSize from the companion .mpu-manifest object
+	//             (written before CompleteMultipartUpload and durable in S3).
+	//             This covers the PUT (validateBlob) path.
+	// Both phases are fail-soft: on any error the original backend size is kept.
+	if h.mpuStateStore != nil && len(listResult.Objects) > 0 {
+		// Phase 1: in-progress uploads via Valkey.
+		remaining := make(map[int]string) // index → key, for phase-2 fallback
+		if plainSizeByKey, lookupErr := h.listActiveMPUPlainSizes(ctx, bucket); lookupErr == nil {
+			for i := range listResult.Objects {
+				if ps, ok := plainSizeByKey[listResult.Objects[i].Key]; ok {
+					listResult.Objects[i].Size = ps
+				} else {
+					remaining[i] = listResult.Objects[i].Key
+				}
+			}
+		} else {
+			for i, obj := range listResult.Objects {
+				remaining[i] = obj.Key
+			}
+		}
+
+		// Phase 2: completed uploads via .mpu-manifest companion object.
+		// To avoid N+1 latency on large listings, only attempt manifest
+		// lookups when the list is small (max-keys ≤ 10) or when the query
+		// looks like Docker Distribution's statList() pattern (max-keys=1).
+		if len(remaining) > 0 && maxKeys <= 10 {
+			for idx, objKey := range remaining {
+				manifestKey := objKey + ".mpu-manifest"
+				if ps, manifestErr := h.readMPUManifestTotalPlainSize(ctx, bucket, manifestKey, s3Client); manifestErr == nil && ps > 0 {
+					listResult.Objects[idx].Size = ps
+				}
+				// Non-fatal: if manifest doesn't exist or errors, keep backend size.
+			}
+		}
+	}
 
 	// Compute NextMarker for S3 API v1 clients.  When the response is
 	// truncated, v1 clients need a key name to send as the next marker.
@@ -3740,6 +3804,88 @@ func (h *Handler) decryptMPUObject(ctx context.Context, bucket, key string, meta
 	return &mpuDecryptCloser{Reader: inner, dek: dek}, nil
 }
 
+// readMPUManifestTotalPlainSize fetches, decrypts, and parses the companion
+// .mpu-manifest object, returning the total plaintext size of the encrypted
+// MPU object. It is used by handleHeadObject to return correct Content-Length
+// values to clients that verify object sizes (e.g. Docker Distribution/Harbor).
+//
+// This is a read-only, fail-soft helper: errors are returned to the caller so
+// it can fall back to returning the ciphertext size with a warning log.
+func (h *Handler) readMPUManifestTotalPlainSize(ctx context.Context, bucket, manifestKey string, s3Client s3.Client) (int64, error) {
+	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: fetch %q: %w", manifestKey, err)
+	}
+	defer manifestReader.Close()
+
+	engine, err := h.getEncryptionEngine(bucket)
+	if err != nil {
+		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: get engine: %w", err)
+	}
+	plainReader, _, err := engine.Decrypt(ctx, manifestReader, manifestMeta)
+	if err != nil {
+		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: decrypt: %w", err)
+	}
+	manifestJSON, err := io.ReadAll(plainReader)
+	if err != nil {
+		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: read: %w", err)
+	}
+	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
+	if err != nil {
+		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: parse: %w", err)
+	}
+	return manifest.TotalPlainSize, nil
+}
+
+// listActiveMPUPlainSizes returns a map of S3 object key → total plaintext
+// bytes uploaded so far for all in-progress encrypted multipart uploads in
+// the given bucket. It is used by handleListObjects to substitute correct
+// plaintext sizes for in-progress MPU data objects when S3/Ceph would
+// otherwise report ciphertext (inflated) sizes.
+//
+// The returned map is empty when there are no active encrypted MPU uploads.
+// Errors are returned to the caller, which treats them as non-fatal.
+// listActiveMPUPlainSizes returns a map of S3 object key → total plaintext
+// bytes uploaded so far for all in-progress encrypted multipart uploads in
+// the given bucket. It is used by handleListObjects to substitute correct
+// plaintext sizes for in-progress MPU data objects when S3/Ceph would
+// otherwise report ciphertext (inflated) sizes.
+//
+// The returned map is empty when there are no active encrypted MPU uploads.
+// Errors are returned to the caller, which treats them as non-fatal.
+func (h *Handler) listActiveMPUPlainSizes(ctx context.Context, bucket string) (map[string]int64, error) {
+	if h.mpuStateStore == nil {
+		return nil, nil
+	}
+	// List() returns UploadState records without part details (parts are stored
+	// in separate hash fields). We call Get() for each matching state to
+	// reconstruct the full PartRecord list including PlainLen values.
+	states, err := h.mpuStateStore.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listActiveMPUPlainSizes: list: %w", err)
+	}
+	if len(states) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]int64, len(states))
+	for _, summary := range states {
+		if summary.Bucket != bucket {
+			continue
+		}
+		// Fetch full state to get per-part PlainLen values.
+		full, getErr := h.mpuStateStore.Get(ctx, summary.UploadID)
+		if getErr != nil || full == nil || len(full.Parts) == 0 {
+			continue
+		}
+		var total int64
+		for _, p := range full.Parts {
+			total += p.PlainLen
+		}
+		result[full.Key] = total
+	}
+	return result, nil
+}
+
 // mpuDecryptCloser wraps an io.Reader and zeros the DEK when the stream is
 // exhausted or explicitly closed.
 type mpuDecryptCloser struct {
@@ -3889,36 +4035,61 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate XML response
+	// For encrypted MPU uploads, Ceph stores encrypted part sizes but clients
+	// like Docker Distribution track plaintext offsets. We have the per-upload
+	// plaintext sizes in Valkey; substitute them so the client sees consistent
+	// sizes.
+	var plainLenByPart map[int32]int64
+	if h.mpuStateStore != nil {
+		if uploadState, err := h.mpuStateStore.Get(ctx, uploadID); err == nil && uploadState != nil && len(uploadState.Parts) > 0 {
+			plainLenByPart = make(map[int32]int64, len(uploadState.Parts))
+			for _, pr := range uploadState.Parts {
+				plainLenByPart[pr.PartNumber] = pr.PlainLen
+			}
+		}
+	}
+
+	// Generate XML response. The response must include IsTruncated (always,
+	// even when false). Some S3-compatible consumers (e.g. Docker Distribution's
+	// S3 driver) dereference IsTruncated without nil checks, so omitting it
+	// causes a nil-pointer panic on the client side.
+	type PartElement struct {
+		PartNumber   int32  `xml:"PartNumber"`
+		ETag         string `xml:"ETag"`
+		Size         int64  `xml:"Size"`
+		LastModified string `xml:"LastModified"`
+	}
+
 	type ListPartsResult struct {
-		XMLName  xml.Name `xml:"ListPartsResult"`
-		Bucket   string   `xml:"Bucket"`
-		Key      string   `xml:"Key"`
-		UploadId string   `xml:"UploadId"`
-		Parts    []struct {
-			PartNumber   int32  `xml:"PartNumber"`
-			ETag         string `xml:"ETag"`
-			Size         int64  `xml:"Size"`
-			LastModified string `xml:"LastModified"`
-		} `xml:"Part"`
+		XMLName                xml.Name      `xml:"ListPartsResult"`
+		Bucket                 string        `xml:"Bucket"`
+		Key                    string        `xml:"Key"`
+		UploadId               string        `xml:"UploadId"`
+		PartNumberMarker       int32         `xml:"PartNumberMarker"`
+		NextPartNumberMarker   int32         `xml:"NextPartNumberMarker,omitempty"`
+		MaxParts               int32         `xml:"MaxParts"`
+		IsTruncated            bool          `xml:"IsTruncated"`
+		Parts                  []PartElement `xml:"Part"`
 	}
 
 	result := ListPartsResult{
-		Bucket:   bucket,
-		Key:      key,
-		UploadId: uploadID,
-		Parts: make([]struct {
-			PartNumber   int32  `xml:"PartNumber"`
-			ETag         string `xml:"ETag"`
-			Size         int64  `xml:"Size"`
-			LastModified string `xml:"LastModified"`
-		}, len(parts)),
+		Bucket:           bucket,
+		Key:              key,
+		UploadId:         uploadID,
+		PartNumberMarker: 0,
+		MaxParts:         1000,
+		IsTruncated:      false,
+		Parts:            make([]PartElement, len(parts)),
 	}
 
 	for i, p := range parts {
 		result.Parts[i].PartNumber = p.PartNumber
 		result.Parts[i].ETag = p.ETag
-		result.Parts[i].Size = p.Size
+		if plainLen, ok := plainLenByPart[p.PartNumber]; ok && plainLen > 0 {
+			result.Parts[i].Size = plainLen
+		} else {
+			result.Parts[i].Size = p.Size
+		}
 		result.Parts[i].LastModified = p.LastModified
 	}
 
@@ -4022,21 +4193,45 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	}
 
 	// Decrypt source if encrypted.
-	// V0.6-PERF-1 Phase C: pass srcReader directly to Decrypt — the engine
-	// already handles buffering for legacy AEAD and streams for chunked.
-	// The intermediate decryptedData []byte allocation is eliminated here.
-	decryptedReader, _, err := srcEngine.Decrypt(r.Context(), srcReader, srcMetadata)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to decrypt source object for copy")
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to decrypt source object",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
+	// Decrypt source object. MPU-encrypted objects (MetaMPUEncrypted=true) carry
+	// their DEK and part manifest in a companion .mpu-manifest object and must be
+	// decrypted via decryptMPUObject. Standard single-PUT encrypted objects are
+	// handled by the engine's Decrypt method.
+	var decryptedReader io.Reader
+	if srcMetadata[crypto.MetaMPUEncrypted] == "true" {
+		decryptedReader, err = h.decryptMPUObject(ctx, srcBucket, srcKey, srcMetadata, srcReader, s3Client)
+		if err != nil {
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"srcBucket": srcBucket,
+				"srcKey":    srcKey,
+			}).Error("Failed to decrypt MPU source object for copy")
+			s3Err := &S3Error{
+				Code:       "InternalError",
+				Message:    "Failed to decrypt multipart-encrypted source object",
+				Resource:   r.URL.Path,
+				HTTPStatus: http.StatusInternalServerError,
+			}
+			s3Err.WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			return
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		return
+	} else {
+		// V0.6-PERF-1 Phase C: pass srcReader directly to Decrypt — the engine
+		// already handles buffering for legacy AEAD and streams for chunked.
+		// The intermediate decryptedData []byte allocation is eliminated here.
+		decryptedReader, _, err = srcEngine.Decrypt(r.Context(), srcReader, srcMetadata)
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to decrypt source object for copy")
+			s3Err := &S3Error{
+				Code:       "InternalError",
+				Message:    "Failed to decrypt source object",
+				Resource:   r.URL.Path,
+				HTTPStatus: http.StatusInternalServerError,
+			}
+			s3Err.WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			return
+		}
 	}
 
 	// Extract destination metadata from headers.
