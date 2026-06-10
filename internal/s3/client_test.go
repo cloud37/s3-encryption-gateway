@@ -3,6 +3,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -1516,4 +1518,129 @@ func TestNewBackendClient_UnknownType_ReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "unknown backend type") {
 		t.Errorf("expected 'unknown backend type' error, got: %v", err)
 	}
+}
+
+// TestComputeContentMD5_Seekable verifies MD5 is computed and stream rewound.
+func TestComputeContentMD5_Seekable(t *testing.T) {
+	data := []byte("hello world")
+	wantMD5 := base64.StdEncoding.EncodeToString(md5sum(data))
+
+	r := bytes.NewReader(data)
+	got, r2, err := computeContentMD5(r)
+	if err != nil {
+		t.Fatalf("computeContentMD5 error: %v", err)
+	}
+	if got != wantMD5 {
+		t.Errorf("md5 = %q, want %q", got, wantMD5)
+	}
+	// Verify stream was rewound.
+	pos, _ := r2.(io.Seeker).Seek(0, io.SeekCurrent)
+	if pos != 0 {
+		t.Errorf("stream not rewound, pos = %d", pos)
+	}
+}
+
+// TestComputeContentMD5_NonSeekable returns empty string without error.
+func TestComputeContentMD5_NonSeekable(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte("data"))
+		pw.Close()
+	}()
+	got, r2, err := computeContentMD5(pr)
+	if err != nil {
+		t.Fatalf("computeContentMD5 error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty md5 for non-seekable, got %q", got)
+	}
+	if r2 != pr {
+		t.Error("expected original reader returned")
+	}
+}
+
+// TestComputeContentMD5_Nil returns empty string.
+func TestComputeContentMD5_Nil(t *testing.T) {
+	got, r2, err := computeContentMD5(nil)
+	if err != nil {
+		t.Fatalf("computeContentMD5 error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty md5 for nil, got %q", got)
+	}
+	if r2 != nil {
+		t.Error("expected nil reader returned")
+	}
+}
+
+// TestS3Client_UploadPart_SetsContentMD5 verifies that UploadPart sets
+// Content-MD5 when the body is seekable (compatibility with older S3 backends).
+func TestS3Client_UploadPart_SetsContentMD5(t *testing.T) {
+	var gotContentMD5 string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			gotContentMD5 = r.Header.Get("Content-Md5")
+			w.Header().Set("ETag", `"part-etag"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	transport := &fakeS3Transport{handler: mux}
+	client := buildTestS3Client(t, transport)
+
+	data := []byte("part-body")
+	wantMD5 := base64.StdEncoding.EncodeToString(md5sum(data))
+	cl := int64(len(data))
+	_, err := client.UploadPart(context.Background(), "test-bucket", "test-key", "upload123", 1, bytes.NewReader(data), &cl)
+	if err != nil {
+		t.Fatalf("UploadPart() error: %v", err)
+	}
+	if gotContentMD5 == "" {
+		t.Error("Content-MD5 header was not sent to backend")
+	}
+	if gotContentMD5 != wantMD5 {
+		t.Errorf("Content-MD5 = %q, want %q", gotContentMD5, wantMD5)
+	}
+}
+
+// TestS3Client_PutObject_SetsContentMD5 verifies PutObject sets Content-MD5
+// when the body is seekable.
+func TestS3Client_PutObject_SetsContentMD5(t *testing.T) {
+	var gotContentMD5 string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			gotContentMD5 = r.Header.Get("Content-Md5")
+			w.Header().Set("ETag", `"obj-etag"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	transport := &fakeS3Transport{handler: mux}
+	client := buildTestS3Client(t, transport)
+
+	data := []byte("object-body")
+	wantMD5 := base64.StdEncoding.EncodeToString(md5sum(data))
+	cl := int64(len(data))
+	_, err := client.PutObject(context.Background(), "test-bucket", "test-key",
+		bytes.NewReader(data), nil, &cl, "", nil, "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("PutObject() error: %v", err)
+	}
+	if gotContentMD5 == "" {
+		t.Error("Content-MD5 header was not sent to backend")
+	}
+	if gotContentMD5 != wantMD5 {
+		t.Errorf("Content-MD5 = %q, want %q", gotContentMD5, wantMD5)
+	}
+}
+
+// md5sum is a test helper returning the raw MD5 digest of b.
+func md5sum(b []byte) []byte {
+	h := md5.New()
+	h.Write(b)
+	return h.Sum(nil)
 }

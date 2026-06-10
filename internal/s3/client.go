@@ -499,6 +499,22 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 		input.GrantWriteACP = aws.String(grantWriteACP)
 	}
 
+	// Older S3-compatible backends (Ceph, certain MinIO versions) still require
+	// the legacy Content-MD5 header on PutObject. AWS SDK v2 dropped automatic
+	// MD5 computation when it moved to x-amz-checksum-*. Compute it here when
+	// the body is seekable (small objects, cached MPU parts); skip for
+	// non-seekable streaming encrypted data.
+	md5Str, body, md5Err := computeContentMD5(reader)
+	if md5Err != nil {
+		span.SetStatus(codes.Error, md5Err.Error())
+		return "", fmt.Errorf("failed to compute Content-MD5 for %s/%s: %w", bucket, key, md5Err)
+	}
+	if md5Str != "" {
+		input.ContentMD5 = aws.String(md5Str)
+		input.Body = body
+		reader = body
+	}
+
 	// For non-seekable readers (e.g. streaming chunked encrypted data), the
 	// SigV4 ComputePayloadSHA256 middleware would fail because it reads the
 	// entire body to hash it then seeks back to the start.  Swap in the
@@ -823,6 +839,27 @@ func (c *s3Client) CreateMultipartUpload(ctx context.Context, bucket, key string
 	return *result.UploadId, nil
 }
 
+// computeContentMD5 reads a seekable stream, calculates the MD5 digest,
+// seeks back to the start, and returns the base64-encoded MD5 string.
+// If the reader is not seekable it returns empty string and the original reader.
+func computeContentMD5(r io.Reader) (string, io.Reader, error) {
+	if r == nil {
+		return "", nil, nil
+	}
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return "", r, nil
+	}
+	h := md5.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", nil, fmt.Errorf("failed to hash body for Content-MD5: %w", err)
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return "", nil, fmt.Errorf("failed to seek body after hashing: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)), r, nil
+}
+
 // UploadPart uploads a part of a multipart upload.
 func (c *s3Client) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, reader io.Reader, contentLength *int64) (string, error) {
 	input := &s3.UploadPartInput{
@@ -835,6 +872,20 @@ func (c *s3Client) UploadPart(ctx context.Context, bucket, key, uploadID string,
 
 	if contentLength != nil {
 		input.ContentLength = contentLength
+	}
+
+	// Older S3-compatible backends (Ceph, certain MinIO versions) require the
+	// legacy Content-MD5 header on UploadPart. AWS SDK v2 dropped automatic MD5
+	// computation when it moved to x-amz-checksum-*; supply it ourselves when
+	// the body is seekable (always true for callers that buffer via
+	// NewSeekableBody).
+	md5Str, body, err := computeContentMD5(reader)
+	if err != nil {
+		return "", err
+	}
+	if md5Str != "" {
+		input.ContentMD5 = aws.String(md5Str)
+		input.Body = body
 	}
 
 	result, err := c.client.UploadPart(ctx, input)
