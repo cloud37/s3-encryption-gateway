@@ -17,5 +17,8 @@ charts-repo-url: https://github.com/cloud37/s3-encryption-gateway/releases/downl
 release-name-template: "{{ .Name }}-{{ .Version }}"
 
 # Options
-prerelease: true
+# NOTE: `prerelease` is not a valid cr option and was silently ignored.
+# Prerelease status is now set explicitly via `gh release edit` in the
+# helm.yml workflow when the chart version contains a pre-release suffix
+# (e.g. -rc*, -alpha*, -beta*).
 debug: true

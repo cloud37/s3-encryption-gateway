@@ -106,6 +106,16 @@ jobs:
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
+      # ── Mark pre-release versions explicitly on GitHub ──────────────────────
+      - name: Mark release as pre-release if version contains a pre-release suffix
+        if: steps.version_check.outputs.already_released == 'false' && contains(steps.version_check.outputs.chart_version, '-')
+        run: |
+          gh release edit "${{ steps.version_check.outputs.release_tag }}" \
+            --prerelease \
+            --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # ── Build and attach binaries to the same release ───────────────────────
       - name: Set up Go
         if: steps.version_check.outputs.already_released == 'false'
