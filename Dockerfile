@@ -50,6 +50,9 @@ FROM alpine:3.24
 # Install CA certificates for TLS
 RUN apk --no-cache add ca-certificates tzdata
 
+# Upgrade APK Packages
+RUN apk --no-cache upgrade
+
 # Create non-root user
 RUN addgroup -g 1000 gateway && \
     adduser -D -u 1000 -G gateway gateway
