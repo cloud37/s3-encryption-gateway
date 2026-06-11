@@ -98,9 +98,7 @@ backends:
 
 | Backend | Status | Notes |
 |---|---|---|
-| Ceph (RADOS Gateway) | ✅ Working | Requires `redirect.disable: true` |
-| MinIO | ✅ Working | Requires `redirect.disable: true` |
-| AWS S3 | ✅ Working | Requires `redirect.disable: true` |
+| Hetzner S3 | ✅ Working | Requires `redirect.disable: true` |
 
 ## Known Behaviour
 
