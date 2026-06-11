@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v5"
 )
 
 // RetryConfig holds exponential-backoff parameters for KMS retries.
@@ -73,20 +73,16 @@ func isPermanentKMSError(err error) bool {
 		errors.Is(err, ErrProviderUnavailable)
 }
 
-// newBackOff constructs a backoff.ExponentialBackOff from the config and wraps
-// it with ctx cancellation support.
-func (r *RetryingKeyManager) newBackOff(ctx context.Context) backoff.BackOff {
+// newBackOff constructs a backoff.ExponentialBackOff from the config.
+func (r *RetryingKeyManager) newBackOff() backoff.BackOff {
 	b := &backoff.ExponentialBackOff{
 		InitialInterval:     r.cfg.InitialInterval,
 		MaxInterval:         r.cfg.MaxInterval,
-		MaxElapsedTime:      r.cfg.MaxElapsedTime,
 		Multiplier:          r.cfg.Multiplier,
-		Clock:               backoff.SystemClock,
 		RandomizationFactor: backoff.DefaultRandomizationFactor,
-		Stop:                backoff.Stop,
 	}
 	b.Reset()
-	return backoff.WithContext(b, ctx)
+	return b
 }
 
 // Provider returns the inner KeyManager's provider identifier.
@@ -97,25 +93,30 @@ func (r *RetryingKeyManager) Provider() string {
 // WrapKey retries transient errors during key wrapping using exponential backoff.
 func (r *RetryingKeyManager) WrapKey(ctx context.Context, plaintext []byte, metadata map[string]string) (*KeyEnvelope, error) {
 	var result *KeyEnvelope
-	op := func() error {
+	op := func() (*KeyEnvelope, error) {
 		env, err := r.inner.WrapKey(ctx, plaintext, metadata)
 		if err != nil {
 			if isPermanentKMSError(err) {
-				return backoff.Permanent(err)
+				return nil, backoff.Permanent(err)
 			}
 			if fn := getRecordKMSRetryAttemptFn(); fn != nil {
 				fn(r.inner.Provider(), "wrap", "failure")
 			}
-			return err
+			return nil, err
 		}
-		result = env
 		if fn := getRecordKMSRetryAttemptFn(); fn != nil {
 			fn(r.inner.Provider(), "wrap", "success")
 		}
-		return nil
+		return env, nil
 	}
-	bo := r.newBackOff(ctx)
-	if err := backoff.Retry(op, bo); err != nil {
+	bo := r.newBackOff()
+	opts := []backoff.RetryOption{backoff.WithBackOff(bo)}
+	if r.cfg.MaxElapsedTime > 0 {
+		opts = append(opts, backoff.WithMaxElapsedTime(r.cfg.MaxElapsedTime))
+	}
+	var err error
+	result, err = backoff.Retry(ctx, op, opts...)
+	if err != nil {
 		return nil, fmt.Errorf("keymanager/retry: %w", err)
 	}
 	return result, nil
@@ -124,25 +125,30 @@ func (r *RetryingKeyManager) WrapKey(ctx context.Context, plaintext []byte, meta
 // UnwrapKey retries transient errors during key unwrapping using exponential backoff.
 func (r *RetryingKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelope, metadata map[string]string) ([]byte, error) {
 	var result []byte
-	op := func() error {
+	op := func() ([]byte, error) {
 		pt, err := r.inner.UnwrapKey(ctx, envelope, metadata)
 		if err != nil {
 			if isPermanentKMSError(err) {
-				return backoff.Permanent(err)
+				return nil, backoff.Permanent(err)
 			}
 			if fn := getRecordKMSRetryAttemptFn(); fn != nil {
 				fn(r.inner.Provider(), "unwrap", "failure")
 			}
-			return err
+			return nil, err
 		}
-		result = pt
 		if fn := getRecordKMSRetryAttemptFn(); fn != nil {
 			fn(r.inner.Provider(), "unwrap", "success")
 		}
-		return nil
+		return pt, nil
 	}
-	bo := r.newBackOff(ctx)
-	if err := backoff.Retry(op, bo); err != nil {
+	bo := r.newBackOff()
+	opts := []backoff.RetryOption{backoff.WithBackOff(bo)}
+	if r.cfg.MaxElapsedTime > 0 {
+		opts = append(opts, backoff.WithMaxElapsedTime(r.cfg.MaxElapsedTime))
+	}
+	var err error
+	result, err = backoff.Retry(ctx, op, opts...)
+	if err != nil {
 		return nil, fmt.Errorf("keymanager/retry: %w", err)
 	}
 	return result, nil
