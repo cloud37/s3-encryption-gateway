@@ -45,7 +45,7 @@ RUN if [ "${STRIP_SYMBOLS}" = "false" ]; then \
     ./cmd/healthcheck
 
 # Runtime stage
-FROM alpine:3.23
+FROM alpine:3.24
 
 # Install CA certificates for TLS
 RUN apk --no-cache add ca-certificates tzdata
