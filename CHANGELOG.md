@@ -118,6 +118,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (default false) for controlled no-AAD recovery. `s3eg-migrate` retained as
   a deprecation shim. See `docs/plans/V1.0-CLI-2-plan.md`.
 
+- **Harbor integration guide**: Published `docs/integrations/harbor.md` with
+  required storage configuration (`disableredirect: true` in Helm chart,
+  `redirect.disable: true` in standalone `harbor.yml`), explanation of why the
+  redirect path is incompatible with the gateway, and a map of Docker
+  Distribution S3 driver calls to gateway behaviour.
+
 ### Removed
 
 - **V1.0-CLI-1 — Developer CLI (rejected)**: The proposed `presign`, `put`,
@@ -151,6 +157,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **KDF legacy read nil-pointer**: fixed nil-pointer dereference in
   legacy-KDF-iteration fallback path when KDF params metadata is absent.
+
+- **Harbor/Docker Distribution encrypted MPU compatibility**: plaintext-size
+  translation for HeadObject, ListObjects, and ListParts so Docker Distribution's
+  size checks (`statHead`, `statList`, `validateBlob`) see the correct byte count
+  instead of inflated ciphertext sizes. Added `SourceClassMPUEncrypted`
+  classification so `CopyObject` and `UploadPartCopy` correctly decrypt
+  MPU-encrypted sources during Harbor's `moveBlob()` staging path. ListParts
+  response now always includes `IsTruncated` (even when false) to prevent a
+  nil-pointer dereference in Docker Distribution's S3 driver. Fixes
+  "blob invalid length" errors when Harbor pushes images through the gateway.
+
+- **Content-MD5 for Ceph/MinIO backends**: `PutObject` and `UploadPart` now
+  compute and send the legacy `Content-MD5` header when the body is seekable.
+  Older S3-compatible backends (Ceph, certain MinIO versions) require this
+  header; AWS SDK v2 dropped automatic MD5 computation in favour of
+  `x-amz-checksum-*`.
+
+- **Passthrough client-auth stripping**: `forwardToBackend` now unconditionally
+  strips `Authorization`, `X-Amz-Content-Sha256`, `X-Amz-Date`, and
+  `X-Amz-Security-Token` headers, and removes presigned query parameters
+  (`X-Amz-Signature`, `X-Amz-Credential`, etc.) before forwarding. The gateway
+  always re-signs with its own backend credentials. Previously, the client's
+  signature (bound to the original `Host` header) was forwarded verbatim,
+  causing the backend to reject authenticated passthrough requests.
+
+- **Negative-byte Prometheus panic**: `handlePassthrough` clamps
+  `resp.ContentLength` from -1 (chunked encoding, no `Content-Length` header)
+  to 0 before passing to the metrics counter. `RecordHTTPRequest` guards
+  against `bytes <= 0`. Prevents a Prometheus `Counter.Add` panic on chunked
+  backend responses.
 
 ### CI & Dependencies
 
