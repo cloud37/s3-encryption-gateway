@@ -452,7 +452,7 @@ docker run -p 8080:8080 \
   -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
   -e GW_ACCESS_KEY_1="gateway-access-key" \
   -e GW_SECRET_KEY_1="gateway-secret-key" \
-  cloud37io/s3-encryption-gateway:0.10.0-rc1
+  cloud37io/s3-encryption-gateway:0.10.0-rc2
 ```
 
 > **Replace the example KEK.** The value shown in `SELF_CONTAINED_AES_KEYS` is a documentation placeholder — generate your own with `openssl rand -base64 32` and keep it in a secrets manager. Anyone with this key can decrypt your objects.
@@ -472,7 +472,7 @@ docker run -p 8080:8080 \
   -e ENCRYPTION_PASSWORD="your-password" \
   -e GW_ACCESS_KEY_1="gateway-access-key" \
   -e GW_SECRET_KEY_1="gateway-secret-key" \
-  cloud37io/s3-encryption-gateway:0.10.0-rc1
+  cloud37io/s3-encryption-gateway:0.10.0-rc2
 ```
 
 Runs PBKDF2-SHA256 600k on every request. No key infrastructure needed — just a single password — but throughput is **50× lower** than envelope encryption.
@@ -574,7 +574,7 @@ docker run -p 8080:8080 --network s3gw-net \
   -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
   -e GW_ACCESS_KEY_1="gw-access-key" \
   -e GW_SECRET_KEY_1="gw-secret-key" \
-  cloud37io/s3-encryption-gateway:0.10.0-rc1
+  cloud37io/s3-encryption-gateway:0.10.0-rc2
 ```
 
 ### Docker Compose
