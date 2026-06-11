@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,8 +132,8 @@ func (m *mpuMockS3Client) ListObjects(ctx context.Context, bucket, prefix string
 	if opts.MaxKeys > 0 {
 		maxKeys = opts.MaxKeys
 	}
+	bk := bucket + "/"
 	for k, data := range m.objects {
-		bk := bucket + "/"
 		if !strings.HasPrefix(k, bk) {
 			continue
 		}
@@ -144,9 +145,13 @@ func (m *mpuMockS3Client) ListObjects(ctx context.Context, bucket, prefix string
 			Key:  key,
 			Size: int64(len(data)), // raw stored size (may be ciphertext)
 		})
-		if int32(len(objects)) >= maxKeys {
-			break
-		}
+	}
+	// Sort by key to match real S3 lexicographic ordering. Map iteration
+	// is non-deterministic in Go; without sorting, .mpu-manifest companion
+	// objects could appear before the data object when MaxKeys=1.
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	if int32(len(objects)) > maxKeys {
+		objects = objects[:maxKeys]
 	}
 	return s3.ListResult{Objects: objects}, nil
 }
