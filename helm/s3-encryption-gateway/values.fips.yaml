@@ -20,7 +20,7 @@
 # Publish this image from Dockerfile.fips; the tag convention is "<version>-fips".
 image:
   repository: cloud37io/s3-encryption-gateway
-  tag: "0.10.0-rc3-fips"
+  tag: "0.10.0-fips"
 
 # Pod annotations for FIPS compliance tracking / audit evidence.
 podAnnotations:
