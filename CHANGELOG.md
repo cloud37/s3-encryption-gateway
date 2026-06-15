@@ -188,21 +188,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against `bytes <= 0`. Prevents a Prometheus `Counter.Add` panic on chunked
   backend responses.
 
+- **PutObject ETag and oversized Range saturation**: `PutObject` now returns
+  the backend ETag so the handler can surface it in the response header.
+  `applyRangeRequest` saturates the range end to `dataLen-1` when the
+  requested end exceeds the object size (RFC 7233 §4.2), instead of returning
+  `416 Range Not Satisfiable`. Fixes s5cmd multipart downloads which request
+  default 50 MiB parts that may exceed the final object size.
+
 ### CI & Dependencies
 
 - Go version bumped to 1.26.4; CI images updated.
 - Updated `github.com/aws/aws-sdk-go-v2` to v1.42.0, `aws-sdk-go-v2/service/s3`
-  to v1.103.3, `aws-sdk-go-v2/config` to v1.32.24,
-  `aws-sdk-go-v2/credentials` to v1.19.23.
+  to v1.103.3, `aws-sdk-go-v2/config` to v1.32.25,
+  `aws-sdk-go-v2/credentials` to v1.19.24.
 - Updated `github.com/aws/smithy-go` to v1.27.2.
 - Updated `golang.org/x/crypto` to v0.53.0.
-- Updated `github.com/cenkalti/backoff` from v4 to v5 (v5.0.3).
+- Updated `golang.org/x/perf` digest to 712aea8.
+- Updated `github.com/cenkalti/backoff` from v4 to v5 (v5.0.3); stale v4
+  direct dependency removed from `go.mod`; retry key manager migrated to v5.
 - Updated `github.com/ovh/kmip-go` to v0.9.1.
 - Updated `github.com/moby/moby/api` to v1.54.2 (for Azurite Testcontainers).
+- Updated `github.com/redis/go-redis/v9` to v9.20.1.
 - Updated `docker/setup-qemu-action` to v4, `docker/setup-buildx-action` to v4,
   `docker/login-action` to v4, `docker/build-push-action` to v7.
 - Updated `sigstore/cosign-installer` to v4.
 - Updated `aquasecurity/trivy-action` to v0.36.0.
+- Updated Alpine Docker base image to v3.24; runtime stage now runs
+  `apk upgrade` to pull patched libraries (fixes Trivy findings for
+  `libcrypto3` and `libssl3`).
+- Updated Helm CLI in CI workflows to v4.2.1.
+- **Fixed prerelease flag in chart-releaser workflow**: removed invalid
+  `releaseNotesFile` key from `.github/cr.yaml`; added explicit
+  `gh release edit --prerelease` step after chart-releaser for versions
+  with pre-release suffixes (`-rc*`, `-alpha*`, `-beta*`). Makes the
+  GitHub release prerelease flag deterministic rather than relying on
+  GitHub's SemVer heuristics.
 
 ## [0.9.0] — 2026-05-28
 
