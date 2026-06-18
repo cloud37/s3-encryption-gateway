@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -51,7 +51,7 @@ jobs:
           - helm/s3-encryption-gateway/examples/values-traefik-single.yaml
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install yq
         run: |
@@ -123,7 +123,7 @@ jobs:
               --set config.encryption.password.value=stub
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -275,7 +275,7 @@ jobs:
     name: Artifact Hub metadata check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check mandatory Artifact Hub annotations
         run: |
           set -euo pipefail
