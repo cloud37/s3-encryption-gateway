@@ -28,7 +28,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.2.1
+          version: v4.2.2
 
       - name: Run helm lint (base)
         run: helm lint helm/s3-encryption-gateway
@@ -56,7 +56,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.2.1
+          version: v4.2.2
 
       - name: Lint ${{ matrix.overlay }}
         run: helm lint helm/s3-encryption-gateway -f ${{ matrix.overlay }}
@@ -71,7 +71,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.2.1
+          version: v4.2.2
 
       - name: Run negative schema test harness
         run: |
@@ -128,7 +128,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.2.1
+          version: v4.2.2
 
       - name: Add Helm repos
         run: helm repo add valkey https://valkey.io/valkey-helm/
@@ -200,7 +200,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.2.1
+          version: v4.2.2
 
       - name: Set up Python
         uses: actions/setup-python@v6
