@@ -45,6 +45,6 @@ dependencies:
   # Chosen over Bitnami because Bitnami's catalog moved to a commercial
   # license model; this chart is Apache-2.0 + verified publisher.
   - name: valkey
-    version: "~0.9.0"
+    version: "~0.10.0"
     repository: https://valkey.io/valkey-helm/
     condition: valkey.enabled
