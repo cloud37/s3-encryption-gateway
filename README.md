@@ -450,8 +450,8 @@ docker run -p 8080:8080 \
   -e KEY_MANAGER_PROVIDER=self_contained \
   -e SELF_CONTAINED_TYPE=aes \
   -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
-  -e GW_ACCESS_KEY_1="gateway-access-key" \
-  -e GW_SECRET_KEY_1="gateway-secret-key" \
+  -e GW_CRED_0_ACCESS_KEY="gateway-access-key" \
+  -e GW_CRED_0_SECRET_KEY="gateway-secret-key" \
   cloud37io/s3-encryption-gateway:0.10.0
 ```
 
@@ -470,8 +470,8 @@ docker run -p 8080:8080 \
   -e BACKEND_ACCESS_KEY="your-key" \
   -e BACKEND_SECRET_KEY="your-secret" \
   -e ENCRYPTION_PASSWORD="your-password" \
-  -e GW_ACCESS_KEY_1="gateway-access-key" \
-  -e GW_SECRET_KEY_1="gateway-secret-key" \
+  -e GW_CRED_0_ACCESS_KEY="gateway-access-key" \
+  -e GW_CRED_0_SECRET_KEY="gateway-secret-key" \
   cloud37io/s3-encryption-gateway:0.10.0
 ```
 
@@ -572,8 +572,8 @@ docker run -p 8080:8080 --network s3gw-net \
   -e KEY_MANAGER_PROVIDER=self_contained \
   -e SELF_CONTAINED_TYPE=aes \
   -e SELF_CONTAINED_AES_KEYS="1=base64:pmW3QqWUWCvjYpcsW1ypkUMPuzdF2w5LfR3ligYtK/o=" \
-  -e GW_ACCESS_KEY_1="gw-access-key" \
-  -e GW_SECRET_KEY_1="gw-secret-key" \
+  -e GW_CRED_0_ACCESS_KEY="gw-access-key" \
+  -e GW_CRED_0_SECRET_KEY="gw-secret-key" \
   cloud37io/s3-encryption-gateway:0.10.0
 ```
 
