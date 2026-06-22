@@ -37,6 +37,30 @@ auth:
 # policies:
 #   - "/etc/s3-gateway/policies/*.yaml"
 # Set via POLICIES env var (comma-separated)
+#
+# Per-policy field (in a policy YAML file):
+#   id: "restic-bypass"
+#   buckets: ["restic-*"]
+#   disable_encryption: true   # store objects as plain bytes; no AEAD applied
+#                              # mutually exclusive with require_encryption: true
+#
+# All policy fields can also be set via indexed env vars (no file needed):
+#   GW_POLICY_0_ID=restic-bypass
+#   GW_POLICY_0_BUCKETS=restic-*
+#   GW_POLICY_0_DISABLE_ENCRYPTION=true
+#
+# Available GW_POLICY_N_* variables:
+#   GW_POLICY_N_ID                        (string, required — sentinel)
+#   GW_POLICY_N_BUCKETS                   (comma-separated glob patterns)
+#   GW_POLICY_N_DISABLE_ENCRYPTION        (true|false)
+#   GW_POLICY_N_REQUIRE_ENCRYPTION        (true|false)
+#   GW_POLICY_N_DISALLOW_LOCK_BYPASS      (true|false)
+#   GW_POLICY_N_ENCRYPT_MULTIPART_UPLOADS (true|false)
+#   GW_POLICY_N_ENCRYPTION_PASSWORD       (string)
+#   GW_POLICY_N_ENCRYPTION_ALGORITHM      (string)
+#   GW_POLICY_N_RATE_LIMIT_ENABLED        (true|false)
+#   GW_POLICY_N_RATE_LIMIT_REQUESTS       (int)
+#   GW_POLICY_N_RATE_LIMIT_WINDOW         (duration, e.g. 1m)
 
 backend:
   endpoint: "https://s3.amazonaws.com"

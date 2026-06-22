@@ -602,10 +602,18 @@ config:
 # Each item maps directly to a PolicyConfig (internal/config/policy.go):
 #   id                        – unique policy identifier (required)
 #   buckets                   – list of bucket name glob patterns (required)
+#   disable_encryption        – store objects as plain bytes; no AEAD applied
+#                               mutually exclusive with require_encryption: true
 #   encrypt_multipart_uploads – opt-in encrypted MPU per ADR-0009 (requires Valkey)
 #   require_encryption        – hard-reject unencrypted PutObject for these buckets
 #   disallow_lock_bypass      – reject requests that try to bypass object lock
 #   encryption / rate_limit  – per-bucket overrides (optional)
+#
+# All policy fields can also be expressed via indexed env vars (no file
+# mount needed). For example, the following is equivalent to the YAML form:
+#   GW_POLICY_0_ID=restic-bypass
+#   GW_POLICY_0_BUCKETS=restic-*
+#   GW_POLICY_0_DISABLE_ENCRYPTION=true
 #
 # Mutually exclusive with config.policies.value / config.policies.valueFrom.
 # Both set → helm lint / helm install --dry-run will fail (Guard 6).
@@ -618,6 +626,10 @@ config:
 #       - "logs-*"
 #     encrypt_multipart_uploads: true
 #     require_encryption: true
+#   - id: restic-bypass
+#     buckets:
+#       - "restic-*"
+#     disable_encryption: true
 #   - id: public-assets
 #     buckets:
 #       - "public-*"

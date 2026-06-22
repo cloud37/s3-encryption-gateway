@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -2544,3 +2546,51 @@ func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
 		t.Errorf("GetObject body mismatch: expected %q, got %q", plaintext, w.Body.String())
 	}
 }
+
+// TestGetEncryptionEngine_DisableBranch_ReturnsPassthrough verifies that
+// getEncryptionEngine returns a PassthroughEngine when the bucket's policy
+// has DisableEncryption: true.
+func TestGetEncryptionEngine_DisableBranch_ReturnsPassthrough(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "bypass.yaml")
+	content := `
+id: "bypass-policy"
+buckets:
+  - "bypass-*"
+disable_encryption: true
+`
+	if err := os.WriteFile(policyFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write policy file: %v", err)
+	}
+
+	pm := config.NewPolicyManager()
+	if err := pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")}); err != nil {
+		t.Fatalf("LoadPolicies failed: %v", err)
+	}
+
+	h := &Handler{
+		encryptionEngine: nil,
+		policyManager:    pm,
+		config:           &config.Config{},
+		logger:           logrus.New(),
+	}
+
+	engine, err := h.getEncryptionEngine("bypass-bucket")
+	if err != nil {
+		t.Fatalf("getEncryptionEngine returned error: %v", err)
+	}
+	if _, ok := engine.(crypto.PassthroughEngine); !ok {
+		t.Fatalf("expected PassthroughEngine, got %T", engine)
+	}
+
+	// Non-bypass bucket should fall through to default engine
+	engine2, err := h.getEncryptionEngine("other-bucket")
+	if err != nil {
+		t.Fatalf("getEncryptionEngine for non-bypass returned error: %v", err)
+	}
+	if engine2 != nil {
+		t.Logf("non-bypass engine: %T (expected nil since no default engine configured)", engine2)
+	}
+}
+
+

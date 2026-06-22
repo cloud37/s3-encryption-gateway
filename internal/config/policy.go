@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/ryanuber/go-glob"
 	"gopkg.in/yaml.v3"
@@ -22,6 +25,11 @@ type PolicyConfig struct {
 	// into a bucket with this flag set). Default is false, preserving
 	// backward compatibility; set explicitly per-bucket to enforce.
 	RequireEncryption bool `yaml:"require_encryption,omitempty"`
+	// DisableEncryption, when true, causes the gateway to store and serve
+	// objects in matching buckets as plain bytes without AEAD encryption.
+	// Mutually exclusive with RequireEncryption: true.
+	// Also implies EncryptMultipartUploads = false.
+	DisableEncryption bool `yaml:"disable_encryption,omitempty"`
 	DisallowLockBypass bool `yaml:"disallow_lock_bypass,omitempty"`
 	// EncryptMultipartUploads opts this bucket into the encrypted multipart
 	// upload path (ADR 0009). When true a per-upload DEK is generated at
@@ -76,6 +84,10 @@ func (pm *PolicyManager) LoadPolicies(patterns []string) error {
 				return fmt.Errorf("policy %s must specify at least one bucket pattern", policy.ID)
 			}
 
+			if policy.DisableEncryption && policy.RequireEncryption {
+				return fmt.Errorf("policy %q: disable_encryption and require_encryption are mutually exclusive", policy.ID)
+			}
+
 			pm.policies = append(pm.policies, &policy)
 		}
 	}
@@ -110,6 +122,19 @@ func (pm *PolicyManager) BucketRequiresEncryption(bucket string) bool {
 		return false
 	}
 	return policy.RequireEncryption
+}
+
+// BucketDisablesEncryption reports whether the bucket's matching policy sets
+// DisableEncryption. Returns false when no policy matches.
+func (pm *PolicyManager) BucketDisablesEncryption(bucket string) bool {
+	if pm == nil {
+		return false
+	}
+	policy := pm.GetPolicyForBucket(bucket)
+	if policy == nil {
+		return false
+	}
+	return policy.DisableEncryption
 }
 
 // ApplyToConfig applies policy overrides to a copy of the base configuration
@@ -162,6 +187,9 @@ func (pm *PolicyManager) BucketEncryptsMultipart(bucket string) bool {
 	if policy == nil {
 		return true
 	}
+	if policy.DisableEncryption {
+		return false
+	}
 	if policy.EncryptMultipartUploads == nil {
 		return true
 	}
@@ -202,4 +230,102 @@ func (pm *PolicyManager) BucketDisallowsLockBypass(bucket string) bool {
 	}
 
 	return false
+}
+
+// Policies returns a copy of all loaded policies.
+func (pm *PolicyManager) Policies() []*PolicyConfig {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	result := make([]*PolicyConfig, len(pm.policies))
+	copy(result, pm.policies)
+	return result
+}
+
+// Reset clears all loaded policies. Must be called before a full config
+// reload to prevent policy accumulation across SIGHUP cycles.
+func (pm *PolicyManager) Reset() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.policies = make([]*PolicyConfig, 0)
+}
+
+// splitTrimmed splits s by sep and trims whitespace from each element.
+func splitTrimmed(s, sep string) []string {
+	parts := strings.Split(s, sep)
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+// LoadPoliciesFromEnv reads GW_POLICY_N_* indexed env vars and appends the
+// resulting policies to pm.policies. Iteration stops at the first N where
+// GW_POLICY_N_ID is absent. Validation is identical to LoadPolicies.
+//
+// Invariants:
+//   - Thread-safe (acquires pm.mu.Lock).
+//   - Appends to existing policies; call Reset() before a full reload.
+//   - Returns the first validation error encountered.
+func (pm *PolicyManager) LoadPoliciesFromEnv() error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for i := 0; ; i++ {
+		id := os.Getenv(fmt.Sprintf("GW_POLICY_%d_ID", i))
+		if id == "" {
+			break
+		}
+		bucketsRaw := os.Getenv(fmt.Sprintf("GW_POLICY_%d_BUCKETS", i))
+		if bucketsRaw == "" {
+			return fmt.Errorf("GW_POLICY_%d_BUCKETS must specify at least one pattern", i)
+		}
+		buckets := splitTrimmed(bucketsRaw, ",")
+
+		policy := &PolicyConfig{ID: id, Buckets: buckets}
+
+		if v := os.Getenv(fmt.Sprintf("GW_POLICY_%d_DISABLE_ENCRYPTION", i)); v != "" {
+			policy.DisableEncryption = v == "true" || v == "1"
+		}
+		if v := os.Getenv(fmt.Sprintf("GW_POLICY_%d_REQUIRE_ENCRYPTION", i)); v != "" {
+			policy.RequireEncryption = v == "true" || v == "1"
+		}
+		if v := os.Getenv(fmt.Sprintf("GW_POLICY_%d_DISALLOW_LOCK_BYPASS", i)); v != "" {
+			policy.DisallowLockBypass = v == "true" || v == "1"
+		}
+		if v := os.Getenv(fmt.Sprintf("GW_POLICY_%d_ENCRYPT_MULTIPART_UPLOADS", i)); v != "" {
+			b := v == "true" || v == "1"
+			policy.EncryptMultipartUploads = &b
+		}
+
+		encPwd := os.Getenv(fmt.Sprintf("GW_POLICY_%d_ENCRYPTION_PASSWORD", i))
+		encAlg := os.Getenv(fmt.Sprintf("GW_POLICY_%d_ENCRYPTION_ALGORITHM", i))
+		if encPwd != "" || encAlg != "" {
+			enc := &EncryptionConfig{}
+			enc.Password = encPwd
+			enc.PreferredAlgorithm = encAlg
+			policy.Encryption = enc
+		}
+
+		rlEnabled := os.Getenv(fmt.Sprintf("GW_POLICY_%d_RATE_LIMIT_ENABLED", i))
+		rlReq := os.Getenv(fmt.Sprintf("GW_POLICY_%d_RATE_LIMIT_REQUESTS", i))
+		rlWin := os.Getenv(fmt.Sprintf("GW_POLICY_%d_RATE_LIMIT_WINDOW", i))
+		if rlEnabled != "" || rlReq != "" || rlWin != "" {
+			rl := &RateLimitConfig{}
+			rl.Enabled = rlEnabled == "true" || rlEnabled == "1"
+			if n, err := strconv.Atoi(rlReq); err == nil && n > 0 {
+				rl.Limit = n
+			}
+			if d, err := time.ParseDuration(rlWin); err == nil {
+				rl.Window = d
+			}
+			policy.RateLimit = rl
+		}
+
+		if policy.DisableEncryption && policy.RequireEncryption {
+			return fmt.Errorf("GW_POLICY_%d (%q): disable_encryption and require_encryption are mutually exclusive", i, id)
+		}
+
+		pm.policies = append(pm.policies, policy)
+	}
+	return nil
 }

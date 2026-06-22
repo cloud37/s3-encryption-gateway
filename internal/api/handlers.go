@@ -619,6 +619,18 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 		if err == nil {
 			decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), bytes.NewReader(bodyBytes), metadata)
 			if err != nil {
+				if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
+					h.logger.WithError(err).Warn("Encrypted object in bypass bucket (forwarded)")
+					s3Err := &S3Error{
+						Code:       "EncryptionConfigurationMismatch",
+						Message:    "The object was encrypted when stored but the bucket policy now disables encryption. Use the migration tool to convert the object.",
+						Resource:   r.URL.Path,
+						HTTPStatus: http.StatusConflict,
+					}
+					s3Err.WriteXML(w)
+					h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+					return
+				}
 				h.logger.WithError(err).Warn("Failed to decrypt forwarded response, returning as-is")
 				isEncrypted = false // Fall back to forwarding encrypted
 				backendResp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -702,6 +714,10 @@ func (h *Handler) getEncryptionEngine(bucket string) (crypto.EncryptionEngine, e
 	policy := h.policyManager.GetPolicyForBucket(bucket)
 	if policy == nil {
 		return h.encryptionEngine, nil
+	}
+
+	if policy.DisableEncryption {
+		return crypto.PassthroughEngine{}, nil
 	}
 
 	// Check cache first (key by policy ID)
@@ -1129,6 +1145,18 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		}); ok {
 			decryptedReader, decMetadata, err = eng.DecryptRangeOptimized(r.Context(), reader, metadata, plaintextStart, plaintextEnd)
 			if err != nil {
+				if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
+					h.logger.WithError(err).Warn("Encrypted object in bypass bucket (range-optimized)")
+					s3Err := &S3Error{
+						Code:       "EncryptionConfigurationMismatch",
+						Message:    "The object was encrypted when stored but the bucket policy now disables encryption. Use the migration tool to convert the object.",
+						Resource:   r.URL.Path,
+						HTTPStatus: http.StatusConflict,
+					}
+					s3Err.WriteXML(w)
+					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+					return
+				}
 				h.logger.WithError(err).Error("Range-optimized decryption failed")
 				h.metrics.RecordEncryptionError(r.Context(), "decrypt", "range_optimized_decryption_failed")
 				s3Err := &S3Error{
@@ -1153,6 +1181,21 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 	decryptDuration := time.Since(decryptStart)
 	if err != nil {
+		if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"bucket": bucket,
+				"key":    key,
+			}).Warn("Encrypted object in bypass bucket")
+			s3Err := &S3Error{
+				Code:       "EncryptionConfigurationMismatch",
+				Message:    "The object was encrypted when stored but the bucket policy now disables encryption. Use the migration tool to convert the object.",
+				Resource:   r.URL.Path,
+				HTTPStatus: http.StatusConflict,
+			}
+			s3Err.WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			return
+		}
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
 			"key":    key,

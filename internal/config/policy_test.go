@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,4 +312,271 @@ func TestPolicyApplication(t *testing.T) {
 	assert.Equal(t, true, newConfig.Encryption.ChunkedMode)
 	assert.Equal(t, 65536, newConfig.Encryption.ChunkSize)
 }
+
+// TestBucketDisablesEncryption_Match verifies that a policy with
+// DisableEncryption: true causes BucketDisablesEncryption to return true.
+func TestBucketDisablesEncryption_Match(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "bypass.yaml")
+	content := `
+id: "bypass-policy"
+buckets:
+  - "bypass-*"
+disable_encryption: true
+`
+	require.NoError(t, os.WriteFile(policyFile, []byte(content), 0644))
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")}))
+
+	assert.True(t, pm.BucketDisablesEncryption("bypass-bucket"))
+	assert.False(t, pm.BucketDisablesEncryption("other-bucket"))
+}
+
+func TestBucketDisablesEncryption_NoMatchReturnsDefault(t *testing.T) {
+	pm := NewPolicyManager()
+	assert.False(t, pm.BucketDisablesEncryption("any-bucket"))
+
+	var nilPM *PolicyManager
+	assert.False(t, nilPM.BucketDisablesEncryption("any-bucket"))
+}
+
+func TestBucketEncryptsMultipart_DisableEncryptionImpliesFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "bypass.yaml")
+	content := `
+id: "bypass-policy"
+buckets:
+  - "bypass-*"
+disable_encryption: true
+`
+	require.NoError(t, os.WriteFile(policyFile, []byte(content), 0644))
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")}))
+
+	assert.False(t, pm.BucketEncryptsMultipart("bypass-bucket"),
+		"BucketEncryptsMultipart should return false when DisableEncryption is true")
+}
+
+func TestPolicyLoad_DisableAndRequireConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "conflict.yaml")
+	content := `
+id: "conflict-policy"
+buckets:
+  - "test-bucket"
+disable_encryption: true
+require_encryption: true
+`
+	require.NoError(t, os.WriteFile(policyFile, []byte(content), 0644))
+
+	pm := NewPolicyManager()
+	err := pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestPolicyManager_Reset(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "policy.yaml")
+	content := `
+id: "test-policy"
+buckets:
+  - "test-bucket"
+`
+	require.NoError(t, os.WriteFile(policyFile, []byte(content), 0644))
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")}))
+	assert.NotNil(t, pm.GetPolicyForBucket("test-bucket"))
+
+	pm.Reset()
+	assert.Nil(t, pm.GetPolicyForBucket("test-bucket"),
+		"GetPolicyForBucket should return nil after Reset")
+}
+
+// setenv is a helper that restores the original env var on test cleanup.
+func setenv(t *testing.T, key, value string) {
+	old := os.Getenv(key)
+	os.Setenv(key, value)
+	t.Cleanup(func() { os.Setenv(key, old) })
+}
+
+func TestLoadPoliciesFromEnv_ResticUseCase(t *testing.T) {
+	setenv(t, "GW_POLICY_0_ID", "restic-bypass")
+	setenv(t, "GW_POLICY_0_BUCKETS", "restic-*")
+	setenv(t, "GW_POLICY_0_DISABLE_ENCRYPTION", "true")
+	t.Cleanup(func() {
+		os.Unsetenv("GW_POLICY_0_ID")
+		os.Unsetenv("GW_POLICY_0_BUCKETS")
+		os.Unsetenv("GW_POLICY_0_DISABLE_ENCRYPTION")
+	})
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPoliciesFromEnv())
+
+	policy := pm.GetPolicyForBucket("restic-data")
+	require.NotNil(t, policy)
+	assert.Equal(t, "restic-bypass", policy.ID)
+	assert.True(t, policy.DisableEncryption)
+}
+
+func TestLoadPoliciesFromEnv_AllFields(t *testing.T) {
+	setenv(t, "GW_POLICY_0_ID", "full-policy")
+	setenv(t, "GW_POLICY_0_BUCKETS", "bucket-a,bucket-b")
+	setenv(t, "GW_POLICY_0_DISABLE_ENCRYPTION", "false")
+	setenv(t, "GW_POLICY_0_REQUIRE_ENCRYPTION", "true")
+	setenv(t, "GW_POLICY_0_DISALLOW_LOCK_BYPASS", "true")
+	setenv(t, "GW_POLICY_0_ENCRYPT_MULTIPART_UPLOADS", "false")
+	setenv(t, "GW_POLICY_0_ENCRYPTION_PASSWORD", "test-password-123456")
+	setenv(t, "GW_POLICY_0_ENCRYPTION_ALGORITHM", "ChaCha20-Poly1305")
+	setenv(t, "GW_POLICY_0_RATE_LIMIT_ENABLED", "true")
+	setenv(t, "GW_POLICY_0_RATE_LIMIT_REQUESTS", "50")
+	setenv(t, "GW_POLICY_0_RATE_LIMIT_WINDOW", "30s")
+	t.Cleanup(func() {
+		for _, k := range []string{
+			"GW_POLICY_0_ID", "GW_POLICY_0_BUCKETS",
+			"GW_POLICY_0_DISABLE_ENCRYPTION", "GW_POLICY_0_REQUIRE_ENCRYPTION",
+			"GW_POLICY_0_DISALLOW_LOCK_BYPASS", "GW_POLICY_0_ENCRYPT_MULTIPART_UPLOADS",
+			"GW_POLICY_0_ENCRYPTION_PASSWORD", "GW_POLICY_0_ENCRYPTION_ALGORITHM",
+			"GW_POLICY_0_RATE_LIMIT_ENABLED", "GW_POLICY_0_RATE_LIMIT_REQUESTS",
+			"GW_POLICY_0_RATE_LIMIT_WINDOW",
+		} {
+			os.Unsetenv(k)
+		}
+	})
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPoliciesFromEnv())
+	policies := pm.Policies()
+	require.Len(t, policies, 1)
+
+	p := policies[0]
+	assert.Equal(t, "full-policy", p.ID)
+	assert.Equal(t, []string{"bucket-a", "bucket-b"}, p.Buckets)
+	assert.False(t, p.DisableEncryption)
+	assert.True(t, p.RequireEncryption)
+	assert.True(t, p.DisallowLockBypass)
+	require.NotNil(t, p.EncryptMultipartUploads)
+	assert.False(t, *p.EncryptMultipartUploads)
+	require.NotNil(t, p.Encryption)
+	assert.Equal(t, "test-password-123456", p.Encryption.Password)
+	assert.Equal(t, "ChaCha20-Poly1305", p.Encryption.PreferredAlgorithm)
+	require.NotNil(t, p.RateLimit)
+	assert.True(t, p.RateLimit.Enabled)
+	assert.Equal(t, 50, p.RateLimit.Limit)
+	assert.Equal(t, 30*time.Second, p.RateLimit.Window)
+}
+
+func TestLoadPoliciesFromEnv_MissingBuckets_ReturnsError(t *testing.T) {
+	setenv(t, "GW_POLICY_0_ID", "no-buckets")
+	t.Cleanup(func() {
+		os.Unsetenv("GW_POLICY_0_ID")
+	})
+
+	pm := NewPolicyManager()
+	err := pm.LoadPoliciesFromEnv()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "BUCKETS must specify at least one pattern")
+}
+
+func TestLoadPoliciesFromEnv_Conflict_ReturnsError(t *testing.T) {
+	setenv(t, "GW_POLICY_0_ID", "conflict")
+	setenv(t, "GW_POLICY_0_BUCKETS", "test")
+	setenv(t, "GW_POLICY_0_DISABLE_ENCRYPTION", "true")
+	setenv(t, "GW_POLICY_0_REQUIRE_ENCRYPTION", "true")
+	t.Cleanup(func() {
+		os.Unsetenv("GW_POLICY_0_ID")
+		os.Unsetenv("GW_POLICY_0_BUCKETS")
+		os.Unsetenv("GW_POLICY_0_DISABLE_ENCRYPTION")
+		os.Unsetenv("GW_POLICY_0_REQUIRE_ENCRYPTION")
+	})
+
+	pm := NewPolicyManager()
+	err := pm.LoadPoliciesFromEnv()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestLoadPoliciesFromEnv_MultiplePolicies(t *testing.T) {
+	setenv(t, "GW_POLICY_0_ID", "policy-zero")
+	setenv(t, "GW_POLICY_0_BUCKETS", "bucket-0")
+	setenv(t, "GW_POLICY_1_ID", "policy-one")
+	setenv(t, "GW_POLICY_1_BUCKETS", "bucket-1")
+	// GW_POLICY_2_ID is absent — iteration should stop at N=2.
+	t.Cleanup(func() {
+		os.Unsetenv("GW_POLICY_0_ID")
+		os.Unsetenv("GW_POLICY_0_BUCKETS")
+		os.Unsetenv("GW_POLICY_1_ID")
+		os.Unsetenv("GW_POLICY_1_BUCKETS")
+	})
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPoliciesFromEnv())
+	assert.Len(t, pm.Policies(), 2)
+}
+
+func TestLoadPoliciesFromEnv_MergesWithFilePolicies(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "file-policy.yaml")
+	content := `
+id: "file-policy"
+buckets:
+  - "file-bucket"
+`
+	require.NoError(t, os.WriteFile(policyFile, []byte(content), 0644))
+
+	setenv(t, "GW_POLICY_0_ID", "env-policy")
+	setenv(t, "GW_POLICY_0_BUCKETS", "env-bucket")
+	t.Cleanup(func() {
+		os.Unsetenv("GW_POLICY_0_ID")
+		os.Unsetenv("GW_POLICY_0_BUCKETS")
+	})
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")}))
+	require.NoError(t, pm.LoadPoliciesFromEnv())
+	require.Len(t, pm.Policies(), 2)
+
+	assert.NotNil(t, pm.GetPolicyForBucket("file-bucket"))
+	assert.NotNil(t, pm.GetPolicyForBucket("env-bucket"))
+}
+
+func TestPoliciesAccessor(t *testing.T) {
+	tmpDir := t.TempDir()
+	policyFile := filepath.Join(tmpDir, "policy.yaml")
+	content := `
+id: "test-policy"
+buckets:
+  - "test-bucket"
+`
+	require.NoError(t, os.WriteFile(policyFile, []byte(content), 0644))
+
+	pm := NewPolicyManager()
+	require.NoError(t, pm.LoadPolicies([]string{filepath.Join(tmpDir, "*.yaml")}))
+	policies := pm.Policies()
+	assert.Len(t, policies, 1)
+	assert.Equal(t, "test-policy", policies[0].ID)
+}
+
+func TestSplitTrimmed(t *testing.T) {
+	tests := []struct {
+		input string
+		sep   string
+		want  []string
+	}{
+		{"a,b,c", ",", []string{"a", "b", "c"}},
+		{"a, b, c", ",", []string{"a", "b", "c"}},
+		{"  a  ,  b  ", ",", []string{"a", "b"}},
+		{"single", ",", []string{"single"}},
+		{"", ",", []string{""}},
+	}
+	for _, tt := range tests {
+		got := splitTrimmed(tt.input, tt.sep)
+		assert.Equal(t, tt.want, got, "splitTrimmed(%q, %q)", tt.input, tt.sep)
+	}
+}
+
+
 

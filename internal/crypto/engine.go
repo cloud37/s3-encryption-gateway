@@ -1879,17 +1879,23 @@ func (e *engine) decryptFallbackV1(reader io.Reader, metadata map[string]string)
 
 // IsEncrypted checks if the metadata indicates the object is encrypted.
 func (e *engine) IsEncrypted(metadata map[string]string) bool {
-	if metadata == nil {
+	return IsEncryptedMetadata(metadata)
+}
+
+// IsEncryptedMetadata returns true when the given metadata map contains a
+// recognised encryption marker whose value is "true". Extracted as a
+// package-level function so that PassthroughEngine and other implementations
+// can reuse the same check without duplicating the key-name logic.
+func IsEncryptedMetadata(meta map[string]string) bool {
+	if meta == nil {
 		return false
 	}
 
-	// Check for full key first
-	if encrypted, ok := metadata[MetaEncrypted]; ok && encrypted == "true" {
+	if encrypted, ok := meta[MetaEncrypted]; ok && encrypted == "true" {
 		return true
 	}
 
-	// Check for compacted key
-	if encrypted, ok := metadata["x-amz-meta-e"]; ok && encrypted == "true" {
+	if encrypted, ok := meta["x-amz-meta-e"]; ok && encrypted == "true" {
 		return true
 	}
 
