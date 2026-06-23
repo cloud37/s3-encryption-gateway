@@ -22,10 +22,10 @@ annotations:
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.10.0
+      image: docker.io/cloud37io/s3-encryption-gateway:0.10.1
       whitelisted: true
     - name: s3-encryption-gateway-fips
-      image: docker.io/cloud37io/s3-encryption-gateway:0.10.0-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.10.1-fips
       whitelisted: true
   artifacthub.io/changes: |
     - kind: added
@@ -35,8 +35,8 @@ annotations:
     - kind: added
       description: Artifact Hub listing with full metadata and image references
   artifacthub.io/containsSecurityUpdates: "false"
-version: 0.10.0
-appVersion: "0.10.0"
+version: 0.10.1
+appVersion: "0.10.1"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;
