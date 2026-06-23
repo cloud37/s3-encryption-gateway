@@ -18,6 +18,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Dependencies
 
+## [0.10.1] — 2026-06-23
+
+### Added
+
+- **V1.0-CONFIG-1 — Per-bucket encryption bypass + flat ENV policy config**:
+  `PassthroughEngine` (no-op encryption) for buckets marked with
+  `disable_encryption: true` in policy; HTTP 409
+  `EncryptionConfigurationMismatch` is returned when a client tries to PUT
+  an already-encrypted object into a bypass bucket. All `PolicyConfig` fields
+  are now configurable via indexed environment variables (`GW_POLICY_N_*`)
+  without any policy YAML files — hot-reload resets and reloads from both
+  file and environment sources on every SIGHUP. Startup emits a warning for
+  each policy with `disable_encryption: true`. See
+  `docs/plans/V1.0-CONFIG-1-plan.md`.
+
+### Fixed
+
+- **Harbor ListObjects blob-size regression**: legacy single-PUT
+  chunked-encrypted objects written before `MetaOriginalSize` was persisted
+  exposed ciphertext sizes in small `ListObjects(max-keys=1)` stat-style
+  listings (used by Docker Distribution as a `HeadObject` fallback).
+  `handleListObjects` now translates object sizes to plaintext by looking
+  up object metadata, matching the size-derivation logic already used by
+  `HeadObject`. Keeps normal large listings fast while fixing Harbor
+  compatibility for legacy encrypted blobs.
+
+- **README Docker examples used stale credential env var names**
+  (PR #195): the `docker run` snippets still referenced the pre-v0.8 names
+  `GW_ACCESS_KEY_N` / `GW_SECRET_KEY_N` instead of the current
+  `GW_CRED_N_ACCESS_KEY` / `GW_CRED_N_SECRET_KEY`. Only documentation
+  changed — the variables the gateway reads have been `GW_CRED_*` since
+  V1.0-AUTH-1.
+
+### Dependencies
+
+- Updated AWS SDK Go v2 monorepo to v1.104.0.
+- Updated `github.com/cenkalti/backoff/v5` to v6.
+- Updated `github.com/moby/moby/api` to v1.55.0.
+- Updated `golang.org/x/perf` digest to 9e4b9dd.
+- Updated Helm release valkey to ~0.10.0.
+- Updated dependency helm to v4.2.2.
+- Updated `actions/checkout` action to v7.
+- Updated `github.com/redis/go-redis` to v9.21.0.
+- Updated `testcontainers-go` monorepo to v0.43.0.
+
 ## [0.10.0] — 2026-06-09
 
 ### ⚠️ Breaking ⚠️

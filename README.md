@@ -81,6 +81,45 @@ All objects are encrypted before being sent to the backend and decrypted on retr
 - **Range requests**: Fetches only the encrypted chunks covering the requested plaintext byte range
 - **FIPS-compliant profile**: Build with `-tags=fips` to restrict to AES-256-GCM + HKDF-SHA256 (FIPS-140 approved). Under envelope encryption, DEK wrapping uses AES-256-GCM (AES KEK) or RSA-OAEP/SHA-256 (RSA KEK) — both FIPS-approved. The `argon2id` KDF is rejected at startup under `-tags=fips`.
 
+### Per-Bucket Policies
+
+Policies let you override encryption behaviour on a per-bucket basis using glob-pattern matches. Use them for multi-tenant setups (different keys per tenant) or when specific buckets must bypass encryption.
+
+**Via YAML files** (mount any number of files; load them with `policies:` in config):
+
+```yaml
+# policy/acme.yaml
+id: acme
+buckets: ["acme-*"]
+encryption:
+  password: "acme-secret"
+  preferred_algorithm: ChaCha20-Poly1305
+```
+
+```yaml
+# policy/legacy.yaml
+id: legacy
+buckets: ["restic-backups"]
+disable_encryption: true
+```
+
+**Via environment variables** — no policy files needed:
+
+```bash
+# Policy 0: encrypt acme-* with a per-tenant password
+GW_POLICY_0_ID="acme"
+GW_POLICY_0_BUCKETS="acme-*"
+GW_POLICY_0_ENCRYPTION_PASSWORD="acme-secret"
+GW_POLICY_0_ENCRYPTION_ALGORITHM="ChaCha20-Poly1305"
+
+# Policy 1: bypass encryption for restic backups
+GW_POLICY_1_ID="legacy"
+GW_POLICY_1_BUCKETS="restic-backups"
+GW_POLICY_1_DISABLE_ENCRYPTION="true"
+```
+
+All `GW_POLICY_N_*` fields are hot-reloaded on SIGHUP. Available variables map 1:1 to `PolicyConfig` fields; see `config.yaml.example` for the complete list.
+
 ### Encrypted Multipart Uploads
 
 Large objects uploaded via the S3 multipart API are encrypted end-to-end. Each upload gets its own key; each chunk gets a deterministic, collision-free IV derived via HKDF-SHA256.
@@ -861,35 +900,13 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 - **AWS KMS adapter** — native envelope encryption with AWS-managed keys
 - **HashiCorp Vault Transit** — key management via Vault's Transit secrets engine
 
-### Shipped in v0.8 (current release)
+### Shipped in previous versions
 
-- **Gateway-managed credential store** (V1.0-AUTH-1) — every request validated via SigV4/V2 against a gateway-local credential store; `use_client_credentials` passthrough removed; credentials configured via `auth.credentials` in config or env vars
-- **Full security audit hardening** — 23 defence-in-depth findings resolved: `context.Context` propagation through the encryption engine, length-prefixed AAD canonicalization, `keyResolver` oracle removal, PBKDF2 default raised to 600 000 iterations, decompression bomb protection, presigned URL expiry cap (7 days), rate limiter map cap, admin token zeroization on shutdown, TLS config for audit HTTP sink, policy reload wired into config watcher, and more
-- **Dedicated metrics port** — `/metrics` is no longer served on the public S3 port. A dedicated unauthenticated listener can be configured via `metrics.addr` / `METRICS_ADDR`; when not set, metrics fall back to the admin port (if enabled) or the S3 port (legacy). The Helm chart wires this end-to-end via `metrics.port` including Service, ServiceMonitor, PodMonitor, and NetworkPolicy (V1.0-SEC-L01)
-- **XML injection fix** — `generateListObjectsXML` now uses proper `encoding/xml` marshaling
-- **Docker healthcheck** — replaced `wget` healthcheck with a native Go binary; FIPS variant included
-
-### Shipped in v0.7
-
-- **Audit tool (`s3eg-cli`)** — read-only backend-envelope inspection: inspect, verify-key, list-algorithm (V1.0-CLI-2). Replaces the removed `s3eg-migrate` (now deprecated). For re-encryption use **GET-through-gateway → PUT-through-gateway**; see [`docs/MIGRATION.md`](docs/MIGRATION.md).
-- **Configurable PBKDF2 iterations + per-object KDF metadata** (V1.0-SEC-H03) — iteration count recorded in object metadata; mixed-iteration deployments decrypt correctly
-- **Large MPU streaming fixes** — `ReadTimeout` set to 0 (same as `WriteTimeout`) to prevent timeout kills on multi-hundred-MiB downloads; active write-deadline refresh during long streams; network errors distinguished from tamper on streaming (#135)
-- **Constant-time credential comparison** — timing-safe comparison for all credential checks
-- **V1.0-SEC-2 / V1.0-SEC-4 / V1.0-SEC-27 / V1.0-SEC-29** — additional hardening fixes
-
-### Shipped in v0.6
-
-- **Encrypted multipart uploads** — per-upload DEK, HKDF-derived per-chunk IVs, AEAD manifest, ranged GET across part boundaries, end-to-end tamper detection, Valkey state store, Helm subchart wiring (ADR 0009)
-- **Pluggable KeyManager interface** (ADR 0004)
-- **FIPS-compliant crypto profile** (ADR 0005, `-tags=fips`)
-- **Multipart copy** (ADR 0006)
-- **Admin API with key-rotation state machine** (ADR 0007)
-- **Object Lock / Retention / Legal Hold pass-through** (ADR 0008)
+See [`CHANGELOG.md`](CHANGELOG.md) for the complete changelog.
 
 ### Future
 
 - Azure Key Vault and GCP Cloud KMS adapters
-- Per-bucket encryption policies
 - S3 Encryption Gateway Kubernetes Operator
 - Multi-arch images with SBOM and SLSA provenance
 
