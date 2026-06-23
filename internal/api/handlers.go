@@ -14,12 +14,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"syscall"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/admin"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/cache"
@@ -28,6 +27,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -923,6 +923,12 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	var backendRange *string
 	var useRangeOptimization bool
 	var plaintextStart, plaintextEnd int64
+	// derivedPlaintextSize holds the MetaOriginalSize value computed from the
+	// ciphertext Content-Length when the object lacks MetaOriginalSize in its
+	// stored metadata. It is propagated into the GetObject metadata map so all
+	// downstream decryption paths (DecryptRangeOptimized, full decrypt) can
+	// also use the correct plaintext size.
+	var derivedPlaintextSize string
 
 	// Get S3 client (may use client credentials if enabled)
 	// For Signature V4 requests, s3Client may be nil - we'll forward the request directly
@@ -1000,8 +1006,70 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 						backendRange = nil
 					}
 				} else {
-					h.logger.WithError(err).Warn("Failed to get plaintext size, falling back to full fetch")
-					backendRange = nil
+					// GetPlaintextSizeFromMetadata failed (no MetaOriginalSize or
+					// MetaChunkCount). Derive exact plaintext size from ciphertext
+					// Content-Length + MetaChunkSize so range optimization still works.
+					// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16))*16
+					h.logger.WithFields(logrus.Fields{
+						"bucket":               bucket,
+						"key":                  key,
+						"headmeta_content_len": headMeta["Content-Length"],
+						"headmeta_chunk_size":  headMeta[crypto.MetaChunkSize],
+					}).Debug("chunked object missing MetaOriginalSize — deriving from ciphertext size")
+					if ctStr, ok2 := headMeta["Content-Length"]; ok2 {
+						if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
+							chunkSize := int64(crypto.DefaultChunkSize)
+							if csStr, ok3 := headMeta[crypto.MetaChunkSize]; ok3 {
+								if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
+									chunkSize = cs
+								}
+							}
+							const aeadTag = int64(16)
+							numChunks := (ct + chunkSize + aeadTag - 1) / (chunkSize + aeadTag)
+							if numChunks < 1 {
+								numChunks = 1
+							}
+							if ps := ct - numChunks*aeadTag; ps > 0 {
+								plaintextSize = ps
+								err = nil
+								// Inject derived size into headMeta so that
+								// CalculateEncryptedRangeForPlaintextRange and
+								// DecryptRangeOptimized can also use it.
+								headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", ps)
+								// Also record for propagation into GetObject metadata.
+								derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
+							}
+						}
+					}
+					if err != nil {
+						h.logger.WithError(err).Warn("Failed to get plaintext size, falling back to full fetch")
+						backendRange = nil
+					} else {
+						// Retry range parsing with derived plaintext size.
+						parsedStart, parsedEnd, parseErr := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
+						if parseErr == nil {
+							plaintextStart, plaintextEnd = parsedStart, parsedEnd
+							encStart, encEnd, encErr := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, parsedStart, parsedEnd)
+							if encErr == nil {
+								encRange := fmt.Sprintf("bytes=%d-%d", encStart, encEnd)
+								backendRange = &encRange
+								useRangeOptimization = true
+								h.logger.WithFields(logrus.Fields{
+									"bucket":          bucket,
+									"key":             key,
+									"client_range":    *rangeHeader,
+									"plaintext_size":  plaintextSize,
+									"plaintext_range": fmt.Sprintf("%d-%d", parsedStart, parsedEnd),
+									"encrypted_range": encRange,
+									"decrypted_size":  parsedEnd - parsedStart + 1,
+								}).Debug("range-optimized GET: derived ranges")
+							} else {
+								backendRange = nil
+							}
+						} else {
+							backendRange = nil
+						}
+					}
 				}
 			} else {
 				// Legacy format: must fetch full object, decrypt, then apply range.
@@ -1011,6 +1079,16 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			// Not encrypted or HEAD failed: forward range to backend as-is.
 			backendRange = rangeHeader
 		}
+	}
+
+	// Legacy chunked objects can be served correctly once we derive the
+	// plaintext size, but keep them on the full-fetch path. Their stored
+	// metadata is incomplete, so avoiding DecryptRangeOptimized here removes
+	// one more variable from Harbor pull compatibility while newer objects
+	// continue to use the optimized path once MetaOriginalSize is persisted.
+	if derivedPlaintextSize != "" {
+		backendRange = nil
+		useRangeOptimization = false
 	}
 
 	reader, metadata, err := s3Client.GetObject(ctx, bucket, key, versionID, backendRange)
@@ -1026,6 +1104,15 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
+
+	// If the range pre-processing derived the plaintext size from the ciphertext,
+	// propagate it into the GetObject metadata so that DecryptRangeOptimized and
+	// the full-object decrypt path both have access to it.
+	if derivedPlaintextSize != "" {
+		if _, already := metadata[crypto.MetaOriginalSize]; !already {
+			metadata[crypto.MetaOriginalSize] = derivedPlaintextSize
+		}
+	}
 
 	// For MPU-encrypted objects, delegate to the MPU decrypt path.
 	if metadata[crypto.MetaMPUEncrypted] == "true" {
@@ -1330,6 +1417,13 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			if versionID != nil && *versionID != "" {
 				w.Header().Set("x-amz-version-id", *versionID)
 			}
+			h.logger.WithFields(logrus.Fields{
+				"bucket":         bucket,
+				"key":            key,
+				"content_range":  fmt.Sprintf("bytes %d-%d/%d", plaintextStart, plaintextEnd, totalSize),
+				"content_length": decryptedSize,
+				"client_range":   *rangeHeader,
+			}).Info("serving range-optimized response")
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", plaintextStart, plaintextEnd, totalSize))
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", decryptedSize))
 			w.WriteHeader(http.StatusPartialContent)
@@ -1342,6 +1436,15 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			if copyErr != nil {
 				h.logger.WithError(copyErr).Error("Failed to write optimized range data")
 				// Headers already sent; log only.
+			}
+			if n64 != decryptedSize {
+				h.logger.WithFields(logrus.Fields{
+					"bucket":          bucket,
+					"key":             key,
+					"promised_bytes":  decryptedSize,
+					"written_bytes":   n64,
+					"plaintext_range": fmt.Sprintf("%d-%d", plaintextStart, plaintextEnd),
+				}).Error("BYTES MISMATCH: Content-Length promised != bytes actually written")
 			}
 			h.metrics.RecordS3Operation(r.Context(), "GetObject", bucket, time.Since(start))
 			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), n64)
@@ -1705,6 +1808,18 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When originalBytes is unknown (e.g. chunked transfer encoding from client
+	// with no Content-Length), wrap the encrypted reader to count ciphertext bytes.
+	// After PutObject, back-calculate the plaintext size and persist it via a
+	// metadata-only copy-to-self. This ensures HeadObject returns the correct
+	// Content-Length so clients can issue correct range requests without the
+	// gateway needing to fetch and decrypt the full object on every range GET.
+	var ciphertextCounter *countingReader
+	if originalBytes == 0 && encMetadata[crypto.MetaChunkedFormat] == "true" {
+		ciphertextCounter = newCountingReader(encryptedReader)
+		encryptedReader = ciphertextCounter
+	}
+
 	// Upload encrypted object with filtered metadata (streaming)
 	etag, err := s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
@@ -1718,6 +1833,55 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordS3Error(r.Context(), "PutObject", bucket, s3Err.Code)
 		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
+	}
+
+	// After a successful streaming PUT where the plaintext size was unknown,
+	// back-calculate the plaintext size from ciphertext length and update the
+	// stored object's metadata. Chunked AES-GCM overhead: 16 bytes per chunk.
+	// ciphertext = plaintext + ceil(plaintext/chunkSize)*16
+	// This metadata-only update uses a server-side copy-to-self (zero data
+	// movement on Ceph) so subsequent HEAD/range-GET calls return the correct
+	// Content-Length, enabling the range-optimization path.
+	if ciphertextCounter != nil && ciphertextCounter.n > 0 {
+		chunkSize := int64(crypto.DefaultChunkSize)
+		if csStr, ok := encMetadata[crypto.MetaChunkSize]; ok {
+			if cs, err2 := strconv.ParseInt(csStr, 10, 64); err2 == nil && cs > 0 {
+				chunkSize = cs
+			}
+		}
+		const aeadTagSize = int64(16)
+		ct := ciphertextCounter.n
+		// Solve: find plaintext p such that p + ceil(p/chunkSize)*16 == ct.
+		// Iterate from the upper bound downward until we find a consistent p.
+		maxChunks := (ct + chunkSize) / (chunkSize + aeadTagSize)
+		var plainSize int64
+		for n := maxChunks; n >= 1; n-- {
+			p := ct - n*aeadTagSize
+			if p > 0 && (p+chunkSize-1)/chunkSize == n {
+				plainSize = p
+				break
+			}
+		}
+		if plainSize > 0 {
+			updatedMeta := make(map[string]string, len(s3Metadata)+1)
+			for k, v := range s3Metadata {
+				updatedMeta[k] = v
+			}
+			updatedMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", plainSize)
+			if _, _, copyErr := s3Client.CopyObject(ctx, bucket, key, bucket, key, nil, updatedMeta, nil); copyErr != nil {
+				h.logger.WithError(copyErr).WithFields(logrus.Fields{
+					"bucket":     bucket,
+					"key":        key,
+					"plain_size": plainSize,
+				}).Warn("handlePutObject: failed to update MetaOriginalSize after streaming PUT; range optimisation unavailable for this object")
+			} else {
+				h.logger.WithFields(logrus.Fields{
+					"bucket":     bucket,
+					"key":        key,
+					"plain_size": plainSize,
+				}).Debug("handlePutObject: updated MetaOriginalSize after streaming PUT")
+			}
+		}
 	}
 
 	if etag != "" {
@@ -1891,12 +2055,48 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Restore original size if available.
-	// Priority: single-PUT encryption metadata > MPU manifest > raw backend size.
+	// Restore original plaintext size if available.
+	// Priority:
+	//   1. x-amz-meta-encryption-original-size    — set by modern chunked Encrypt
+	//   2. x-amz-meta-original-content-length     — legacy alias
+	//   3. chunked format: derive from ciphertext size + MetaChunkSize (exact)
+	//   4. MPU-encrypted                           — read TotalPlainSize from manifest
+	//   5. fall through → return raw backend size  (unencrypted or unknown format)
+	//
+	// Without a correct plaintext Content-Length, clients (Docker, docker-distribution)
+	// compute byte-range requests based on the ciphertext size, which is larger.
+	// The gateway then returns wrong data for those ranges, causing digest mismatches
+	// and "unexpected EOF" on pull.
 	if originalSize, ok := metadata["x-amz-meta-encryption-original-size"]; ok {
 		filteredMetadata["Content-Length"] = originalSize
 	} else if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok {
 		filteredMetadata["Content-Length"] = originalSize
+	} else if metadata[crypto.MetaChunkedFormat] == "true" {
+		// Chunked single-PUT objects without MetaOriginalSize (e.g. stored before
+		// the size-recording fix, or via streaming PUT without Content-Length).
+		// Derive the exact plaintext size from the ciphertext Content-Length and
+		// chunk size: each chunk adds exactly 16 bytes (AES-GCM/ChaCha20 AEAD tag).
+		// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16)) * 16
+		if ctStr, ok := metadata["Content-Length"]; ok {
+			if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
+				chunkSize := int64(crypto.DefaultChunkSize)
+				if csStr, ok2 := metadata[crypto.MetaChunkSize]; ok2 {
+					if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
+						chunkSize = cs
+					}
+				}
+				const aeadTagSize = int64(16)
+				// Number of chunks = ceil(ciphertext / (chunkSize + tagSize))
+				numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
+				if numChunks < 1 {
+					numChunks = 1
+				}
+				plainSize := ct - numChunks*aeadTagSize
+				if plainSize > 0 {
+					filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
+				}
+			}
+		}
 	} else if metadata[crypto.MetaMPUEncrypted] == "true" {
 		// MPU-encrypted object: the backend size is the sum of all encrypted
 		// parts (ciphertext). The plaintext total is stored in the companion
@@ -1910,9 +2110,9 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 			filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
 		} else {
 			h.logger.WithError(manifestErr).WithFields(logrus.Fields{
-				"bucket":       bucket,
-				"key":          key,
-				"manifestKey":  manifestKey,
+				"bucket":      bucket,
+				"key":         key,
+				"manifestKey": manifestKey,
 			}).Warn("HeadObject: failed to read MPU manifest for size translation; returning ciphertext size")
 		}
 	}
@@ -2123,6 +2323,21 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Docker Distribution's S3 driver also uses ListObjects(max-keys=1) as a
+	// stat fallback for regular objects. Legacy single-PUT chunked-encrypted
+	// objects stored before MetaOriginalSize was persisted still report
+	// ciphertext sizes from the backend, which can poison Harbor's blob
+	// descriptor cache. For these small stat-style listings, translate object
+	// sizes from ciphertext to plaintext exactly like handleHeadObject.
+	if len(listResult.Objects) > 0 && maxKeys <= 10 {
+		for i := range listResult.Objects {
+			obj := &listResult.Objects[i]
+			if ps, ok, translateErr := h.lookupListObjectPlaintextSize(ctx, bucket, obj.Key, obj.Size, s3Client); translateErr == nil && ok {
+				obj.Size = ps
+			}
+		}
+	}
+
 	// Compute NextMarker for S3 API v1 clients.  When the response is
 	// truncated, v1 clients need a key name to send as the next marker.
 	// (v2 clients use the opaque NextContinuationToken instead.)
@@ -2140,6 +2355,66 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 
 	h.metrics.RecordS3Operation(r.Context(), "ListObjects", bucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(len(xmlResponse)))
+}
+
+// lookupListObjectPlaintextSize returns the plaintext size for list results
+// when the backend object is known to be encrypted and its reported size is
+// ciphertext. It is intentionally used only on small stat-style listings to
+// avoid per-object HEAD amplification on large enumerations.
+func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key string, ciphertextSize int64, s3Client s3.Client) (int64, bool, error) {
+	if ciphertextSize <= 0 {
+		return 0, false, nil
+	}
+
+	metadata, err := s3Client.HeadObject(ctx, bucket, key, nil)
+	if err != nil {
+		return 0, false, err
+	}
+
+	if originalSize, ok := metadata[crypto.MetaOriginalSize]; ok && originalSize != "" {
+		ps, parseErr := strconv.ParseInt(originalSize, 10, 64)
+		if parseErr != nil || ps <= 0 {
+			return 0, false, parseErr
+		}
+		return ps, true, nil
+	}
+
+	if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok && originalSize != "" {
+		ps, parseErr := strconv.ParseInt(originalSize, 10, 64)
+		if parseErr != nil || ps <= 0 {
+			return 0, false, parseErr
+		}
+		return ps, true, nil
+	}
+
+	if metadata[crypto.MetaChunkedFormat] == "true" {
+		chunkSize := int64(crypto.DefaultChunkSize)
+		if csStr, ok := metadata[crypto.MetaChunkSize]; ok {
+			if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
+				chunkSize = cs
+			}
+		}
+		const aeadTagSize = int64(16)
+		numChunks := (ciphertextSize + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
+		if numChunks < 1 {
+			numChunks = 1
+		}
+		plainSize := ciphertextSize - numChunks*aeadTagSize
+		if plainSize > 0 {
+			return plainSize, true, nil
+		}
+		return 0, false, nil
+	}
+
+	if metadata[crypto.MetaMPUEncrypted] == "true" {
+		ps, manifestErr := h.readMPUManifestTotalPlainSize(ctx, bucket, key+".mpu-manifest", s3Client)
+		if manifestErr != nil || ps <= 0 {
+			return 0, false, manifestErr
+		}
+		return ps, true, nil
+	}
+
+	return 0, false, nil
 }
 
 // handleHeadBucket handles HEAD bucket requests.
@@ -4104,15 +4379,15 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ListPartsResult struct {
-		XMLName                xml.Name      `xml:"ListPartsResult"`
-		Bucket                 string        `xml:"Bucket"`
-		Key                    string        `xml:"Key"`
-		UploadId               string        `xml:"UploadId"`
-		PartNumberMarker       int32         `xml:"PartNumberMarker"`
-		NextPartNumberMarker   int32         `xml:"NextPartNumberMarker,omitempty"`
-		MaxParts               int32         `xml:"MaxParts"`
-		IsTruncated            bool          `xml:"IsTruncated"`
-		Parts                  []PartElement `xml:"Part"`
+		XMLName              xml.Name      `xml:"ListPartsResult"`
+		Bucket               string        `xml:"Bucket"`
+		Key                  string        `xml:"Key"`
+		UploadId             string        `xml:"UploadId"`
+		PartNumberMarker     int32         `xml:"PartNumberMarker"`
+		NextPartNumberMarker int32         `xml:"NextPartNumberMarker,omitempty"`
+		MaxParts             int32         `xml:"MaxParts"`
+		IsTruncated          bool          `xml:"IsTruncated"`
+		Parts                []PartElement `xml:"Part"`
 	}
 
 	result := ListPartsResult{
@@ -4500,7 +4775,7 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 			// Whole-batch failure — log and move on.
 			h.logger.WithError(manifestErr).WithFields(logrus.Fields{
 				"bucket": bucket,
-				"count": len(manifestKeys),
+				"count":  len(manifestKeys),
 			}).Warn("Failed to batch-delete MPU manifest companion objects")
 		} else {
 			for _, d := range manifestDeleted {

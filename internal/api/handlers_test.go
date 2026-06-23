@@ -19,11 +19,11 @@ import (
 	"time"
 
 	"github.com/aws/smithy-go"
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -51,9 +51,10 @@ func (e *mockAPIError) ErrorFault() smithy.ErrorFault {
 
 // mockS3Client is a mock implementation of s3.Client for testing.
 type mockS3Client struct {
-	objects  map[string][]byte
-	metadata map[string]map[string]string
-	errors   map[string]error
+	objects      map[string][]byte
+	metadata     map[string]map[string]string
+	errors       map[string]error
+	lastGetRange *string
 
 	// Object-Lock recording (V0.6-S3-2). Readers MUST hold mu; writers
 	// hold mu for write.
@@ -66,16 +67,16 @@ type mockS3Client struct {
 	lockConfigs      map[string]*s3.ObjectLockConfiguration
 
 	// ACL recording (V1.0-S3-1). Protected by locksMu.
-	lastCannedACL         string
-	lastGrantFullCtrl     string
-	lastGrantRead         string
-	lastGrantReadACP      string
-	lastGrantWriteACP     string
-	lastMPUCannedACL      string
-	lastMPUGrantFullCtrl  string
-	lastMPUGrantRead      string
-	lastMPUGrantReadACP   string
-	lastMPUGrantWriteACP  string
+	lastCannedACL        string
+	lastGrantFullCtrl    string
+	lastGrantRead        string
+	lastGrantReadACP     string
+	lastGrantWriteACP    string
+	lastMPUCannedACL     string
+	lastMPUGrantFullCtrl string
+	lastMPUGrantRead     string
+	lastMPUGrantReadACP  string
+	lastMPUGrantWriteACP string
 }
 
 func newMockS3Client() *mockS3Client {
@@ -110,6 +111,12 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader
 func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
 	if err := m.errors[bucket+"/"+key+"/get"]; err != nil {
 		return nil, nil, err
+	}
+	if rangeHeader != nil {
+		rh := *rangeHeader
+		m.lastGetRange = &rh
+	} else {
+		m.lastGetRange = nil
 	}
 	data, ok := m.objects[bucket+"/"+key]
 	if !ok {
@@ -223,7 +230,7 @@ func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, o
 	}
 
 	// Sort for deterministic pagination
-	 sort.Slice(allObjects, func(i, j int) bool {
+	sort.Slice(allObjects, func(i, j int) bool {
 		return allObjects[i].Key < allObjects[j].Key
 	})
 
@@ -662,7 +669,6 @@ func TestHandleCreateMultipartUpload_NoCannedACL_NoACLHeader(t *testing.T) {
 		t.Errorf("expected empty MPU cannedACL, got %q", got)
 	}
 }
-
 
 // TestHandler_HandlePutObject_InvalidACL_Forwarded verifies that unknown ACL
 // values are forwarded as-is (the gateway does not validate ACL strings).
@@ -2592,5 +2598,3 @@ disable_encryption: true
 		t.Logf("non-bypass engine: %T (expected nil since no default engine configured)", engine2)
 	}
 }
-
-

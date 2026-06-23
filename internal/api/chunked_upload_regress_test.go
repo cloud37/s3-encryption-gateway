@@ -3,14 +3,16 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
@@ -72,4 +74,115 @@ func TestReproChunkedUploadIssue(t *testing.T) {
 	// It SHOULD be 11, not the chunked size
 	storedLen := storedMeta[crypto.MetaOriginalSize]
 	assert.Equal(t, strconv.Itoa(realDataSize), storedLen, "Stored original content length should match decoded size")
+}
+
+func TestLegacyChunkedRangeGetFallsBackToFullFetch(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	plaintext := bytes.Repeat([]byte("legacy-range-data-"), 3000)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+
+	delete(metadata, crypto.MetaOriginalSize)
+	delete(metadata, crypto.MetaChunkCount)
+	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
+
+	mockClient.PutObject(context.Background(), "test-bucket", "legacy-key", bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	headReq := httptest.NewRequest("HEAD", "/test-bucket/legacy-key", nil)
+	headW := httptest.NewRecorder()
+	router.ServeHTTP(headW, headReq)
+
+	if headW.Code != http.StatusOK {
+		t.Fatalf("HEAD expected 200, got %d body=%s", headW.Code, headW.Body.String())
+	}
+	if got := headW.Header().Get("Content-Length"); got != strconv.Itoa(len(plaintext)) {
+		t.Fatalf("HEAD Content-Length = %q, want %d", got, len(plaintext))
+	}
+
+	req := httptest.NewRequest("GET", "/test-bucket/legacy-key", nil)
+	req.Header.Set("Range", "bytes=0-")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("GET expected 206, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Length"); got != strconv.Itoa(len(plaintext)) {
+		t.Fatalf("GET Content-Length = %q, want %d", got, len(plaintext))
+	}
+	wantRange := fmt.Sprintf("bytes 0-%d/%d", len(plaintext)-1, len(plaintext))
+	if got := w.Header().Get("Content-Range"); got != wantRange {
+		t.Fatalf("GET Content-Range = %q, want %q", got, wantRange)
+	}
+	if !bytes.Equal(w.Body.Bytes(), plaintext) {
+		t.Fatalf("GET body mismatch: got %d bytes, want %d", len(w.Body.Bytes()), len(plaintext))
+	}
+	if mockClient.lastGetRange != nil {
+		t.Fatalf("expected full backend fetch for legacy chunked object, got backend range %q", *mockClient.lastGetRange)
+	}
+}
+
+func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	plaintext := bytes.Repeat([]byte("legacy-list-size-"), 400)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+
+	delete(metadata, crypto.MetaOriginalSize)
+	delete(metadata, crypto.MetaChunkCount)
+	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
+
+	objectKey := "docker/registry/v2/blobs/sha256/39/legacy/data"
+	mockClient.PutObject(context.Background(), "test-bucket", objectKey, bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/test-bucket?prefix=docker/registry/v2/blobs/sha256/39/legacy/&max-keys=1", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListObjects expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), fmt.Sprintf("<Size>%d</Size>", len(plaintext))) {
+		t.Fatalf("ListObjects body missing plaintext size %d: %s", len(plaintext), w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), fmt.Sprintf("<Size>%d</Size>", len(encryptedData))) {
+		t.Fatalf("ListObjects body still exposes ciphertext size %d: %s", len(encryptedData), w.Body.String())
+	}
 }

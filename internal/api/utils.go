@@ -301,3 +301,23 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 		h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), true, nil, time.Since(start))
 	}
 }
+
+// countingReader wraps an io.Reader and counts how many bytes have been read.
+// It is used in handlePutObject to measure ciphertext length when the plaintext
+// size was not known before encryption (e.g. chunked transfer encoding with no
+// Content-Length). The count n is safe to read after the wrapped reader reaches
+// EOF; concurrent access is not supported.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func newCountingReader(r io.Reader) *countingReader {
+	return &countingReader{r: r}
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
