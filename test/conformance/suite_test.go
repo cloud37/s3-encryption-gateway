@@ -130,6 +130,17 @@ func TestConformance(t *testing.T) {
 		{"EncryptedMPU_AbortCleansState", provider.CapEncryptedMPU, testEncryptedMPUAbortCleansState},
 		{"EncryptedMPU_LargeObject", provider.CapEncryptedMPU, testEncryptedMPU_LargeObject},
 
+			// V1.0-CONFIG-1 — Per-bucket encryption bypass + ENV policy configuration.
+			{"BypassEncryption_RoundTrip", 0, testBypassEncryption_RoundTrip},
+			{"BypassEncryption_AtRest", 0, testBypassEncryption_AtRest},
+			{"BypassEncryption_NoEncryptionMetadata", 0, testBypassEncryption_NoEncryptionMetadata},
+			{"BypassEncryption_EncryptedObjectReturns409", 0, testBypassEncryption_EncryptedObjectReturns409},
+			{"BypassEncryption_PlaintextObjectServedCorrectly", 0, testBypassEncryption_PlaintextObjectServedCorrectly},
+			{"BypassEncryption_EnvPolicy_EndToEnd", 0, testBypassEncryption_EnvPolicy_EndToEnd},
+			{"BypassEncryption_MixedBypassAndEncrypt", 0, testBypassEncryption_MultiPolicy_MixedBypassAndEncrypt},
+			{"BypassEncryption_ConflictRejected", 0, testBypassEncryption_ConflictRejected},
+			{"BypassEncryption_ResetClearsPolicies", 0, testBypassEncryption_ResetClearsPolicies},
+
 			// KMS envelope encryption integration test.
 			// Starts a Cosmian KMS container and verifies the full wrap/unwrap path
 			// with the in-process gateway. Gated on CapKMSIntegration so it only

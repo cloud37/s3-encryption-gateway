@@ -1784,9 +1784,17 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		"metadata_sizes": metadataSizes,
 	}).Debug("Metadata keys after filtering (being sent to S3)")
 
-	// Compute encrypted content length for chunked mode if possible to avoid chunked transfer
+	// Compute stored content length for backend PutObject.
+	// For chunked encryption: plaintext + AEAD tag overhead per chunk.
+	// For passthrough / bypass (disable_encryption): stored bytes = original bytes.
+	// For legacy (non-chunked) encryption: the encrypted reader is a *bytes.Reader
+	// which reports its own length; contentLengthPtr stays nil so the S3 client
+	// derives it from the reader.
 	var contentLengthPtr *int64
-	if encMetadata[crypto.MetaChunkedFormat] == "true" && originalBytes > 0 {
+	if originalBytes > 0 && encMetadata[crypto.MetaEncrypted] != "true" {
+		// Bypass / passthrough mode: plaintext is stored as-is.
+		contentLengthPtr = &originalBytes
+	} else if encMetadata[crypto.MetaChunkedFormat] == "true" && originalBytes > 0 {
 		// Determine chunk size from metadata
 		chunkSize := crypto.DefaultChunkSize
 		if csStr, ok := encMetadata[crypto.MetaChunkSize]; ok && csStr != "" {

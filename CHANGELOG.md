@@ -30,8 +30,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are now configurable via indexed environment variables (`GW_POLICY_N_*`)
   without any policy YAML files — hot-reload resets and reloads from both
   file and environment sources on every SIGHUP. Startup emits a warning for
-  each policy with `disable_encryption: true`. See
-  `docs/plans/V1.0-CONFIG-1-plan.md`.
+  each policy with `disable_encryption: true`. Conformance tests cover
+  round-trip, at-rest plaintext verification, mixed bypass/encrypt buckets,
+  ENV-only policy loading, conflict rejection, and HTTP 409 responses.
+  See `docs/plans/V1.0-CONFIG-1-plan.md`.
 
 ### Fixed
 
