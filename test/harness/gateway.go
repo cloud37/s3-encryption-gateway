@@ -260,7 +260,11 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	handler.RegisterRoutes(router)
 
 	// Middleware.
-	httpHandler := middleware.RecoveryMiddleware(logger)(router)
+	// StripBucketTrailingSlash normalises "/<bucket>/" → "/<bucket>"
+	// before gorilla/mux performs route matching. Mirrors the production
+	// middleware chain in cmd/server/main.go. See issue #198.
+	httpHandler := middleware.StripBucketTrailingSlash(router)
+	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)
 	httpHandler = middleware.LoggingMiddleware(logger, &cfg.Logging)(httpHandler)
 
 	// Wire auth middleware if credentials are configured (V1.0-AUTH-1).

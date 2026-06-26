@@ -25,6 +25,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Bucket-level trailing-slash 404 (restic / MC / minio-go)** — S3 clients
+  that address bucket-level operations with a trailing slash
+  (`HEAD /bucket/`, `PUT /bucket/`, `GET /bucket/?list-type=2`, …) received
+  HTTP 404 "The specified bucket does not exist" because gorilla/mux's
+  `/{bucket}` route template does not match `/{bucket}/`. The new
+  `StripBucketTrailingSlash` middleware normalises single-segment paths
+  from `/<bucket>/` to `/<bucket>` before route matching; multi-segment
+  paths (`/<bucket>/<key>/`) are preserved because S3 keys may end with
+  `/`. Fixes #198 ("Restic: The specified bucket does not exist").
+
 ### Changed
 
 - **Valkey state encryption now requires a KeyManager.** Deployments

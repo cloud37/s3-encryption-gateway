@@ -843,7 +843,16 @@ func main() {
 	// layers. If it were innermost, panics in outer middleware (logging,
 	// security headers, tracing, bucket validation, rate limiting) would
 	// bypass recovery and crash the server goroutine.
-	httpHandler := middleware.LoggingMiddleware(logger, &cfg.Logging)(router)
+	//
+	// StripBucketTrailingSlash is the innermost middleware (directly wraps
+	// the router) so bucket-level paths addressed as "/<bucket>/" — the
+	// form used by minio-go / restic and many S3 clients — are normalised to
+	// "/<bucket>" before gorilla/mux performs route matching. Outer layers
+	// (logging in particular) still see the original wire-form URL.Path
+	// because they read it before delegating to the inner handler.
+	// See internal/middleware/trailing_slash.go and issue #198.
+	httpHandler := middleware.StripBucketTrailingSlash(router)
+	httpHandler = middleware.LoggingMiddleware(logger, &cfg.Logging)(httpHandler)
 	httpHandler = middleware.SecurityHeadersMiddleware(cfg.Server.ForceHTTPS)(httpHandler)
 
 	// Apply tracing middleware if tracing is enabled
