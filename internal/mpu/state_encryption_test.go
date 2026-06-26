@@ -3,12 +3,17 @@ package mpu
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
@@ -16,20 +21,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testMemoryKM returns a fresh in-memory KeyManager for tests.
+func testMemoryKM(t *testing.T) crypto.KeyManager {
+	t.Helper()
+	km, err := crypto.NewInMemoryKeyManager(nil)
+	require.NoError(t, err)
+	return km
+}
+
 // newEncryptedTestStore returns a ValkeyStateStore with encryption enabled and
-// backed by a fresh miniredis instance. password is used to derive the AEAD key.
+// backed by a fresh miniredis instance. The state DEK is a random 32-byte key
+// wrapped by an in-memory KeyManager.
 func newEncryptedTestStore(t *testing.T, password string) (*ValkeyStateStore, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
+	ctx := context.Background()
 	client := redis.NewClient(&redis.Options{
 		Addr: mr.Addr(),
 	})
+
+	km := testMemoryKM(t)
+
+	// Generate a random state DEK, wrap it, and persist to miniredis.
+	dek := make([]byte, 32)
+	_, err := io.ReadFull(rand.Reader, dek)
+	require.NoError(t, err)
+	envelope, err := km.WrapKey(ctx, dek, nil)
+	require.NoError(t, err)
+	envJSON, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	mr.Set(stateKeyWrappedKey, string(envJSON))
+
+	var stateKeyV1 []byte
+	if password != "" {
+		stateKeyV1 = deriveStateAEADKeyV1(password)
+	}
+
 	reg := prometheus.NewRegistry()
 	m := metrics.NewMetricsWithRegistry(reg)
 	s := &ValkeyStateStore{
 		client:       client,
 		ttl:          7 * 24 * time.Hour,
-		stateKey:     deriveStateAEADKey(password),
+		stateDEK:     dek,
+		stateKeyV1:   stateKeyV1,
+		keyManager:   km,
 		encryptState: true,
 		metrics:      m,
 	}
@@ -118,11 +153,12 @@ func TestStateStore_Decrypt_TamperedCiphertext(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStateDecryptFailed, "tampered ciphertext should return ErrStateDecryptFailed")
 }
 
-// TestStateStore_Get_LegacyPlaintextFallback puts a raw JSON blob (no version
-// prefix) directly into miniredis, then calls Get with encryption enabled and
+// TestStateStore_Get_LegacyPlaintextFallback_OptInOnly puts a raw JSON blob
+// directly into miniredis, then calls Get with allowLegacyPlaintext=true and
 // verifies the state is decoded successfully via the legacy fallback path.
-func TestStateStore_Get_LegacyPlaintextFallback(t *testing.T) {
+func TestStateStore_Get_LegacyPlaintextFallback_OptInOnly(t *testing.T) {
 	s, mr := newEncryptedTestStore(t, "test-password-legacy")
+	s.allowLegacyPlaintext = true
 	ctx := context.Background()
 
 	// Build the legacy (plaintext) state.
@@ -143,22 +179,96 @@ func TestStateStore_Get_LegacyPlaintextFallback(t *testing.T) {
 	assert.Equal(t, legacy.Key, got.Key)
 }
 
-// TestDeriveStateAEADKey_DifferentPasswords verifies that two different
+// TestStateStore_Get_PlaintextFallback_DisabledByDefault_FailsClosed verifies
+// that Get returns ErrStateDecryptFailed when allowLegacyPlaintext is false
+// (the default) and state cannot be decrypted.
+func TestStateStore_Get_PlaintextFallback_DisabledByDefault_FailsClosed(t *testing.T) {
+	s, mr := newEncryptedTestStore(t, "test-password-failclosed")
+	s.allowLegacyPlaintext = false
+	ctx := context.Background()
+
+	legacy := sampleState("upload-failclosed")
+	rawJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+
+	key := uploadKey(legacy.UploadID)
+	mr.HSet(key, fieldMeta, string(rawJSON))
+
+	_, err = s.Get(ctx, legacy.UploadID)
+	require.Error(t, err)
+	// The error should wrap ErrStateDecryptFailed.
+	assert.True(t, errors.Is(err, ErrStateDecryptFailed) || strings.Contains(err.Error(), "state decryption failed"),
+		"expected ErrStateDecryptFailed, got: %v", err)
+}
+
+// TestStateStore_List_PlaintextFallback_DisabledByDefault_FailsClosed verifies
+// that List skips entries that fail decryption when allowLegacyPlaintext is false.
+func TestStateStore_List_PlaintextFallback_DisabledByDefault_FailsClosed(t *testing.T) {
+	s, mr := newEncryptedTestStore(t, "test-password-listfail")
+	s.allowLegacyPlaintext = false
+	ctx := context.Background()
+
+	legacy := sampleState("upload-listfail")
+	rawJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+
+	key := uploadKey(legacy.UploadID)
+	mr.HSet(key, fieldMeta, string(rawJSON))
+
+	// List should not return the plaintext entry and should not error.
+	states, err := s.List(ctx)
+	require.NoError(t, err)
+	for _, st := range states {
+		if st.UploadID == legacy.UploadID {
+			t.Error("List returned a plaintext entry that should have been skipped")
+		}
+	}
+}
+
+// TestStateStore_List_LegacyPlaintextFallback_OptInOnly verifies that List
+// returns plaintext entries when allowLegacyPlaintext is true.
+func TestStateStore_List_LegacyPlaintextFallback_OptInOnly(t *testing.T) {
+	s, mr := newEncryptedTestStore(t, "test-password-listoptin")
+	s.allowLegacyPlaintext = true
+	ctx := context.Background()
+
+	legacy := sampleState("upload-listoptin")
+	rawJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+
+	key := uploadKey(legacy.UploadID)
+	mr.HSet(key, fieldMeta, string(rawJSON))
+
+	states, err := s.List(ctx)
+	require.NoError(t, err)
+	found := false
+	for _, st := range states {
+		if st.UploadID == legacy.UploadID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("List should have returned the plaintext entry with opt-in")
+	}
+}
+
+// TestDeriveStateAEADKeyV1_DifferentPasswords verifies that two different
 // passwords produce different derived keys.
-func TestDeriveStateAEADKey_DifferentPasswords(t *testing.T) {
-	key1 := deriveStateAEADKey("password-alpha")
-	key2 := deriveStateAEADKey("password-beta")
+func TestDeriveStateAEADKeyV1_DifferentPasswords(t *testing.T) {
+	key1 := deriveStateAEADKeyV1("password-alpha")
+	key2 := deriveStateAEADKeyV1("password-beta")
 
 	require.Len(t, key1, 32, "derived key should be 32 bytes")
 	require.Len(t, key2, 32, "derived key should be 32 bytes")
 	assert.False(t, bytes.Equal(key1, key2), "different passwords must produce different keys")
 }
 
-// TestDeriveStateAEADKey_Deterministic verifies that the same password always
+// TestDeriveStateAEADKeyV1_Deterministic verifies that the same password always
 // produces the same key (HKDF-Extract is deterministic for fixed salt+input).
-func TestDeriveStateAEADKey_Deterministic(t *testing.T) {
-	key1 := deriveStateAEADKey("deterministic-password")
-	key2 := deriveStateAEADKey("deterministic-password")
+func TestDeriveStateAEADKeyV1_Deterministic(t *testing.T) {
+	key1 := deriveStateAEADKeyV1("deterministic-password")
+	key2 := deriveStateAEADKeyV1("deterministic-password")
 	assert.True(t, bytes.Equal(key1, key2), "same password must produce identical keys")
 }
 
@@ -185,21 +295,21 @@ func TestValkeyConfig_Validate_MissingEnvVar(t *testing.T) {
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
 	}
-	_, err := NewValkeyStateStore(ctx, cfg, "" /* no fallback password */)
+	_, err := NewValkeyStateStore(ctx, cfg, nil, "" /* no legacy password */)
 	require.Error(t, err, "should fail when encryption password env var is empty")
 	assert.ErrorIs(t, err, ErrStateUnavailable)
 }
 
 // TestStateStore_Close_ZeroizesKey creates a store, calls Close(), then
-// verifies that the stateKey has been zeroed and set to nil.
+// verifies that the stateDEK has been zeroed and set to nil.
 func TestStateStore_Close_ZeroizesKey(t *testing.T) {
 	s, _ := newEncryptedTestStore(t, "test-password-close")
 
-	require.NotNil(t, s.stateKey, "stateKey should be non-nil before Close")
+	require.NotNil(t, s.stateDEK, "stateDEK should be non-nil before Close")
 	require.NoError(t, s.Close())
 
-	// After Close, stateKey should be nil (zeroized in Close()).
-	assert.Nil(t, s.stateKey, "stateKey should be nil after Close (zeroized)")
+	// After Close, stateDEK should be nil (zeroized in Close()).
+	assert.Nil(t, s.stateDEK, "stateDEK should be nil after Close (zeroized)")
 }
 
 // TestStateStore_CreateGetList_WithEncryption exercises the full
@@ -302,6 +412,183 @@ func TestStateStore_DecryptState_UnknownVersion(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStateDecryptFailed)
 }
 
+// --- V1.0-SEC-30 Phase B: Envelope state DEK tests ---
+
+// TestStateStore_DecryptState_EnvelopeKey_RoundTrip encrypts with the envelope
+// state DEK and decrypts with the same store; asserts success.
+func TestStateStore_DecryptState_EnvelopeKey_RoundTrip(t *testing.T) {
+	s, _ := newEncryptedTestStore(t, "")
+
+	plaintext := []byte(`{"upload_id":"env-roundtrip","bucket":"b","key":"k"}`)
+	ct, err := s.EncryptState(plaintext)
+	require.NoError(t, err)
+
+	recovered, err := s.DecryptState(ct)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, recovered)
+}
+
+// TestStateStore_DecryptState_LegacyV1Ciphertext_OpensWithV1Key encrypts with
+// a V1 HKDF key only, then decrypts with a store that has both envelope DEK +
+// V1 legacy key; asserts success (V1 fallback path).
+func TestStateStore_DecryptState_LegacyV1Ciphertext_OpensWithV1Key(t *testing.T) {
+	// Encrypt with V1 key only.
+	v1Key := deriveStateAEADKeyV1("v1-test-password")
+	store := &ValkeyStateStore{stateDEK: v1Key, encryptState: true}
+	plaintext := []byte(`{"upload_id":"v1-fallback","bucket":"b","key":"k"}`)
+	ct, err := store.EncryptState(plaintext)
+	require.NoError(t, err)
+
+	// Decrypt with envelope DEK + V1 key.
+	s2, _ := newEncryptedTestStore(t, "v1-test-password")
+	recovered, err := s2.DecryptState(ct)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, recovered)
+}
+
+// TestStateStore_DecryptState_V1Ciphertext_NoV1Key_Errors encrypts with a V1
+// key, then decrypts with a store that has envelope DEK only (no V1 key);
+// asserts ErrStateDecryptFailed.
+func TestStateStore_DecryptState_V1Ciphertext_NoV1Key_Errors(t *testing.T) {
+	// Encrypt with V1 key.
+	v1Key := deriveStateAEADKeyV1("v1-test-password")
+	store := &ValkeyStateStore{stateDEK: v1Key, encryptState: true}
+	plaintext := []byte(`{"upload_id":"v1-nov1","bucket":"b","key":"k"}`)
+	ct, err := store.EncryptState(plaintext)
+	require.NoError(t, err)
+
+	// Decrypt with a store that has envelope DEK only (no V1 key — password "").
+	s2, _ := newEncryptedTestStore(t, "") // no legacy password → no stateKeyV1
+	_, err = s2.DecryptState(ct)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateDecryptFailed)
+}
+
+// TestStateStore_DecryptState_NoKeys_Errors creates a store with no state DEK
+// and no V1 key; asserts ErrStateDecryptFailed.
+func TestStateStore_DecryptState_NoKeys_Errors(t *testing.T) {
+	s := &ValkeyStateStore{encryptState: true}
+	ct := make([]byte, stateEncryptionVersionLen+stateEncryptionNonceLen+stateEncryptionTagLen)
+	ct[0] = stateEncryptionVersionV1
+
+	_, err := s.DecryptState(ct)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateDecryptFailed)
+}
+
+// TestNewValkeyStateStore_GeneratesAndWrapsStateDEK verifies that the first
+// call generates a 32-byte DEK, wraps it via KeyManager, and stores the
+// wrapped envelope in Valkey.
+func TestNewValkeyStateStore_GeneratesAndWrapsStateDEK(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+	km := testMemoryKM(t)
+
+	trueVal := true
+	cfg := config.ValkeyConfig{
+		Addr:                   mr.Addr(),
+		EncryptState:           &trueVal,
+		InsecureAllowPlaintext: true,
+		TLS:                    config.ValkeyTLSConfig{Enabled: false},
+		TTLSeconds:             60,
+		DialTimeout:            2 * time.Second,
+		ReadTimeout:            1 * time.Second,
+		WriteTimeout:           1 * time.Second,
+		PoolSize:               2,
+	}
+
+	s, err := NewValkeyStateStore(ctx, cfg, km, "")
+	require.NoError(t, err)
+	defer s.Close()
+
+	assert.NotNil(t, s.stateDEK, "stateDEK should be set")
+	assert.Len(t, s.stateDEK, 32, "stateDEK should be 32 bytes")
+
+	// Verify the wrapped envelope was persisted.
+	wrappedJSON, err := mr.Get(stateKeyWrappedKey)
+	require.NoError(t, err, "mpu:state-key-wrapped should exist")
+	require.NotEmpty(t, wrappedJSON)
+
+	var envelope crypto.KeyEnvelope
+	require.NoError(t, json.Unmarshal([]byte(wrappedJSON), &envelope))
+	assert.Equal(t, "memory", envelope.Provider)
+	assert.NotEmpty(t, envelope.Ciphertext)
+}
+
+// TestNewValkeyStateStore_LoadsAndUnwrapsStateDEK pre-populates
+// mpu:state-key-wrapped with a wrapped DEK, then constructs the store and
+// verifies stateDEK matches the unwrapped key.
+func TestNewValkeyStateStore_LoadsAndUnwrapsStateDEK(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+	km := testMemoryKM(t)
+
+	// Generate and pre-populate a wrapped state DEK.
+	dek := make([]byte, 32)
+	_, err := io.ReadFull(rand.Reader, dek)
+	require.NoError(t, err)
+	envelope, err := km.WrapKey(ctx, dek, nil)
+	require.NoError(t, err)
+	envJSON, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	mr.Set(stateKeyWrappedKey, string(envJSON))
+
+	trueVal := true
+	cfg := config.ValkeyConfig{
+		Addr:                   mr.Addr(),
+		EncryptState:           &trueVal,
+		InsecureAllowPlaintext: true,
+		TLS:                    config.ValkeyTLSConfig{Enabled: false},
+		TTLSeconds:             60,
+		DialTimeout:            2 * time.Second,
+		ReadTimeout:            1 * time.Second,
+		WriteTimeout:           1 * time.Second,
+		PoolSize:               2,
+	}
+
+	s, err := NewValkeyStateStore(ctx, cfg, km, "")
+	require.NoError(t, err)
+	defer s.Close()
+
+	assert.Equal(t, dek, s.stateDEK, "stateDEK should match the pre-populated key")
+}
+
+// TestNewValkeyStateStore_FailsClosedWithoutKeyManager verifies that
+// encryptState=true with keyManager=nil returns ErrStateUnavailable.
+func TestNewValkeyStateStore_FailsClosedWithoutKeyManager(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+
+	trueVal := true
+	cfg := config.ValkeyConfig{
+		Addr:                   mr.Addr(),
+		EncryptState:           &trueVal,
+		InsecureAllowPlaintext: true,
+		TLS:                    config.ValkeyTLSConfig{Enabled: false},
+		TTLSeconds:             60,
+		DialTimeout:            2 * time.Second,
+		ReadTimeout:            1 * time.Second,
+		WriteTimeout:           1 * time.Second,
+		PoolSize:               2,
+	}
+
+	_, err := NewValkeyStateStore(ctx, cfg, nil, "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrStateUnavailable)
+}
+
+// TestNewValkeyStateStore_ZeroizesAllKeysOnClose verifies that stateDEK and
+// stateKeyV1 are nil after Close.
+func TestNewValkeyStateStore_ZeroizesAllKeysOnClose(t *testing.T) {
+	s, _ := newEncryptedTestStore(t, "test-password-zeroize-close")
+	require.NotNil(t, s.stateDEK)
+	require.NotNil(t, s.stateKeyV1)
+
+	require.NoError(t, s.Close())
+	assert.Nil(t, s.stateDEK)
+	assert.Nil(t, s.stateKeyV1)
+}
+
 // FuzzStateEncryption is a fuzz test that feeds random bytes to DecryptState and
 // verifies it never panics (only returns errors on invalid inputs), and that
 // DecryptState(EncryptState(p)) == p for valid inputs.
@@ -314,7 +601,7 @@ func FuzzStateEncryption(f *testing.F) {
 	f.Add([]byte{0x01, 0x00, 0x00})
 
 	s := &ValkeyStateStore{
-		stateKey:     deriveStateAEADKey("fuzz-password"),
+		stateDEK:     deriveStateAEADKeyV1("fuzz-password"),
 		encryptState: true,
 	}
 

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
@@ -125,18 +126,29 @@ const (
 type ValkeyStateStore struct {
 	client       redis.UniversalClient
 	ttl          time.Duration
-	stateKey     []byte
+	stateDEK     []byte            // random 32-byte AES-256 key (envelope DEK)
+	stateKeyV1   []byte            // legacy HKDF key for pre-upgrade state (nil if none)
+	keyManager   crypto.KeyManager // wraps/unwraps the state DEK
 	encryptState bool
-	legacyWarn   sync.Once
+	// allowLegacyPlaintext permits Get/List to fall back to plaintext JSON
+	// when state AEAD decryption fails. Intended ONLY for one-time migration
+	// from a pre-encryption deployment. Default false (fail-closed). V1.0-SEC-30.
+	allowLegacyPlaintext bool
+	legacyWarn           sync.Once
 	// metrics is optional; when non-nil, encryption counters are reported.
 	metrics *metrics.Metrics
 }
 
-// NewValkeyStateStore constructs a ValkeyStateStore from cfg and performs a
-// HealthCheck. Returns an error (fail-closed) if Valkey is unreachable.
-// encryptionPassword is the main gateway encryption password, used as fallback
-// when cfg.EncryptionPasswordEnv is not set.
-func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, encryptionPassword string) (*ValkeyStateStore, error) {
+// NewValkeyStateStore constructs a ValkeyStateStore.
+//
+// keyManager is required when encryptState is true (fail-closed if nil).
+// It wraps/unwraps the random state DEK (envelope pattern). See V1.0-SEC-30.
+//
+// legacyPassword is used ONLY to derive the V1 HKDF key for backward-compatible
+// decrypt of pre-V1.0-SEC-30 state. Pass "" for brand-new deployments with no
+// legacy state. The V1 key is read-only (never used for new encryption) and
+// expires with the 7-day state TTL.
+func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, keyManager crypto.KeyManager, legacyPassword string) (*ValkeyStateStore, error) {
 	password := ""
 	if cfg.PasswordEnv != "" {
 		password = os.Getenv(cfg.PasswordEnv)
@@ -173,28 +185,48 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, encryptio
 
 	client := redis.NewUniversalClient(opts)
 
-	// Derive at-rest encryption key.
 	encryptState := cfg.EncryptState == nil || *cfg.EncryptState
-	var stateKey []byte
+	var stateDEK []byte
+	var stateKeyV1 []byte
+	var dekErr error
+
 	if encryptState {
-		encPassword := ""
-		if cfg.EncryptionPasswordEnv != "" {
-			encPassword = os.Getenv(cfg.EncryptionPasswordEnv)
-		} else {
-			encPassword = encryptionPassword
-		}
-		if encPassword == "" {
+		// Fail-closed: require a non-nil KeyManager.
+		if keyManager == nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("%w: valkey state encryption enabled but no encryption password available (set %s or configure encryption.password)", ErrStateUnavailable, cfg.EncryptionPasswordEnv)
+			return nil, fmt.Errorf("%w: state encryption enabled but no KeyManager configured (enable key_manager or set encrypt_state=false)", ErrStateUnavailable)
 		}
-		stateKey = deriveStateAEADKey(encPassword)
+
+		// Load or generate the wrapped state DEK.
+		stateDEK, dekErr = loadOrGenerateStateDEK(ctx, client, keyManager)
+		if dekErr != nil {
+			_ = client.Close()
+			return nil, fmt.Errorf("mpu: state DEK setup: %w", dekErr)
+		}
+
+		// Derive V1 legacy key for backward-compatible decrypt (read-only).
+		if legacyPassword != "" {
+			stateKeyV1 = deriveStateAEADKeyV1(legacyPassword)
+			logrus.WithFields(logrus.Fields{
+				"component": "mpu_state",
+			}).Debug("V1 legacy state key derived for backward-compatible decrypt (expires with 7-day state TTL)")
+		}
 	}
 
 	s := &ValkeyStateStore{
-		client:       client,
-		ttl:          ttl,
-		stateKey:     stateKey,
-		encryptState: encryptState,
+		client:               client,
+		ttl:                  ttl,
+		stateDEK:             stateDEK,
+		stateKeyV1:           stateKeyV1,
+		keyManager:           keyManager,
+		encryptState:         encryptState,
+		allowLegacyPlaintext: cfg.AllowLegacyPlaintextState,
+	}
+
+	if s.allowLegacyPlaintext {
+		logrus.WithFields(logrus.Fields{
+			"component": "mpu_state",
+		}).Warn("allow_legacy_plaintext_state is true — state decryption will fall back to plaintext on AEAD failure; disable after migration")
 	}
 
 	// Fail-closed: if Valkey is unreachable at startup, refuse to start.
@@ -203,6 +235,92 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, encryptio
 		return nil, fmt.Errorf("%w: %v", ErrStateUnavailable, err)
 	}
 	return s, nil
+}
+
+// stateKeyWrappedKey is the Valkey key for the wrapped state DEK.
+const stateKeyWrappedKey = "mpu:state-key-wrapped"
+
+// loadOrGenerateStateDEK loads an existing wrapped state DEK from Valkey, or
+// generates a new random 32-byte DEK, wraps it via keyManager, and persists
+// the wrapped envelope using SET NX (atomic first-writer-wins across replicas).
+func loadOrGenerateStateDEK(ctx context.Context, client redis.UniversalClient, keyManager crypto.KeyManager) ([]byte, error) {
+	// Try to load an existing wrapped state DEK.
+	wrappedJSON, err := client.Get(ctx, stateKeyWrappedKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("get wrapped state DEK: %w", err)
+	}
+
+	if err == nil && wrappedJSON != "" {
+		// Load existing: JSON-decode and unwrap.
+		var envelope crypto.KeyEnvelope
+		if err := json.Unmarshal([]byte(wrappedJSON), &envelope); err != nil {
+			return nil, fmt.Errorf("unmarshal wrapped state DEK envelope: %w", err)
+		}
+		dek, err := keyManager.UnwrapKey(ctx, &envelope, nil)
+		if err != nil {
+			return nil, fmt.Errorf("unwrap state DEK: %w", err)
+		}
+		logrus.WithFields(logrus.Fields{
+			"component": "mpu_state",
+			"provider":  keyManager.Provider(),
+		}).Info("unwrapped state DEK via KeyManager")
+		return dek, nil
+	}
+
+	// Generate new random 32-byte state DEK.
+	dek := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, dek); err != nil {
+		return nil, fmt.Errorf("generate state DEK: %w", err)
+	}
+
+	envelope, err := keyManager.WrapKey(ctx, dek, nil)
+	if err != nil {
+		zeroBytes(dek)
+		return nil, fmt.Errorf("wrap state DEK: %w", err)
+	}
+
+	envJSON, err := json.Marshal(envelope)
+	if err != nil {
+		zeroBytes(dek)
+		return nil, fmt.Errorf("marshal wrapped state DEK envelope: %w", err)
+	}
+
+	// Persist with SET NX — atomic first-writer-wins across replicas.
+	set, err := client.SetNX(ctx, stateKeyWrappedKey, string(envJSON), 0).Result()
+	if err != nil {
+		zeroBytes(dek)
+		return nil, fmt.Errorf("persist wrapped state DEK: %w", err)
+	}
+	if !set {
+		// Lost the race — another replica already stored it. Load theirs.
+		wrappedJSON, err := client.Get(ctx, stateKeyWrappedKey).Result()
+		if err != nil {
+			zeroBytes(dek)
+			return nil, fmt.Errorf("get wrapped state DEK after race: %w", err)
+		}
+		var envelope crypto.KeyEnvelope
+		if err := json.Unmarshal([]byte(wrappedJSON), &envelope); err != nil {
+			zeroBytes(dek)
+			return nil, fmt.Errorf("unmarshal wrapped state DEK envelope after race: %w", err)
+		}
+		dek2, err := keyManager.UnwrapKey(ctx, &envelope, nil)
+		if err != nil {
+			zeroBytes(dek)
+			return nil, fmt.Errorf("unwrap state DEK after race: %w", err)
+		}
+		zeroBytes(dek) // discard our generated key
+		logrus.WithFields(logrus.Fields{
+			"component": "mpu_state",
+			"provider":  keyManager.Provider(),
+		}).Info("unwrapped state DEK via KeyManager (lost SET NX race)")
+		return dek2, nil
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"component": "mpu_state",
+		"provider":  keyManager.Provider(),
+	}).Info("generated and wrapped new state DEK via KeyManager")
+	return dek, nil
 }
 
 // buildTLSConfig constructs a *tls.Config from ValkeyTLSConfig.
@@ -260,7 +378,7 @@ func buildTLSConfig(cfg config.ValkeyTLSConfig) (*tls.Config, error) {
 //
 // Nonce is crypto/rand 96 bits.
 func (s *ValkeyStateStore) EncryptState(plaintext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(s.stateKey)
+	block, err := aes.NewCipher(s.stateDEK)
 	if err != nil {
 		return nil, fmt.Errorf("mpu: aes new cipher: %w", err)
 	}
@@ -283,8 +401,11 @@ func (s *ValkeyStateStore) EncryptState(plaintext []byte) ([]byte, error) {
 }
 
 // DecryptState opens a ciphertext blob sealed by EncryptState.
-// If decryption fails with an AEAD tag error, returns ErrStateDecryptFailed
-// so the caller can attempt legacy plaintext fallback.
+// It tries the envelope state DEK first, then the legacy V1 HKDF key (if
+// present) for backward-compatible decrypt of pre-upgrade state. Both paths
+// return ErrStateDecryptFailed on failure; neither ever falls back to
+// plaintext (that is gated by allowLegacyPlaintext at the Get/List call
+// sites, not inside DecryptState). V1.0-SEC-30.
 func (s *ValkeyStateStore) DecryptState(ciphertext []byte) ([]byte, error) {
 	minLen := stateEncryptionVersionLen + stateEncryptionNonceLen + stateEncryptionTagLen
 	if len(ciphertext) < minLen {
@@ -296,23 +417,21 @@ func (s *ValkeyStateStore) DecryptState(ciphertext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: unknown version byte 0x%02x", ErrStateDecryptFailed, version)
 	}
 
-	block, err := aes.NewCipher(s.stateKey)
-	if err != nil {
-		return nil, fmt.Errorf("mpu: aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("mpu: new gcm: %w", err)
+	// Try the envelope state DEK first.
+	if s.stateDEK != nil {
+		if pt, err := tryOpen(s.stateDEK, ciphertext); err == nil {
+			return pt, nil
+		}
 	}
 
-	nonce := ciphertext[stateEncryptionVersionLen : stateEncryptionVersionLen+stateEncryptionNonceLen]
-	encData := ciphertext[stateEncryptionVersionLen+stateEncryptionNonceLen:]
-
-	plaintext, err := gcm.Open(nil, nonce, encData, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrStateDecryptFailed, err)
+	// Try the legacy V1 key (if present) for backward-compatible decrypt.
+	if s.stateKeyV1 != nil {
+		if pt, err := tryOpen(s.stateKeyV1, ciphertext); err == nil {
+			return pt, nil
+		}
 	}
-	return plaintext, nil
+
+	return nil, fmt.Errorf("%w: aead open failed for all configured keys", ErrStateDecryptFailed)
 }
 
 func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error {
@@ -368,7 +487,13 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	if s.encryptState {
 		decrypted, err := s.DecryptState(metaBytes)
 		if err != nil {
-			// Decryption failed — try legacy plaintext fallback.
+			if !s.allowLegacyPlaintext {
+				// Fail closed: do NOT treat AEAD failure as plaintext.
+				return nil, fmt.Errorf("%w: state decryption failed for upload %q "+
+					"(set allow_legacy_plaintext_state=true only if migrating from plaintext)",
+					err, uploadID)
+			}
+			// Legacy plaintext fallback (opt-in migration path).
 			s.legacyWarn.Do(func() {
 				logrus.WithFields(logrus.Fields{
 					"component": "mpu_state",
@@ -447,6 +572,10 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 	iter := s.client.Scan(ctx, 0, "mpu:*", 0).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
+		// Skip the state DEK wrapper key — it is a plain string, not a hash.
+		if key == stateKeyWrappedKey {
+			continue
+		}
 		metaRaw, err := s.client.HGet(ctx, key, fieldMeta).Result()
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
@@ -459,7 +588,11 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 		if s.encryptState {
 			decrypted, err := s.DecryptState(metaBytes)
 			if err != nil {
-				// Legacy plaintext fallback.
+				if !s.allowLegacyPlaintext {
+					// Fail closed: skip this key.
+					continue
+				}
+				// Legacy plaintext fallback (opt-in migration path).
 				s.legacyWarn.Do(func() {
 					logrus.WithFields(logrus.Fields{
 						"component": "mpu_state",
@@ -496,9 +629,13 @@ func (s *ValkeyStateStore) HealthCheck(ctx context.Context) error {
 
 // Close closes the underlying Redis client and zeroizes sensitive key material.
 func (s *ValkeyStateStore) Close() error {
-	if s.stateKey != nil {
-		zeroBytes(s.stateKey)
-		s.stateKey = nil
+	if s.stateDEK != nil {
+		zeroBytes(s.stateDEK)
+		s.stateDEK = nil
+	}
+	if s.stateKeyV1 != nil {
+		zeroBytes(s.stateKeyV1)
+		s.stateKeyV1 = nil
 	}
 	return s.client.Close()
 }
@@ -532,22 +669,40 @@ func UploadIDHashB64(uploadID string) string {
 	return base64.URLEncoding.EncodeToString(h[:])
 }
 
-// deriveStateAEADKey derives a dedicated 32-byte AES-256 key from the configured
-// password using HKDF-SHA256 Extract. The salt is a fixed public string that is
-// distinct from any salt used elsewhere in the binary.
-func deriveStateAEADKey(password string) []byte {
-	// HKDF-Extract is sufficient here because the input (password) is already
-	// a high-entropy secret. A fixed salt is safe as long as it is unique
-	// relative to other salts used in the same binary; "s3eg-mpu-state-v1" is
-	// distinct from any salt used in the engine's KDF or IV derivation.
+// deriveStateAEADKeyV1 derives the legacy V1 32-byte AES-256 key from the
+// configured password using HKDF-SHA256 Extract.
+//
+// Deprecated: retained for backward-compatible decrypt of pre-V1.0-SEC-30
+// state during the 7-day state TTL window. New deployments generate a random
+// state DEK wrapped by the KeyManager instead (see NewValkeyStateStore).
+func deriveStateAEADKeyV1(password string) []byte {
 	salt := []byte("s3eg-mpu-state-v1")
-	// Use HKDF Extract to derive a 32-byte key.
 	extracted := hkdf.Extract(sha256.New, []byte(password), salt)
-	// hkdf.Extract returns a []byte whose length equals the hash output (32 for SHA-256).
-	// Copy it to guarantee immutability of the returned slice.
 	key := make([]byte, 32)
 	copy(key, extracted)
 	return key
+}
+
+// tryOpen tries to open ciphertext with the given key using AES-256-GCM.
+// Returns the plaintext on success, or an error on AEAD failure.
+func tryOpen(key, ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("mpu: aes new cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("mpu: new gcm: %w", err)
+	}
+
+	nonce := ciphertext[stateEncryptionVersionLen : stateEncryptionVersionLen+stateEncryptionNonceLen]
+	encData := ciphertext[stateEncryptionVersionLen+stateEncryptionNonceLen:]
+
+	plaintext, err := gcm.Open(nil, nonce, encData, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStateDecryptFailed, err)
+	}
+	return plaintext, nil
 }
 
 // zeroBytes overwrites a byte slice with zeros for secure memory cleanup.

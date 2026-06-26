@@ -220,7 +220,7 @@ func TestNewValkeyStateStore_TLSRequired(t *testing.T) {
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
 		TTLSeconds:             604800,
 	}
-	_, err := NewValkeyStateStore(ctx, cfg, "")
+	_, err := NewValkeyStateStore(ctx, cfg, nil, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStateUnavailable)
 	assert.Contains(t, err.Error(), "TLS is required")
@@ -264,7 +264,7 @@ func TestNewValkeyStateStore_InsecurePlaintext(t *testing.T) {
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
 	}
-	store, err := NewValkeyStateStore(ctx, cfg, "")
+	store, err := NewValkeyStateStore(ctx, cfg, nil, "")
 	require.NoError(t, err)
 	require.NotNil(t, store)
 	assert.NoError(t, store.Close())
@@ -284,7 +284,7 @@ func TestNewValkeyStateStore_UnreachableAddr(t *testing.T) {
 		WriteTimeout:           200 * time.Millisecond,
 		PoolSize:               1,
 	}
-	_, err := NewValkeyStateStore(ctx, cfg, "")
+	_, err := NewValkeyStateStore(ctx, cfg, nil, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrStateUnavailable)
 }
@@ -391,7 +391,7 @@ func TestNewValkeyStateStore_PasswordEnv(t *testing.T) {
 		PoolSize:               2,
 	}
 	// miniredis doesn't enforce passwords, so the connection succeeds.
-	store, err := NewValkeyStateStore(ctx, cfg, "")
+	store, err := NewValkeyStateStore(ctx, cfg, nil, "")
 	require.NoError(t, err)
 	assert.NoError(t, store.Close())
 }

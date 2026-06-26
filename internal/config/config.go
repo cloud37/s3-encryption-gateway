@@ -777,6 +777,11 @@ type ValkeyConfig struct {
 	// or the main encryption.password is used to derive an AES-256-GCM key.
 	// V1.0-CRYPTO-2.
 	EncryptState *bool `yaml:"encrypt_state" env:"VALKEY_ENCRYPT_STATE"`
+	// AllowLegacyPlaintextState permits Get/List to fall back to plaintext JSON
+	// unmarshal when state AEAD decryption fails. Intended ONLY for one-time
+	// migration from a pre-encryption deployment. Defaults to false (fail-closed).
+	// V1.0-SEC-30.
+	AllowLegacyPlaintextState bool `yaml:"allow_legacy_plaintext_state" env:"VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE"`
 }
 
 // ValkeyTLSConfig holds TLS settings for the Valkey connection.
@@ -1939,6 +1944,9 @@ func (c *Config) Validate() error {
 			}
 		} else if c.Encryption.Password == "" {
 			slog.Warn("multipart_state.valkey.encryption_password_env is not set and encryption.password is empty — at-rest encryption will fail at runtime if enabled")
+		}
+		if c.MultipartState.Valkey.AllowLegacyPlaintextState {
+			slog.Warn("allow_legacy_plaintext_state is true — state decryption will fall back to plaintext on AEAD failure; disable after migration")
 		}
 	}
 

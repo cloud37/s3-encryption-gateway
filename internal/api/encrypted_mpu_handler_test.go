@@ -329,7 +329,7 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
-	}, "")
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}
@@ -754,7 +754,7 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
-	}, "")
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}
@@ -1398,7 +1398,7 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
-	}, "")
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}

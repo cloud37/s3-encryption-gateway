@@ -205,7 +205,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			ReadTimeout:            1 * time.Second,
 			WriteTimeout:           1 * time.Second,
 			PoolSize:               4,
-		}, "")
+		}, nil, "")
 		if storeErr != nil {
 			listener.Close()
 			t.Fatalf("harness.StartGateway: create Valkey state store (%s): %v", o.valkeyAddr, storeErr)
