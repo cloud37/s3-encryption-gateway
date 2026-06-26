@@ -10,9 +10,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **V1.0-SEC-30 — Security audit 2026-06-23 remediation**:
+  (A) Fix `/metrics` path-prefix authentication bypass — exact-match
+  system endpoints only (`internal/api/auth_middleware.go`).
+  (B) Replace HKDF-Extract state-encryption key with a random state DEK
+  wrapped by the existing KeyManager (envelope pattern); no password
+  derivation on the MPU hot path; V1 legacy key retained for 7-day
+  backward-compatible decrypt (`internal/mpu/state.go`,
+  `cmd/server/main.go`).
+  (C) Fail-closed Valkey state decryption — AEAD failure no longer
+  silently falls back to plaintext; new opt-in
+  `allow_legacy_plaintext_state` flag for one-time migration
+  (`internal/mpu/state.go`, `internal/config/config.go`).
+
 ### Fixed
 
 ### Changed
+
+- **Valkey state encryption now requires a KeyManager.** Deployments
+  with `encrypt_state: true` and no `key_manager` configured will fail
+  to start. In password-only mode, the `PasswordKeyManager` wraps the
+  state DEK automatically (one-time PBKDF2 cost at startup, not
+  per-call). Set `encrypt_state: false` to disable state encryption.
 
 ### Removed
 

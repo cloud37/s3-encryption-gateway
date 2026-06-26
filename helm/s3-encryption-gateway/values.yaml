@@ -581,6 +581,14 @@ config:
         value: ""
 
       # ── At-rest encryption for MPU state (V1.0-CRYPTO-2) ─────────────────
+      # State encryption uses a random DEK wrapped by the configured
+      # KeyManager (envelope pattern). No password derivation on the hot
+      # path. Requires key_manager to be enabled. (V1.0-SEC-30)
+      # allowLegacyPlaintextState permits Get/List to fall back to plaintext
+      # JSON on AEAD failure. Intended ONLY for one-time migration from a
+      # pre-encryption deployment. Default false (fail-closed). (V1.0-SEC-30)
+      allowLegacyPlaintextState:
+        value: ""
       # encryptionPassword provides the dedicated password for AES-256-GCM
       # at-rest encryption of UploadState blobs in Valkey.
       # When set (either .value or .valueFrom), VALKEY_ENCRYPT_STATE is

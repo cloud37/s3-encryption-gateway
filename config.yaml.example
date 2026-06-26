@@ -262,7 +262,11 @@ encryption:
 # multipart_state:
 #   valkey:
 #     addr: "valkey.internal:6379"
-#     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"  # V1.0-CRYPTO-2
+#     # State encryption uses a random DEK wrapped by the configured
+#     # KeyManager (envelope pattern). No password derivation on the
+#     # hot path. Requires key_manager to be enabled. (V1.0-SEC-30)
+#     # allow_legacy_plaintext_state: false  # true only during one-time
+#     #                                      # migration from plaintext (V1.0-SEC-30)
 #     # encrypt_state: true                                    # V1.0-CRYPTO-2 (default)
 #     tls:
 #       enabled: true

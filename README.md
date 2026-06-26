@@ -179,6 +179,7 @@ The gateway refuses to silently degrade security under any of these conditions:
 | Policy is flipped mid-upload | In-flight uploads use the `PolicySnapshot` captured at `CreateMultipartUpload`; the flip only affects new uploads |
 | No `KeyManager` and an encrypted-MPU request arrives | 503 ServiceUnavailable with reason `"KeyManager not configured"` |
 | Plaintext Valkey + production config (`insecure_allow_plaintext: false`) | Startup refuses; emits a `gateway_mpu_valkey_insecure=1` gauge if overridden |
+| State decryption AEAD failure (`allow_legacy_plaintext_state: false`, default) | Request returns error; no silent plaintext fallback (V1.0-SEC-30) |
 
 The dedicated escape hatch for deployments that cannot run Valkey at all:
 
@@ -693,10 +694,13 @@ encryption:
 # multipart_state:
 #   valkey:
 #     addr: "valkey.internal:6379"
+#     # State encryption uses a random DEK wrapped by the configured
+#     # KeyManager (envelope pattern). Requires key_manager to be
+#     # enabled. (V1.0-SEC-30)
 #     tls:
 #       enabled: true
-#     # encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"
-#     # encrypt_state: true  # default: true
+#     # allow_legacy_plaintext_state: false  # true only during one-time
+#     #                                      # migration from plaintext (V1.0-SEC-30)
 
 # NOTE: built-in compression was removed in v1.0 (V1.0-MAINT-2).
 # Use external composition: client → s4 → s3-encryption-gateway → storage

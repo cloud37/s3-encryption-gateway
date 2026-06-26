@@ -281,6 +281,10 @@ spec:
         - name: VALKEY_TTL_SECONDS
           value: {{ .Values.config.multipartState.valkey.ttlSeconds.value | quote }}
         {{- end }}
+        {{- if .Values.config.multipartState.valkey.allowLegacyPlaintextState.value }}
+        - name: VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE
+          value: {{ .Values.config.multipartState.valkey.allowLegacyPlaintextState.value | quote }}
+        {{- end }}
         {{- if .Values.config.multipartState.valkey.encryptionPassword.value }}
         - name: VALKEY_ENCRYPTION_PASSWORD
           value: {{ .Values.config.multipartState.valkey.encryptionPassword.value | quote }}

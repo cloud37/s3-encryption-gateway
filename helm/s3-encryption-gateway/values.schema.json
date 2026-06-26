@@ -1244,6 +1244,10 @@
                 "encryptionPassword": {
                   "allOf": [{ "$ref": "#/$defs/configValue" }],
                   "description": "Dedicated password for AES-256-GCM at-rest encryption of UploadState blobs in Valkey (V1.0-CRYPTO-2). When set (value or valueFrom), VALKEY_ENCRYPT_STATE is automatically enabled. If unset, falls back to deriving the key from the main ENCRYPTION_PASSWORD with a distinct HKDF salt."
+                },
+                "allowLegacyPlaintextState": {
+                  "allOf": [{ "$ref": "#/$defs/configValue" }],
+                  "description": "Allow Get/List to fall back to plaintext JSON on AEAD failure. Intended ONLY for one-time migration from pre-encryption deployments. Default false (fail-closed). (V1.0-SEC-30)"
                 }
               }
             }
