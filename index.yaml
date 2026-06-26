@@ -13,6 +13,55 @@ entries:
       artifacthub.io/containsSecurityUpdates: "false"
       artifacthub.io/images: |
         - name: s3-encryption-gateway
+          image: docker.io/cloud37io/s3-encryption-gateway:0.10.2
+          whitelisted: true
+        - name: s3-encryption-gateway-fips
+          image: docker.io/cloud37io/s3-encryption-gateway:0.10.2-fips
+          whitelisted: true
+      artifacthub.io/license: MIT
+      artifacthub.io/prerelease: "false"
+      artifacthub.io/signKey: |
+        fingerprint: keyless
+        url: https://github.com/cloud37/s3-encryption-gateway
+    apiVersion: v2
+    appVersion: 0.10.2
+    created: "2026-06-26T11:49:51.904793728Z"
+    dependencies:
+    - condition: valkey.enabled
+      name: valkey
+      repository: https://valkey.io/valkey-helm/
+      version: ~0.10.0
+    description: A Helm chart for S3 Encryption Gateway - a transparent proxy providing
+      client-side encryption for S3-compatible storage services
+    digest: 7ed51de3b7f8aba96786dc6723a87268db3f7b036ceea35ef74f9f8f40931aef
+    home: https://github.com/cloud37/s3-encryption-gateway
+    keywords:
+    - s3
+    - encryption
+    - gateway
+    - storage
+    maintainers:
+    - name: kenchrcum
+      url: https://github.com/kenchrcum
+    name: s3-encryption-gateway
+    sources:
+    - https://github.com/cloud37/s3-encryption-gateway
+    type: application
+    urls:
+    - https://github.com/cloud37/s3-encryption-gateway/releases/download/s3-encryption-gateway-0.10.2/s3-encryption-gateway-0.10.2.tgz
+    version: 0.10.2
+  - annotations:
+      artifacthub.io/category: security
+      artifacthub.io/changes: |
+        - kind: added
+          description: Multi-arch images (linux/amd64, linux/arm64) published to Docker Hub
+        - kind: added
+          description: SLSA provenance and SBOM attestations via cosign keyless signing
+        - kind: added
+          description: Artifact Hub listing with full metadata and image references
+      artifacthub.io/containsSecurityUpdates: "false"
+      artifacthub.io/images: |
+        - name: s3-encryption-gateway
           image: docker.io/cloud37io/s3-encryption-gateway:0.10.1
           whitelisted: true
         - name: s3-encryption-gateway-fips
@@ -1218,4 +1267,4 @@ entries:
     urls:
     - https://github.com/kenchrcum/s3-encryption-gateway/releases/download/s3-encryption-gateway-0.1.0/s3-encryption-gateway-0.1.0.tgz
     version: 0.1.0
-generated: "2026-06-23T15:14:32.604358108Z"
+generated: "2026-06-26T11:49:51.905405712Z"
