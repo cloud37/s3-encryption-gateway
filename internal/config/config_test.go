@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -931,6 +933,36 @@ func TestAdminProfilingConfig_Validate_NonLoopbackRequiresTLS(t *testing.T) {
 	if !hasTLSMsg {
 		t.Errorf("expected TLS-related error, got: %v", err)
 	}
+}
+
+// TestValkeyConfig_Validate_AllowLegacyPlaintextWarns verifies that
+// Validate() emits a warning when AllowLegacyPlaintextState is true.
+// V1.0-SEC-30 DoD item: "`Validate()` warns when `AllowLegacyPlaintextState` is true."
+func TestValkeyConfig_Validate_AllowLegacyPlaintextWarns(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.MultipartState.Valkey.Addr = "localhost:6379"
+	cfg.MultipartState.Valkey.InsecureAllowPlaintext = true
+	cfg.MultipartState.Valkey.AllowLegacyPlaintextState = true
+	// EncryptState defaults to true (nil → true), and Encryption.Password
+	// is set via minValidConfig, so no additional fields are needed.
+
+	// Redirect the slog default logger to a bytes.Buffer so we can assert
+	// the warning is emitted without relying on stdout/stderr.
+	var buf bytes.Buffer
+	origHandler := slog.Default().Handler()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
+	defer slog.SetDefault(slog.New(origHandler))
+
+	err := cfg.Validate()
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "allow_legacy_plaintext_state is true",
+		"Validate() should warn when AllowLegacyPlaintextState=true")
+	assert.Contains(t, logged, "disable after migration",
+		"warning should advise disabling after migration")
 }
 
 // TestAdminProfilingConfig_Validate_NegativeBlockRate verifies that a negative
