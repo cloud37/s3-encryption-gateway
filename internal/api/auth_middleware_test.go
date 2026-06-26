@@ -330,6 +330,122 @@ func TestAuthMiddleware_SigV4_BadSignature(t *testing.T) {
 	}
 }
 
+// --- V1.0-SEC-30: Auth bypass tests ---
+
+// TestAuthMiddleware_MetricsPrefixBypass_Rejected verifies that a request to
+// /metrics-<anything> without credentials is rejected (exact-match only).
+func TestAuthMiddleware_MetricsPrefixBypass_Rejected(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("PUT", "/metrics-attackerbucket/key", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "AccessDenied") {
+		t.Errorf("body = %q, want AccessDenied", body)
+	}
+}
+
+// TestAuthMiddleware_MetricsExact_Allowed verifies that GET /metrics with no
+// credentials reaches the inner handler.
+func TestAuthMiddleware_MetricsExact_Allowed(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
+
+	var reached bool
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !reached {
+		t.Error("inner handler was not reached")
+	}
+}
+
+// TestAuthMiddleware_HealthReadyLive_Allowed verifies that /health, /ready,
+// and /live all pass through without authentication.
+func TestAuthMiddleware_HealthReadyLive_Allowed(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
+
+	for _, path := range []string{"/health", "/ready", "/live"} {
+		t.Run(path, func(t *testing.T) {
+			var reached bool
+			handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest("GET", path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			if !reached {
+				t.Error("inner handler was not reached")
+			}
+		})
+	}
+}
+
+// TestAuthMiddleware_MetricsPrefixBypass_WithCredentials_Rejected verifies
+// that a request to /metrics-<anything> with a valid SigV4 signature for a
+// different bucket still goes through auth (the prefix bypass is gone).
+func TestAuthMiddleware_MetricsPrefixBypass_WithCredentials_Rejected(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Use a valid SigV2 signature for a different bucket (/real-bucket/key).
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	q := url.Values{}
+	q.Set("AWSAccessKeyId", "AKIAIOSFODNN7EXAMPLE")
+	q.Set("Expires", expires)
+	q.Set("AWSSecretAccessKey", "dummy")
+
+	// Sign for /real-bucket/key, but request goes to /metrics-attackerbucket/key.
+	stringToSign := "PUT\n\n\n" + expires + "\n/real-bucket/key"
+	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), []byte(stringToSign)))
+	q.Set("Signature", sig)
+
+	req := httptest.NewRequest("PUT", "/metrics-attackerbucket/key?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// The request is NOT skipped by the auth bypass (exact-match only), so auth
+	// runs. The signature is for /real-bucket/key but the path is
+	// /metrics-attackerbucket/key, so signature validation catches the mismatch.
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d; body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
 func TestAuthMiddleware_PresignedV4_Valid(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)

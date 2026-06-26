@@ -3,12 +3,29 @@ package api
 import (
 	"context"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/sirupsen/logrus"
 )
+
+// systemEndpoints are the exact paths that bypass authentication.
+// Only the literal paths listed here are allowed without credentials.
+// Prefix matching would let /metrics-<anything> bypass auth — see
+// V1.0-SEC-30.
+var systemEndpoints = map[string]bool{
+	"/health":  true,
+	"/ready":   true,
+	"/live":    true,
+	"/metrics": true,
+}
+
+// isSystemEndpoint reports whether path is an unauthenticated system endpoint.
+// It uses exact match only — prefix matching here would let /metrics-<anything>
+// bypass auth and fall through to the /{bucket} route.
+func isSystemEndpoint(path string) bool {
+	return systemEndpoints[path]
+}
 
 // contextKey is a private type for context keys to avoid collisions.
 type contextKey int
@@ -53,11 +70,11 @@ func writeS3ClientError(w http.ResponseWriter, r *http.Request, err error, metho
 func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logrus.Logger, auditLog audit.Logger, allowSigV2 bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Allow health check, readiness, liveness, and metrics endpoints
-			// without authentication so Kubernetes probes and Prometheus
-			// scraping work without credentials.
-			path := r.URL.Path
-			if path == "/health" || path == "/ready" || path == "/live" || path == "/metrics" || strings.HasPrefix(path, "/metrics") {
+			// Allow only the exact system endpoints without authentication
+			// so Kubernetes probes and Prometheus scraping work without
+			// credentials. Exact match only — prefix matching would let
+			// /metrics-<anything> bypass auth (V1.0-SEC-30).
+			if isSystemEndpoint(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
