@@ -71,7 +71,8 @@ func (p *rustfsProvider) Capabilities() Capabilities {
 		CapCLIAWSCLI |
 		CapCLIS5cmd |
 		CapCLIRclone |
-		CapSDKMinIOPy
+		CapSDKMinIOPy |
+		CapCLIRestic
 }
 
 func (p *rustfsProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }

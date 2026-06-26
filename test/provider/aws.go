@@ -31,7 +31,7 @@ func init() {
 			CapObjectLock | CapVersioning |
 			CapServerSideEncryption | CapKMSIntegration | CapEncryptedMPU |
 			CapSDKAWSGoV2 | CapSDKBoto3 | CapCLIAWSCLI |
-			CapCLIS5cmd | CapCLIRclone | CapSDKMinIOPy,
+			CapCLIS5cmd | CapCLIRclone | CapSDKMinIOPy | CapCLIRestic,
 		cleanup: CleanupPolicyDelete,
 	})
 }

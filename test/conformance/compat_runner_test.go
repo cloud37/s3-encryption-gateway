@@ -15,6 +15,8 @@ func TestRunToolContainer_ExitNonZero_ReturnsError(t *testing.T) {
 		&s5cmdRunner{},
 		&rcloneRunner{},
 		&minioPyRunner{},
+		&resticRoundTripRunner{},
+		&resticBackupGatewayRestoreDirectRunner{},
 	}
 	for _, r := range runners {
 		r := r
@@ -39,6 +41,8 @@ func TestRunToolContainer_MissingMarker_ReturnsError(t *testing.T) {
 		&s5cmdRunner{},
 		&rcloneRunner{},
 		&minioPyRunner{},
+		&resticRoundTripRunner{},
+		&resticBackupGatewayRestoreDirectRunner{},
 	}
 	for _, r := range runners {
 		r := r
@@ -65,6 +69,8 @@ func TestRunToolContainer_SuccessMarker_ReturnsNil(t *testing.T) {
 		{&s5cmdRunner{}, "s5cmd:OK"},
 		{&rcloneRunner{}, "rclone:OK"},
 		{&minioPyRunner{}, "minio-py:OK"},
+		{&resticRoundTripRunner{}, "restic:roundtrip:OK"},
+		{&resticBackupGatewayRestoreDirectRunner{}, "restic:hybrid:OK"},
 	}
 	for _, tc := range cases {
 		tc := tc

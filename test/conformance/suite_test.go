@@ -141,6 +141,14 @@ func TestConformance(t *testing.T) {
 			{"BypassEncryption_ConflictRejected", 0, testBypassEncryption_ConflictRejected},
 			{"BypassEncryption_ResetClearsPolicies", 0, testBypassEncryption_ResetClearsPolicies},
 
+			// V1.0-CONFIG-1 — Restic bypass-encryption conformance (issue #198).
+			// These spin up a real restic/restic container and exercise the
+			// full init+backup+restore cycle, gated on CapCLIRestic so they
+			// only fire on backends known to host the workflow (local +
+			// external AWS S3).
+			{"BypassEncryption_ResticRoundTrip", provider.CapCLIRestic, testBypassEncryption_ResticRoundTrip},
+			{"BypassEncryption_ResticBackupGatewayRestoreDirect", provider.CapCLIRestic, testBypassEncryption_ResticBackupGatewayRestoreDirect},
+
 			// KMS envelope encryption integration test.
 			// Starts a Cosmian KMS container and verifies the full wrap/unwrap path
 			// with the in-process gateway. Gated on CapKMSIntegration so it only

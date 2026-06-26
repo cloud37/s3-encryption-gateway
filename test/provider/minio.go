@@ -46,7 +46,8 @@ func (p *minioProvider) Capabilities() Capabilities {
 		CapCLIAWSCLI |
 		CapCLIS5cmd |
 		CapCLIRclone |
-		CapSDKMinIOPy
+		CapSDKMinIOPy |
+		CapCLIRestic
 }
 
 func (p *minioProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }

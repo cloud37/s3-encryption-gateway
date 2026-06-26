@@ -85,7 +85,15 @@ const (
 	// smoke test. Requires Docker (Python container).
 	CapSDKMinIOPy Capabilities = 1 << 25
 
-	// Next available: 1 << 26
+	// CapCLIRestic indicates the provider is suitable for the restic conformance
+	// test that exercises V1.0-CONFIG-1 bypass-encryption with a real restic
+	// container (restic/restic). The bypass policy is enabled inside the test
+	// itself; this bit only declares that the provider can host restic's S3
+	// workflow (ListObjectsV2 + PutObject + multipart upload + DeleteObjects).
+	// Requires Docker (restic container with --network=host).
+	CapCLIRestic Capabilities = 1 << 26
+
+	// Next available: 1 << 27
 )
 
 // capNames maps each bit to a human-readable label for Stringer output.
@@ -120,6 +128,7 @@ var capNames = []struct {
 	{CapCLIS5cmd, "CLIS5cmd"},
 	{CapCLIRclone, "CLIRclone"},
 	{CapSDKMinIOPy, "SDKMinIOPy"},
+	{CapCLIRestic, "CLIRestic"},
 }
 
 // String returns a human-readable description of the capabilities bitmap.

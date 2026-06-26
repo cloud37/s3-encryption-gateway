@@ -398,3 +398,75 @@ func testBypassEncryption_ResetClearsPolicies(t *testing.T, inst provider.Instan
 		t.Error("policy should NOT match after Reset")
 	}
 }
+
+// resticTestEnv builds an sdkTestEnv pointed at a bypass-enabled gateway.
+// A unique restic repo prefix is generated so parallel providers do not
+// clash inside a shared bucket.
+func resticTestEnv(t *testing.T, gw *harness.Gateway, inst provider.Instance) sdkTestEnv {
+	t.Helper()
+	return sdkTestEnv{
+		Endpoint:  gw.URL,
+		Region:    inst.Region,
+		AccessKey: inst.AccessKey,
+		SecretKey: inst.SecretKey,
+		Bucket:    inst.Bucket,
+		// The restic repo lives under a unique prefix; unique-key collisions
+		// with parallel test runs are avoided by reusing compatUniqueKey.
+		Key: compatUniqueKey(t),
+	}
+}
+
+// testBypassEncryption_ResticRoundTrip verifies that a real restic
+// repository works end-to-end through a bypass-enabled gateway: the gateway
+// must NOT encrypt MPU/list/put traffic when the bucket policy declares
+// disable_encryption: true. The entire init+backup+restore loop runs inside a
+// restic/restic container that talks only to the gateway endpoint.
+//
+// This test is the prime regression guard for issue #198 ("Restic: The
+// specified bucket does not exist") — the user-reported failure shape is a
+// ListObjectsV2 404 against /<bucket>/, which this test exercises before any
+// backup can succeed.
+func testBypassEncryption_ResticRoundTrip(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+
+	pm := newBypassPolicyManager(t, inst.Bucket)
+	gw := harness.StartGateway(t, inst, harness.WithPolicyManager(pm))
+
+	env := resticTestEnv(t, gw, inst)
+	if err := runToolContainer(ctx, t, &resticRoundTripRunner{}, env); err != nil {
+		t.Fatalf("restic round-trip through bypass gateway: %v", err)
+	}
+}
+
+// testBypassEncryption_ResticBackupGatewayRestoreDirect reproduces the
+// deployment shape reported in issue #198: backups are taken *via* the
+// gateway (which is trusted to encrypt at-rest, but here is configured to
+// bypass encryption because restic encrypts itself), and restores are taken
+// directly from the raw S3 API.
+//
+// The single restic container first inits+backups against GATEWAY_ENDPOINT,
+// then re-points restic at BACKEND_ENDPOINT and restores. The test fails if
+// the gateway-side trajectory (init/backup) does not succeed, *or* if the
+// backend-side restore cannot read what the gateway wrote. Because the
+// bypass policy stores plaintext on the backend, the second leg must
+// succeed byte-for-byte — a failure here flags either an encoding mismatch
+// in the gateway's ListObjectsV2 response (the #198 hypothesis) or a
+// problem with how the gateway mangles objects that bypass customers (like
+// restic) expect to read back verbatim.
+func testBypassEncryption_ResticBackupGatewayRestoreDirect(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+
+	pm := newBypassPolicyManager(t, inst.Bucket)
+	gw := harness.StartGateway(t, inst, harness.WithPolicyManager(pm))
+
+	env := resticTestEnv(t, gw, inst)
+	// BackendEndpoint overrides restore to go directly to S3, bypassing the
+	// gateway. The runner's Script reads $BACKEND_ENDPOINT for the restore leg.
+	env.BackendEndpoint = inst.Endpoint
+
+	if err := runToolContainer(ctx, t, &resticBackupGatewayRestoreDirectRunner{}, env); err != nil {
+		t.Fatalf("restic backup-via-gateway + restore-from-backend: %v", err)
+	}
+}

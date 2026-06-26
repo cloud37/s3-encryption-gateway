@@ -213,3 +213,183 @@ func (r *minioPyRunner) AssertOutput(code int, out, _ string) error {
 	}
 	return nil
 }
+
+// ─── restic runner (restic/restic container) ─────────────────────────────────
+//
+// Two runners share a common script generator but differ in which endpoint
+// their scripts target for init/backup vs. restore.
+//
+// Both runners exercise a real restic repository on S3 through the gateway,
+// which requires bypass_encryption for the bucket (restic encrypts at-rest
+// itself, and uses multipart uploads that the gateway would otherwise wrap).
+
+// resticImage is the official image tag used by both restic runners. Pinned at
+// build time to keep conformance reproducible; bump via Renovate outside the
+// suite.
+const resticImage = "restic/restic:0.18.1"
+
+// resticPassword is the repository-encryption password injected into the
+// container. Restic always encrypts at-rest using this password, regardless
+// of the gateway's bypass policy — this is what the conformance test is
+// proving still works end-to-end.
+const resticPassword = "conformance-restic-repo-pass"
+
+// resticUniqueRepoPath is shared by both runners: it lives at env.Key so the
+// repo prefix is unique per test invocation, preventing cross-bucket key
+// collisions with concurrent providers running in parallel.
+func resticUniqueRepoPath(env sdkTestEnv) string {
+	return env.Key // e.g. "restic/.../<n>-<ts>"
+}
+
+// resticRoundTripRunner runs the entire init+backup+restore cycle through the
+// gateway endpoint (env.Endpoint). It is the simplest end-to-end proof that
+// restic works against a bypass-enabled gateway.
+type resticRoundTripRunner struct{}
+
+func (r *resticRoundTripRunner) Name() string  { return "restic" }
+func (r *resticRoundTripRunner) Image() string { return resticImage }
+
+func (r *resticRoundTripRunner) Script(env sdkTestEnv) string {
+	return resticScript(resticScriptOpts{
+		RepoPath:      resticUniqueRepoPath(env),
+		BackupVia:     "$GATEWAY_ENDPOINT",
+		RestoreVia:    "$GATEWAY_ENDPOINT",
+		BackupFiles:   "/tmp/backup",
+		RestoredFiles: "/tmp/restore",
+		OKMarker:      "restic:roundtrip:OK",
+	})
+}
+
+func (r *resticRoundTripRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("restic round-trip exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "restic:roundtrip:OK") {
+		return fmt.Errorf("restic: expected 'restic:roundtrip:OK' marker in stdout, got: %s", out)
+	}
+	return nil
+}
+
+// resticBackupGatewayRestoreDirectRunner initials and backs up the repo
+// through the gateway, then re-points restic at BACKEND_ENDPOINT (the raw S3
+// backend, bypassing the gateway entirely) and restores from there. This
+// reproduces issue #198's deployment shape: backup via gateway + direct S3
+// restore.
+type resticBackupGatewayRestoreDirectRunner struct{}
+
+func (r *resticBackupGatewayRestoreDirectRunner) Name() string  { return "restic-hybrid" }
+func (r *resticBackupGatewayRestoreDirectRunner) Image() string { return resticImage }
+
+func (r *resticBackupGatewayRestoreDirectRunner) Script(env sdkTestEnv) string {
+	return resticScript(resticScriptOpts{
+		RepoPath:      resticUniqueRepoPath(env),
+		BackupVia:     "$GATEWAY_ENDPOINT",
+		RestoreVia:    "$BACKEND_ENDPOINT",
+		BackupFiles:   "/tmp/backup",
+		RestoredFiles: "/tmp/restore",
+		OKMarker:      "restic:hybrid:OK",
+	})
+}
+
+func (r *resticBackupGatewayRestoreDirectRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("restic hybrid exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "restic:hybrid:OK") {
+		return fmt.Errorf("restic-hybrid: expected 'restic:hybrid:OK' marker in stdout, got: %s", out)
+	}
+	return nil
+}
+
+// resticScriptOpts parameterises the shared restic script body so the two
+// runners above only differ in the backup/restore endpoint and OK marker.
+type resticScriptOpts struct {
+	RepoPath      string // S3 prefix under the bucket for the restic repository
+	BackupVia     string // shell-evaluated endpoint URL for init+backup
+	RestoreVia    string // shell-evaluated endpoint URL for restore
+	BackupFiles   string // host-side dir created with sample content to back up
+	RestoredFiles string // host-side dir contents are restored into
+	OKMarker      string // success marker printed last
+}
+
+// resticScript generates the inline /bin/sh script that runs inside the
+// restic container. The script:
+//  1. Creates a small directory of files to back up.
+//  2. Initialises a restic repository at s3:<BackupVia>/<Bucket>/<RepoPath>.
+//  3. Snapshots the directory through restic backup.
+//  4. Lists the snapshot to capture its ID.
+//  5. Restores the latest snapshot into a separate directory using RestoreVia.
+//  6. Diff's original vs. restored and prints the OK marker.
+//
+// Both endpoint args are escaped into the script text verbatim (callers pass
+// "$GATEWAY_ENDPOINT" / "$BACKEND_ENDPOINT" which the shell resolves at run
+// time via the env injected by runToolContainer).
+func resticScript(o resticScriptOpts) string {
+	// Restic's S3 backend builds the repository URL as
+	//   s3:<endpoint>/<bucket>/<prefix>
+	// We therefore need the endpoint WITHOUT a trailing slash, and the
+	// bucket/prefix concatenated. We assemble this shell-side using $GATEWAY_
+	// BUCKET so per-test buckets resolve correctly.
+	//
+	// The script does NOT rely on restic's exact on-disk restore layout
+	// (whether absolute source paths turn into <target>/<original-path> or
+	// <target>/...); it locates every restored file by basename and verifies
+	// the expected content. This makes the test robust across restic
+	// versions; the goal is to verify the S3 round-trip, not restic's tree
+	// reconstruction semantics.
+	return fmt.Sprintf(`set -eu
+
+# ---- Prepare sample content ---------------------------------------------
+mkdir -p %[1]s/sub
+echo "hello-restic-conformance" > %[1]s/hello.txt
+echo "payload-2"                  > %[1]s/second.txt
+echo "nested-payload"             > %[1]s/sub/nested.txt
+
+# ---- Restic init + backup via %[2]s --------------------------------------
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+export RESTIC_PASSWORD=%[6]q
+REPO_PREFIX="%[7]s"
+REPO_BACKUP="s3:%[2]s/$GATEWAY_BUCKET/$REPO_PREFIX"
+echo "init:   $REPO_BACKUP"
+restic -r "$REPO_BACKUP" init || { echo "FATAL: restic init failed"; exit 1; }
+
+echo "backup: $REPO_BACKUP"
+restic -r "$REPO_BACKUP" backup %[1]s --tag conformance \
+  || { echo "FATAL: restic backup failed"; exit 1; }
+
+# Capture and print the snapshot list for diagnostics.
+restic -r "$REPO_BACKUP" snapshots
+
+# ---- Restore via %[3]s --------------------------------------------------
+REPO_RESTORE="s3:%[3]s/$GATEWAY_BUCKET/$REPO_PREFIX"
+mkdir -p %[4]s
+echo "restore: $REPO_RESTORE"
+restic -r "$REPO_RESTORE" restore latest --target %[4]s \
+  || { echo "FATAL: restic restore failed"; exit 1; }
+
+# ---- Verify restored content (basename-agnostic to restic version) -------
+verify_file() {
+  name="$1"; want="$2"
+  path=$(find %[4]s -name "$name" -print -quit)
+  if [ -z "$path" ]; then
+    echo "FATAL: $name not found in restored tree"; exit 1
+  fi
+  if ! grep -q "$want" "$path"; then
+    echo "FATAL: $name content mismatch — want '$want'"; exit 1
+  fi
+}
+verify_file hello.txt   "hello-restic-conformance"
+verify_file second.txt  "payload-2"
+verify_file nested.txt  "nested-payload"
+
+echo "%[5]s"
+`,
+		o.BackupFiles,
+		o.BackupVia,
+		o.RestoreVia,
+		o.RestoredFiles,
+		o.OKMarker,
+		resticPassword,
+		o.RepoPath,
+	)
+}

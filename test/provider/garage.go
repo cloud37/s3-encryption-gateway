@@ -50,7 +50,8 @@ func (p *garageProvider) Capabilities() Capabilities {
 		CapCLIAWSCLI |
 		CapCLIS5cmd |
 		CapCLIRclone |
-		CapSDKMinIOPy
+		CapSDKMinIOPy |
+		CapCLIRestic
 }
 
 func (p *garageProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }

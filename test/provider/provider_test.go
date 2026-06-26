@@ -64,6 +64,7 @@ func TestCapabilities_NewBitsPresent(t *testing.T) {
 		{provider.CapCLIS5cmd, "CLIS5cmd"},
 		{provider.CapCLIRclone, "CLIRclone"},
 		{provider.CapSDKMinIOPy, "SDKMinIOPy"},
+		{provider.CapCLIRestic, "CLIRestic"},
 	}
 
 	// Check 1: none is zero.

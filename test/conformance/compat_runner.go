@@ -41,6 +41,11 @@ type sdkTestEnv struct {
 	SecretKey string
 	Bucket    string
 	Key       string // unique object key for this test run
+	// BackendEndpoint is the *direct* S3 backend URL (bypassing the gateway).
+	// Empty by default. Runners that exercise a hybrid gateway→backend path
+	// (e.g. backup via gateway, restore directly from S3) populate this and
+	// runToolContainer injects it as BACKEND_ENDPOINT into the container env.
+	BackendEndpoint string
 }
 
 // runToolContainer launches a Docker container running the given SDK/CLI tool
@@ -82,6 +87,12 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 		WaitingFor: wait.ForExit().WithExitTimeout(120 * time.Second),
 	}
 
+	// BACKEND_ENDPOINT injected only when set — empty value would
+	// confuse runners that treat absence as "no direct backend mode".
+	if env.BackendEndpoint != "" {
+		req.Env["BACKEND_ENDPOINT"] = env.BackendEndpoint
+	}
+
 	c, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
@@ -111,9 +122,9 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 		return fmt.Errorf("%s: state: %w", runner.Name(), err)
 	}
 
-	t.Logf("%s: exit code %d, stdout:\n%s", runner.Name(), exitCode.ExitCode, stdoutStr)
+	t.Logf("%s: exit code %d, stdout:\\n%s", runner.Name(), exitCode.ExitCode, stdoutStr)
 	if stderrStr != "" {
-		t.Logf("%s: stderr:\n%s", runner.Name(), stderrStr)
+		t.Logf("%s: stderr:\\n%s", runner.Name(), stderrStr)
 	}
 
 	return runner.AssertOutput(exitCode.ExitCode, stdoutStr, stderrStr)

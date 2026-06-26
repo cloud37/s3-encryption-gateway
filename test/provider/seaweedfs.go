@@ -74,7 +74,8 @@ func (p *seaweedfsProvider) Capabilities() Capabilities {
 		CapCLIAWSCLI |
 		CapCLIS5cmd |
 		CapCLIRclone |
-		CapSDKMinIOPy
+		CapSDKMinIOPy |
+		CapCLIRestic
 }
 
 func (p *seaweedfsProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }
