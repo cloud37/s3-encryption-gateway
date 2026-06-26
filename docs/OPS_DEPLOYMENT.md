@@ -218,7 +218,7 @@ key version and shared Valkey as blue.
 helm install gw-green helm/s3-encryption-gateway \
   --namespace s3-gateway \
   --values helm/s3-encryption-gateway/examples/values-green.yaml \
-  --set image.tag=0.10.1 \   # new version
+  --set image.tag=0.10.2 \   # new version
   --set config.backend.endpoint.value=https://your-backend.example.com \
   --set config.encryption.password.valueFrom.secretKeyRef.name=my-secrets \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
@@ -336,7 +336,7 @@ helm upgrade gw-stable helm/s3-encryption-gateway \
 helm install gw-canary helm/s3-encryption-gateway \
   --namespace s3-gateway \
   --values helm/s3-encryption-gateway/examples/values-canary-canary.yaml \
-  --set image.tag=0.10.1-rc1 \   # candidate version
+  --set image.tag=0.10.2-rc1 \   # candidate version
   --set config.backend.endpoint.value=https://your-backend.example.com \
   --set config.encryption.password.valueFrom.secretKeyRef.name=my-secrets \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
@@ -404,7 +404,7 @@ After `promote.sh 100` and a final soak:
    helm upgrade gw-stable helm/s3-encryption-gateway \
      --namespace s3-gateway \
      --values helm/s3-encryption-gateway/examples/values-canary-stable.yaml \
-     --set image.tag=0.10.1-rc1
+     --set image.tag=0.10.2-rc1
    ```
 2. Update `docs/examples/canary/traefikservice.yaml` weights back to 100/0
    (stable=100, canary=0) and apply.

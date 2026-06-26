@@ -10,6 +10,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+### Fixed
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+## [0.10.2] — 2026-06-26
+
+### Added
+
+### Security
+
 - **V1.0-SEC-30 — Security audit 2026-06-23 remediation**:
   (A) Fix `/metrics` path-prefix authentication bypass — exact-match
   system endpoints only (`internal/api/auth_middleware.go`).
