@@ -72,11 +72,17 @@ var _ KeyManager = (*CircuitBreakerKeyManager)(nil)
 // Circuit-breaker state metrics are recorded via the callback registered
 // by SetKMSCircuitBreakerStateObserver.
 func NewCircuitBreakerKeyManager(inner KeyManager, cfg CircuitBreakerConfig) KeyManager {
-	return &CircuitBreakerKeyManager{
+	cb := &CircuitBreakerKeyManager{
 		inner: inner,
 		cfg:   cfg,
 		state: cbStateClosed,
 	}
+	// Preserve rotatability through the decorator (see
+	// keymanager_decorator_rotation.go).
+	if _, ok := inner.(RotatableKeyManager); ok {
+		return &rotatableCircuitBreakerKeyManager{cb}
+	}
+	return cb
 }
 
 // Provider returns the inner KeyManager's provider identifier.

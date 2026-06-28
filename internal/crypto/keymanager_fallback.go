@@ -22,7 +22,14 @@ import (
 // Close closes both the primary and the fallback. If primary.Close returns an
 // error the fallback is still closed and the primary error is returned.
 func NewFallbackKeyManager(primary KeyManager, fallback KeyManager) KeyManager {
-	return &fallbackKeyManager{primary: primary, fallback: fallback}
+	f := &fallbackKeyManager{primary: primary, fallback: fallback}
+	// Preserve rotatability of the primary KMS through the fallback wrapper (see
+	// keymanager_decorator_rotation.go) so the admin rotation API still works for
+	// KMS + password-fallback deployments.
+	if _, ok := primary.(RotatableKeyManager); ok {
+		return &rotatableFallbackKeyManager{f}
+	}
+	return f
 }
 
 type fallbackKeyManager struct {
@@ -49,9 +56,14 @@ func (f *fallbackKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelop
 		return plaintext, nil
 	}
 
-	// Only fall back when: primary definitively failed to unwrap AND the
-	// envelope was produced by the password key manager.
-	if errors.Is(err, ErrUnwrapFailed) && envelope != nil && envelope.Provider == passwordKMProvider {
+	// Only fall back when the envelope was produced by the password key manager
+	// AND the primary rejected it structurally. Different primaries reject a
+	// non-native (password) envelope with different sentinels: KMIP/Cosmian
+	// tries to decrypt and returns ErrUnwrapFailed, while the OpenBao adapter
+	// rejects it up-front with ErrInvalidEnvelope because the ciphertext lacks
+	// the "vault:v" prefix. Both must route to the password fallback.
+	if (errors.Is(err, ErrUnwrapFailed) || errors.Is(err, ErrInvalidEnvelope)) &&
+		envelope != nil && envelope.Provider == passwordKMProvider {
 		plaintext2, fallbackErr := f.fallback.UnwrapKey(ctx, envelope, metadata)
 		if fallbackErr == nil {
 			return plaintext2, nil

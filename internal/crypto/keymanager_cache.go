@@ -54,12 +54,12 @@ type CachingKeyManager struct {
 	inner KeyManager
 	cfg   DEKCacheConfig
 
-	mu            sync.RWMutex
-	entries       map[[32]byte]*cacheEntry // fingerprint → entry
-	lruOrder      [][32]byte               // insertion-ordered for LRU eviction
-	stopCleanup   chan struct{}
-	cleanupDone   chan struct{}
-	closed        bool // guards against double-Close
+	mu          sync.RWMutex
+	entries     map[[32]byte]*cacheEntry // fingerprint → entry
+	lruOrder    [][32]byte               // insertion-ordered for LRU eviction
+	stopCleanup chan struct{}
+	cleanupDone chan struct{}
+	closed      bool // guards against double-Close
 }
 
 // cacheFingerprint computes the SHA-256 fingerprint of ciphertext.
@@ -90,12 +90,12 @@ func NewCachingKeyManager(inner KeyManager, cfg DEKCacheConfig) (KeyManager, err
 	}
 
 	km := &CachingKeyManager{
-		inner:        inner,
-		cfg:          cfg,
-		entries:      make(map[[32]byte]*cacheEntry),
-		lruOrder:     make([][32]byte, 0, cfg.MaxEntries),
-		stopCleanup:  make(chan struct{}),
-		cleanupDone:  make(chan struct{}),
+		inner:       inner,
+		cfg:         cfg,
+		entries:     make(map[[32]byte]*cacheEntry),
+		lruOrder:    make([][32]byte, 0, cfg.MaxEntries),
+		stopCleanup: make(chan struct{}),
+		cleanupDone: make(chan struct{}),
 	}
 
 	if cfg.Enabled {
@@ -104,6 +104,11 @@ func NewCachingKeyManager(inner KeyManager, cfg DEKCacheConfig) (KeyManager, err
 		close(km.cleanupDone) // no cleanup needed
 	}
 
+	// Preserve rotatability through the decorator (see
+	// keymanager_decorator_rotation.go).
+	if _, ok := inner.(RotatableKeyManager); ok {
+		return &rotatableCachingKeyManager{km}, nil
+	}
 	return km, nil
 }
 
@@ -292,4 +297,3 @@ func (c *CachingKeyManager) Close(ctx context.Context) error {
 
 	return c.inner.Close(ctx)
 }
-
