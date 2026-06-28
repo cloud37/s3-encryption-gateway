@@ -59,10 +59,16 @@ var _ KeyManager = (*RetryingKeyManager)(nil)
 // KMS retry metrics are recorded via the callback registered by
 // SetKMSRetryAttemptObserver.
 func NewRetryingKeyManager(inner KeyManager, cfg RetryConfig) KeyManager {
-	return &RetryingKeyManager{
+	r := &RetryingKeyManager{
 		inner: inner,
 		cfg:   cfg,
 	}
+	// Preserve rotatability through the decorator (see
+	// keymanager_decorator_rotation.go).
+	if _, ok := inner.(RotatableKeyManager); ok {
+		return &rotatableRetryingKeyManager{r}
+	}
+	return r
 }
 
 // isPermanentKMSError returns true for errors that should never be retried.

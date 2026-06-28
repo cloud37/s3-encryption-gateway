@@ -29,6 +29,7 @@ and can be selected via `encryption.key_manager.provider` in configuration.
 | `memory` | ✅ Stable (v0.6) | In-process AES-256 key-wrap; no external deps |
 | `hsm` | 🚧 Skeleton (v0.6) | PKCS#11 stub; functional in v1.0 (needs `-tags hsm`) |
 | `self_contained` | ✅ Stable (v1.0) | AES-256-GCM or RSA-OAEP KEK; no external deps |
+| `openbao` / `openbao-transit` / `vault` / `vault-transit` | ✅ Stable (v1.0) | OpenBao / HashiCorp Vault Transit; token/AppRole/Kubernetes auth; in-process token renewal |
 
 #### `cosmian` / `kmip` adapter
 
@@ -149,12 +150,82 @@ requires manual key pair replacement and re-instantiation.
   - Will use AWS SDK v2
   - Support for key aliases, ARNs, and key versioning
 
-- 🔜 **HashiCorp Vault Transit**: Planned for v1.0 (see [V1.0-KMS-3](../issues/v1.0-issues.md#v10-kms-3-hashicorp-vault-transit-adapter))
-  - Deferred from v0.5 due to Enterprise license requirements for Transit engine
-  - Will support multiple authentication methods
-  - Support for key versioning via Vault's key rotation
+- ✅ **OpenBao / HashiCorp Vault Transit**: Implemented in v1.0 (see [V1.0-KMS-3](../issues/v1.0-issues.md#v10-kms-3-hashicorp-vault-transit-adapter)).
+  See the [`openbao` / `vault` adapter](#openbao--vault-transit-adapter) section below.
 
-**Note**: The examples below for AWS KMS and Vault Transit are **conceptual only** and demonstrate the interface pattern. They are not currently implemented and should not be used in production.
+**Note**: The AWS KMS example below is **conceptual only** and demonstrates the
+interface pattern. It is not yet implemented and should not be used in production.
+
+#### `openbao` / `vault` Transit adapter
+
+The Transit secrets engine is an encryption-as-a-service backend: the gateway
+sends the per-object DEK to `transit/encrypt/<key>` to wrap it and to
+`transit/decrypt/<key>` to unwrap it. The KEK never leaves the server and is
+non-exportable. The identical Transit API is served by OpenBao (MPL-2.0) and by
+HashiCorp Vault, so one adapter covers both — selectable as `openbao`,
+`openbao-transit`, `vault`, or `vault-transit`.
+
+Server prerequisites (run once, out of band):
+
+```bash
+bao secrets enable transit
+bao write -f transit/keys/s3gw-dek type=aes256-gcm96   # non-exportable by default
+```
+
+Recommended in-cluster auth (Kubernetes ServiceAccount JWT — no static secret):
+
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: openbao
+    openbao:
+      address: "https://bao.internal:8200"
+      transit_path: "transit"
+      key_name: "s3gw-dek"
+      auth:
+        method: kubernetes
+        role: s3-encryption-gateway     # auth/kubernetes role bound to the pod SA
+      tls:
+        ca_cert: "/etc/ssl/bao-ca.pem"
+```
+
+Required OpenBao policy (scope tightly; omit `create` so a missing key is a hard
+error, not a silently-created empty KEK):
+
+```hcl
+path "transit/encrypt/s3gw-dek" { capabilities = ["update"] }
+path "transit/decrypt/s3gw-dek" { capabilities = ["update"] }
+path "transit/keys/s3gw-dek"    { capabilities = ["read"] }   # HealthCheck + ActiveKeyVersion
+# only if the gateway drives rotation via the admin API:
+path "transit/keys/s3gw-dek/rotate" { capabilities = ["update"] }
+# HealthCheck also calls auth/token/lookup-self (to detect token expiry). This
+# is granted by the built-in `default` policy, so no extra rule is needed unless
+# the role sets token_no_default_policy=true — then add it explicitly:
+# path "auth/token/lookup-self" { capabilities = ["read"] }
+```
+
+Auth methods: `token` (`auth.token` or `auth.token_source` = `env:`/`file:`),
+`approle` (`role_id` + `secret_id`/`secret_id_source`), and `kubernetes`
+(`role` + `jwt_path`). For `approle`/`kubernetes` the adapter renews the auth
+token in the background (OpenBao `LifetimeWatcher`) and re-logs-in when the
+token can no longer be renewed (max_ttl, revocation, server restart) — no Vault
+Agent sidecar required. Prefer a **periodic** token on the role.
+
+Key rotation: a single `transit/keys/<key>/rotate` advances `latest_version`;
+new objects wrap with the new version while older objects keep decrypting
+(Transit self-routes by the `vault:vN:` ciphertext prefix). Rotation flows
+through the gateway's existing `/admin/kms/rotate/*` drain-and-cutover API.
+Retiring old versions is a deliberate server-side operation: rewrap stored
+envelopes forward (`transit/rewrap`), then raise `min_decryption_version`.
+There is intentionally **no `dual_read_window`** for this provider.
+
+Security properties: tokens/secret IDs are never logged or placed in a
+KeyEnvelope; the KEK is non-exportable; TLS 1.2+ with restricted suites. FIPS:
+the adapter builds under `-tags=fips` and performs no local AES (wrapping is
+server-side); note that no upstream FIPS-140-validated OpenBao build exists yet
+([openbao#1409](https://github.com/openbao/openbao/issues/1409)) — the Transit
+backend's FIPS posture depends on the OpenBao deployment.
 
 ## Production Hardening (V1.0-KMS-1)
 
@@ -177,7 +248,7 @@ retry, circuit-breaking, and DEK caching:
 | `self_contained` (AES) | Verifies `len(keys[activeVersion]) == 32` |
 | `self_contained` (RSA) | Verifies modulus consistency |
 | `aws` (V1.0-KMS-2) | `DescribeKey` — key state must be ENABLED |
-| `vault` (V1.0-KMS-3) | `GET /v1/<mount>/keys/<name>` — key must exist |
+| `openbao` / `vault` (V1.0-KMS-3) | `GET auth/token/lookup-self` (token validity — sys/health returns 200 with a dead token) **plus** `GET transit/keys/<name>` (key exists & readable; `404 → ErrKeyNotFound`) |
 
 ## Key Manager Interface
 
@@ -570,35 +641,15 @@ func (k *AWSKMSManager) RotateKey(newPassword string, deactivateOld bool) error 
 }
 ```
 
-## Example: HashiCorp Vault Integration (Conceptual - Not Yet Implemented)
+## HashiCorp Vault / OpenBao Integration (Implemented)
 
-> **⚠️ This is a conceptual example only.** Vault Transit adapter is planned for v1.0. See [V1.0-KMS-3](../issues/v1.0-issues.md#v10-kms-3-hashicorp-vault-transit-adapter) for implementation details.
-
-```go
-package vaultkms
-
-import (
-    "github.com/hashicorp/vault/api"
-    "github.com/cloud37/s3-encryption-gateway/internal/crypto"
-)
-
-type VaultKMSManager struct {
-    client *api.Client
-    path   string // e.g., "secret/data/s3-gateway-keys"
-}
-
-func (v *VaultKMSManager) GetActiveKey() (string, int, error) {
-    secret, err := v.client.Logical().Read(v.path + "/active")
-    if err != nil {
-        return "", 0, err
-    }
-    
-    password := secret.Data["password"].(string)
-    version := int(secret.Data["version"].(float64))
-    
-    return password, version, nil
-}
-```
+> ✅ **Implemented in v1.0.** OpenBao and HashiCorp Vault are supported via the
+> Transit secrets engine — see the
+> [`openbao` / `vault` Transit adapter](#openbao--vault-transit-adapter)
+> section above for configuration, auth methods, policy, and rotation. The
+> conceptual KV-based sketch that previously lived here was superseded by the
+> real Transit adapter (`internal/crypto/keymanager_openbao.go`,
+> [ADR 0015](adr/0015-openbao-vault-transit-adapter.md)).
 
 ## Example: Database-Backed KMS
 

@@ -19,6 +19,24 @@ func init() {
 	// is compiled, keeping internal/crypto tests dependency-light.
 	crypto.Register("cosmian", cosmianFactory)
 	crypto.Register("kmip", cosmianFactory) // alias
+
+	// OpenBao / HashiCorp Vault Transit (V1.0-KMS-3). One adapter, four names:
+	// the Transit API is identical across OpenBao and Vault servers.
+	crypto.Register("openbao", openbaoFactory)
+	crypto.Register("openbao-transit", openbaoFactory)
+	crypto.Register("vault", openbaoFactory)
+	crypto.Register("vault-transit", openbaoFactory)
+}
+
+// openbaoFactory is the adapter Factory for the OpenBao/Vault Transit provider.
+// Like cosmianFactory it expects cfg["__opts"] to hold a pre-built
+// crypto.OpenBaoTransitOptions assembled by BuildKeyManager.
+func openbaoFactory(_ context.Context, cfg map[string]any) (crypto.KeyManager, error) {
+	opts, ok := cfg["__opts"].(crypto.OpenBaoTransitOptions)
+	if !ok {
+		return nil, fmt.Errorf("openbao factory: missing __opts (crypto.OpenBaoTransitOptions) in configuration map")
+	}
+	return crypto.NewOpenBaoTransitManager(opts)
 }
 
 // cosmianFactory is the adapter Factory for the Cosmian KMIP provider.
@@ -101,6 +119,12 @@ func buildBaseKeyManager(cfg *config.KeyManagerConfig, logger *logrus.Logger) (c
 		return crypto.Open(context.Background(), "hsm", map[string]any{})
 	case "self_contained":
 		return buildSelfContainedKeyManager(cfg)
+	case "openbao", "openbao-transit", "vault", "vault-transit":
+		opts, err := buildOpenBaoOptions(cfg, provider)
+		if err != nil {
+			return nil, err
+		}
+		return crypto.Open(context.Background(), "openbao", map[string]any{"__opts": opts})
 	default:
 		// Attempt generic registry lookup for third-party adapters.
 		km, err := crypto.Open(context.Background(), provider, map[string]any{})
@@ -257,4 +281,176 @@ func buildCosmianTLSConfig(cfg config.CosmianConfig) (*tls.Config, error) {
 	}
 
 	return tlsCfg, nil
+}
+
+// buildOpenBaoOptions constructs crypto.OpenBaoTransitOptions from the typed
+// configuration, resolving env:/file: secret references for the token /
+// secret_id so the long-lived config struct never holds the resolved secret.
+func buildOpenBaoOptions(kmCfg *config.KeyManagerConfig, providerName string) (crypto.OpenBaoTransitOptions, error) {
+	ob := kmCfg.OpenBao
+	if ob.Address == "" {
+		return crypto.OpenBaoTransitOptions{}, fmt.Errorf("openbao.key_manager.address is required")
+	}
+	if ob.KeyName == "" {
+		return crypto.OpenBaoTransitOptions{}, fmt.Errorf("openbao.key_manager.key_name is required")
+	}
+
+	// Reflect the operator's chosen provider family in Provider() (and thus in
+	// object metadata / telemetry) rather than always reporting a single
+	// canonical string.
+	provider := "openbao-transit"
+	if strings.HasPrefix(strings.ToLower(providerName), "vault") {
+		provider = "vault-transit"
+	}
+
+	tlsCfg, err := buildOpenBaoTLSConfig(ob.TLS)
+	if err != nil {
+		return crypto.OpenBaoTransitOptions{}, err
+	}
+
+	auth := crypto.OpenBaoAuthConfig{
+		Method:  ob.Auth.Method,
+		Mount:   ob.Auth.Mount,
+		RoleID:  ob.Auth.RoleID,
+		Role:    ob.Auth.Role,
+		JWTPath: ob.Auth.JWTPath,
+	}
+	if ob.Auth.TokenSource != "" {
+		tok, err := resolveOpenBaoSecret(ob.Auth.TokenSource)
+		if err != nil {
+			return crypto.OpenBaoTransitOptions{}, err
+		}
+		auth.Token = tok
+	} else {
+		auth.Token = ob.Auth.Token
+	}
+	if ob.Auth.SecretIDSource != "" {
+		sid, err := resolveOpenBaoSecret(ob.Auth.SecretIDSource)
+		if err != nil {
+			return crypto.OpenBaoTransitOptions{}, err
+		}
+		auth.SecretID = sid
+	} else {
+		auth.SecretID = ob.Auth.SecretID
+	}
+
+	return crypto.OpenBaoTransitOptions{
+		Address:     ob.Address,
+		TransitPath: ob.TransitPath,
+		KeyName:     ob.KeyName,
+		Namespace:   ob.Namespace,
+		Provider:    provider,
+		Timeout:     ob.Timeout,
+		TLSConfig:   tlsCfg,
+		Auth:        auth,
+	}, nil
+}
+
+// buildOpenBaoTLSConfig builds a *tls.Config for the OpenBao client (TLS 1.2
+// floor, restricted suites). For plain-HTTP (dev) addresses the returned config
+// is simply unused by the transport.
+//
+// TLS verification semantics are honest about what Go actually does:
+//
+//   - ca_cert set, insecure_skip_verify=false → standard verification against
+//     the pinned CA (chain + hostname). The normal production setup.
+//   - ca_cert set, insecure_skip_verify=true  → REAL pinning that skips only the
+//     hostname check: Go's default verification is disabled (so RootCAs alone
+//     would pin nothing — the bug this avoids), and a VerifyConnection callback
+//     verifies the peer chains to the pinned CA. Use for IP/SAN-mismatch cases.
+//   - no ca_cert, insecure_skip_verify=true   → genuinely no verification
+//     (dev only); logged loudly.
+//   - no ca_cert, insecure_skip_verify=false  → system root CAs.
+func buildOpenBaoTLSConfig(cfg config.OpenBaoTLSConfig) (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
+		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
+	}
+
+	var pinnedPool *x509.CertPool
+	if cfg.CACert != "" {
+		caData, err := os.ReadFile(cfg.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read OpenBao CA certificate: %w", err)
+		}
+		pinnedPool = x509.NewCertPool()
+		if !pinnedPool.AppendCertsFromPEM(caData) {
+			return nil, fmt.Errorf("failed to parse OpenBao CA certificate")
+		}
+		tlsCfg.RootCAs = pinnedPool
+	}
+
+	switch {
+	case cfg.InsecureSkipVerify && pinnedPool != nil:
+		// Skip Go's default verification (which includes the hostname check) but
+		// still verify the chain to the pinned CA via VerifyConnection — RootCAs
+		// alone would pin nothing once InsecureSkipVerify is true.
+		// #nosec G402 — verification is performed manually below.
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("openbao: server presented no certificates")
+			}
+			opts := x509.VerifyOptions{Roots: pinnedPool, Intermediates: x509.NewCertPool()}
+			for _, intermediate := range cs.PeerCertificates[1:] {
+				opts.Intermediates.AddCert(intermediate)
+			}
+			if _, err := cs.PeerCertificates[0].Verify(opts); err != nil {
+				return fmt.Errorf("openbao: server certificate not trusted by pinned ca_cert: %w", err)
+			}
+			return nil
+		}
+		logrus.WithFields(logrus.Fields{
+			"component": "crypto_factory",
+			"setting":   "OPENBAO_SKIP_VERIFY",
+		}).Warn("OpenBao TLS: hostname verification disabled; peer is verified against the pinned ca_cert only.")
+
+	case cfg.InsecureSkipVerify:
+		// No CA pinned and verification disabled: genuinely insecure, dev only.
+		// #nosec G402 — operator opt-in with a loud startup warning.
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+		logrus.WithFields(logrus.Fields{
+			"component": "crypto_factory",
+			"setting":   "OPENBAO_SKIP_VERIFY",
+		}).Error("OpenBao TLS certificate verification is DISABLED and no ca_cert is pinned — this allows MITM attacks. Use only in development.")
+	}
+
+	if cfg.ClientCert != "" && cfg.ClientKey != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.ClientCert, cfg.ClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load OpenBao client certificate: %w", err)
+		}
+		tlsCfg.Certificates = append(tlsCfg.Certificates, cert)
+	}
+
+	return tlsCfg, nil
+}
+
+// resolveOpenBaoSecret resolves an "env:VAR" or "file:PATH" reference (or a
+// literal value) into the secret string.
+func resolveOpenBaoSecret(ref string) (string, error) {
+	switch {
+	case strings.HasPrefix(ref, "env:"):
+		name := strings.TrimPrefix(ref, "env:")
+		v := os.Getenv(name)
+		if v == "" {
+			return "", fmt.Errorf("openbao: environment variable %q is empty or unset", name)
+		}
+		return v, nil
+	case strings.HasPrefix(ref, "file:"):
+		path := strings.TrimPrefix(ref, "file:")
+		data, err := os.ReadFile(path) //nolint:gosec // operator-configured path
+		if err != nil {
+			return "", fmt.Errorf("openbao: read secret file %q: %w", path, err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	default:
+		return strings.TrimSpace(ref), nil
+	}
 }

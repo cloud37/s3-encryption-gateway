@@ -160,24 +160,24 @@ const (
 // in BackendRetryConfig.PerOperation.  Unknown keys are rejected at validation
 // time to surface typos promptly.
 var knownOperationNames = map[string]bool{
-	"PutObject":                true,
-	"GetObject":                true,
-	"HeadObject":               true,
-	"UploadPart":               true,
-	"CompleteMultipartUpload":  true,
-	"CreateMultipartUpload":    true,
-	"AbortMultipartUpload":     true,
-	"ListParts":                true,
-	"CopyObject":               true,
-	"UploadPartCopy":           true,
-	"DeleteObject":             true,
-	"DeleteObjects":            true,
-	"ListObjectsV2":            true,
-	"ListObjects":              true,
-	"PutObjectRetention":       true,
-	"GetObjectRetention":       true,
-	"PutObjectLegalHold":       true,
-	"GetObjectLegalHold":       true,
+	"PutObject":                  true,
+	"GetObject":                  true,
+	"HeadObject":                 true,
+	"UploadPart":                 true,
+	"CompleteMultipartUpload":    true,
+	"CreateMultipartUpload":      true,
+	"AbortMultipartUpload":       true,
+	"ListParts":                  true,
+	"CopyObject":                 true,
+	"UploadPartCopy":             true,
+	"DeleteObject":               true,
+	"DeleteObjects":              true,
+	"ListObjectsV2":              true,
+	"ListObjects":                true,
+	"PutObjectRetention":         true,
+	"GetObjectRetention":         true,
+	"PutObjectLegalHold":         true,
+	"GetObjectLegalHold":         true,
 	"PutObjectLockConfiguration": true,
 	"GetObjectLockConfiguration": true,
 }
@@ -267,9 +267,10 @@ type KDFConfig struct {
 // Argon2idConfig holds operator-tunable argon2id parameters.
 //
 // Recommended production values (OWASP 2024):
-//   Time    = 2
-//   Memory  = 19456  (19 MiB)
-//   Threads = 1
+//
+//	Time    = 2
+//	Memory  = 19456  (19 MiB)
+//	Threads = 1
 //
 // These are the minimums; operators may raise them for higher attack cost.
 type Argon2idConfig struct {
@@ -280,7 +281,7 @@ type Argon2idConfig struct {
 
 // PBKDF2Config holds parameters specific to PBKDF2-SHA256 key derivation.
 type PBKDF2Config struct {
-    Iterations int `yaml:"iterations" env:"ENCRYPTION_KDF_PBKDF2_ITERATIONS"`
+	Iterations int `yaml:"iterations" env:"ENCRYPTION_KDF_PBKDF2_ITERATIONS"`
 }
 
 type EncryptionConfig struct {
@@ -337,20 +338,22 @@ type HardwareConfig struct {
 //
 // See docs/KMS_COMPATIBILITY.md for implementation status and adapter options.
 type KeyManagerConfig struct {
-	Enabled        bool                 `yaml:"enabled" env:"KEY_MANAGER_ENABLED"`
-	Provider       string               `yaml:"provider" env:"KEY_MANAGER_PROVIDER"`
-	DualReadWindow int                  `yaml:"dual_read_window" env:"KEY_MANAGER_DUAL_READ_WINDOW"`
-	RotationPolicy RotationPolicyConfig `yaml:"rotation_policy"`
-	Cosmian        CosmianConfig        `yaml:"cosmian"`
-	Memory         MemoryKMConfig       `yaml:"memory"`
+	Enabled        bool                  `yaml:"enabled" env:"KEY_MANAGER_ENABLED"`
+	Provider       string                `yaml:"provider" env:"KEY_MANAGER_PROVIDER"`
+	DualReadWindow int                   `yaml:"dual_read_window" env:"KEY_MANAGER_DUAL_READ_WINDOW"`
+	RotationPolicy RotationPolicyConfig  `yaml:"rotation_policy"`
+	Cosmian        CosmianConfig         `yaml:"cosmian"`
+	Memory         MemoryKMConfig        `yaml:"memory"`
 	SelfContained  SelfContainedKMConfig `yaml:"self_contained"`
 	// V1.0-KMS-1 — KMS production readiness fields.
-	Retry              KMSRetryConfig          `yaml:"retry"`
-	CircuitBreaker     KMSCircuitBreakerConfig `yaml:"circuit_breaker"`
-	DEKCache           DEKCacheConfig          `yaml:"dek_cache"`
-	HealthCheckInterval time.Duration          `yaml:"health_check_interval" env:"KMS_HEALTH_CHECK_INTERVAL"`
+	Retry               KMSRetryConfig          `yaml:"retry"`
+	CircuitBreaker      KMSCircuitBreakerConfig `yaml:"circuit_breaker"`
+	DEKCache            DEKCacheConfig          `yaml:"dek_cache"`
+	HealthCheckInterval time.Duration           `yaml:"health_check_interval" env:"KMS_HEALTH_CHECK_INTERVAL"`
+	// OpenBao holds settings for the OpenBao / HashiCorp Vault Transit adapter
+	// (provider "openbao", "openbao-transit", "vault", or "vault-transit").
+	OpenBao OpenBaoConfig `yaml:"openbao"`
 	// AWS        AWSKMSConfig  `yaml:"aws"`
-	// Vault      VaultConfig   `yaml:"vault"`
 }
 
 // MemoryKMConfig captures settings for the in-memory key manager adapter.
@@ -470,6 +473,64 @@ type CosmianKeyReference struct {
 	Version int    `yaml:"version"`
 }
 
+// OpenBaoConfig captures settings for the OpenBao / HashiCorp Vault Transit
+// adapter (V1.0-KMS-3). The same adapter works against an OpenBao server and a
+// HashiCorp Vault server (the Transit API is identical); the provider names
+// "openbao"/"openbao-transit" and "vault"/"vault-transit" all read this block.
+//
+// Supported auth methods: "token" (default), "approle", "kubernetes".
+type OpenBaoConfig struct {
+	// Address is the server address, e.g. "https://bao.internal:8200". Required.
+	Address string `yaml:"address" env:"OPENBAO_ADDR"`
+	// TransitPath is the Transit engine mount path. Default: "transit".
+	TransitPath string `yaml:"transit_path" env:"OPENBAO_TRANSIT_PATH"`
+	// KeyName is the Transit key used for DEK wrap/unwrap. Required.
+	KeyName string `yaml:"key_name" env:"OPENBAO_TRANSIT_KEY_NAME"`
+	// Namespace is an optional namespace prefix (OpenBao/Vault Enterprise).
+	Namespace string `yaml:"namespace" env:"OPENBAO_NAMESPACE"`
+	// Timeout is the per-request timeout. Default: 5s.
+	Timeout time.Duration `yaml:"timeout" env:"OPENBAO_TIMEOUT"`
+	// Auth holds authentication configuration.
+	Auth OpenBaoAuthConfig `yaml:"auth"`
+	// TLS holds TLS configuration for the client.
+	TLS OpenBaoTLSConfig `yaml:"tls"`
+}
+
+// OpenBaoAuthConfig selects the OpenBao authentication method and parameters.
+type OpenBaoAuthConfig struct {
+	// Method is "token" (default), "approle", or "kubernetes".
+	Method string `yaml:"method" env:"OPENBAO_AUTH_METHOD"`
+	// Mount is the auth backend mount path (defaults per method).
+	Mount string `yaml:"mount" env:"OPENBAO_AUTH_MOUNT"`
+
+	// Token is the literal token for the "token" method (prefer TokenSource).
+	Token string `yaml:"token" env:"OPENBAO_TOKEN"`
+	// TokenSource is a secret reference for the token: "env:VAR" or "file:PATH".
+	TokenSource string `yaml:"token_source" env:"OPENBAO_TOKEN_SOURCE"`
+
+	// RoleID is the AppRole role ID.
+	RoleID string `yaml:"role_id" env:"OPENBAO_ROLE_ID"`
+	// SecretID is the literal AppRole secret ID (prefer SecretIDSource).
+	SecretID string `yaml:"secret_id" env:"OPENBAO_SECRET_ID"`
+	// SecretIDSource is a secret reference: "env:VAR" or "file:PATH".
+	SecretIDSource string `yaml:"secret_id_source" env:"OPENBAO_SECRET_ID_SOURCE"`
+
+	// Role is the role name for the kubernetes method.
+	Role string `yaml:"role" env:"OPENBAO_AUTH_ROLE"`
+	// JWTPath is the projected ServiceAccount JWT file. Default:
+	// /var/run/secrets/kubernetes.io/serviceaccount/token.
+	JWTPath string `yaml:"jwt_path" env:"OPENBAO_K8S_JWT_PATH"`
+}
+
+// OpenBaoTLSConfig holds TLS settings for the OpenBao client.
+type OpenBaoTLSConfig struct {
+	CACert     string `yaml:"ca_cert" env:"OPENBAO_CACERT"`
+	ClientCert string `yaml:"client_cert" env:"OPENBAO_CLIENT_CERT"`
+	ClientKey  string `yaml:"client_key" env:"OPENBAO_CLIENT_KEY"`
+	// InsecureSkipVerify disables TLS verification. Never set true in production.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify" env:"OPENBAO_SKIP_VERIFY"`
+}
+
 // TLSConfig holds TLS configuration.
 type TLSConfig struct {
 	Enabled  bool   `yaml:"enabled" env:"TLS_ENABLED"`
@@ -548,9 +609,9 @@ type AuditConfig struct {
 
 // SinkConfig holds audit sink configuration.
 type SinkConfig struct {
-	Type          string            `yaml:"type" env:"AUDIT_SINK_TYPE"` // stdout, file, http
-	Endpoint      string            `yaml:"endpoint" env:"AUDIT_SINK_ENDPOINT"`
-	FilePath      string            `yaml:"file_path" env:"AUDIT_SINK_FILE_PATH"`
+	Type     string `yaml:"type" env:"AUDIT_SINK_TYPE"` // stdout, file, http
+	Endpoint string `yaml:"endpoint" env:"AUDIT_SINK_ENDPOINT"`
+	FilePath string `yaml:"file_path" env:"AUDIT_SINK_FILE_PATH"`
 	// FileMode sets the Unix permission bits for the audit log file.
 	// Default 0 means use the secure default (0600). Operators may set e.g. 0640.
 	// V1.0-SEC-26.
@@ -558,8 +619,8 @@ type SinkConfig struct {
 	Headers       map[string]string `yaml:"headers"` // Custom headers for HTTP sink
 	BatchSize     int               `yaml:"batch_size" env:"AUDIT_SINK_BATCH_SIZE"`
 	FlushInterval time.Duration     `yaml:"flush_interval" env:"AUDIT_SINK_FLUSH_INTERVAL"`
-	RetryCount           int               `yaml:"retry_count" env:"AUDIT_SINK_RETRY_COUNT"`
-	RetryBackoff         time.Duration     `yaml:"retry_backoff" env:"AUDIT_SINK_RETRY_BACKOFF"`
+	RetryCount    int               `yaml:"retry_count" env:"AUDIT_SINK_RETRY_COUNT"`
+	RetryBackoff  time.Duration     `yaml:"retry_backoff" env:"AUDIT_SINK_RETRY_BACKOFF"`
 	// MaxConcurrentFlushes bounds the number of concurrent async flush
 	// goroutines spawned by BatchSink.WriteEvent. V1.0-SEC-13.
 	// Default: 4
@@ -620,7 +681,7 @@ type TracingConfig struct {
 
 // MetricsConfig holds metrics configuration.
 type MetricsConfig struct {
-	EnableBucketLabel bool   `yaml:"enable_bucket_label" env:"METRICS_ENABLE_BUCKET_LABEL"`
+	EnableBucketLabel bool `yaml:"enable_bucket_label" env:"METRICS_ENABLE_BUCKET_LABEL"`
 	// Addr is the optional address for a dedicated unauthenticated metrics
 	// listener (e.g. ":9090"). When set, /metrics is served on this port only
 	// and is removed from both the S3 data-plane port and the admin port.
@@ -639,14 +700,14 @@ type LoggingConfig struct {
 // GatewayCredential is a single access-key/secret-key pair managed by the gateway.
 type GatewayCredential struct {
 	// AccessKey is the S3 access key identifier presented by clients.
-	AccessKey    string `yaml:"access_key"`
+	AccessKey string `yaml:"access_key"`
 	// SecretKey is the inline plaintext secret (dev only; prefer SecretKeyEnv).
-	SecretKey    string `yaml:"secret_key"`
+	SecretKey string `yaml:"secret_key"`
 	// SecretKeyEnv is the name of the environment variable that holds the
 	// plaintext secret key.  Takes precedence over SecretKey.
 	SecretKeyEnv string `yaml:"secret_key_env"`
 	// Label is an optional human-readable name used in audit log entries.
-	Label        string `yaml:"label"`
+	Label string `yaml:"label"`
 }
 
 // AuthConfig holds authentication-related configuration for the S3 API.
@@ -1182,6 +1243,69 @@ func loadFromEnv(config *Config) {
 	}
 	if v := os.Getenv("COSMIAN_KMS_KEYS"); v != "" {
 		config.Encryption.KeyManager.Cosmian.Keys = parseCosmianKeyRefs(v)
+	}
+
+	// OpenBao / Vault Transit (V1.0-KMS-3).
+	ob := &config.Encryption.KeyManager.OpenBao
+	if v := os.Getenv("OPENBAO_ADDR"); v != "" {
+		ob.Address = v
+	}
+	if v := os.Getenv("OPENBAO_TRANSIT_PATH"); v != "" {
+		ob.TransitPath = v
+	}
+	if v := os.Getenv("OPENBAO_TRANSIT_KEY_NAME"); v != "" {
+		ob.KeyName = v
+	}
+	if v := os.Getenv("OPENBAO_NAMESPACE"); v != "" {
+		ob.Namespace = v
+	}
+	if v := os.Getenv("OPENBAO_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ob.Timeout = d
+		}
+	}
+	if v := os.Getenv("OPENBAO_AUTH_METHOD"); v != "" {
+		ob.Auth.Method = v
+	}
+	if v := os.Getenv("OPENBAO_AUTH_MOUNT"); v != "" {
+		ob.Auth.Mount = v
+	}
+	if v := os.Getenv("OPENBAO_TOKEN"); v != "" {
+		ob.Auth.Token = v
+	}
+	if v := os.Getenv("OPENBAO_TOKEN_SOURCE"); v != "" {
+		ob.Auth.TokenSource = v
+	}
+	if v := os.Getenv("OPENBAO_ROLE_ID"); v != "" {
+		ob.Auth.RoleID = v
+	}
+	if v := os.Getenv("OPENBAO_SECRET_ID"); v != "" {
+		ob.Auth.SecretID = v
+	}
+	if v := os.Getenv("OPENBAO_SECRET_ID_SOURCE"); v != "" {
+		ob.Auth.SecretIDSource = v
+	}
+	if v := os.Getenv("OPENBAO_AUTH_ROLE"); v != "" {
+		ob.Auth.Role = v
+	}
+	if v := os.Getenv("OPENBAO_K8S_JWT_PATH"); v != "" {
+		ob.Auth.JWTPath = v
+	}
+	if v := os.Getenv("OPENBAO_CACERT"); v != "" {
+		ob.TLS.CACert = v
+	}
+	if v := os.Getenv("OPENBAO_CLIENT_CERT"); v != "" {
+		ob.TLS.ClientCert = v
+	}
+	if v := os.Getenv("OPENBAO_CLIENT_KEY"); v != "" {
+		ob.TLS.ClientKey = v
+	}
+	if v := os.Getenv("OPENBAO_SKIP_VERIFY"); v != "" {
+		// strconv.ParseBool accepts 1/t/T/TRUE/true/0/f/F/FALSE/etc.; invalid
+		// values are ignored (consistent with the other env parsers here).
+		if b, err := strconv.ParseBool(v); err == nil {
+			ob.TLS.InsecureSkipVerify = b
+		}
 	}
 
 	if v := os.Getenv("SELF_CONTAINED_TYPE"); v != "" {
@@ -1848,8 +1972,35 @@ func (c *Config) Validate() error {
 			default:
 				return fmt.Errorf("encryption.key_manager.self_contained.type must be \"aes\" or \"rsa\" (got %q)", sc.Type)
 			}
+		case "openbao", "openbao-transit", "vault", "vault-transit":
+			ob := c.Encryption.KeyManager.OpenBao
+			if ob.Address == "" {
+				return fmt.Errorf("encryption.key_manager.openbao.address is required")
+			}
+			if ob.KeyName == "" {
+				return fmt.Errorf("encryption.key_manager.openbao.key_name is required")
+			}
+			switch strings.ToLower(ob.Auth.Method) {
+			case "", "token":
+				if ob.Auth.Token == "" && ob.Auth.TokenSource == "" {
+					return fmt.Errorf("encryption.key_manager.openbao.auth: token or token_source is required for token auth")
+				}
+			case "approle":
+				if ob.Auth.RoleID == "" {
+					return fmt.Errorf("encryption.key_manager.openbao.auth.role_id is required for approle auth")
+				}
+				if ob.Auth.SecretID == "" && ob.Auth.SecretIDSource == "" {
+					return fmt.Errorf("encryption.key_manager.openbao.auth: secret_id or secret_id_source is required for approle auth")
+				}
+			case "kubernetes":
+				if ob.Auth.Role == "" {
+					return fmt.Errorf("encryption.key_manager.openbao.auth.role is required for kubernetes auth")
+				}
+			default:
+				return fmt.Errorf("encryption.key_manager.openbao.auth.method must be \"token\", \"approle\", or \"kubernetes\" (got %q)", ob.Auth.Method)
+			}
 		default:
-			return fmt.Errorf("unsupported key manager provider: %s (supported: cosmian, kmip, memory, hsm, self_contained)", c.Encryption.KeyManager.Provider)
+			return fmt.Errorf("unsupported key manager provider: %s (supported: cosmian, kmip, memory, hsm, self_contained, openbao, openbao-transit, vault, vault-transit)", c.Encryption.KeyManager.Provider)
 		}
 
 		// V1.0-KMS-1 — KMS production readiness validation.

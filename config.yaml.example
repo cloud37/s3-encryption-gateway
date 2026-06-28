@@ -130,10 +130,13 @@ encryption:
   key_manager:
     enabled: false  # Set to true to enable key rotation/KMS mode (default: single password mode)
     provider: "cosmian"  # KMS provider (v0.6+):
-                         #   "cosmian" / "kmip" — Cosmian KMIP (production-ready)
+                         #   "cosmian" / "kmip"  — Cosmian KMIP (production-ready)
                          #   "memory"            — In-process AES key-wrap (tests / single-node)
+                         #   "self_contained"    — AES-256-GCM / RSA-OAEP KEK (no external KMS)
+                         #   "openbao" / "openbao-transit" / "vault" / "vault-transit"
+                         #                       — OpenBao / HashiCorp Vault Transit (v1.0)
                          #   "hsm"               — PKCS#11 HSM skeleton (-tags hsm; functional in v1.0)
-                         # Planned (v1.0): "aws", "vault"
+                         # Planned (v1.0): "aws"
                          # Set via KEY_MANAGER_PROVIDER env var
     dual_read_window: 1  # Number of previous key versions to try during rotation (default: 1)
 
@@ -167,6 +170,41 @@ encryption:
     #   rsa:
     #     private_key_source: "file:/run/secrets/kek_rsa.pem"
     #     key_version: 1
+
+    # ---------------------------------------------------------------------------
+    # openbao provider — OpenBao / HashiCorp Vault Transit (V1.0-KMS-3)
+    # ---------------------------------------------------------------------------
+    # The same adapter works against an OpenBao server and a HashiCorp Vault
+    # server (the Transit API is identical). Pre-create the Transit key out of
+    # band with a non-exportable type (e.g. aes256-gcm96) and scope the token
+    # policy WITHOUT create-on-encrypt, so a typo'd key_name is a hard error
+    # rather than a silently-created empty KEK.
+    #
+    # NOTE: there is intentionally NO dual_read_window for this provider —
+    # Transit self-routes a decrypt to the version embedded in the ciphertext
+    # ("vault:vN:"). Retiring old versions is a server-side operation
+    # (rewrap stored envelopes forward, then raise min_decryption_version).
+    # openbao:
+    #   address: "https://bao.internal:8200"   # OPENBAO_ADDR
+    #   transit_path: "transit"                # Transit engine mount (default "transit")
+    #   key_name: "s3gw-dek"                   # Transit key name (required)
+    #   namespace: ""                          # optional (OpenBao/Vault Enterprise)
+    #   timeout: "5s"
+    #   auth:
+    #     method: "kubernetes"                 # "token" | "approle" | "kubernetes"
+    #     # --- token auth ---
+    #     # method: "token"
+    #     # token_source: "env:OPENBAO_TOKEN"  # "env:VAR" or "file:PATH" (preferred over inline token)
+    #     # --- approle auth ---
+    #     # method: "approle"
+    #     # role_id: "..."
+    #     # secret_id_source: "env:OPENBAO_SECRET_ID"
+    #     # --- kubernetes auth (in-cluster, recommended) ---
+    #     role: "s3-encryption-gateway"        # OpenBao auth/kubernetes role bound to the pod SA
+    #     # jwt_path: "/var/run/secrets/kubernetes.io/serviceaccount/token"  # default
+    #   tls:
+    #     ca_cert: "/etc/ssl/bao-ca.pem"
+    #     # insecure_skip_verify: false        # never true in production
 
     # ---------------------------------------------------------------------------
     # V1.0-KMS-1 — KMS production readiness (all fields optional)
