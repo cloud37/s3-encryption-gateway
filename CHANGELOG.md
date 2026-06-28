@@ -8,15 +8,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **V1.0-KMS-3 — OpenBao / HashiCorp Vault Transit KeyManager adapter**:
+  Envelope encryption via the Transit secrets engine (`transit/encrypt` /
+  `transit/decrypt`); the KEK stays non-exportable in the server. Registered
+  under the provider names `openbao`, `openbao-transit`, `vault`, and
+  `vault-transit` (the Transit API is identical across OpenBao and Vault).
+  Supports `token`, `approle`, and `kubernetes` auth methods with an
+  in-process token-renewal goroutine (LifetimeWatcher + re-login on
+  expiry/revocation — no sidecar required). Implements `RotatableKeyManager`:
+  rotation drives the server-side `transit/keys/<key>/rotate` RPC and the
+  gateway follows the server's `latest_version`. `HealthCheck` probes
+  `auth/token/lookup-self` so an expired token is detected (resolves
+  GAP-KMS3-3, which `sys/health` alone could not) and that the configured
+  Transit key exists and is readable (`404 → ErrKeyNotFound`), so a wrong
+  `key_name` or missing key-read policy cannot report a "healthy but broken"
+  data plane. Builds under `-tags=fips`. Files:
+  `internal/crypto/keymanager_openbao.go`, `internal/api/crypto_factory.go`,
+  `internal/config/config.go`.
+
 ### Security
 
 ### Fixed
+
+- **Key rotation now survives the KMS decorator stack.** The retry, circuit
+  breaker, and DEK-cache decorators exposed only the `KeyManager` method set, so
+  the admin rotation API's `km.(RotatableKeyManager)` assertion failed (and
+  `/admin/kms/rotate/*` returned "rotation not supported") whenever any KMS
+  decorator was enabled — affecting every rotatable adapter (Cosmian,
+  self-contained AES, memory, OpenBao). The decorators now conditionally forward
+  `RotatableKeyManager` to the wrapped adapter
+  (`internal/crypto/keymanager_decorator_rotation.go`).
 
 ### Changed
 
 ### Removed
 
 ### Dependencies
+
+- Add `github.com/openbao/openbao/api/v2` (MPL-2.0) for the OpenBao/Vault
+  Transit KeyManager adapter.
 
 ## [0.10.2] — 2026-06-26
 
