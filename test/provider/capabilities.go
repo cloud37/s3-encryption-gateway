@@ -101,6 +101,13 @@ const (
 	CapSizeTranslation Capabilities = 1 << 27
 
 	// Next available: 1 << 28
+	// CapOpenBaoKMS indicates that the OpenBao / Vault Transit KMS integration
+	// works with this provider. Like CapKMSIntegration, requires Docker so the
+	// in-process gateway and the OpenBao container share the same network.
+	// Disable with GATEWAY_TEST_SKIP_OPENBAO=1.
+	CapOpenBaoKMS Capabilities = 1 << 28
+
+	// Next available: 1 << 29
 )
 
 // capNames maps each bit to a human-readable label for Stringer output.
@@ -137,6 +144,7 @@ var capNames = []struct {
 	{CapCLIRclone, "CLIRclone"},
 	{CapSDKMinIOPy, "SDKMinIOPy"},
 	{CapCLIRestic, "CLIRestic"},
+	{CapOpenBaoKMS, "OpenBaoKMS"},
 }
 
 // String returns a human-readable description of the capabilities bitmap.

@@ -157,6 +157,14 @@ func TestConformance(t *testing.T) {
 			// runs on local Testcontainer providers (MinIO, Garage) where the
 			// in-process gateway can reach the KMS container.
 			{"KMS_EnvelopeEncryption", provider.CapKMSIntegration, testKMSIntegration},
+
+			// V1.0-KMS-3 — OpenBao / Vault Transit adapter conformance.
+			// Starts a real OpenBao dev-server container and exercises the
+			// full wrap/unwrap path through the in-process gateway proxy.
+			// Gated on CapOpenBaoKMS; disable with GATEWAY_TEST_SKIP_OPENBAO=1.
+			{"OpenBao_EnvelopeEncryption", provider.CapOpenBaoKMS, testOpenBaoKMSIntegration},
+			{"OpenBao_KeyRotation", provider.CapOpenBaoKMS, testOpenBaoKMSRotation},
+			{"OpenBao_TokenRenewal", provider.CapOpenBaoKMS, testOpenBaoKMSTokenRenewal},
 			{"SelfContained_AES_EnvelopeRoundTrip", 0, testSelfContained_AES_EnvelopeRoundTrip},
 			{"SelfContained_AES_AtRest", 0, testSelfContained_AES_AtRest},
 			{"SelfContained_AES_Rotation_DualRead", 0, testSelfContained_AES_Rotation_DualRead},

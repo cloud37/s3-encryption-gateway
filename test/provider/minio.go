@@ -41,6 +41,7 @@ func (p *minioProvider) Capabilities() Capabilities {
 		CapSizeTranslation |
 		CapEncryptedMPU |
 		CapKMSIntegration |
+		CapOpenBaoKMS |
 		CapLoadTest |
 		CapSDKAWSGoV2 |
 		CapSDKBoto3 |
