@@ -45,6 +45,7 @@ func (p *garageProvider) Capabilities() Capabilities {
 		CapSizeTranslation |
 		CapEncryptedMPU |
 		CapKMSIntegration |
+		CapOpenBaoKMS |
 		CapLoadTest |
 		CapSDKAWSGoV2 |
 		CapSDKBoto3 |

@@ -63,6 +63,7 @@ func (p *rustfsProvider) Capabilities() Capabilities {
 		CapPresignedURL |
 		CapBatchDelete |
 		CapKMSIntegration |
+		CapOpenBaoKMS |
 		CapInlinePutTagging |
 		CapSizeTranslation |
 		CapEncryptedMPU |
