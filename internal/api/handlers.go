@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -45,6 +47,7 @@ type Handler struct {
 	policyManager    *config.PolicyManager
 	engineCache      *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
 	mpuStateStore    mpu.StateStore  // nil when encrypted MPU is not configured
+	sizeCache        sizecache.SizeCache
 }
 
 // NewHandler creates a new API handler (backward compatibility).
@@ -91,6 +94,11 @@ func NewHandlerWithFeatures(
 // When non-nil, buckets with EncryptMultipartUploads=true will use this store.
 func (h *Handler) WithMPUStateStore(store mpu.StateStore) {
 	h.mpuStateStore = store
+}
+
+// WithSizeCache sets the size cache used for ListObjects plaintext size resolution.
+func (h *Handler) WithSizeCache(c sizecache.SizeCache) {
+	h.sizeCache = c
 }
 
 // Close stops the per-policy engine cache sweeper and calls Close() on every
@@ -1892,6 +1900,24 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Populate the size cache after a successful PUT so subsequent ListObjects
+	// can resolve the plaintext size without a HEAD request.
+	if h.sizeCache != nil {
+		var ps int64
+		if psStr, ok := encMetadata[crypto.MetaOriginalSize]; ok && psStr != "" {
+			if parsed, parseErr := strconv.ParseInt(psStr, 10, 64); parseErr == nil && parsed > 0 {
+				ps = parsed
+			}
+		}
+		if ps > 0 {
+			if cacheErr := h.sizeCache.Set(r.Context(), bucket, key, ps); cacheErr != nil {
+				h.logger.WithError(cacheErr).WithFields(logrus.Fields{
+					"bucket": bucket, "key": key,
+				}).Warn("handlePutObject: failed to set size cache; listing may show ciphertext size")
+			}
+		}
+	}
+
 	if etag != "" {
 		w.Header().Set("ETag", etag)
 	}
@@ -1900,7 +1926,6 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
-// isStandardMetadata checks if a header is a standard HTTP metadata header.
 func isStandardMetadata(key string) bool {
 	standardHeaders := map[string]bool{
 		"Content-Type":        true,
@@ -1998,6 +2023,13 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 			"bucket": bucket,
 			"key":    manifestKey,
 		}).Debug("Cleaned up MPU manifest companion object")
+	}
+
+	// Evict from size cache.
+	if h.sizeCache != nil {
+		if cacheErr := h.sizeCache.Delete(ctx, bucket, key); cacheErr != nil {
+			h.logger.WithError(cacheErr).Warn("handleDeleteObject: failed to evict size cache")
+		}
 	}
 
 	// Audit logging
@@ -2346,6 +2378,39 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Phase 3: size-cache resolution for general listings.
+	// For each object not yet resolved by the maxKeys<=10 HEAD path above,
+	// look up plaintext size from the write-time size cache.
+	if h.sizeCache != nil && h.config != nil && h.config.ListSizeTranslate.Enabled && len(listResult.Objects) > 0 {
+		missKeys := make([]string, len(listResult.Objects))
+		for i := range listResult.Objects {
+			missKeys[i] = listResult.Objects[i].Key
+		}
+
+		cached, cacheErr := h.sizeCache.GetBatch(ctx, bucket, missKeys)
+		if cacheErr != nil {
+			h.logger.WithError(cacheErr).Warn("handleListObjects: size cache GetBatch failed; returning ciphertext sizes")
+		} else {
+			stillMissIdxs := make([]int, 0, len(listResult.Objects))
+			stillMissKeys := make([]string, 0, len(listResult.Objects))
+			for i := range listResult.Objects {
+				if ps, ok := cached[missKeys[i]]; ok {
+					listResult.Objects[i].Size = ps
+					h.metrics.RecordListSizeCacheHit(ctx, bucket)
+				} else {
+					stillMissIdxs = append(stillMissIdxs, i)
+					stillMissKeys = append(stillMissKeys, missKeys[i])
+					h.metrics.RecordListSizeCacheMiss(ctx, bucket)
+				}
+			}
+
+			// Fallback HEAD batch for unresolved misses (opt-in).
+			if h.config.ListSizeTranslate.FallbackHeadEnabled && len(stillMissIdxs) > 0 {
+				h.resolveListSizesByHead(ctx, bucket, listResult.Objects, stillMissIdxs, stillMissKeys, s3Client)
+			}
+		}
+	}
+
 	// Compute NextMarker for S3 API v1 clients.  When the response is
 	// truncated, v1 clients need a key name to send as the next marker.
 	// (v2 clients use the opaque NextContinuationToken instead.)
@@ -2426,6 +2491,65 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 }
 
 // handleHeadBucket handles HEAD bucket requests.
+
+// resolveListSizesByHead issues bounded concurrent HeadObject calls for the
+// given object indices, substitutes plaintext sizes, and populates the size
+// cache. It is fail-soft: objects whose HEAD fails or times out retain their
+// ciphertext sizes.
+func (h *Handler) resolveListSizesByHead(
+	ctx context.Context,
+	bucket string,
+	objects []s3.ObjectInfo,
+	idxs []int,
+	keys []string,
+	s3Client s3.Client,
+) {
+	cfg := h.config.ListSizeTranslate
+	batchCtx, cancel := context.WithTimeout(ctx, cfg.FallbackHeadTimeout)
+	defer cancel()
+
+	sem := make(chan struct{}, cfg.FallbackHeadConcurrency)
+	type result struct {
+		idx  int
+		key  string
+		size int64
+		err  error
+	}
+	results := make(chan result, len(idxs))
+	var wg sync.WaitGroup
+
+	for i, idx := range idxs {
+		wg.Add(1)
+		go func(i, idx int, key string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			ps, ok, err := h.lookupListObjectPlaintextSize(batchCtx, bucket, key, objects[idx].Size, s3Client)
+			if err != nil || !ok {
+				h.metrics.RecordListSizeFallbackHead(ctx, bucket, "error")
+				results <- result{idx: idx, key: key, err: err}
+				return
+			}
+			h.metrics.RecordListSizeFallbackHead(ctx, bucket, "hit")
+			results <- result{idx: idx, key: key, size: ps}
+		}(i, idx, keys[i])
+	}
+
+	go func() { wg.Wait(); close(results) }()
+
+	cacheUpdates := make(map[string]int64)
+	for r := range results {
+		if r.err == nil && r.size > 0 {
+			objects[r.idx].Size = r.size
+			cacheUpdates[r.key] = r.size
+		}
+	}
+	if h.sizeCache != nil && len(cacheUpdates) > 0 {
+		_ = h.sizeCache.SetBatch(ctx, bucket, cacheUpdates)
+	}
+}
+
 func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	vars := mux.Vars(r)
@@ -3516,7 +3640,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	// For encrypted MPU: consult the PolicySnapshot stored at Create time so
 	// a policy flip mid-upload cannot cause the manifest to be skipped or
 	// written for an upload that was never encrypted (ADR-0009).
-	_, completeIsEnc, completeStateErr := h.uploadStateEncrypted(ctx, uploadID)
+	completeState, completeIsEnc, completeStateErr := h.uploadStateEncrypted(ctx, uploadID)
 	if completeStateErr != nil {
 		h.logger.WithError(completeStateErr).WithFields(logrus.Fields{
 			"bucket":   bucket,
@@ -3593,6 +3717,20 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		if delErr := h.mpuStateStore.Delete(ctx, uploadID); delErr != nil {
 			h.logger.WithError(delErr).WithField("uploadID", uploadID).
 				Warn("Failed to delete MPU state after completion")
+		}
+	}
+
+	// Populate the size cache after a successful complete so subsequent
+	// ListObjects can resolve the plaintext size without a HEAD request.
+	if h.sizeCache != nil && completeState != nil {
+		var totalPlain int64
+		for _, p := range completeState.Parts {
+			totalPlain += p.PlainLen
+		}
+		if totalPlain > 0 {
+			if cacheErr := h.sizeCache.Set(ctx, bucket, key, totalPlain); cacheErr != nil {
+				h.logger.WithError(cacheErr).Warn("handleCompleteMultipartUpload: failed to set size cache")
+			}
 		}
 	}
 
@@ -4665,6 +4803,24 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	headMeta, _ := s3Client.HeadObject(ctx, dstBucket, dstKey, nil)
 	etag := headMeta["ETag"]
 
+	// Populate the size cache for the destination object so subsequent
+	// ListObjects can resolve the plaintext size without a HEAD request.
+	if h.sizeCache != nil {
+		var ps int64
+		if psStr, ok := srcMetadata[crypto.MetaOriginalSize]; ok && psStr != "" {
+			if parsed, parseErr := strconv.ParseInt(psStr, 10, 64); parseErr == nil && parsed > 0 {
+				ps = parsed
+			}
+		}
+		if ps > 0 {
+			if cacheErr := h.sizeCache.Set(ctx, dstBucket, dstKey, ps); cacheErr != nil {
+				h.logger.WithError(cacheErr).WithFields(logrus.Fields{
+					"dstBucket": dstBucket, "dstKey": dstKey,
+				}).Warn("handleCopyObject: failed to set size cache")
+			}
+		}
+	}
+
 	// Return CopyObjectResult XML
 	type CopyObjectResult struct {
 		XMLName      xml.Name `xml:"CopyObjectResult"`
@@ -4806,6 +4962,17 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 					}).Warn("Failed to clean up MPU manifest companion object")
 				}
 			}
+		}
+	}
+
+	// Evict deleted keys from size cache.
+	if h.sizeCache != nil && len(deleted) > 0 {
+		keys := make([]string, len(deleted))
+		for i, del := range deleted {
+			keys[i] = del.Key
+		}
+		if cacheErr := h.sizeCache.DeleteBatch(ctx, bucket, keys); cacheErr != nil {
+			h.logger.WithError(cacheErr).Warn("handleDeleteObjects: failed to evict size cache")
 		}
 	}
 

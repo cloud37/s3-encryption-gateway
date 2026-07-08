@@ -618,6 +618,12 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 }
 
 // HealthCheck pings Valkey with a 1-second timeout.
+// Client returns the underlying redis.UniversalClient, so callers can share
+// the connection pool with other components (e.g. the size cache).
+func (s *ValkeyStateStore) Client() redis.UniversalClient {
+	return s.client
+}
+
 func (s *ValkeyStateStore) HealthCheck(ctx context.Context) error {
 	hctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
