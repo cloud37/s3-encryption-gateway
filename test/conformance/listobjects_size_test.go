@@ -302,11 +302,11 @@ func testListObjectsV1_SizeAccuracy(t *testing.T, inst provider.Instance) {
 	if getSize != plaintextSize {
 		t.Errorf("GET Content-Length = %d, want plaintext size %d", getSize, plaintextSize)
 	}
-	if listedSize <= plaintextSize {
-		t.Errorf("LIST Size = %d, expected > plaintext size %d (should be ciphertext size)", listedSize, plaintextSize)
+	if listedSize != headSize {
+		t.Errorf("LIST Size = %d, HEAD Content-Length = %d: listed size must equal HEAD size", listedSize, headSize)
 	}
 
-	t.Logf("v1-size-accuracy: listed=%d (ciphertext) head=%d get=%d (plaintext=%d)",
+	t.Logf("v1-size-accuracy: listed=%d head=%d get=%d plaintext=%d (invariant: listed==head)",
 		listedSize, headSize, getSize, plaintextSize)
 }
 
@@ -385,10 +385,10 @@ func testListObjectsV2_SizeAccuracy(t *testing.T, inst provider.Instance) {
 	if getSize != plaintextSize {
 		t.Errorf("GET Content-Length = %d, want plaintext size %d", getSize, plaintextSize)
 	}
-	if listedSize <= plaintextSize {
-		t.Errorf("LIST Size = %d, expected > plaintext size %d (should be ciphertext size)", listedSize, plaintextSize)
+	if listedSize != headSize {
+		t.Errorf("LIST Size = %d, HEAD Content-Length = %d: listed size must equal HEAD size", listedSize, headSize)
 	}
 
-	t.Logf("v2-size-accuracy: listed=%d (ciphertext) head=%d get=%d (plaintext=%d)",
+	t.Logf("v2-size-accuracy: listed=%d head=%d get=%d plaintext=%d (invariant: listed==head)",
 		listedSize, headSize, getSize, plaintextSize)
 }

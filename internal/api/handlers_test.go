@@ -18,13 +18,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/aws/smithy-go"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockAPIError implements smithy.APIError for testing
@@ -77,6 +82,8 @@ type mockS3Client struct {
 	lastMPUGrantRead     string
 	lastMPUGrantReadACP  string
 	lastMPUGrantWriteACP string
+
+	headObjectCallCount int
 }
 
 func newMockS3Client() *mockS3Client {
@@ -160,6 +167,7 @@ func (m *mockS3Client) DeleteObject(ctx context.Context, bucket, key string, ver
 }
 
 func (m *mockS3Client) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
+	m.headObjectCallCount++
 	if err := m.errors[bucket+"/"+key+"/head"]; err != nil {
 		return nil, err
 	}
@@ -408,6 +416,28 @@ func getTestMetrics() *metrics.Metrics {
 		sharedTestMetrics = metrics.NewMetrics()
 	})
 	return sharedTestMetrics
+}
+
+func newListObjectsTestHandlerWithSizeCache(t *testing.T, lsc config.ListSizeTranslateConfig) (*Handler, *mockS3Client, *sizecache.ValkeySizeCache) {
+	t.Helper()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		ListSizeTranslate: lsc,
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	mr := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { redisClient.Close() })
+	sc := sizecache.NewValkeySizeCache(redisClient)
+	handler.WithSizeCache(sc)
+
+	return handler, mockClient, sc
 }
 
 func TestHandler_HandleHealth(t *testing.T) {
@@ -2597,4 +2627,117 @@ disable_encryption: true
 	if engine2 != nil {
 		t.Logf("non-bypass engine: %T (expected nil since no default engine configured)", engine2)
 	}
+}
+
+func TestListObjects_SizeCache_WarmPath(t *testing.T) {
+	handler, mockClient, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     false,
+		FallbackHeadConcurrency: 10,
+		FallbackHeadTimeout:     5 * time.Second,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+	plainSize := int64(12345)
+
+	_, err := mockClient.PutObject(ctx, bucket, "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+	_, err = mockClient.PutObject(ctx, bucket, "key2", bytes.NewReader([]byte("data2")), nil, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+
+	require.NoError(t, sc.Set(ctx, bucket, "key1", plainSize))
+	require.NoError(t, sc.Set(ctx, bucket, "key2", plainSize+1))
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/"+bucket, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	body := w.Body.String()
+	assert.Contains(t, body, "<Size>12345</Size>")
+	assert.Contains(t, body, "<Size>12346</Size>")
+
+	assert.Equal(t, 0, mockClient.headObjectCallCount)
+}
+
+func TestListObjects_SizeCache_ColdMiss_FallbackDisabled(t *testing.T) {
+	handler, mockClient, _ := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     false,
+		FallbackHeadConcurrency: 10,
+		FallbackHeadTimeout:     5 * time.Second,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+
+	_, err := mockClient.PutObject(ctx, bucket, "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/"+bucket, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	assert.Equal(t, 0, mockClient.headObjectCallCount)
+}
+
+func TestListObjects_SizeCache_ValkeyUnavailable(t *testing.T) {
+	handler, mockClient, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     false,
+		FallbackHeadConcurrency: 10,
+		FallbackHeadTimeout:     5 * time.Second,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+
+	_, err := mockClient.PutObject(ctx, bucket, "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+
+	sc.Close()
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/"+bucket, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 0, mockClient.headObjectCallCount)
+}
+
+func TestPutObject_SizeCache_Populated(t *testing.T) {
+	handler, _, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     false,
+		FallbackHeadConcurrency: 10,
+		FallbackHeadTimeout:     5 * time.Second,
+	})
+	bucket := "test-bucket"
+	key := "test-key"
+	body := "test data for put"
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/"+bucket+"/"+key, bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	ctx := context.Background()
+	results, err := sc.GetBatch(ctx, bucket, []string{key})
+	require.NoError(t, err)
+	require.Contains(t, results, key)
+	assert.Equal(t, int64(len(body)), results[key])
 }
