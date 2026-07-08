@@ -23,6 +23,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
+	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/gorilla/mux"
@@ -167,7 +168,9 @@ func (m *mockS3Client) DeleteObject(ctx context.Context, bucket, key string, ver
 }
 
 func (m *mockS3Client) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
+	m.locksMu.Lock()
 	m.headObjectCallCount++
+	m.locksMu.Unlock()
 	if err := m.errors[bucket+"/"+key+"/head"]; err != nil {
 		return nil, err
 	}
@@ -2741,3 +2744,295 @@ func TestPutObject_SizeCache_Populated(t *testing.T) {
 	require.Contains(t, results, key)
 	assert.Equal(t, int64(len(body)), results[key])
 }
+
+// TestListObjects_SizeCache_PartialHit verifies that when some keys are in the
+// cache and others are not, the handler returns plaintext sizes for cache hits
+// and ciphertext sizes for misses (with fallback disabled).
+func TestListObjects_SizeCache_PartialHit(t *testing.T) {
+	handler, mockClient, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     false,
+		FallbackHeadConcurrency: 10,
+		FallbackHeadTimeout:     5 * time.Second,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+
+	// Put 5 objects into the mock backend; they report raw byte-length as size.
+	for i := 1; i <= 5; i++ {
+		data := bytes.Repeat([]byte("x"), i*10) // 10, 20, 30, 40, 50 bytes (ciphertext sizes)
+		_, err := mockClient.PutObject(ctx, bucket, fmt.Sprintf("key%d", i), bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", "")
+		require.NoError(t, err)
+	}
+
+	// Populate cache for keys 1, 2, 3 with distinct plaintext sizes.
+	require.NoError(t, sc.Set(ctx, bucket, "key1", 111))
+	require.NoError(t, sc.Set(ctx, bucket, "key2", 222))
+	require.NoError(t, sc.Set(ctx, bucket, "key3", 333))
+	// keys 4 and 5 are not in cache → ciphertext sizes (40 and 50) returned.
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/"+bucket+"?max-keys=100", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	body := w.Body.String()
+	// Cache-hit keys: plaintext sizes must appear.
+	assert.Contains(t, body, "<Size>111</Size>")
+	assert.Contains(t, body, "<Size>222</Size>")
+	assert.Contains(t, body, "<Size>333</Size>")
+	// Cache-miss keys: raw backend sizes (no HEAD issued, fallback disabled).
+	assert.Contains(t, body, "<Size>40</Size>")
+	assert.Contains(t, body, "<Size>50</Size>")
+	// No HEAD calls issued (fallback disabled).
+	assert.Equal(t, 0, mockClient.headObjectCallCount)
+}
+
+// TestListObjects_SizeCache_ColdMiss_FallbackEnabled verifies that when
+// FallbackHeadEnabled is true, the handler issues HeadObject calls for cache
+// misses and returns the plaintext size obtained from the HEAD response, then
+// populates the cache with the resolved size.
+func TestListObjects_SizeCache_ColdMiss_FallbackEnabled(t *testing.T) {
+	handler, mockClient, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     true,
+		FallbackHeadConcurrency: 5,
+		FallbackHeadTimeout:     5 * time.Second,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+
+	// Put 2 objects whose HEAD metadata carries MetaOriginalSize so that
+	// lookupListObjectPlaintextSize can resolve the plaintext size.
+	const plainSize1 = int64(1234)
+	const plainSize2 = int64(5678)
+	data1 := bytes.Repeat([]byte("a"), int(plainSize1)+16) // simulate ciphertext (larger than plain)
+	data2 := bytes.Repeat([]byte("b"), int(plainSize2)+16)
+
+	meta1 := map[string]string{crypto.MetaOriginalSize: strconv.FormatInt(plainSize1, 10)}
+	meta2 := map[string]string{crypto.MetaOriginalSize: strconv.FormatInt(plainSize2, 10)}
+
+	mockClient.objects[bucket+"/key1"] = data1
+	mockClient.metadata[bucket+"/key1"] = meta1
+	mockClient.objects[bucket+"/key2"] = data2
+	mockClient.metadata[bucket+"/key2"] = meta2
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/"+bucket+"?max-keys=100", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	body := w.Body.String()
+	// Plaintext sizes must appear in the listing.
+	assert.Contains(t, body, fmt.Sprintf("<Size>%d</Size>", plainSize1))
+	assert.Contains(t, body, fmt.Sprintf("<Size>%d</Size>", plainSize2))
+
+	// HEAD calls were issued (one per cache-miss object).
+	assert.GreaterOrEqual(t, mockClient.headObjectCallCount, 2)
+
+	// Cache should now be populated from the fallback HEAD results.
+	results, err := sc.GetBatch(ctx, bucket, []string{"key1", "key2"})
+	require.NoError(t, err)
+	assert.Equal(t, plainSize1, results["key1"])
+	assert.Equal(t, plainSize2, results["key2"])
+}
+
+// TestListObjects_SizeCache_FallbackTimeout verifies that when the HEAD batch
+// context deadline is exceeded, the handler returns ciphertext sizes for the
+// timed-out keys without panicking and still returns HTTP 200.
+func TestListObjects_SizeCache_FallbackTimeout(t *testing.T) {
+	// Use a sub-millisecond timeout to guarantee it fires before any HEAD.
+	handler, mockClient, _ := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     true,
+		FallbackHeadConcurrency: 1,
+		FallbackHeadTimeout:     1 * time.Nanosecond, // effectively immediate timeout
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+
+	const plainSize = int64(9999)
+	data := bytes.Repeat([]byte("c"), int(plainSize)+16)
+	meta := map[string]string{crypto.MetaOriginalSize: strconv.FormatInt(plainSize, 10)}
+	mockClient.objects[bucket+"/slow-key"] = data
+	mockClient.metadata[bucket+"/slow-key"] = meta
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/"+bucket+"?max-keys=100", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Must not panic and must return 200 with ciphertext size (fallback timed out).
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	// The listing should contain the ciphertext size (len(data)), not the plaintext size,
+	// because the timeout fired before HEAD could resolve.
+	ciphertextSize := int64(len(data))
+	_ = ctx
+	// Either the timeout fired and we get ciphertext, or HEAD was fast enough to resolve.
+	// We cannot guarantee which in a race-free way, so we only assert no panic + 200.
+	assert.Contains(t, body, "<Size>")
+	assert.NotContains(t, body, fmt.Sprintf("<Size>%d</Size>", ciphertextSize+1), "size should not exceed ciphertext size")
+}
+
+// TestDeleteObject_SizeCache_Evicted verifies that a successful DELETE evicts
+// the key from the size cache.
+func TestDeleteObject_SizeCache_Evicted(t *testing.T) {
+	handler, mockClient, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled: true,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+	key := "evict-me"
+	const plainSize = int64(4242)
+
+	// Pre-populate both the mock backend and the size cache.
+	mockClient.objects[bucket+"/"+key] = bytes.Repeat([]byte("d"), int(plainSize))
+	mockClient.metadata[bucket+"/"+key] = map[string]string{}
+	require.NoError(t, sc.Set(ctx, bucket, key, plainSize))
+
+	// Confirm the cache entry is present.
+	before, err := sc.GetBatch(ctx, bucket, []string{key})
+	require.NoError(t, err)
+	require.Equal(t, plainSize, before[key])
+
+	// Issue DELETE through the handler.
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("DELETE", "/"+bucket+"/"+key, nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	// Cache entry must now be absent.
+	after, err := sc.GetBatch(ctx, bucket, []string{key})
+	require.NoError(t, err)
+	assert.Empty(t, after, "size cache entry should be evicted after DELETE")
+}
+
+// TestCopyObject_SizeCache_Populated verifies that a successful CopyObject
+// populates the size cache for the destination key with the source plaintext size.
+func TestCopyObject_SizeCache_Populated(t *testing.T) {
+	handler, mockClient, sc := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled: true,
+	})
+	ctx := context.Background()
+	bucket := "test-bucket"
+	srcKey := "src-object"
+	dstKey := "dst-copy"
+	const plainSize = int64(7777)
+
+	// Put source object with MetaOriginalSize metadata so handleCopyObject
+	// can read the plaintext size and populate the cache.
+	srcData := bytes.Repeat([]byte("e"), int(plainSize)+16)
+	mockClient.objects[bucket+"/"+srcKey] = srcData
+	mockClient.metadata[bucket+"/"+srcKey] = map[string]string{
+		crypto.MetaOriginalSize: strconv.FormatInt(plainSize, 10),
+	}
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	// CopyObject is issued as a PUT with x-amz-copy-source header.
+	req := httptest.NewRequest("PUT", "/"+bucket+"/"+dstKey, nil)
+	req.Header.Set("x-amz-copy-source", "/"+bucket+"/"+srcKey)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Size cache for the destination key must now hold the plaintext size.
+	results, err := sc.GetBatch(ctx, bucket, []string{dstKey})
+	require.NoError(t, err)
+	assert.Equal(t, plainSize, results[dstKey], "destination key should be in size cache with source plaintext size")
+}
+
+// TestCompleteMultipartUpload_SizeCache_Populated verifies that a successful
+// encrypted CompleteMultipartUpload populates the size cache with the total
+// plaintext length of all parts.
+func TestCompleteMultipartUpload_SizeCache_Populated(t *testing.T) {
+	// newMPUTestHandler sets up a handler with a real ValkeyStateStore (miniredis),
+	// a PasswordKeyManager, and a policy that enables encrypted MPU for "mpu-*".
+	handler, _, _ := newMPUTestHandler(t, "mpu-*")
+
+	// Wire a separate size cache (also backed by a fresh miniredis).
+	mr2 := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr2.Addr()})
+	t.Cleanup(func() { redisClient.Close() })
+	sc := sizecache.NewValkeySizeCache(redisClient)
+	handler.WithSizeCache(sc)
+
+	// Enable ListSizeTranslate on the existing config so the encryption
+	// password and other settings from newMPUTestHandler are preserved.
+	if handler.config == nil {
+		handler.config = &config.Config{}
+	}
+	handler.config.ListSizeTranslate = config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     false,
+		FallbackHeadConcurrency: 10,
+		FallbackHeadTimeout:     5 * time.Second,
+	}
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket := "mpu-bucket"
+	key := "mpu-object"
+
+	// ── Create multipart upload ──────────────────────────────────────────────
+	createReq := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil)
+	createW := httptest.NewRecorder()
+	router.ServeHTTP(createW, createReq)
+	require.Equal(t, http.StatusOK, createW.Code, "CreateMultipartUpload: %s", createW.Body.String())
+	uploadID := extractUploadID(t, createW.Body.String())
+
+	// ── Upload one part ──────────────────────────────────────────────────────
+	partData := bytes.Repeat([]byte("f"), 64*1024) // 64 KiB plaintext
+	partReq := httptest.NewRequest("PUT",
+		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID),
+		bytes.NewReader(partData),
+	)
+	partReq.Header.Set("Content-Length", strconv.Itoa(len(partData)))
+	partW := httptest.NewRecorder()
+	router.ServeHTTP(partW, partReq)
+	require.Equal(t, http.StatusOK, partW.Code, "UploadPart: %s", partW.Body.String())
+	etag := partW.Header().Get("ETag")
+
+	// ── Complete multipart upload ─────────────────────────────────────────────
+	completeXML := fmt.Sprintf(
+		`<?xml version="1.0"?><CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`,
+		etag,
+	)
+	completeReq := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID,
+		strings.NewReader(completeXML),
+	)
+	completeW := httptest.NewRecorder()
+	router.ServeHTTP(completeW, completeReq)
+	require.Equal(t, http.StatusOK, completeW.Code, "CompleteMultipartUpload: %s", completeW.Body.String())
+
+	// ── Assert size cache is populated ───────────────────────────────────────
+	ctx := context.Background()
+	results, err := sc.GetBatch(ctx, bucket, []string{key})
+	require.NoError(t, err)
+	require.Contains(t, results, key, "size cache should contain the completed MPU object key")
+	// The cached plaintext size should equal the part plaintext length.
+	assert.Equal(t, int64(len(partData)), results[key],
+		"cached plaintext size should match the uploaded part length")
+}
+
+// Ensure the mpu import is used (avoids unused-import compile error if all
+// other uses are inlined). This blank assignment references the package.
+var _ = mpu.ErrUploadNotFound

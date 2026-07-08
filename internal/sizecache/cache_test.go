@@ -129,3 +129,22 @@ func TestValkeySizeCache_RejectsZeroSize(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int64{"goodkey": 42}, results)
 }
+
+// TestValkeySizeCache_Close verifies that Close() returns no error.
+func TestValkeySizeCache_Close(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	// Do NOT register t.Cleanup for client.Close — Close() under test does it.
+	cache := NewValkeySizeCache(client)
+	assert.NoError(t, cache.Close())
+}
+
+// TestValkeySizeCache_DeleteBatch_Empty verifies that DeleteBatch is a no-op
+// for an empty key slice (the early-return branch).
+func TestValkeySizeCache_DeleteBatch_Empty(t *testing.T) {
+	cache, _ := newTestValkeyCache(t)
+	ctx := context.Background()
+	// No keys — must not call HDel and must return nil.
+	assert.NoError(t, cache.DeleteBatch(ctx, "bucket1", []string{}))
+	assert.NoError(t, cache.DeleteBatch(ctx, "bucket1", nil))
+}
