@@ -274,6 +274,17 @@ encryption:
 #       cert_file: "/etc/gateway/valkey-client.pem"
 #       key_file:  "/etc/gateway/valkey-client-key.pem"
 #     ttl_seconds: 604800
+
+# list_size_translate controls how ListObjects resolves plaintext sizes for
+# encrypted objects without issuing per-object HeadObject calls to the backend.
+# Requires a Valkey instance (multipart_state.valkey) to be configured.
+# list_size_translate:
+#   enabled: true
+#   # fallback_head_enabled: if true, issue bounded concurrent HeadObject calls
+#   # for cache misses. Disabled by default to avoid provider API billing amplification.
+#   fallback_head_enabled: false
+#   fallback_head_concurrency: 10
+#   fallback_head_timeout: 5s
 #     pool_size: 16
 
 server:

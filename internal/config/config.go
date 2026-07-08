@@ -39,7 +39,8 @@ type Config struct {
 	Admin          AdminConfig          `yaml:"admin"`
 	Auth           AuthConfig           `yaml:"auth"`
 	PolicyFiles    []string             `yaml:"policies" env:"POLICIES"`
-	MultipartState MultipartStateConfig `yaml:"multipart_state"`
+	MultipartState  MultipartStateConfig    `yaml:"multipart_state"`
+	ListSizeTranslate ListSizeTranslateConfig `yaml:"list_size_translate"`
 }
 
 // ResolvedCredentials returns a copy of the auth credentials with SecretKeyEnv
@@ -741,6 +742,16 @@ type MultipartStateConfig struct {
 	Valkey ValkeyConfig `yaml:"valkey"`
 }
 
+
+// ListSizeTranslateConfig controls how ListObjects resolves plaintext sizes for
+// encrypted objects without issuing per-object HeadObject calls to the backend.
+type ListSizeTranslateConfig struct {
+	Enabled                 bool          `yaml:"enabled" env:"LIST_SIZE_TRANSLATE_ENABLED"`
+	FallbackHeadEnabled     bool          `yaml:"fallback_head_enabled" env:"LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED"`
+	FallbackHeadConcurrency int           `yaml:"fallback_head_concurrency" env:"LIST_SIZE_TRANSLATE_FALLBACK_HEAD_CONCURRENCY"`
+	FallbackHeadTimeout     time.Duration `yaml:"fallback_head_timeout" env:"LIST_SIZE_TRANSLATE_FALLBACK_HEAD_TIMEOUT"`
+}
+
 // ValkeyConfig holds the connection settings for the Valkey state store.
 type ValkeyConfig struct {
 	Addr string `yaml:"addr" env:"VALKEY_ADDR"` // e.g. "valkey.internal:6379"
@@ -918,6 +929,12 @@ func LoadConfig(path string) (*Config, error) {
 					MinVersion: "1.3",
 				},
 			},
+		},
+		ListSizeTranslate: ListSizeTranslateConfig{
+			Enabled:                 true,
+			FallbackHeadEnabled:     false,
+			FallbackHeadConcurrency: 10,
+			FallbackHeadTimeout:     5 * time.Second,
 		},
 	}
 
@@ -2038,7 +2055,7 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// V0.6-OBS-1 — profiling validation.
+		// V0.6-OBS-1 — profiling validation.
 	if c.Admin.Profiling.Enabled {
 		if !c.Admin.Enabled {
 			return fmt.Errorf("admin.profiling requires admin.enabled")
@@ -2054,6 +2071,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Admin.Profiling.MaxProfileSeconds < 1 || c.Admin.Profiling.MaxProfileSeconds > 600 {
 			return fmt.Errorf("admin.profiling.max_profile_seconds must be between 1 and 600")
+		}
+	}
+
+	// Validate list_size_translate configuration (only if explicitly set).
+	if c.ListSizeTranslate.FallbackHeadConcurrency != 0 {
+		if c.ListSizeTranslate.FallbackHeadConcurrency < 1 || c.ListSizeTranslate.FallbackHeadConcurrency > 100 {
+			return fmt.Errorf("list_size_translate.fallback_head_concurrency must be between 1 and 100 (got %d)", c.ListSizeTranslate.FallbackHeadConcurrency)
+		}
+	}
+	if c.ListSizeTranslate.FallbackHeadTimeout != 0 {
+		if c.ListSizeTranslate.FallbackHeadTimeout < 100*time.Millisecond || c.ListSizeTranslate.FallbackHeadTimeout > 60*time.Second {
+			return fmt.Errorf("list_size_translate.fallback_head_timeout must be between 100ms and 60s (got %s)", c.ListSizeTranslate.FallbackHeadTimeout)
 		}
 	}
 

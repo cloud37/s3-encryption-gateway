@@ -160,6 +160,11 @@ type Metrics struct {
 	// encryptedObjectBytes is a histogram of plaintext object sizes seen
 	// by the encryption engine at Encrypt() time.
 	encryptedObjectBytes prometheus.Histogram
+
+	// V1.0-S3-3 — ListObjects size cache metrics.
+	listSizeCacheHitsTotal    *prometheus.CounterVec
+	listSizeCacheMissesTotal  *prometheus.CounterVec
+	listSizeFallbackHeadTotal *prometheus.CounterVec
 }
 
 // NewMetrics creates a new metrics instance with default configuration.
@@ -600,6 +605,27 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 				Help:    "Plaintext object size distribution at Encrypt() time.",
 				Buckets: []float64{1 << 10, 16 << 10, 256 << 10, 1 << 20, 16 << 20, 64 << 20, 256 << 20, 1 << 30},
 			},
+		),
+		listSizeCacheHitsTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "list_size_cache_hits_total",
+				Help: "Total number of ListObjects size resolution requests served from the Valkey size cache (plaintext size known, no HEAD issued).",
+			},
+			[]string{"bucket"},
+		),
+		listSizeCacheMissesTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "list_size_cache_misses_total",
+				Help: "Total number of ListObjects keys not found in the size cache (returns ciphertext size or triggers fallback HEAD).",
+			},
+			[]string{"bucket"},
+		),
+		listSizeFallbackHeadTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "list_size_fallback_head_total",
+				Help: "Total number of HeadObject calls issued by the fallback HEAD batch in handleListObjects.",
+			},
+			[]string{"bucket", "result"},
 		),
 	}
 }
@@ -1181,6 +1207,34 @@ func (m *Metrics) DecMPUActiveUploads() {
 }
 
 // getExemplar extracts trace ID from context and returns prometheus Labels for exemplar.
+
+// ---- V1.0-S3-3 ListObjects size cache metric helpers ----------------------
+
+// RecordListSizeCacheHit increments the list_size_cache_hits_total counter.
+func (m *Metrics) RecordListSizeCacheHit(_ context.Context, bucket string) {
+	if m == nil || m.listSizeCacheHitsTotal == nil {
+		return
+	}
+	m.listSizeCacheHitsTotal.WithLabelValues(bucket).Inc()
+}
+
+// RecordListSizeCacheMiss increments the list_size_cache_misses_total counter.
+func (m *Metrics) RecordListSizeCacheMiss(_ context.Context, bucket string) {
+	if m == nil || m.listSizeCacheMissesTotal == nil {
+		return
+	}
+	m.listSizeCacheMissesTotal.WithLabelValues(bucket).Inc()
+}
+
+// RecordListSizeFallbackHead increments the list_size_fallback_head_total counter.
+// result is one of "hit", "timeout", or "error".
+func (m *Metrics) RecordListSizeFallbackHead(_ context.Context, bucket, result string) {
+	if m == nil || m.listSizeFallbackHeadTotal == nil {
+		return
+	}
+	m.listSizeFallbackHeadTotal.WithLabelValues(bucket, result).Inc()
+}
+
 func getExemplar(ctx context.Context) prometheus.Labels {
 	if ctx == nil {
 		return nil
