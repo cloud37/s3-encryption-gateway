@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **ListObjects plaintext size translation (V1.0-S3-3):** New `SizeCache` index
+  mapping (bucket, key) → plaintext size, backed by a Valkey hash per bucket.
+  `handleListObjects` resolves ciphertext sizes through a three-phase pipeline:
+  1. existing `maxKeys<=10` HEAD path (unchanged), 2. Valkey `HMGET` batch
+  lookup (single round-trip), 3. opt-in bounded concurrent HEAD fallback
+  (`list_size_translate.fallback_head_enabled`). The write-through index is
+  populated by `PutObject`, `CompleteMultipartUpload`, and `CopyObject`; evicted
+  by `DeleteObject` and `DeleteObjects`. All cache operations are fail-soft:
+  Valkey errors degrade to ciphertext sizes without 5xx. Three new Prometheus
+  metrics: `list_size_cache_hits_total`, `list_size_cache_misses_total`,
+  `list_size_fallback_head_total`. New config stanza `list_size_translate`
+  with `enabled`, `fallback_head_enabled`, `fallback_head_concurrency`,
+  `fallback_head_timeout`.
+
 ### Security
 
 ### Fixed
