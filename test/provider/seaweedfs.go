@@ -67,6 +67,7 @@ func (p *seaweedfsProvider) Capabilities() Capabilities {
 		CapBatchDelete |
 		CapKMSIntegration |
 		CapInlinePutTagging |
+		CapSizeTranslation |
 		CapEncryptedMPU |
 		CapLoadTest |
 		CapSDKAWSGoV2 |

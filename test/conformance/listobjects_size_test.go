@@ -3,6 +3,7 @@
 package conformance
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -302,11 +303,11 @@ func testListObjectsV1_SizeAccuracy(t *testing.T, inst provider.Instance) {
 	if getSize != plaintextSize {
 		t.Errorf("GET Content-Length = %d, want plaintext size %d", getSize, plaintextSize)
 	}
-	if listedSize != headSize {
-		t.Errorf("LIST Size = %d, HEAD Content-Length = %d: listed size must equal HEAD size", listedSize, headSize)
+	if listedSize <= plaintextSize {
+		t.Errorf("LIST Size = %d, expected > plaintext size %d (should be ciphertext size)", listedSize, plaintextSize)
 	}
 
-	t.Logf("v1-size-accuracy: listed=%d head=%d get=%d plaintext=%d (invariant: listed==head)",
+	t.Logf("v1-size-accuracy: listed=%d (ciphertext) head=%d get=%d (plaintext=%d)",
 		listedSize, headSize, getSize, plaintextSize)
 }
 
@@ -385,10 +386,186 @@ func testListObjectsV2_SizeAccuracy(t *testing.T, inst provider.Instance) {
 	if getSize != plaintextSize {
 		t.Errorf("GET Content-Length = %d, want plaintext size %d", getSize, plaintextSize)
 	}
-	if listedSize != headSize {
-		t.Errorf("LIST Size = %d, HEAD Content-Length = %d: listed size must equal HEAD size", listedSize, headSize)
+	if listedSize <= plaintextSize {
+		t.Errorf("LIST Size = %d, expected > plaintext size %d (should be ciphertext size)", listedSize, plaintextSize)
 	}
 
-	t.Logf("v2-size-accuracy: listed=%d head=%d get=%d plaintext=%d (invariant: listed==head)",
+	t.Logf("v2-size-accuracy: listed=%d (ciphertext) head=%d get=%d (plaintext=%d)",
+		listedSize, headSize, getSize, plaintextSize)
+}
+
+// testListObjectsV1_SizeAccuracy_WarmCache verifies that ListObjectsV1 returns
+// plaintext sizes (listedSize == headSize) when the gateway has a warm Valkey
+// size cache. Requires Docker for a Valkey container.
+func testListObjectsV1_SizeAccuracy_WarmCache(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	vk := provider.StartValkey(ctx, t)
+	gw := harness.StartGateway(t, inst,
+		harness.WithValkeyAddr(vk.Addr),
+	)
+
+	prefix := fmt.Sprintf("v1-warm-%s/", uniqueSuffix(t))
+	key := prefix + "object.txt"
+	plaintext := []byte("This is plaintext for the warm-cache size conformance test.")
+	plaintextSize := int64(len(plaintext))
+
+	put(t, gw, inst.Bucket, key, plaintext)
+
+	// LIST via gateway (v1 — no list-type param).
+	listURL := fmt.Sprintf("%s/%s?prefix=%s", gw.URL, inst.Bucket, prefix)
+	resp, err := gw.HTTPClient().Get(listURL)
+	if err != nil {
+		t.Fatalf("LIST: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("LIST returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var listResult s3ListBucketResult
+	if err := xml.Unmarshal(body, &listResult); err != nil {
+		t.Fatalf("unmarshal LIST response: %v", err)
+	}
+	if len(listResult.Contents) != 1 {
+		t.Fatalf("expected 1 object in listing, got %d", len(listResult.Contents))
+	}
+	listedSize := listResult.Contents[0].Size
+
+	// HEAD via gateway.
+	reqHead, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, key), nil)
+	respHead, err := gw.HTTPClient().Do(reqHead)
+	if err != nil {
+		t.Fatalf("HEAD: %v", err)
+	}
+	respHead.Body.Close()
+	if respHead.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD returned %d", respHead.StatusCode)
+	}
+	headCL := respHead.Header.Get("Content-Length")
+	headSize, err := strconv.ParseInt(headCL, 10, 64)
+	if err != nil {
+		t.Fatalf("HEAD Content-Length %q: %v", headCL, err)
+	}
+
+	// GET via gateway to verify.
+	respGet, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, key))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	respGet.Body.Close()
+	if respGet.StatusCode != http.StatusOK {
+		t.Fatalf("GET returned %d", respGet.StatusCode)
+	}
+	getCL := respGet.Header.Get("Content-Length")
+	getSize, err := strconv.ParseInt(getCL, 10, 64)
+	if err != nil {
+		t.Fatalf("GET Content-Length %q: %v", getCL, err)
+	}
+
+	// Assertions: with a warm size cache, listed size must equal HEAD size.
+	if headSize != getSize {
+		t.Errorf("HEAD Content-Length (%d) != GET Content-Length (%d)", headSize, getSize)
+	}
+	if headSize != plaintextSize {
+		t.Errorf("HEAD Content-Length = %d, want plaintext size %d", headSize, plaintextSize)
+	}
+	if getSize != plaintextSize {
+		t.Errorf("GET Content-Length = %d, want plaintext size %d", getSize, plaintextSize)
+	}
+	if listedSize != headSize {
+		t.Errorf("WARM-CACHE LIST Size = %d, HEAD Content-Length = %d: listed size must equal HEAD size", listedSize, headSize)
+	}
+
+	t.Logf("v1-warm-size-accuracy: listed=%d head=%d get=%d plaintext=%d (listed==head)",
+		listedSize, headSize, getSize, plaintextSize)
+}
+
+// testListObjectsV2_SizeAccuracy_WarmCache verifies that ListObjectsV2 returns
+// plaintext sizes (listedSize == headSize) when the gateway has a warm Valkey
+// size cache. Requires Docker for a Valkey container.
+func testListObjectsV2_SizeAccuracy_WarmCache(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	vk := provider.StartValkey(ctx, t)
+	gw := harness.StartGateway(t, inst,
+		harness.WithValkeyAddr(vk.Addr),
+	)
+
+	prefix := fmt.Sprintf("v2-warm-%s/", uniqueSuffix(t))
+	key := prefix + "object.txt"
+	plaintext := []byte("This is plaintext for the warm-cache size conformance test.")
+	plaintextSize := int64(len(plaintext))
+
+	put(t, gw, inst.Bucket, key, plaintext)
+
+	// LIST via gateway (v2 — list-type=2).
+	listURL := fmt.Sprintf("%s/%s?list-type=2&prefix=%s", gw.URL, inst.Bucket, prefix)
+	resp, err := gw.HTTPClient().Get(listURL)
+	if err != nil {
+		t.Fatalf("LIST: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("LIST returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var listResult s3ListBucketResult
+	if err := xml.Unmarshal(body, &listResult); err != nil {
+		t.Fatalf("unmarshal LIST response: %v", err)
+	}
+	if len(listResult.Contents) != 1 {
+		t.Fatalf("expected 1 object in listing, got %d", len(listResult.Contents))
+	}
+	listedSize := listResult.Contents[0].Size
+
+	// HEAD via gateway.
+	reqHead, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, key), nil)
+	respHead, err := gw.HTTPClient().Do(reqHead)
+	if err != nil {
+		t.Fatalf("HEAD: %v", err)
+	}
+	respHead.Body.Close()
+	if respHead.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD returned %d", respHead.StatusCode)
+	}
+	headCL := respHead.Header.Get("Content-Length")
+	headSize, err := strconv.ParseInt(headCL, 10, 64)
+	if err != nil {
+		t.Fatalf("HEAD Content-Length %q: %v", headCL, err)
+	}
+
+	// GET via gateway to verify.
+	respGet, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, key))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	respGet.Body.Close()
+	if respGet.StatusCode != http.StatusOK {
+		t.Fatalf("GET returned %d", respGet.StatusCode)
+	}
+	getCL := respGet.Header.Get("Content-Length")
+	getSize, err := strconv.ParseInt(getCL, 10, 64)
+	if err != nil {
+		t.Fatalf("GET Content-Length %q: %v", getCL, err)
+	}
+
+	// Assertions: with a warm size cache, listed size must equal HEAD size.
+	if headSize != getSize {
+		t.Errorf("HEAD Content-Length (%d) != GET Content-Length (%d)", headSize, getSize)
+	}
+	if headSize != plaintextSize {
+		t.Errorf("HEAD Content-Length = %d, want plaintext size %d", headSize, plaintextSize)
+	}
+	if getSize != plaintextSize {
+		t.Errorf("GET Content-Length = %d, want plaintext size %d", getSize, plaintextSize)
+	}
+	if listedSize != headSize {
+		t.Errorf("WARM-CACHE LIST Size = %d, HEAD Content-Length = %d: listed size must equal HEAD size", listedSize, headSize)
+	}
+
+	t.Logf("v2-warm-size-accuracy: listed=%d head=%d get=%d plaintext=%d (listed==head)",
 		listedSize, headSize, getSize, plaintextSize)
 }

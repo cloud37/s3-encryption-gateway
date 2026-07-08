@@ -55,6 +55,8 @@ func TestConformance(t *testing.T) {
 				{"ListObjectsV2_Pagination", 0, testListObjectsV2_Pagination},
 				{"ListObjectsV1_SizeAccuracy", 0, testListObjectsV1_SizeAccuracy},
 				{"ListObjectsV2_SizeAccuracy", 0, testListObjectsV2_SizeAccuracy},
+				{"ListObjectsV1_SizeAccuracy_WarmCache", provider.CapSizeTranslation, testListObjectsV1_SizeAccuracy_WarmCache},
+				{"ListObjectsV2_SizeAccuracy_WarmCache", provider.CapSizeTranslation, testListObjectsV2_SizeAccuracy_WarmCache},
 				{"DeleteObject", 0, testDeleteObject},
 				{"DeleteObjects", provider.CapBatchDelete, testDeleteObjects},
 				{"CopyObject", 0, testCopyObject},

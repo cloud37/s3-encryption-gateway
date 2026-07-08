@@ -19,6 +19,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/middleware"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/cloud37/s3-encryption-gateway/internal/util"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 	"github.com/prometheus/client_golang/prometheus"
@@ -252,6 +253,12 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	)
 	if o.mpuStore != nil {
 		handler.WithMPUStateStore(o.mpuStore)
+		// Wire the ListObjects size cache, sharing the Valkey connection pool.
+		cfg.ListSizeTranslate.Enabled = true
+		if vs, ok := o.mpuStore.(*mpu.ValkeyStateStore); ok {
+			sc := sizecache.NewValkeySizeCache(vs.Client())
+			handler.WithSizeCache(sc)
+		}
 	}
 
 	// Router.

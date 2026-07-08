@@ -108,6 +108,7 @@ func TestCapabilities_NewBitsPresent(t *testing.T) {
 		{provider.CapKMSIntegration, "KMSIntegration"},
 		{provider.CapInlinePutTagging, "InlinePutTagging"},
 		{provider.CapEncryptedMPU, "EncryptedMPU"},
+		{provider.CapSizeTranslation, "SizeTranslation"},
 		{provider.CapLoadTest, "LoadTest"},
 		{provider.CapBucketPolicy, "BucketPolicy"},
 		{provider.CapBucketLifecycle, "BucketLifecycle"},

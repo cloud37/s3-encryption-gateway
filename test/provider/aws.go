@@ -29,7 +29,7 @@ func init() {
 			CapObjectTagging | CapInlinePutTagging | CapPresignedURL |
 			CapConditionalWrites | CapBatchDelete |
 			CapObjectLock | CapVersioning |
-			CapServerSideEncryption | CapKMSIntegration | CapEncryptedMPU |
+			CapServerSideEncryption | CapKMSIntegration | CapSizeTranslation | CapEncryptedMPU |
 			CapSDKAWSGoV2 | CapSDKBoto3 | CapCLIAWSCLI |
 			CapCLIS5cmd | CapCLIRclone | CapSDKMinIOPy | CapCLIRestic,
 		cleanup: CleanupPolicyDelete,

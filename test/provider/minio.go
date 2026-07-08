@@ -38,6 +38,7 @@ func (p *minioProvider) Capabilities() Capabilities {
 		CapPresignedURL |
 		CapConditionalWrites |
 		CapBatchDelete |
+		CapSizeTranslation |
 		CapEncryptedMPU |
 		CapKMSIntegration |
 		CapLoadTest |

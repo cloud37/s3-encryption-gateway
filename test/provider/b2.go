@@ -25,7 +25,7 @@ func init() {
 		bucketEnv: "B2_BUCKET_NAME",
 		caps: CapMultipartUpload | CapMultipartCopy |
 			CapObjectTagging | CapPresignedURL |
-			CapBatchDelete | CapKMSIntegration | CapEncryptedMPU |
+			CapBatchDelete | CapKMSIntegration | CapSizeTranslation | CapEncryptedMPU |
 			CapSDKAWSGoV2 | CapSDKBoto3 | CapCLIAWSCLI | CapCLIS5cmd,
 		cleanup: CleanupPolicyDelete, // B2 deletes are free
 	})

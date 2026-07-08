@@ -93,7 +93,14 @@ const (
 	// Requires Docker (restic container with --network=host).
 	CapCLIRestic Capabilities = 1 << 26
 
-	// Next available: 1 << 27
+	// CapSizeTranslation indicates that the conformance test for the
+	// ListObjects size cache (V1.0-S3-3) should run against this provider.
+	// Requires Docker for a Valkey container. All providers that support
+	// multipart uploads should set this; the test itself starts a Valkey
+	// container for size cache state storage.
+	CapSizeTranslation Capabilities = 1 << 27
+
+	// Next available: 1 << 28
 )
 
 // capNames maps each bit to a human-readable label for Stringer output.
@@ -120,6 +127,7 @@ var capNames = []struct {
 	{CapBucketACL, "BucketACL"},
 	{CapObjectACL, "ObjectACL"},
 	{CapBucketEncryption, "BucketEncryption"},
+	{CapSizeTranslation, "SizeTranslation"},
 
 	// V1.0-COMPAT-1 — SDK/Tool compatibility matrix.
 	{CapSDKAWSGoV2, "SDKAWSGoV2"},
