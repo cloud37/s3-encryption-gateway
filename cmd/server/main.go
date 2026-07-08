@@ -26,6 +26,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/middleware"
 	mpupkg "github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/cloud37/s3-encryption-gateway/internal/util"
 	"github.com/sirupsen/logrus"
 
@@ -781,6 +782,22 @@ func main() {
 		m.SetMPUValkeyInsecure(!cfg.MultipartState.Valkey.TLS.Enabled)
 		logger.WithField("addr", cfg.MultipartState.Valkey.Addr).Info("MPU Valkey state store initialised")
 	}
+
+	// Initialize ListObjects size cache.
+	// Shares the same Valkey connection pool as the MPU state store.
+	var sizeCache sizecache.SizeCache = &sizecache.NoopSizeCache{}
+	if cfg.ListSizeTranslate.Enabled {
+		if mpuStore != nil {
+			if vs, ok := mpuStore.(*mpupkg.ValkeyStateStore); ok {
+				sizeCache = sizecache.NewValkeySizeCache(vs.Client())
+				logger.Info("ListObjects size cache initialised (shared Valkey pool)")
+			}
+		}
+		if _, ok := sizeCache.(*sizecache.NoopSizeCache); ok {
+			logger.Warn("ListObjects size translate enabled but Valkey not configured; using noop cache (ciphertext sizes returned)")
+		}
+	}
+	handler.WithSizeCache(sizeCache)
 
 	// Initialize configuration hot-reload (only if config file is specified)
 	var configReloader *config.ConfigReloader
