@@ -219,7 +219,7 @@ encrypted object looks "modified" on every sync run and is re-transferred.
 The size cache shares the **same Valkey instance and connection pool** as the
 multipart-upload state store — there is no second Valkey deployment. Unlike MPU
 state, the size cache is **fail-soft**: if Valkey is unavailable, listings
-return ciphertext sizes (the pre-v0.11.0 behaviour) with no `5xx`. Valkey is
+return ciphertext sizes (the pre-v0.11.1 behaviour) with no `5xx`. Valkey is
 strongly recommended for ListObjects, not a hard dependency.
 
 ### Metrics to watch
