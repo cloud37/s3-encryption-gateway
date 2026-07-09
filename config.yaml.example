@@ -312,6 +312,7 @@ encryption:
 #       cert_file: "/etc/gateway/valkey-client.pem"
 #       key_file:  "/etc/gateway/valkey-client-key.pem"
 #     ttl_seconds: 604800
+#     pool_size: 16
 
 # list_size_translate controls how ListObjects resolves plaintext sizes for
 # encrypted objects without issuing per-object HeadObject calls to the backend.
@@ -323,7 +324,6 @@ encryption:
 #   fallback_head_enabled: false
 #   fallback_head_concurrency: 10
 #   fallback_head_timeout: 5s
-#     pool_size: 16
 
 server:
   read_timeout: "0s"   # Disabled; read_header_timeout guards slow-loris; non-zero value kills large object streams
