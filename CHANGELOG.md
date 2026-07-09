@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-09
+
 ### Added
 
 - **V1.0-KMS-3 — OpenBao / HashiCorp Vault Transit KeyManager adapter**:
@@ -59,8 +61,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Dependencies
 
-- Add `github.com/openbao/openbao/api/v2` (MPL-2.0) for the OpenBao/Vault
+- Add `github.com/openbao/openbao/api/v2` v2.6.0 (MPL-2.0) for the OpenBao/Vault
   Transit KeyManager adapter.
+- Updated `github.com/aws/aws-sdk-go-v2` monorepo (v1.42.0 → v1.42.1,
+  `config` v1.32.25 → v1.32.29, `credentials` v1.19.24 → v1.19.28,
+  `service/s3` v1.104.0 → v1.105.0).
+- Updated `github.com/aws/smithy-go` to v1.27.3.
+- Updated `golang.org/x/crypto` to v0.54.0.
+- Updated `golang.org/x/sys` to v0.47.0.
+- Updated `golang.org/x/perf` digest to `82a0b07`.
+- Removed unused `github.com/cenkalti/backoff/v6` direct dependency (v5 remains
+  in use).
+- Go module directive updated to 1.26.5.
 
 ## [0.10.2] — 2026-06-26
 
