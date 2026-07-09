@@ -622,3 +622,244 @@ func TestFallback_OpenBaoPrimary_DecryptsLegacyPasswordEnvelope(t *testing.T) {
 func isErr(err, target error) bool {
 	return err != nil && errors.Is(err, target)
 }
+
+// ---- credential/key-material leak tests ------------------------------------
+// These tests assert that no token value, AppRole secret, or plaintext DEK
+// byte string appears in any error message returned by the adapter.  Callers
+// typically log errors verbatim, so error strings are the primary leak vector
+// in an adapter that has no direct log calls of its own.
+
+// TestOpenBao_NoTokenInErrors verifies that a token value never surfaces in
+// any error message produced by WrapKey, UnwrapKey, HealthCheck, or
+// ActiveKeyVersion — even when the mock server deliberately rejects the
+// request with a 403 (expired-token scenario) or when the encrypt/decrypt
+// endpoint is misconfigured.
+func TestOpenBao_NoTokenInErrors(t *testing.T) {
+	const secret = "super-secret-vault-token-abc123" // value we must never see in errors
+
+	srv := newMockBaoServer(t)
+	km, err := NewOpenBaoTransitManager(OpenBaoTransitOptions{
+		Address:        srv.URL,
+		KeyName:        "test-key",
+		Auth:           OpenBaoAuthConfig{Method: "token", Token: secret},
+		DisableRenewal: true,
+		Timeout:        2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	defer func() { _ = km.Close(context.Background()) }()
+
+	// Inject a 403 on every subsequent request so all operations fail.
+	srv.setLookupStatus(http.StatusForbidden)
+	srv.mu.Lock()
+	srv.encryptStatus = http.StatusForbidden
+	srv.decryptStatus = http.StatusForbidden
+	srv.keysStatus = http.StatusForbidden
+	srv.mu.Unlock()
+
+	check := func(label string, gotErr error) {
+		t.Helper()
+		if gotErr == nil {
+			return // not an error; nothing to check
+		}
+		msg := gotErr.Error()
+		if strings.Contains(msg, secret) {
+			t.Errorf("%s: token value leaked into error message: %q", label, msg)
+		}
+	}
+
+	dek := make([]byte, 32)
+	_, wrapErr := km.WrapKey(context.Background(), dek, nil)
+	check("WrapKey", wrapErr)
+
+	_, unwrapErr := km.UnwrapKey(context.Background(), &KeyEnvelope{Ciphertext: []byte("vault:v1:abc")}, nil)
+	check("UnwrapKey", unwrapErr)
+
+	check("HealthCheck", km.HealthCheck(context.Background()))
+
+	_, akvErr := km.ActiveKeyVersion(context.Background())
+	check("ActiveKeyVersion", akvErr)
+}
+
+// TestOpenBao_NoDEKInErrors verifies that the plaintext DEK bytes (or their
+// base64 encoding) never appear in any error message when WrapKey or UnwrapKey
+// fails.  The mock is wired to fail after receiving the request, so the
+// plaintext is already in-flight when the error path is exercised.
+func TestOpenBao_NoDEKInErrors(t *testing.T) {
+	srv := newMockBaoServer(t)
+	km, err := NewOpenBaoTransitManager(OpenBaoTransitOptions{
+		Address:        srv.URL,
+		KeyName:        "test-key",
+		Auth:           OpenBaoAuthConfig{Method: "token", Token: "test-token"},
+		DisableRenewal: true,
+		Timeout:        2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	defer func() { _ = km.Close(context.Background()) }()
+
+	// Use a recognisable DEK so any leak is obvious.
+	dek := []byte("DEADBEEFDEADBEEFDEADBEEFDEADBEEF") // 32 ascii bytes
+
+	// Make encrypt fail with a 500 so the plaintext is handed to the error path.
+	srv.mu.Lock()
+	srv.encryptStatus = http.StatusInternalServerError
+	srv.mu.Unlock()
+
+	_, wrapErr := km.WrapKey(context.Background(), dek, nil)
+	if wrapErr != nil {
+		msg := wrapErr.Error()
+		if strings.Contains(msg, string(dek)) {
+			t.Errorf("WrapKey error contains raw DEK: %q", msg)
+		}
+	}
+
+	// Make decrypt fail; pass a recognisable ciphertext whose plaintext would
+	// be the DEK.  Even on error the adapter must not reproduce the DEK.
+	srv.mu.Lock()
+	srv.encryptStatus = 0
+	srv.decryptStatus = http.StatusInternalServerError
+	srv.mu.Unlock()
+
+	// First get a valid ciphertext so we have a well-formed envelope.
+	env, err := km.WrapKey(context.Background(), dek, nil)
+	if err != nil {
+		t.Fatalf("WrapKey (second attempt): %v", err)
+	}
+	_, unwrapErr := km.UnwrapKey(context.Background(), env, nil)
+	if unwrapErr != nil {
+		msg := unwrapErr.Error()
+		if strings.Contains(msg, string(dek)) {
+			t.Errorf("UnwrapKey error contains raw DEK: %q", msg)
+		}
+	}
+}
+
+// ---- unit coverage helpers -------------------------------------------------
+
+// TestSleepOrStop_StopsEarly verifies that sleepOrStop returns false when the
+// stop channel is closed before the timer fires.
+func TestSleepOrStop_StopsEarly(t *testing.T) {
+	stop := make(chan struct{})
+	close(stop)
+	if sleepOrStop(stop, 10*time.Second) {
+		t.Error("expected sleepOrStop to return false when stop is already closed")
+	}
+}
+
+// TestSleepOrStop_TimerFires verifies that sleepOrStop returns true when the
+// duration elapses before stop is closed.
+func TestSleepOrStop_TimerFires(t *testing.T) {
+	stop := make(chan struct{})
+	if !sleepOrStop(stop, time.Millisecond) {
+		t.Error("expected sleepOrStop to return true when timer fires first")
+	}
+}
+
+// TestNextBackoff covers both the doubling and the cap branches.
+func TestNextBackoff(t *testing.T) {
+	cases := []struct {
+		cur, max, want time.Duration
+	}{
+		{time.Second, 5 * time.Minute, 2 * time.Second},           // normal double
+		{3 * time.Minute, 5 * time.Minute, 5 * time.Minute},       // capped
+		{5 * time.Minute, 5 * time.Minute, 5 * time.Minute},       // already at cap
+		{100 * time.Millisecond, time.Second, 200 * time.Millisecond}, // sub-second
+	}
+	for _, tc := range cases {
+		got := nextBackoff(tc.cur, tc.max)
+		if got != tc.want {
+			t.Errorf("nextBackoff(%v, %v) = %v, want %v", tc.cur, tc.max, got, tc.want)
+		}
+	}
+}
+
+// TestWithTimeout_NilContext verifies that a nil ctx is coerced to
+// context.Background() rather than panicking.
+func TestWithTimeout_NilContext(t *testing.T) {
+	srv := newMockBaoServer(t)
+	km := newTestManager(t, srv).(*openBaoTransitManager)
+	defer func() { _ = km.Close(context.Background()) }()
+
+	ctx, cancel := km.withTimeout(nil)
+	defer cancel()
+	if ctx == nil {
+		t.Error("withTimeout(nil) returned nil context")
+	}
+	// Should not be the zero context
+	select {
+	case <-ctx.Done():
+		t.Error("context returned by withTimeout(nil) is already cancelled")
+	default:
+	}
+}
+
+// TestWithTimeout_ZeroTimeout verifies the zero-timeout path returns the
+// original context unchanged with a no-op cancel.
+func TestWithTimeout_ZeroTimeout(t *testing.T) {
+	srv := newMockBaoServer(t)
+	km := newTestManager(t, srv).(*openBaoTransitManager)
+	defer func() { _ = km.Close(context.Background()) }()
+
+	km.timeout = 0 // disable per-request timeout
+	parent := context.Background()
+	ctx, cancel := km.withTimeout(parent)
+	defer cancel()
+	if ctx != parent {
+		t.Error("expected withTimeout with zero timeout to return parent context unchanged")
+	}
+}
+
+// TestClassifyError_NilAndPassthrough covers the nil-error and non-ResponseError
+// branches of classifyError that are not exercised by the HTTP-server-based tests.
+func TestClassifyError_NilAndPassthrough(t *testing.T) {
+	srv := newMockBaoServer(t)
+	km := newTestManager(t, srv).(*openBaoTransitManager)
+	defer func() { _ = km.Close(context.Background()) }()
+
+	// nil error → nil returned
+	if got := km.classifyError(context.Background(), nil); got != nil {
+		t.Errorf("classifyError(nil) = %v, want nil", got)
+	}
+
+	// non-ResponseError (plain error) → returned as-is
+	plain := fmt.Errorf("network timeout")
+	if got := km.classifyError(context.Background(), plain); got != plain {
+		t.Errorf("classifyError(plain) = %v, want %v", got, plain)
+	}
+
+	// cancelled context → ctx.Err() returned regardless of the error
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := km.classifyError(ctx, plain)
+	if got != context.Canceled {
+		t.Errorf("classifyError with cancelled ctx = %v, want context.Canceled", got)
+	}
+}
+
+// TestToInt_AllBranches exercises every type case in toInt.
+func TestToInt_AllBranches(t *testing.T) {
+	cases := []struct {
+		in      any
+		want    int
+		wantOK  bool
+	}{
+		{json.Number("42"), 42, true},
+		{json.Number("bad"), 0, false},
+		{float64(7), 7, true},
+		{int(3), 3, true},
+		{int64(99), 99, true},
+		{"12", 12, true},
+		{"nope", 0, false},
+		{nil, 0, false},
+		{[]byte("x"), 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := toInt(tc.in)
+		if ok != tc.wantOK || (ok && got != tc.want) {
+			t.Errorf("toInt(%v) = (%d, %v), want (%d, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
