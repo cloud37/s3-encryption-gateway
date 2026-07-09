@@ -296,6 +296,14 @@ spec:
         - name: VALKEY_ENCRYPT_STATE
           value: "true"
         {{- end }}
+        {{- /* ListObjects plaintext-size cache env vars (V1.0-S3-3). Reuses the
+               Valkey connection from multipartState.valkey above. All leaves
+               default to empty so the gateway applies its internal defaults
+               (enabled=true when Valkey configured, fallback disabled). */ -}}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "LIST_SIZE_TRANSLATE_ENABLED" "value" .Values.config.listSizeTranslate.enabled.value "valueFrom" .Values.config.listSizeTranslate.enabled.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED" "value" .Values.config.listSizeTranslate.fallbackHeadEnabled.value "valueFrom" .Values.config.listSizeTranslate.fallbackHeadEnabled.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "LIST_SIZE_TRANSLATE_FALLBACK_HEAD_CONCURRENCY" "value" .Values.config.listSizeTranslate.fallbackHeadConcurrency.value "valueFrom" .Values.config.listSizeTranslate.fallbackHeadConcurrency.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "LIST_SIZE_TRANSLATE_FALLBACK_HEAD_TIMEOUT" "value" .Values.config.listSizeTranslate.fallbackHeadTimeout.value "valueFrom" .Values.config.listSizeTranslate.fallbackHeadTimeout.valueFrom) | nindent 8 }}
         {{- if .Values.metrics.port }}
         - name: METRICS_ADDR
           value: {{ printf ":%d" (int .Values.metrics.port) | quote }}

@@ -602,6 +602,33 @@ config:
         #     name: s3-encryption-gateway-secrets
         #     key: valkey-encryption-password
 
+  # ── ListObjects plaintext-size cache (V1.0-S3-3) ──────────────────────────
+  # Reuses the Valkey instance from multipartState.valkey above; no separate
+  # deployment or connection pool. When enabled (default true if Valkey is
+  # configured), ListObjects resolves ciphertext sizes to plaintext via a
+  # per-bucket Valkey hash (single HMGET per page) so sync clients (rclone,
+  # restic, s5cmd) observe ListObjects[i].Size == HeadObject(key).Content-Length.
+  # Fail-soft: if Valkey is unavailable, listings return ciphertext sizes (no 5xx).
+  # Leave all values blank to inherit gateway defaults.
+  listSizeTranslate:
+    enabled:
+      value: ""
+    # fallbackHeadEnabled: opt-in — issue bounded concurrent HeadObject calls
+    # for cache misses (e.g. legacy objects uploaded before this feature).
+    # WARNING: disabled by default because it amplifies per-API-call billing on
+    # Wasabi / Cloudflare R2 / Backblaze B2. Enable temporarily to warm the
+    # cache, then disable. See docs/RUNBOOK.md § ListObjects Plaintext Size Cache.
+    fallbackHeadEnabled:
+      value: ""
+    # fallbackHeadConcurrency: max concurrent HeadObject goroutines per listing
+    # page (1–100, default 10).
+    fallbackHeadConcurrency:
+      value: ""
+    # fallbackHeadTimeout: per-page deadline for the HEAD batch (100ms–60s,
+    # default 5s).
+    fallbackHeadTimeout:
+      value: ""
+
 # ── First-class bucket policies ────────────────────────────────────────────
 # Define bucket policies inline in values.yaml. The chart renders a single
 # ConfigMap (<release>-policies) from these entries, mounts it at
