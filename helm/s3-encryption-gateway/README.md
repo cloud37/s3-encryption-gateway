@@ -286,9 +286,21 @@ config:
 - **JSON/HTTP (Recommended)**: Full URL `http://host:9998/kmip/2_1`; no client certificates needed for HTTP
 - **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS)
 
-#### Encrypted Multipart Upload State (Valkey)
+#### Valkey (Multipart Upload State + ListObjects Size Cache)
 
-Encrypted multipart uploads (enabled per-bucket via policy files) require a Valkey instance for in-flight state storage. Use the built-in Valkey subchart for development or point at an external cluster for production.
+Valkey (or any Redis-protocol-compatible store) is the gateway's shared state
+backend. As of v1.0 a single Valkey instance and one connection pool serve two
+features:
+
+1. **Encrypted multipart-upload state** — in-flight `UploadState` blobs
+   (`mpu:<id>`, 7-day TTL). Required (fail-closed) when any policy sets
+   `encrypt_multipart_uploads: true`.
+2. **ListObjects plaintext-size cache** (V1.0-S3-3) — per-bucket hash
+   `plainsize:<bucket>` so `ListObjects[i].Size == HeadObject(key).Content-Length`
+   without per-object HEAD calls. **Strongly recommended**; fail-soft to
+   ciphertext sizes if Valkey is unavailable.
+
+Use the built-in Valkey subchart for development or point at an external cluster for production.
 
 **Valkey subchart (development / single-release deployments)**:
 
@@ -314,6 +326,22 @@ Encrypted multipart uploads (enabled per-bucket via policy files) require a Valk
 | `config.multipartState.valkey.encryptionPassword` | Dedicated password for Valkey at-rest encryption (V1.0-CRYPTO-2). Provide via `.value` (plaintext) or `.valueFrom` (secret ref). When set, `VALKEY_ENCRYPT_STATE` is automatically `"true"` | `""` |
 
 > **CRYPTO-2 note:** When `encryptionPassword` is set (either `.value` or `.valueFrom`), the gateway automatically enables at-rest encryption (`VALKEY_ENCRYPT_STATE=true`). If unset, the gateway falls back to the main `ENCRYPTION_PASSWORD` with a distinct HKDF salt.
+
+**ListObjects size cache (`config.listSizeTranslate.*`)** — V1.0-S3-3. Reuses the
+Valkey instance above; no separate deployment. All fields use the
+`configValue` shape (`.value` / `.valueFrom`).
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `config.listSizeTranslate.enabled` | Enable size-cache lookup on ListObjects. Automatically false when Valkey is not configured. | `true` (when Valkey configured) |
+| `config.listSizeTranslate.fallbackHeadEnabled` | Issue bounded concurrent `HeadObject` calls for cache misses. **Disabled by default** to avoid per-API-call billing amplification on Wasabi / R2 / B2. | `false` |
+| `config.listSizeTranslate.fallbackHeadConcurrency` | Max concurrent `HeadObject` goroutines per listing page (1–100). | `10` |
+| `config.listSizeTranslate.fallbackHeadTimeout` | Per-page deadline for the HEAD batch (100ms–60s). | `5s` |
+
+> **Operational note:** The size cache has no TTL — entries persist until evicted
+> by `DeleteObject`/`DeleteObjects`. Objects uploaded before enabling the feature
+> are not auto-warmed; temporarily set `fallbackHeadEnabled: true` to warm them
+> via normal listing traffic. See `docs/RUNBOOK.md`.
 
 #### Compression Configuration
 
@@ -758,11 +786,13 @@ config:
 - `keys` format: `"key1:version1,key2:version2"` (comma-separated for rotation)
 - Health checks automatically verify KMS connectivity via `/ready`
 
-### Encrypted Multipart Uploads with Valkey
+### Encrypted Multipart Uploads & ListObjects Size Cache with Valkey
 
 Define bucket policies inline in `values.yaml` using the top-level `policies`
 list. The chart renders a ConfigMap, mounts it, and sets `POLICIES`
-automatically — no manual `extraVolumes` / `extraVolumeMounts` required.
+automatically — no manual `extraVolumes` / `extraVolumeMounts` required. The same
+Valkey instance also powers the ListObjects plaintext-size cache (V1.0-S3-3),
+which is enabled by default whenever Valkey is configured.
 
 #### Development / staging (in-cluster Valkey subchart)
 
@@ -819,6 +849,23 @@ policies:
       - "my-important-bucket"
     encrypt_multipart_uploads: true
     require_encryption: true
+```
+
+The ListObjects size cache is enabled by default with the Valkey config above.
+Override the fallback HEAD batch (e.g. to warm legacy objects) under
+`config.listSizeTranslate`:
+
+```yaml
+config:
+  listSizeTranslate:
+    enabled:
+      value: "true"
+    fallbackHeadEnabled:
+      value: "true"        # opt-in; watch billing on per-API-call backends
+    fallbackHeadConcurrency:
+      value: "10"
+    fallbackHeadTimeout:
+      value: "5s"
 ```
 
 > **Note:** `policies` (top-level list) and `config.policies.value` /

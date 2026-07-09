@@ -202,6 +202,79 @@ Recommended alert rules:
 
 ---
 
+## ListObjects Plaintext Size Cache (V1.0-S3-3)
+
+### Overview
+
+`handleListObjects` resolves plaintext sizes for encrypted objects via a
+write-through Valkey hash (`plainsize:<bucket>`) instead of issuing one
+`HeadObject` per listed key. The index is populated by `PutObject`,
+`CompleteMultipartUpload`, and `CopyObject`, and evicted by `DeleteObject` /
+`DeleteObjects`. A whole listing page resolves with a single `HMGET`.
+
+This is what makes sync clients (rclone, restic, Duplicati, s5cmd) observe
+`ListObjects[i].Size == HeadObject(key).Content-Length`. Without it, every
+encrypted object looks "modified" on every sync run and is re-transferred.
+
+The size cache shares the **same Valkey instance and connection pool** as the
+multipart-upload state store — there is no second Valkey deployment. Unlike MPU
+state, the size cache is **fail-soft**: if Valkey is unavailable, listings
+return ciphertext sizes (the pre-v0.11.0 behaviour) with no `5xx`. Valkey is
+strongly recommended for ListObjects, not a hard dependency.
+
+### Metrics to watch
+
+| Metric | Meaning |
+|---|---|
+| `list_size_cache_hits_total{bucket}` | Keys resolved from the cache (good) |
+| `list_size_cache_misses_total{bucket}` | Keys absent from the cache |
+| `list_size_fallback_head_total{bucket,result}` | `HeadObject` calls from the opt-in fallback batch (`hit`/`timeout`/`error`) |
+
+Track the warm-up ratio:
+
+```promql
+sum(rate(list_size_cache_hits_total[5m]))
+  /
+(sum(rate(list_size_cache_hits_total[5m])) + sum(rate(list_size_cache_misses_total[5m])))
+```
+
+A ratio climbing toward 1.0 during normal traffic means the cache is warming.
+A rising `list_size_fallback_head_total` indicates billing exposure on
+per-API-call backends (Wasabi, R2, B2) — disable `fallback_head_enabled` if
+cost is a concern.
+
+### Warming legacy objects
+
+Objects uploaded before V1.0-S3-3 was deployed are **not** auto-indexed. They
+populate naturally as they are re-uploaded or copied. To warm them via normal
+listing traffic, temporarily enable the fallback HEAD batch:
+
+```yaml
+list_size_translate:
+  enabled: true
+  fallback_head_enabled: true      # opt-in; bounded by concurrency + timeout
+  fallback_head_concurrency: 10
+  fallback_head_timeout: 5s
+```
+
+Watch `list_size_fallback_head_total` and the warm-up ratio; once misses trend
+to near-zero, set `fallback_head_enabled: false` again to stop the HEAD cost.
+A proactive admin warm-up endpoint (`POST /admin/warm-size-cache`) is noted as
+a follow-up in the plan but is not yet implemented.
+
+### Behaviour during a Valkey outage
+
+- `ListObjects` keeps serving `200 OK` with **ciphertext sizes** for all keys.
+  No `5xx`, no panic. Expect a log line at `WARN` level:
+  `handleListObjects: size cache GetBatch failed; returning ciphertext sizes`.
+- Sync clients will flag every encrypted object as modified and re-transfer
+  until Valkey recovers and the cache re-warms. This is a correctness/
+  efficiency regression, not a data-loss event.
+- Multipart uploads are unaffected by the size cache; they remain fail-closed
+  on Valkey outage (see [valkey-down](#valkey-down)).
+- On recovery, the cache re-warms through normal write traffic (or the fallback
+  HEAD batch if enabled). There is no manual repair step.
+
 ---
 
 ## Alert Playbooks
@@ -341,7 +414,8 @@ but reject PUT/POST operations. This is the correct degraded-mode posture.
 - Restart the Valkey pod: `kubectl rollout restart deployment/valkey`.
 - If Valkey has persistent storage, check for disk or memory pressure.
 - In-flight multipart uploads will fail until Valkey is restored — the uploads are not lost on the S3 side, but the state store is temporarily unavailable.
-- After Valkey recovers, in-flight uploads with active TTLs will be readable again.
+- `ListObjects` **degrades, not fails**: listings return `200 OK` with ciphertext sizes, so sync clients (rclone, restic, s5cmd) will re-transfer encrypted objects until Valkey recovers and the size cache re-warms. No data loss; see [ListObjects Plaintext Size Cache](#listobjects-plaintext-size-cache-v10-s3-3).
+- After Valkey recovers, in-flight uploads with active TTLs will be readable again, and the size cache re-warms through normal write traffic.
 
 ---
 

@@ -138,7 +138,7 @@ See [ADR 0009](docs/adr/0009-encrypted-multipart-uploads.md) for the full design
 
 #### Enabling encrypted multipart uploads
 
-Encrypted multipart uploads require a **Valkey** (or Redis-protocol-compatible) instance for in-flight state storage. Enable per bucket via policy and configure the state store in the gateway config:
+Encrypted multipart uploads require a **Valkey** (or Redis-protocol-compatible) instance for in-flight state storage. The same Valkey instance and connection pool also back the [ListObjects plaintext size cache](#listobjects-plaintext-size-translation) — a single Valkey deployment serves both features. Enable per bucket via policy and configure the state store in the gateway config:
 
 ```yaml
 # config.yaml
@@ -217,6 +217,32 @@ valkey:
 When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to the subchart's `<release>-valkey:6379` service. You can also point at an external Valkey cluster via the `config.multipartState.valkey` values stanza — the two paths are mutually exclusive.
 
 > **Cost note for Wasabi / Glacier / S3 IA users:** The Valkey state store exists precisely to avoid writing state objects to S3 — which on backends with minimum-storage-duration policies (Wasabi: 90 days on Pay-Go; Glacier / Standard-IA / One Zone-IA: 30–180 days) would incur significant phantom-storage charges. Your *data* objects still land on whichever backend you choose; only the ephemeral per-upload state lives in Valkey.
+
+### ListObjects Plaintext Size Translation
+
+S3 sync clients (rclone, restic, Duplicati, s5cmd) rely on the invariant `ListObjects[i].Size == HeadObject(key).Content-Length`. Without translation, the  gateway returns ciphertext sizes in listings — every encrypted object looks "modified" on every run, causing infinite re-transfers and error spam.
+
+As of v0.11.0 (V1.0-S3-3), `handleListObjects` resolves plaintext sizes via a **write-through Valkey size cache** — a per-bucket hash (`plainsize:<bucket>`) populated on `PutObject`, `CompleteMultipartUpload`, and `CopyObject`, and evicted on `DeleteObject` / `DeleteObjects`. A whole listing page is resolved with a single `HMGET` round-trip — **zero per-object `HeadObject` calls** when the cache is warm.
+
+- **Shared Valkey instance**: reuses the same `redis.UniversalClient` and connection pool as the multipart-upload state store — no second Valkey deployment or connection pool. See [Encrypted Multipart Uploads](#encrypted-multipart-uploads)for Valkey configuration.
+- **Strongly recommended, not a hard dependency**: if Valkey is unavailable, the gateway degrades gracefully to ciphertext sizes (the pre-v1.0 behaviour) — no`5xx`, no crash. ListObjects keeps working; only size accuracy for sync clients is lost until Valkey recovers. (Multipart uploads, by contrast, are **fail-closed** — see the [fail-closed table](#fail-closed-guarantees))
+- **Opt-in fallback HEAD batch**: for cache misses (e.g. objects uploaded before this feature), `list_size_translate.fallback_head_enabled: true` issues bounded concurrent `HeadObject` calls to populate the cache. **Disabled by default** to avoid per-API-call billing amplification on Wasabi / R2 / B2.
+- **No TTL on size entries**: index entries are permanent until evicted by delete/copy. Legacy objects are not auto-warmed; enable the fallback HEAD batch temporarily or wait for normal write traffic to populate the cache.
+
+```yaml
+# config.yaml
+list_size_translate:
+  enabled: true                   # default true when Valkey is configured
+  fallback_head_enabled: false    # opt-in HEAD batch for cache misses (billing!)
+  fallback_head_concurrency: 10   # 1–100 concurrent HEADs per listing page
+  fallback_head_timeout: 5s       # 100ms–60s per-page deadline
+```
+
+All fields are also available as environment variables (`LIST_SIZE_TRANSLATE_ENABLED`, `LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED`, etc.). If `enabled: true` but no Valkey is configured, the gateway logs a warning and silently disables the lookup.
+
+Three Prometheus metrics track cache health (see [Monitoring](#monitoring--observability)): `list_size_cache_hits_total`, `list_size_cache_misses_total`, and `list_size_fallback_head_total` (label `result`: `hit`/`timeout`/`error`).
+
+See [`docs/plans/V1.0-S3-3-plan.md`](docs/plans/V1.0-S3-3-plan.md) for the full design, and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for operational guidance.
 
 ### Envelope Encryption (Recommended)
 
@@ -438,6 +464,17 @@ Seven metrics track the multipart-encryption hot path:
 | `gateway_mpu_valkey_up` | gauge | — | Ready-check HealthCheck |
 | `gateway_mpu_valkey_insecure` | gauge | — | Startup, if TLS is disabled |
 | `gateway_mpu_manifest_bytes` | histogram | — | Every `CompleteMultipartUpload` |
+
+Three metrics track the ListObjects plaintext-size cache (V1.0-S3-3):
+
+| Metric | Type | Labels | Emitted on |
+|---|---|---|---|
+| `list_size_cache_hits_total` | counter | `bucket` | ListObjects key resolved from the Valkey size cache |
+| `list_size_cache_misses_total` | counter | `bucket` | ListObjects key absent from the cache |
+| `list_size_fallback_head_total` | counter | `bucket`, `result` (`hit`/`timeout`/`error`) | Each `HeadObject` issued by the opt-in fallback HEAD batch |
+
+Track `hits / (hits + misses)` to watch the cache warm up; a rising
+`list_size_fallback_head_total` signals billing exposure on per-API-call backends.
 
 ### TLS
 
@@ -702,6 +739,15 @@ encryption:
 #     # allow_legacy_plaintext_state: false  # true only during one-time
 #     #                                      # migration from plaintext (V1.0-SEC-30)
 
+# list_size_translate: ListObjects plaintext-size cache (V1.0-S3-3). Reuses the
+#   Valkey instance above; strongly recommended so rclone/restic/s5cmd see correct
+#   sizes. Degrades to ciphertext sizes if Valkey is absent — no hard dependency.
+# list_size_translate:
+#   enabled: true                   # default true when Valkey is configured
+#   fallback_head_enabled: false    # opt-in HEAD batch for cache misses (billing!)
+#   fallback_head_concurrency: 10
+#   fallback_head_timeout: 5s
+
 # NOTE: built-in compression was removed in v1.0 (V1.0-MAINT-2).
 # Use external composition: client → s4 → s3-encryption-gateway → storage
 
@@ -841,6 +887,7 @@ flowchart LR
     CMP -.-> |pre/post| E
   end
   G --> |S3 API| B[("S3 Backend<br/>AWS, MinIO, Wasabi, Hetzner")]
+  G -.-> |MPU state + ListObjects size cache| V[("Valkey<br/>(Redis-protocol)")]
 ```
 
 ### Data Flow (PUT/GET)

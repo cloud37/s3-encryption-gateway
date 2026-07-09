@@ -107,7 +107,16 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   - `GET /{bucket}?list-type=2` (ListObjectsV2)
   - `GET /{bucket}` (ListObjects)
   - `GET /{bucket}?delimiter=...` (ListObjects with delimiter)
-- **Implementation**: Pass-through to backend, no modification needed
+- **Implementation**: Object bodies are passed through unmodified, but
+  per-object **sizes are translated** as of V1.0-S3-3 (see below).
+- **Size translation (V1.0-S3-3)**: `handleListObjects` resolves plaintext
+  sizes via a Valkey-backed write-through size cache (`plainsize:<bucket>`
+  hash, single `HMGET` per page) populated by `PutObject`,
+  `CompleteMultipartUpload`, and `CopyObject`. Cache hits return plaintext
+  sizes with zero per-object `HeadObject` calls; an opt-in bounded HEAD batch
+  (`list_size_translate.fallback_head_enabled`) warms misses. **Fail-soft**:
+  if Valkey is unavailable, ciphertext sizes are returned (no `5xx`). ETags
+  remain ciphertext ETags. See `docs/plans/V1.0-S3-3-plan.md`.
 
 #### Head Bucket
 - **Endpoint**: `HEAD /{bucket}`
@@ -202,7 +211,8 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
 |---|---|
 | `SelectObjectContent` | Requires server-side SQL evaluation on encrypted data — not feasible in a proxy model |
 | `WriteGetObjectResponse` | S3 Object Lambda integration — proxy model incompatible |
-| `ListObjects` / `ListObjectsV2` sizes & ETags | Returns **backend (ciphertext) sizes and ETags**. Accurate plaintext size and ETag are available via `HeadObject` and `GetObject`, which decrypt metadata on a per-object basis. Per-object HEAD translation in listings was removed because it caused an N-fold latency explosion (one HEAD request per listed object), making large bucket listings unusable. |
+| `ListObjects` / `ListObjectsV2` ETags | ETags in listings remain **backend (ciphertext) ETags**. Accurate plaintext ETag is available via `HeadObject` and `GetObject`, which decrypt metadata on a per-object basis. ETag correction in listings is tracked as a separate follow-up. |
+| `ListObjects` / `ListObjectsV2` sizes | **Fixed in V1.0-S3-3.** Sizes are translated to plaintext via a Valkey-backed write-through size cache (`plainsize:<bucket>`), populated on `PutObject`/`CompleteMultipartUpload`/`CopyObject` and evicted on delete. Cache misses return ciphertext sizes (fail-soft); opt-in `list_size_translate.fallback_head_enabled` warms misses with a bounded HEAD batch. Objects uploaded before the feature was deployed are not auto-warmed. The earlier per-object HEAD translation was removed because it caused an N-fold latency explosion; the cache restores correctness without that cost. |
 
 ### Helper Infrastructure (V1.0-S3-2)
 

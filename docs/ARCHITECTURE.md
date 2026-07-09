@@ -22,12 +22,14 @@ After analyzing multiple languages, Go was selected for this project due to:
 │   (awscli, SDK) │    │  Gateway         │    │  (AWS, Wasabi,  │
 │                 │    │                  │    │   Hetzner, etc.) │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │
-                              ▼
-                       ┌──────────────────┐
-                       │   Encryption     │
-                       │   Key Store      │
-                       └──────────────────┘
+                                │
+               ┌────────────────┼──────────────────┐
+               ▼                ▼                  ▼
+        ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐
+        │  Key Store   │ │   Valkey     │ │  Config / KMS    │
+        │  (KEK)       │ │ (MPU state + │ │  (Cosmian, ...)  │
+        │              │ │  size cache) │ │                  │
+        └──────────────┘ └──────────────┘ └──────────────────┘
 ```
 
 ## Core Components
@@ -78,6 +80,25 @@ After analyzing multiple languages, Go was selected for this project due to:
   - Listen port and bind address
   - TLS certificates (optional)
 
+### 6. State & Size Cache (Valkey)
+- **Purpose**: Holds in-flight multipart-upload state and the ListObjects
+  plaintext-size index (V1.0-S3-3). A single Valkey (or any
+  Redis-protocol-compatible) instance and one shared connection pool serve both.
+- **Multipart-upload state**: per-upload `UploadState` blobs under `mpu:<id>`
+  with a 7-day TTL; encrypted at rest (V1.0-CRYPTO-2). **Fail-closed**: if any
+  policy enables `encrypt_multipart_uploads` and Valkey is unreachable at
+  startup, the process exits.
+- **ListObjects size cache**: per-bucket hash `plainsize:<bucket>` mapping
+  object key → plaintext size, written through on `PutObject`,
+  `CompleteMultipartUpload`, and `CopyObject`, evicted on `DeleteObject` /
+  `DeleteObjects`. `ListObjects` resolves an entire page with one `HMGET`.
+  **Fail-soft**: if Valkey is unavailable, listings return ciphertext sizes
+  (pre-v1.0 behaviour) — no `5xx`, no crash. Valkey is strongly recommended
+  for correct sync-client behaviour, not a hard dependency for ListObjects.
+- **Opt-in fallback**: `list_size_translate.fallback_head_enabled` issues a
+  bounded concurrent `HeadObject` batch to warm the cache for misses (disabled
+  by default to avoid per-API-call billing amplification).
+
 ## Data Flow
 
 ### Authentication Flow
@@ -118,10 +139,24 @@ The gateway maintains a unified credential store (`auth.credentials`). Each entr
 ```
 1. Client → Gateway: GET /bucket/?list-type=2 (with AWS Signature V4/V2)
 2. Gateway → AuthMiddleware: Validate signature against auth.credentials
-3. Gateway → BackendClient: Forward request (no encryption needed)
-4. BackendClient → Gateway: Response
-5. Gateway → Client: Response (unchanged)
+3. Gateway → BackendClient: Forward request (object bodies are not encrypted)
+4. BackendClient → Gateway: Response (ciphertext sizes + ETags)
+5. Gateway → SizeCache (Valkey): HMGET plainsize:<bucket> for the listed keys
+6. Gateway → Gateway: substitute plaintext sizes for cache hits; optional bounded
+   HEAD fallback for misses (list_size_translate, V1.0-S3-3)
+7. Gateway → Client: Response (plaintext sizes where known; ciphertext sizes
+   for unresolved keys — fail-soft, no 5xx)
 ```
+
+> **Note (V1.0-S3-3):** `ListObjects` object data is never encrypted/decrypted,
+> but the response is no longer passed through unchanged. The gateway translates
+> per-object sizes via a Valkey-backed write-through size cache so that sync
+> clients (rclone, restic, Duplicati, s5cmd) observe
+> `ListObjects[i].Size == HeadObject(key).Content-Length`. ETags remain
+> ciphertext ETags (separate, deferred issue). If Valkey is unavailable the
+> gateway degrades to ciphertext sizes — Valkey is **strongly recommended** for
+> ListObjects, not a hard dependency (multipart uploads, by contrast, are
+> fail-closed and require Valkey).
 
 ## Key Design Decisions
 

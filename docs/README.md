@@ -18,6 +18,8 @@ This directory contains comprehensive documentation for the S3 Encryption Gatewa
 
 - **[ADR 0001: Range Optimization Design](adr/0001-range-optimization-design.md)** - Design decisions for range-optimized decryption
 - **[ADR 0002: Multipart Upload Security Validation](adr/0002-multipart-upload-interoperability.md)** - XML validation and interoperability decisions for multipart uploads
+- **[ADR 0009: Encrypted Multipart Uploads](adr/0009-encrypted-multipart-uploads.md)** - Per-upload DEKs, deterministic IV derivation, and the Valkey-backed upload state store
+- **[ADR 0014: State Key Derivation Hardening](adr/0014-state-key-derivation-hardening.md)** - Valkey at-rest state encryption hardening (V1.0-CRYPTO-2 / V1.0-SEC-30)
 
 ## Diagrams
 
@@ -27,6 +29,7 @@ This directory contains comprehensive documentation for the S3 Encryption Gatewa
 ## Security & Operations
 
 - **[SECURITY_AUDIT.md](SECURITY_AUDIT.md)** - STRIDE threat model, security hardening guide, and audit recommendations
+- **[RUNBOOK.md](RUNBOOK.md)** - Operations runbook, including Valkey state at-rest encryption and the **ListObjects plaintext-size cache** (V1.0-S3-3)
 
 ## Planning
 
