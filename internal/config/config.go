@@ -1735,6 +1735,23 @@ func loadFromEnv(config *Config) {
 		b := v == "true" || v == "1"
 		config.MultipartState.Valkey.EncryptState = &b
 	}
+	// V1.0-S3-3 — ListObjects plaintext size translation via Valkey size cache.
+	if v := os.Getenv("LIST_SIZE_TRANSLATE_ENABLED"); v != "" {
+		config.ListSizeTranslate.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED"); v != "" {
+		config.ListSizeTranslate.FallbackHeadEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("LIST_SIZE_TRANSLATE_FALLBACK_HEAD_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			config.ListSizeTranslate.FallbackHeadConcurrency = n
+		}
+	}
+	if v := os.Getenv("LIST_SIZE_TRANSLATE_FALLBACK_HEAD_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.ListSizeTranslate.FallbackHeadTimeout = d
+		}
+	}
 }
 
 func parseCosmianKeyRefs(value string) []CosmianKeyReference {

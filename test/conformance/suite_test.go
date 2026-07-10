@@ -256,6 +256,7 @@ func TestConformance(t *testing.T) {
 			{"Compat_S5cmd", provider.CapCLIS5cmd, testCompatSmoke_S5cmd},
 			{"Compat_Rclone", provider.CapCLIRclone, testCompatSmoke_Rclone},
 				{"Compat_Rclone_SyncCheck_SizeCache", provider.CapCLIRclone | provider.CapSizeTranslation, testRcloneSyncCheck_SizeCache},
+				{"Compat_Rclone_SyncCheck_FallbackHead", provider.CapCLIRclone | provider.CapSizeTranslation, testRcloneSyncCheck_FallbackHead},
 			{"Compat_MinIOPy", provider.CapSDKMinIOPy, testCompatSmoke_MinIOPy},
 
 			// V1.0-S3-2 S3 API feature parity

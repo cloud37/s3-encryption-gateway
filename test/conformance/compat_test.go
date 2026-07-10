@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
@@ -290,20 +293,12 @@ func testCompatSmoke_MinIOPy(t *testing.T, inst provider.Instance) {
 	_ = gw
 }
 
-// testRcloneSyncCheck_SizeCache is a full end-to-end regression test for
-// issues #204 and #207.
+// testRcloneSyncCheck_SizeCache verifies the warm-cache path for issues #204
+// and #207: objects uploaded through the gateway populate the Valkey size cache
+// automatically, so rclone check --size-only sees correct plaintext sizes.
 //
-// It reproduces the exact workflow reported by the issue author:
-//  1. Start a gateway with a real Valkey size cache (CapSizeTranslation).
-//  2. Run rclone sync from a local directory containing files of varying sizes
-//     to the gateway. Each PUT warms the Valkey size cache automatically.
-//  3. Run rclone check --size-only --one-way, which compares each local file's
-//     size against the size returned by ListObjects. With the fix this exits 0;
-//     without the fix it exits 1 with "sizes differ" for every encrypted object.
-//
-// The test gates on CapCLIRclone|CapSizeTranslation because it requires:
-//   - Docker (for the rclone container and the Valkey container).
-//   - A gateway with ListSizeTranslate wired (i.e. Valkey configured).
+// This covers the steady-state case: deploy gateway with Valkey, upload via
+// gateway, rclone check passes immediately.
 func testRcloneSyncCheck_SizeCache(t *testing.T, inst provider.Instance) {
 	t.Helper()
 	ctx := context.Background()
@@ -330,5 +325,92 @@ func testRcloneSyncCheck_SizeCache(t *testing.T, inst provider.Instance) {
 
 	if err := runToolContainer(ctx, t, &rcloneSyncCheckRunner{}, env); err != nil {
 		t.Fatalf("rclone-sync-check: %v", err)
+	}
+}
+
+// testRcloneSyncCheck_FallbackHead is the regression test for the specific
+// failure reported in issue #207 comment: the user upgraded to 0.11.1, set
+// LIST_SIZE_TRANSLATE_ENABLED=true and LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED=true,
+// but rclone check still reported "sizes differ".
+//
+// Root cause: loadFromEnv() never read the LIST_SIZE_TRANSLATE_* env vars —
+// the env: struct tags were declared but not wired. The env vars were silently
+// ignored, the fallback HEAD path never fired, and pre-existing objects
+// (uploaded before 0.11.1 with a cold cache) always returned ciphertext sizes.
+//
+// This test reproduces that scenario:
+//  1. Upload 15 objects directly to the backend (bypassing the gateway) so the
+//     Valkey cache starts cold — simulating objects that existed before upgrade.
+//  2. Start the gateway with Valkey + fallback HEAD enabled.
+//  3. rclone sync downloads the objects and then rclone check --size-only
+//     compares local sizes against the gateway listing. Without the fix the
+//     env var is ignored, the fallback never fires, and check exits 1.
+//     With the fix the env var is respected, the fallback HEAD resolves
+//     plaintext sizes, and check exits 0.
+func testRcloneSyncCheck_FallbackHead(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+
+	// Start Valkey — cache starts empty (cold).
+	vk := provider.StartValkey(ctx, t)
+
+	// Start the gateway with Valkey + fallback HEAD enabled.
+	// WithConfigMutator simulates the operator setting the env vars
+	// LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED=true after upgrade.
+	gw := harness.StartGateway(t, inst,
+		harness.WithValkeyAddr(vk.Addr),
+		harness.WithConfigMutator(func(cfg *config.Config) {
+			cfg.ListSizeTranslate.FallbackHeadEnabled = true
+			cfg.ListSizeTranslate.FallbackHeadConcurrency = 10
+			cfg.ListSizeTranslate.FallbackHeadTimeout = 30 * time.Second
+		}),
+	)
+
+	// Write the 15 files directly to the backend, bypassing the gateway.
+	// This means the Valkey cache has no entries for them — exactly the
+	// situation for objects that existed before the 0.11.1 upgrade.
+	prefix := compatUniqueKey(t)
+	directClient := newS3Client(t, inst)
+	eng, err := crypto.NewEngine([]byte("test-encryption-password-123456"))
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+
+	type fileSpec struct {
+		name string
+		size int
+	}
+	files := []fileSpec{
+		{"file-00.bin", 100}, {"file-01.bin", 1100}, {"file-02.bin", 2100},
+		{"file-03.bin", 3100}, {"file-04.bin", 4100}, {"file-05.bin", 5100},
+		{"file-06.bin", 6100}, {"file-07.bin", 7100}, {"file-08.bin", 8100},
+		{"file-09.bin", 9100}, {"file-10.bin", 65536}, {"file-11.bin", 65537},
+		{"file-12.bin", 131072}, {"file-13.bin", 131073}, {"file-14.txt", 18},
+	}
+
+	for _, f := range files {
+		plaintext := make([]byte, f.size)
+		for i := range plaintext {
+			plaintext[i] = byte('a' + (i % 26))
+		}
+		key := prefix + "/" + f.name
+		putEncryptedObject(t, directClient, eng, inst.Bucket, key, plaintext, nil)
+	}
+
+	// Run rclone sync (download from gateway) then rclone check --size-only.
+	// The sync downloads the objects; check compares the local sizes against
+	// what ListObjects returns. The fallback HEAD must fire for each cache-miss
+	// to resolve the plaintext size — otherwise check sees ciphertext sizes.
+	env := sdkTestEnv{
+		Endpoint:  gw.URL,
+		Region:    inst.Region,
+		AccessKey: inst.AccessKey,
+		SecretKey: inst.SecretKey,
+		Bucket:    inst.Bucket,
+		Key:       prefix,
+	}
+
+	if err := runToolContainer(ctx, t, &rcloneSyncCheckFallbackRunner{}, env); err != nil {
+		t.Fatalf("rclone-sync-check-fallback: %v", err)
 	}
 }

@@ -294,6 +294,84 @@ func (r *rcloneSyncCheckRunner) AssertOutput(code int, out, _ string) error {
 	return nil
 }
 
+// ─── rcloneSyncCheckFallbackRunner ───────────────────────────────────────────
+//
+// rcloneSyncCheckFallbackRunner is the companion to rcloneSyncCheckRunner for
+// the fallback-HEAD scenario (issue #207 comment). Objects were written
+// directly to the backend (bypassing the gateway), so the Valkey cache is cold.
+// The runner must:
+//  1. Download all objects from the gateway via rclone sync (gateway→local).
+//     This tells rclone what the local "source" sizes are.
+//  2. Run rclone check --size-only, comparing local sizes against what
+//     ListObjects returns. With fallback HEAD enabled the gateway issues
+//     HeadObject for each cache-miss and returns plaintext sizes; without it
+//     (or when env vars are silently ignored) check reports "sizes differ".
+
+type rcloneSyncCheckFallbackRunner struct{}
+
+func (r *rcloneSyncCheckFallbackRunner) Name() string  { return "rclone-sync-check-fallback" }
+func (r *rcloneSyncCheckFallbackRunner) Image() string { return "rclone/rclone:1.68" }
+
+func (r *rcloneSyncCheckFallbackRunner) Script(env sdkTestEnv) string {
+	return fmt.Sprintf(`set -e
+r() { rclone \
+  --s3-provider=Minio \
+  --s3-endpoint="$GATEWAY_ENDPOINT" \
+  --s3-env-auth=false \
+  --s3-access-key-id="$AWS_ACCESS_KEY_ID" \
+  --s3-secret-access-key="$AWS_SECRET_ACCESS_KEY" \
+  --s3-region=us-east-1 \
+  --s3-no-check-bucket=true \
+  "$@"; }
+
+PREFIX="%[1]s"
+BUCKET="%[2]s"
+REMOTE=":s3:${BUCKET}/${PREFIX}"
+
+# ── Download objects from gateway into a local reference directory ───────────
+# These objects were written directly to the backend before the gateway
+# was deployed, so the Valkey cache is cold. We download them here so
+# rclone knows what plaintext sizes to expect during check.
+mkdir -p /tmp/rclone-ref
+echo "=== rclone sync (download) gateway → local ==="
+r sync "${REMOTE}/" /tmp/rclone-ref/ -v
+
+echo "=== local reference files after download ==="
+ls -la /tmp/rclone-ref/
+
+# ── List remote to show what sizes the gateway is returning ──────────────────
+echo "=== rclone lsl (listing sizes from gateway) ==="
+r lsl "${REMOTE}/"
+
+# ── rclone check --size-only ─────────────────────────────────────────────────
+# Compares the local (downloaded) sizes against what ListObjects returns.
+# With fallback HEAD enabled and env vars correctly wired, the gateway
+# issues HeadObject for each cold-cache key and returns the plaintext size.
+# Without the env-var fix, the gateway silently ignores the setting and
+# returns ciphertext sizes — causing check to report "sizes differ".
+echo "=== rclone check --size-only (fallback-HEAD scenario) ==="
+r check /tmp/rclone-ref/ "${REMOTE}/" --size-only --one-way
+
+echo "rclone-sync-check-fallback:OK"
+`,
+		env.Key,
+		env.Bucket,
+	)
+}
+
+func (r *rcloneSyncCheckFallbackRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("rclone-sync-check-fallback exited %d — "+
+			"rclone check reported size mismatches for pre-existing objects. "+
+			"This indicates the LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED env var "+
+			"is not being read by loadFromEnv (the bug from issue #207)", code)
+	}
+	if !strings.Contains(out, "rclone-sync-check-fallback:OK") {
+		return fmt.Errorf("rclone-sync-check-fallback: expected OK marker in stdout")
+	}
+	return nil
+}
+
 // ─── minio-py runner (Python container) ─────────────────────────────────────
 
 type minioPyRunner struct{}

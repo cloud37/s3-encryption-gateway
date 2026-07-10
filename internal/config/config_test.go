@@ -2579,6 +2579,34 @@ func TestMetadataEncryptionKey_InvalidBase64(t *testing.T) {
 	}
 }
 
+// TestLoadFromEnv_ListSizeTranslate verifies that all four
+// LIST_SIZE_TRANSLATE_* environment variables are correctly wired into
+// loadFromEnv. This is a regression test for the bug where the env tags were
+// declared on the struct but the loadFromEnv function never read them, causing
+// the feature to be silently non-functional when configured via env vars.
+func TestLoadFromEnv_ListSizeTranslate(t *testing.T) {
+	t.Setenv("LIST_SIZE_TRANSLATE_ENABLED", "false")
+	t.Setenv("LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED", "true")
+	t.Setenv("LIST_SIZE_TRANSLATE_FALLBACK_HEAD_CONCURRENCY", "25")
+	t.Setenv("LIST_SIZE_TRANSLATE_FALLBACK_HEAD_TIMEOUT", "15s")
+
+	cfg := &Config{}
+	loadFromEnv(cfg)
+
+	if cfg.ListSizeTranslate.Enabled != false {
+		t.Errorf("Enabled: got true, want false")
+	}
+	if cfg.ListSizeTranslate.FallbackHeadEnabled != true {
+		t.Errorf("FallbackHeadEnabled: got false, want true")
+	}
+	if cfg.ListSizeTranslate.FallbackHeadConcurrency != 25 {
+		t.Errorf("FallbackHeadConcurrency: got %d, want 25", cfg.ListSizeTranslate.FallbackHeadConcurrency)
+	}
+	if cfg.ListSizeTranslate.FallbackHeadTimeout != 15*time.Second {
+		t.Errorf("FallbackHeadTimeout: got %v, want 15s", cfg.ListSizeTranslate.FallbackHeadTimeout)
+	}
+}
+
 // TestMetadataEncryptionKey_BothSet verifies that setting both
 // MetadataEncryptionKeyFile and MetadataEncryptionKey is rejected.
 func TestMetadataEncryptionKey_BothSet(t *testing.T) {
