@@ -173,18 +173,18 @@ func (r *rcloneRunner) AssertOutput(code int, out, _ string) error {
 // encrypted gateway whose ListObjects returns ciphertext sizes.
 //
 // The test:
-//  1. Creates five local files of varying sizes (small, medium, exact-chunk
-//     boundary, multi-chunk, and a binary blob).
+//  1. Creates 15 local files of varying sizes (> 10 so the listing is handled
+//     by the general Valkey cache-lookup path, not the Docker Distribution
+//     maxKeys<=10 fast path that issues per-object HEAD calls regardless).
 //  2. rclone sync → gateway (PUT via gateway, warms Valkey size cache).
 //  3. rclone check --size-only --one-way: compares local sizes against the
 //     gateway listing. With a warm cache the gateway returns plaintext sizes;
 //     without the fix it returns ciphertext sizes and rclone reports
 //     "sizes differ" for every object.
-//  4. rclone lsl (listing with sizes visible): logs sizes for diagnostics.
+//  4. rclone lsl (listing with sizes visible): logged for diagnostics.
 //
 // The runner requires a gateway started with WithValkeyAddr so the size cache
-// is active (CapSizeTranslation). The test function passes VALKEY_ADDR via the
-// sdkTestEnv.Key field convention — see testRcloneSyncCheck_SizeCache.
+// is active (CapSizeTranslation).
 //
 // ⚠  The check sub-command exits non-zero if any size mismatches are found.
 // That is exactly what we assert: if the fix is working, exit 0.
@@ -196,12 +196,21 @@ func (r *rcloneSyncCheckRunner) Image() string { return "rclone/rclone:1.68" }
 
 func (r *rcloneSyncCheckRunner) Script(env sdkTestEnv) string {
 	// env.Key is used as the remote prefix so parallel tests don't collide.
-	// The script creates files of different sizes chosen to exercise:
-	//   - small:           17 bytes  (1 chunk, minimal ciphertext overhead)
-	//   - medium:       8 192 bytes  (fits in one 64 KiB chunk)
-	//   - at-boundary: 65 536 bytes  (exactly one full 64 KiB chunk)
-	//   - multi-chunk: 131 073 bytes (two full chunks + 1 byte → 3 AEAD tags)
-	//   - binary:       4 096 bytes  (non-printable content, not text)
+	//
+	// 15 files are created — deliberately more than the maxKeys=10 threshold
+	// used by the Docker Distribution fast-path in handleListObjects. Below
+	// that threshold the gateway issues per-object HEAD calls regardless of
+	// the cache, so the test would pass even without the Valkey fix. Above it,
+	// the gateway must resolve sizes from the cache (or return ciphertext sizes
+	// if the cache is misconfigured).
+	//
+	// File sizes are chosen to cover distinct AEAD-overhead cases:
+	//   files 00-09:  varying sub-chunk sizes (100 B … 9 900 B, step 1 000)
+	//   file     10:  exactly 65 536 B (one full 64 KiB chunk boundary)
+	//   file     11:  65 537 B (one full chunk + 1 byte → 2 AEAD tags)
+	//   file     12: 131 072 B (two full 64 KiB chunks)
+	//   file     13: 131 073 B (two full chunks + 1 byte → 3 AEAD tags)
+	//   file     14:  17 B     (minimal, non-zero plaintext)
 	//
 	// If rclone check reports "sizes differ" for any file, it exits 1 and
 	// AssertOutput fails the test.
@@ -220,25 +229,34 @@ PREFIX="%[1]s"
 BUCKET="%[2]s"
 REMOTE=":s3:${BUCKET}/${PREFIX}"
 
-# ── Create local test files of varying sizes ────────────────────────────────
+# ── Create 15 local test files of varying sizes ─────────────────────────────
+# 15 files > 10 (maxKeys threshold) so the general Valkey cache-lookup path
+# is exercised, not the Docker Distribution per-object HEAD fast path.
 mkdir -p /tmp/rclone-src
 
-# small: 17 bytes
-printf 'small-file-payload' > /tmp/rclone-src/small.txt
+# files 00-09: sub-chunk sizes 100 B … 9 900 B (step 1 000 B)
+i=0
+for size in 100 1100 2100 3100 4100 5100 6100 7100 8100 9100; do
+  dd if=/dev/urandom bs="$size" count=1 of="$(printf '/tmp/rclone-src/file-%02d.bin' $i)" 2>/dev/null
+  i=$((i+1))
+done
 
-# medium: 8192 bytes (dd bs=1 count= is portable across alpine's busybox)
-dd if=/dev/urandom bs=8192 count=1 of=/tmp/rclone-src/medium.bin 2>/dev/null
+# file 10: exactly 65 536 B — one full 64 KiB AES-GCM chunk boundary
+dd if=/dev/urandom bs=65536  count=1 of=/tmp/rclone-src/file-10.bin 2>/dev/null
 
-# at-boundary: exactly 65536 bytes (one full 64 KiB AES-GCM chunk)
-dd if=/dev/urandom bs=65536 count=1 of=/tmp/rclone-src/boundary.bin 2>/dev/null
+# file 11: 65 537 B — one full chunk + 1 byte (two AEAD tags)
+dd if=/dev/urandom bs=65537  count=1 of=/tmp/rclone-src/file-11.bin 2>/dev/null
 
-# multi-chunk: 131073 bytes (two full chunks + 1 byte)
-dd if=/dev/urandom bs=131073 count=1 of=/tmp/rclone-src/multi.bin 2>/dev/null
+# file 12: 131 072 B — two full 64 KiB chunks
+dd if=/dev/urandom bs=131072 count=1 of=/tmp/rclone-src/file-12.bin 2>/dev/null
 
-# binary: 4096 bytes of non-ASCII content
-dd if=/dev/urandom bs=4096 count=1 of=/tmp/rclone-src/binary.bin 2>/dev/null
+# file 13: 131 073 B — two full chunks + 1 byte (three AEAD tags)
+dd if=/dev/urandom bs=131073 count=1 of=/tmp/rclone-src/file-13.bin 2>/dev/null
 
-echo "=== local files ==="
+# file 14: 17 B — minimal non-zero plaintext
+printf 'small-file-payload' > /tmp/rclone-src/file-14.txt
+
+echo "=== local files ($(ls /tmp/rclone-src | wc -l) total) ==="
 ls -la /tmp/rclone-src/
 
 # ── Sync local → gateway ─────────────────────────────────────────────────────
@@ -246,18 +264,17 @@ ls -la /tmp/rclone-src/
 echo "=== rclone sync → gateway ==="
 r sync /tmp/rclone-src/ "${REMOTE}/" -v
 
-# ── List remote to show sizes (diagnostic) ───────────────────────────────────
+# ── List remote with sizes for diagnostics ───────────────────────────────────
 echo "=== rclone lsl (listing sizes from gateway) ==="
 r lsl "${REMOTE}/"
 
 # ── rclone check --size-only ─────────────────────────────────────────────────
-# This is the exact command that rclone uses internally during 'rclone sync'
-# to detect changed files when source has no cryptographic hashes (e.g. crypt
-# remotes, restic, Duplicati). If the gateway returns ciphertext sizes in the
-# listing, rclone reports "sizes differ" for every file and exits 1.
-# With a warm Valkey size cache the gateway returns plaintext sizes and rclone
-# exits 0.
-echo "=== rclone check --size-only ==="
+# This is the exact command that fails in issues #204/#207.
+# rclone compares each local file size against the size returned by
+# ListObjects. If the gateway returns ciphertext sizes in the listing,
+# rclone reports "sizes differ" for every encrypted object and exits 1.
+# With a warm Valkey size cache the gateway returns plaintext sizes → exit 0.
+echo "=== rclone check --size-only ($(ls /tmp/rclone-src | wc -l) files) ==="
 r check /tmp/rclone-src/ "${REMOTE}/" --size-only --one-way
 
 echo "rclone-sync-check:OK"
