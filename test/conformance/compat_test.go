@@ -355,7 +355,7 @@ func testRcloneSyncCheck_FallbackHead(t *testing.T, inst provider.Instance) {
 	vk := provider.StartValkey(ctx, t)
 
 	// Start the gateway with Valkey + fallback HEAD enabled.
-	// WithConfigMutator simulates the operator setting the env vars
+	// WithConfigMutator simulates the operator setting
 	// LIST_SIZE_TRANSLATE_FALLBACK_HEAD_ENABLED=true after upgrade.
 	gw := harness.StartGateway(t, inst,
 		harness.WithValkeyAddr(vk.Addr),
