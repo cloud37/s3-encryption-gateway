@@ -2493,9 +2493,20 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 // handleHeadBucket handles HEAD bucket requests.
 
 // resolveListSizesByHead issues bounded concurrent HeadObject calls for the
-// given object indices, substitutes plaintext sizes, and populates the size
-// cache. It is fail-soft: objects whose HEAD fails or times out retain their
-// ciphertext sizes.
+// given object indices, substitutes plaintext sizes into the response, and
+// populates the size cache.
+//
+// Design: FallbackHeadTimeout governs how long we block the HTTP response
+// waiting for HEAD results. Goroutines that do not complete within that
+// deadline are NOT cancelled — they continue running in the background and
+// write their resolved sizes to Valkey after the response is sent. This
+// ensures a single listing pass fully warms the cache for all objects,
+// regardless of how many there are relative to the deadline.
+//
+// The background goroutines use a detached context (not tied to the request)
+// so they survive after the HTTP response is written and the request ctx is
+// cancelled. They are bounded by FallbackHeadConcurrency and a generous
+// background deadline (5 minutes) to prevent unbounded resource use.
 func (h *Handler) resolveListSizesByHead(
 	ctx context.Context,
 	bucket string,
@@ -2505,48 +2516,104 @@ func (h *Handler) resolveListSizesByHead(
 	s3Client s3.Client,
 ) {
 	cfg := h.config.ListSizeTranslate
-	batchCtx, cancel := context.WithTimeout(ctx, cfg.FallbackHeadTimeout)
-	defer cancel()
+
+	// responseCtx bounds how long we wait before returning the HTTP response.
+	// Goroutines that miss this deadline still run to completion in background.
+	responseCtx, responseCancel := context.WithTimeout(ctx, cfg.FallbackHeadTimeout)
+	defer responseCancel()
+
+	// bgCtx is detached from the request so background goroutines can write
+	// to Valkey after the HTTP response is sent and ctx is cancelled.
+	// A 5-minute hard cap prevents unbounded background work.
+	bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 
 	sem := make(chan struct{}, cfg.FallbackHeadConcurrency)
-	type result struct {
-		idx  int
-		key  string
-		size int64
-		err  error
-	}
-	results := make(chan result, len(idxs))
-	var wg sync.WaitGroup
 
+	// resolved carries results that arrived before the response deadline.
+	// It is buffered to the full length so goroutines never block on send.
+	resolved := make(chan struct {
+		idx  int
+		sz   int64
+	}, len(idxs))
+
+	var wg sync.WaitGroup
 	for i, idx := range idxs {
 		wg.Add(1)
-		go func(i, idx int, key string) {
+		go func(i, idx int, key string, ciphertextSz int64) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			ps, ok, err := h.lookupListObjectPlaintextSize(batchCtx, bucket, key, objects[idx].Size, s3Client)
-			if err != nil || !ok {
+			// Use bgCtx for the HEAD so the call survives after the HTTP response
+			// is written and ctx is cancelled. This is the key property that allows
+			// background goroutines to complete their HEAD+cache work even after the
+			// response deadline has fired.
+			ps, ok, err := h.lookupListObjectPlaintextSize(bgCtx, bucket, key, ciphertextSz, s3Client)
+
+			var sizeToCache int64
+			switch {
+			case err != nil:
+				// Network error or context cancelled — skip caching; retry next listing.
 				h.metrics.RecordListSizeFallbackHead(ctx, bucket, "error")
-				results <- result{idx: idx, key: key, err: err}
+				return
+			case !ok:
+				// HEAD succeeded but no encryption metadata — plaintext or unrecognised
+				// format. The ciphertext size is the correct answer; cache it to avoid
+				// HEADing this object on every future listing.
+				h.metrics.RecordListSizeFallbackHead(ctx, bucket, "hit")
+				sizeToCache = ciphertextSz
+				ps = ciphertextSz
+			default:
+				h.metrics.RecordListSizeFallbackHead(ctx, bucket, "hit")
+				sizeToCache = ps
+			}
+
+			// Write to cache immediately using bgCtx so the entry is persisted
+			// regardless of whether responseCtx has already expired.
+			if h.sizeCache != nil && sizeToCache > 0 {
+				_ = h.sizeCache.Set(bgCtx, bucket, key, sizeToCache)
+			}
+
+			// Send to resolved only if the response deadline hasn't fired yet.
+			// Non-blocking: if responseCtx is already done, drop — the response
+			// has been sent and substituting the size is no longer possible.
+			select {
+			case <-responseCtx.Done():
+				// Response already sent; size substitution not possible, cache write
+				// already done above.
+			default:
+				resolved <- struct {
+					idx int
+					sz  int64
+				}{idx: idx, sz: ps}
+			}
+		}(i, idx, keys[i], objects[idx].Size)
+	}
+
+	// Close bgCtx when all goroutines finish so its resources are released.
+	go func() {
+		wg.Wait()
+		bgCancel()
+		close(resolved)
+	}()
+
+	// Drain resolved channel until the response deadline fires or all
+	// goroutines have reported back.
+	for {
+		select {
+		case r, ok := <-resolved:
+			if !ok {
+				// All goroutines finished within the deadline.
 				return
 			}
-			h.metrics.RecordListSizeFallbackHead(ctx, bucket, "hit")
-			results <- result{idx: idx, key: key, size: ps}
-		}(i, idx, keys[i])
-	}
-
-	go func() { wg.Wait(); close(results) }()
-
-	cacheUpdates := make(map[string]int64)
-	for r := range results {
-		if r.err == nil && r.size > 0 {
-			objects[r.idx].Size = r.size
-			cacheUpdates[r.key] = r.size
+			if r.sz > 0 {
+				objects[r.idx].Size = r.sz
+			}
+		case <-responseCtx.Done():
+			// Deadline reached — return the response with whatever resolved so far.
+			// Background goroutines continue running and writing to cache.
+			return
 		}
-	}
-	if h.sizeCache != nil && len(cacheUpdates) > 0 {
-		_ = h.sizeCache.SetBatch(ctx, bucket, cacheUpdates)
 	}
 }
 
