@@ -166,6 +166,117 @@ func (r *rcloneRunner) AssertOutput(code int, out, _ string) error {
 	return nil
 }
 
+// ─── rcloneSyncCheckRunner ────────────────────────────────────────────────────
+//
+// rcloneSyncCheckRunner reproduces the exact failure reported in issues #204
+// and #207: rclone sync followed by rclone check --size-only against an
+// encrypted gateway whose ListObjects returns ciphertext sizes.
+//
+// The test:
+//  1. Creates five local files of varying sizes (small, medium, exact-chunk
+//     boundary, multi-chunk, and a binary blob).
+//  2. rclone sync → gateway (PUT via gateway, warms Valkey size cache).
+//  3. rclone check --size-only --one-way: compares local sizes against the
+//     gateway listing. With a warm cache the gateway returns plaintext sizes;
+//     without the fix it returns ciphertext sizes and rclone reports
+//     "sizes differ" for every object.
+//  4. rclone lsl (listing with sizes visible): logs sizes for diagnostics.
+//
+// The runner requires a gateway started with WithValkeyAddr so the size cache
+// is active (CapSizeTranslation). The test function passes VALKEY_ADDR via the
+// sdkTestEnv.Key field convention — see testRcloneSyncCheck_SizeCache.
+//
+// ⚠  The check sub-command exits non-zero if any size mismatches are found.
+// That is exactly what we assert: if the fix is working, exit 0.
+
+type rcloneSyncCheckRunner struct{}
+
+func (r *rcloneSyncCheckRunner) Name() string  { return "rclone-sync-check" }
+func (r *rcloneSyncCheckRunner) Image() string { return "rclone/rclone:1.68" }
+
+func (r *rcloneSyncCheckRunner) Script(env sdkTestEnv) string {
+	// env.Key is used as the remote prefix so parallel tests don't collide.
+	// The script creates files of different sizes chosen to exercise:
+	//   - small:           17 bytes  (1 chunk, minimal ciphertext overhead)
+	//   - medium:       8 192 bytes  (fits in one 64 KiB chunk)
+	//   - at-boundary: 65 536 bytes  (exactly one full 64 KiB chunk)
+	//   - multi-chunk: 131 073 bytes (two full chunks + 1 byte → 3 AEAD tags)
+	//   - binary:       4 096 bytes  (non-printable content, not text)
+	//
+	// If rclone check reports "sizes differ" for any file, it exits 1 and
+	// AssertOutput fails the test.
+	return fmt.Sprintf(`set -e
+r() { rclone \
+  --s3-provider=Minio \
+  --s3-endpoint="$GATEWAY_ENDPOINT" \
+  --s3-env-auth=false \
+  --s3-access-key-id="$AWS_ACCESS_KEY_ID" \
+  --s3-secret-access-key="$AWS_SECRET_ACCESS_KEY" \
+  --s3-region=us-east-1 \
+  --s3-no-check-bucket=true \
+  "$@"; }
+
+PREFIX="%[1]s"
+BUCKET="%[2]s"
+REMOTE=":s3:${BUCKET}/${PREFIX}"
+
+# ── Create local test files of varying sizes ────────────────────────────────
+mkdir -p /tmp/rclone-src
+
+# small: 17 bytes
+printf 'small-file-payload' > /tmp/rclone-src/small.txt
+
+# medium: 8192 bytes (dd bs=1 count= is portable across alpine's busybox)
+dd if=/dev/urandom bs=8192 count=1 of=/tmp/rclone-src/medium.bin 2>/dev/null
+
+# at-boundary: exactly 65536 bytes (one full 64 KiB AES-GCM chunk)
+dd if=/dev/urandom bs=65536 count=1 of=/tmp/rclone-src/boundary.bin 2>/dev/null
+
+# multi-chunk: 131073 bytes (two full chunks + 1 byte)
+dd if=/dev/urandom bs=131073 count=1 of=/tmp/rclone-src/multi.bin 2>/dev/null
+
+# binary: 4096 bytes of non-ASCII content
+dd if=/dev/urandom bs=4096 count=1 of=/tmp/rclone-src/binary.bin 2>/dev/null
+
+echo "=== local files ==="
+ls -la /tmp/rclone-src/
+
+# ── Sync local → gateway ─────────────────────────────────────────────────────
+# Each PUT warms the Valkey size cache entry for that key.
+echo "=== rclone sync → gateway ==="
+r sync /tmp/rclone-src/ "${REMOTE}/" -v
+
+# ── List remote to show sizes (diagnostic) ───────────────────────────────────
+echo "=== rclone lsl (listing sizes from gateway) ==="
+r lsl "${REMOTE}/"
+
+# ── rclone check --size-only ─────────────────────────────────────────────────
+# This is the exact command that rclone uses internally during 'rclone sync'
+# to detect changed files when source has no cryptographic hashes (e.g. crypt
+# remotes, restic, Duplicati). If the gateway returns ciphertext sizes in the
+# listing, rclone reports "sizes differ" for every file and exits 1.
+# With a warm Valkey size cache the gateway returns plaintext sizes and rclone
+# exits 0.
+echo "=== rclone check --size-only ==="
+r check /tmp/rclone-src/ "${REMOTE}/" --size-only --one-way
+
+echo "rclone-sync-check:OK"
+`,
+		env.Key,
+		env.Bucket,
+	)
+}
+
+func (r *rcloneSyncCheckRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("rclone-sync-check exited %d (rclone check reported size mismatches — gateway may be returning ciphertext sizes in listings)", code)
+	}
+	if !strings.Contains(out, "rclone-sync-check:OK") {
+		return fmt.Errorf("rclone-sync-check: expected OK marker in stdout")
+	}
+	return nil
+}
+
 // ─── minio-py runner (Python container) ─────────────────────────────────────
 
 type minioPyRunner struct{}

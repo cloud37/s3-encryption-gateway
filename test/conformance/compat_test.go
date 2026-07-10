@@ -289,3 +289,46 @@ func testCompatSmoke_MinIOPy(t *testing.T, inst provider.Instance) {
 	}
 	_ = gw
 }
+
+// testRcloneSyncCheck_SizeCache is a full end-to-end regression test for
+// issues #204 and #207.
+//
+// It reproduces the exact workflow reported by the issue author:
+//  1. Start a gateway with a real Valkey size cache (CapSizeTranslation).
+//  2. Run rclone sync from a local directory containing files of varying sizes
+//     to the gateway. Each PUT warms the Valkey size cache automatically.
+//  3. Run rclone check --size-only --one-way, which compares each local file's
+//     size against the size returned by ListObjects. With the fix this exits 0;
+//     without the fix it exits 1 with "sizes differ" for every encrypted object.
+//
+// The test gates on CapCLIRclone|CapSizeTranslation because it requires:
+//   - Docker (for the rclone container and the Valkey container).
+//   - A gateway with ListSizeTranslate wired (i.e. Valkey configured).
+func testRcloneSyncCheck_SizeCache(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+
+	// Start a real Valkey container so the gateway size cache is active.
+	vk := provider.StartValkey(ctx, t)
+
+	// Start the gateway with the size cache wired via the shared Valkey pool.
+	gw := harness.StartGateway(t, inst,
+		harness.WithValkeyAddr(vk.Addr),
+	)
+
+	// Use a unique prefix so parallel tests never collide in the same bucket.
+	prefix := compatUniqueKey(t)
+
+	env := sdkTestEnv{
+		Endpoint:  gw.URL,
+		Region:    inst.Region,
+		AccessKey: inst.AccessKey,
+		SecretKey: inst.SecretKey,
+		Bucket:    inst.Bucket,
+		Key:       prefix, // repurposed as the remote path prefix
+	}
+
+	if err := runToolContainer(ctx, t, &rcloneSyncCheckRunner{}, env); err != nil {
+		t.Fatalf("rclone-sync-check: %v", err)
+	}
+}
