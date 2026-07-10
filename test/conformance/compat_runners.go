@@ -237,7 +237,7 @@ mkdir -p /tmp/rclone-src
 # files 00-09: sub-chunk sizes 100 B … 9 900 B (step 1 000 B)
 i=0
 for size in 100 1100 2100 3100 4100 5100 6100 7100 8100 9100; do
-  dd if=/dev/urandom bs="$size" count=1 of="$(printf '/tmp/rclone-src/file-%02d.bin' $i)" 2>/dev/null
+  dd if=/dev/urandom bs="$size" count=1 of="$(printf '/tmp/rclone-src/file-%%02d.bin' $i)" 2>/dev/null
   i=$((i+1))
 done
 
