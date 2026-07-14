@@ -1561,7 +1561,7 @@ func TestValidateCompleteMultipartUploadRequest(t *testing.T) {
 					PartNumber int32    `xml:"PartNumber"`
 					ETag       string   `xml:"ETag"`
 				}{
-					{PartNumber: 1, ETag: `invalid-etag`},
+					{PartNumber: 1, ETag: `invalid-etag!`},
 				},
 			},
 			expectError: true,
@@ -1578,8 +1578,7 @@ func TestValidateCompleteMultipartUploadRequest(t *testing.T) {
 					{PartNumber: 1, ETag: `abc123`},
 				},
 			},
-			expectError: true,
-			errorCode:   "InvalidArgument",
+			expectError: false,
 		},
 		{
 			name: "parts not in ascending order (should warn but not error)",
@@ -1646,6 +1645,29 @@ func TestIsValidETag(t *testing.T) {
 			result := isValidETag(tt.etag)
 			if result != tt.isValid {
 				t.Errorf("isValidETag(%q) = %v, want %v", tt.etag, result, tt.isValid)
+			}
+		})
+	}
+}
+
+func TestNormalizeETag(t *testing.T) {
+	tests := []struct {
+		name string
+		etag string
+		want string
+		ok   bool
+	}{
+		{name: "quoted", etag: `"abc123"`, want: `"abc123"`, ok: true},
+		{name: "unquoted minio-go", etag: `abc123`, want: `"abc123"`, ok: true},
+		{name: "invalid character", etag: `abc!123`, ok: false},
+		{name: "embedded quote", etag: `abc"123`, ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := normalizeETag(tt.etag)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("normalizeETag(%q) = (%q, %v), want (%q, %v)",
+					tt.etag, got, ok, tt.want, tt.ok)
 			}
 		})
 	}

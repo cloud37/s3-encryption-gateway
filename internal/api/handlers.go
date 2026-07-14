@@ -3368,14 +3368,19 @@ func (h *Handler) validateCompleteMultipartUploadRequest(req *CompleteMultipartU
 		}
 		seenParts[part.PartNumber] = true
 
-		// Validate ETag format (should be quoted)
-		if !isValidETag(part.ETag) {
+		// minio-go removes the quotes from UploadPart ETags before sending
+		// CompleteMultipartUpload. Accept both wire forms, then retain the
+		// canonical quoted form for the backend request.
+		canonicalETag, ok := normalizeETag(part.ETag)
+		if !ok {
 			return &S3Error{
 				Code:       "InvalidArgument",
 				Message:    fmt.Sprintf("Invalid ETag format for part %d: %s", part.PartNumber, part.ETag),
 				HTTPStatus: http.StatusBadRequest,
 			}
 		}
+		part.ETag = canonicalETag
+		req.Parts[i].ETag = canonicalETag
 
 		// Check if parts are in ascending order (AWS requires this)
 		if i > 0 && part.PartNumber < lastPartNumber {
@@ -3390,7 +3395,26 @@ func (h *Handler) validateCompleteMultipartUploadRequest(req *CompleteMultipartU
 	return nil
 }
 
-// isValidETag validates ETag format (should be quoted and contain valid characters).
+// normalizeETag accepts either the quoted HTTP form or the unquoted value
+// emitted by clients such as minio-go, and returns the canonical quoted form.
+func normalizeETag(etag string) (string, bool) {
+	if len(etag) >= 2 && strings.HasPrefix(etag, "\"") && strings.HasSuffix(etag, "\"") {
+		if isValidETag(etag) {
+			return etag, true
+		}
+		return "", false
+	}
+	if len(etag) == 0 || strings.Contains(etag, "\"") {
+		return "", false
+	}
+	quoted := "\"" + etag + "\""
+	if !isValidETag(quoted) {
+		return "", false
+	}
+	return quoted, true
+}
+
+// isValidETag validates the canonical quoted ETag form and its contents.
 func isValidETag(etag string) bool {
 	if len(etag) < 2 || !strings.HasPrefix(etag, "\"") || !strings.HasSuffix(etag, "\"") {
 		return false
