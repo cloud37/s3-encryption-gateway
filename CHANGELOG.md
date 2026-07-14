@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.3] — 2026-07-14
+
+### Added
+
+- **MinIO Go multipart conformance coverage:** Added an end-to-end multipart
+  upload test using `minio-go`'s `NewMultipartUpload`, `PutObjectPart`, and
+  `CompleteMultipartUpload` APIs. The test runs against all multipart-capable
+  conformance providers and covers the client behaviour that strips quotes from
+  part ETags.
+
+### Security
+
+### Fixed
+
+- **Encrypted MPU copy ranges:** `UploadPartCopy` now decrypts only the
+  requested plaintext range when copying from an encrypted multipart-upload
+  source, instead of buffering the complete source object. This avoids the
+  legacy copy-source size cap for large encrypted MPU objects and preserves
+  correct range semantics.
+
+- **Decrypted object sizes:** GET, HEAD, and listing paths now report accurate
+  plaintext sizes for legacy AEAD and chunked-encrypted objects, including
+  objects with short final chunks, missing size metadata, or stale persisted
+  size metadata. Optimized encrypted range requests are also clamped to the
+  actual ciphertext length.
+
+- **Multipart ETag compatibility:** `CompleteMultipartUpload` now accepts both
+  quoted and unquoted ETags emitted by compatible clients such as `minio-go`,
+  validates the value, and canonicalizes it to the quoted form before backend
+  processing. This resolves `Invalid ETag format` failures during multipart
+  uploads.
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+- Updated the AWS SDK for Go v2 monorepo, including `config` to v1.32.30,
+  `credentials` to v1.19.29, `service/s3` to v1.105.1, and related AWS service
+  modules.
+- Updated `github.com/minio/minio-go/v7` to v7.2.1 for multipart conformance
+  coverage and client compatibility verification.
+- Updated the Helm test and release workflows to use Helm v4.2.3.
+
 ## [0.11.0] — 2026-07-09
 
 ### Added
