@@ -32,18 +32,18 @@ const (
 	tagSize    = 16 // 128 bits authentication tag
 
 	// Metadata keys for encryption information
-	MetaEncrypted               = "x-amz-meta-encrypted"
-	MetaAlgorithm               = "x-amz-meta-encryption-algorithm"
-	MetaKeySalt                 = "x-amz-meta-encryption-key-salt"
-	MetaIV                      = "x-amz-meta-encryption-iv"
-	MetaAuthTag                 = "x-amz-meta-encryption-auth-tag"
-	MetaOriginalSize            = "x-amz-meta-encryption-original-size"
-	MetaOriginalETag            = "x-amz-meta-encryption-original-etag"
+	MetaEncrypted    = "x-amz-meta-encrypted"
+	MetaAlgorithm    = "x-amz-meta-encryption-algorithm"
+	MetaKeySalt      = "x-amz-meta-encryption-key-salt"
+	MetaIV           = "x-amz-meta-encryption-iv"
+	MetaAuthTag      = "x-amz-meta-encryption-auth-tag"
+	MetaOriginalSize = "x-amz-meta-encryption-original-size"
+	MetaOriginalETag = "x-amz-meta-encryption-original-etag"
 
-	MetaWrappedKeyCiphertext    = "x-amz-meta-encryption-wrapped-key"
-	MetaKMSKeyID                = "x-amz-meta-encryption-kms-id"
-	MetaKMSProvider             = "x-amz-meta-encryption-kms-provider"
-	MetaContentType             = "x-amz-meta-encryption-content-type"
+	MetaWrappedKeyCiphertext = "x-amz-meta-encryption-wrapped-key"
+	MetaKMSKeyID             = "x-amz-meta-encryption-kms-id"
+	MetaKMSProvider          = "x-amz-meta-encryption-kms-provider"
+	MetaContentType          = "x-amz-meta-encryption-content-type"
 	// MetaKDFParams stores the KDF algorithm and parameters used to derive the
 	// per-object encryption key. Format: "pbkdf2-sha256:<iterations>" or
 	// "argon2id:<time>:<memory_kib>:<threads>".
@@ -97,9 +97,10 @@ type EncryptionEngine interface {
 // Argon2idConfig holds operator-tunable argon2id KDF parameters.
 //
 // Recommended production values (OWASP 2024):
-//   Time    = 2
-//   Memory  = 19456  (19 MiB)
-//   Threads = 1
+//
+//	Time    = 2
+//	Memory  = 19456  (19 MiB)
+//	Threads = 1
 //
 // These are the minimums; operators may raise them for higher attack cost.
 type Argon2idConfig struct {
@@ -109,10 +110,10 @@ type Argon2idConfig struct {
 }
 
 type engine struct {
-	password         []byte
-	pbkdf2Iterations int // configurable, default DefaultPBKDF2Iterations
-	kdfAlgorithm     KDFAlgorithm // selected KDF for new objects, default KDFAlgPBKDF2SHA256
-	argon2idParams   Argon2idConfig
+	password            []byte
+	pbkdf2Iterations    int          // configurable, default DefaultPBKDF2Iterations
+	kdfAlgorithm        KDFAlgorithm // selected KDF for new objects, default KDFAlgPBKDF2SHA256
+	argon2idParams      Argon2idConfig
 	preferredAlgorithm  string
 	supportedAlgorithms []string
 	// Chunked encryption settings
@@ -217,9 +218,9 @@ func NewEngineWithChunkingAndProvider(password []byte, preferredAlgorithm string
 	copy(passwordBytes, password)
 
 	e := &engine{
-		password:            passwordBytes,
-		pbkdf2Iterations:    pbkdf2Iterations,
-		kdfAlgorithm:        KDFAlgPBKDF2SHA256,
+		password:         passwordBytes,
+		pbkdf2Iterations: pbkdf2Iterations,
+		kdfAlgorithm:     KDFAlgPBKDF2SHA256,
 		argon2idParams: Argon2idConfig{
 			Time:    2,
 			Memory:  19456,
@@ -844,7 +845,13 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 	}
 
 	// Restore original size if available
-	if originalSize, ok := expandedMetadata[MetaOriginalSize]; ok {
+	// The ciphertext was just read, so its length is more authoritative than
+	// persisted size metadata. Legacy AEAD adds one authentication tag; using
+	// the stored value here can make HTTP advertise ciphertext bytes alongside
+	// a plaintext body (BuildKit then reports a 16-byte short read).
+	if len(ciphertext) > gcm.Overhead() {
+		decMetadata["Content-Length"] = strconv.Itoa(len(ciphertext) - gcm.Overhead())
+	} else if originalSize, ok := expandedMetadata[MetaOriginalSize]; ok {
 		decMetadata["Content-Length"] = originalSize
 	}
 
@@ -1354,17 +1361,41 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 		decMetadata[k] = v
 	}
 
-	// Restore original size if available (prefer MetaOriginalSize, fallback to calculation)
-	if originalSize, ok := metadata[MetaOriginalSize]; ok {
-		decMetadata["Content-Length"] = originalSize
-	} else if chunkCount, ok := metadata[MetaChunkCount]; ok {
-		if chunkSize, ok2 := metadata[MetaChunkSize]; ok2 {
-			count, err1 := strconv.Atoi(chunkCount)
-			size, err2 := strconv.Atoi(chunkSize)
-			if err1 == nil && err2 == nil {
-				// Approximate original size (last chunk might be smaller)
-				approxSize := int64((count-1)*size + size)
-				decMetadata["Content-Length"] = fmt.Sprintf("%d", approxSize)
+	// Restore the plaintext size. For chunked objects, derive it from the
+	// ciphertext length when available because MetaChunkCount*MetaChunkSize is
+	// only an upper bound when the final chunk is short. This also prevents a
+	// stale original-size header from being exposed as the response length.
+	if ciphertextSize, ok := metadata["Content-Length"]; ok {
+		// Older chunked objects may not contain MetaOriginalSize or
+		// MetaChunkCount. Content-Length still describes the stored ciphertext;
+		// derive the exact plaintext length so callers do not accidentally
+		// forward the ciphertext length alongside decrypted bytes.
+		if ct, parseErr := strconv.ParseInt(ciphertextSize, 10, 64); parseErr == nil && ct > 0 {
+			chunkSize := int64(manifest.ChunkSize)
+			if chunkSize <= 0 {
+				chunkSize = int64(DefaultChunkSize)
+			}
+			const aeadTagSize = int64(16)
+			numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
+			plainSize := ct - numChunks*aeadTagSize
+			if plainSize > 0 {
+				decMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
+			}
+		}
+	}
+	if _, ok := decMetadata["Content-Length"]; !ok {
+		if originalSize, ok := metadata[MetaOriginalSize]; ok {
+			decMetadata["Content-Length"] = originalSize
+		} else if chunkCount, ok := metadata[MetaChunkCount]; ok {
+			if chunkSize, ok2 := metadata[MetaChunkSize]; ok2 {
+				count, err1 := strconv.Atoi(chunkCount)
+				size, err2 := strconv.Atoi(chunkSize)
+				if err1 == nil && err2 == nil && count > 0 && size > 0 {
+					// This is only a last-resort upper bound when the backend did
+					// not provide a ciphertext length.
+					approxSize := int64(count * size)
+					decMetadata["Content-Length"] = fmt.Sprintf("%d", approxSize)
+				}
 			}
 		}
 	}
@@ -1573,7 +1604,7 @@ func (e *engine) needsMetadataFallback(metadata map[string]string) bool {
 
 // encryptWithMetadataFallback encrypts data with metadata stored in object body
 func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[string]string, contentType string, originalSize int64, originalETag string) (io.Reader, map[string]string, error) {
-		data := plaintext
+	data := plaintext
 
 	// Generate encryption parameters
 	salt, err := e.generateSalt()

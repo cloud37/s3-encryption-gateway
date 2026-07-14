@@ -141,6 +141,83 @@ func TestLegacyChunkedRangeGetFallsBackToFullFetch(t *testing.T) {
 	}
 }
 
+func TestLegacyChunkedGetReportsDecryptedContentLength(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	plaintext := bytes.Repeat([]byte("legacy-full-get-"), 400)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+	delete(metadata, crypto.MetaOriginalSize)
+	delete(metadata, crypto.MetaChunkCount)
+	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
+	mockClient.PutObject(context.Background(), "test-bucket", "legacy-full", bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/test-bucket/legacy-full", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), plaintext) {
+		t.Fatalf("GET body mismatch: got %d bytes, want %d", len(w.Body.Bytes()), len(plaintext))
+	}
+	if got := w.Header().Get("Content-Length"); got != strconv.Itoa(len(plaintext)) {
+		t.Fatalf("GET Content-Length = %q, want %d", got, len(plaintext))
+	}
+}
+
+func TestChunkedGetUsesExactSizeWhenChunkCountIsPresent(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	plaintext := bytes.Repeat([]byte("short-final-chunk-"), 400)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+	delete(metadata, crypto.MetaOriginalSize)
+	metadata[crypto.MetaChunkCount] = "1"
+	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
+	mockClient.PutObject(context.Background(), "test-bucket", "chunk-count", bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/test-bucket/chunk-count", nil))
+	if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), plaintext) {
+		t.Fatalf("GET returned status %d and %d bytes, want 200 and %d bytes", w.Code, len(w.Body.Bytes()), len(plaintext))
+	}
+	if got := w.Header().Get("Content-Length"); got != strconv.Itoa(len(plaintext)) {
+		t.Fatalf("GET Content-Length = %q, want %d", got, len(plaintext))
+	}
+}
+
 func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
@@ -184,5 +261,51 @@ func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), fmt.Sprintf("<Size>%d</Size>", len(encryptedData))) {
 		t.Fatalf("ListObjects body still exposes ciphertext size %d: %s", len(encryptedData), w.Body.String())
+	}
+}
+
+func TestChunkedRangeGetClampsFinalCiphertextChunk(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	// Make the final chunk short. The nominal encrypted chunk size is 16 KiB
+	// plus a 16-byte AEAD tag, but the final ciphertext is shorter than that.
+	plaintext := bytes.Repeat([]byte("final-chunk-range-"), 1700)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+	metadata[crypto.MetaChunkCount] = strconv.Itoa((len(plaintext) + 16*1024 - 1) / (16 * 1024))
+	metadata[crypto.MetaOriginalSize] = strconv.Itoa(len(plaintext))
+	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
+
+	mockClient.PutObject(context.Background(), "test-bucket", "final-chunk", bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/test-bucket/final-chunk", nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", len(plaintext)-1, len(plaintext)-1))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("GET expected 206, got %d body=%s", w.Code, w.Body.String())
+	}
+	if len(w.Body.Bytes()) != 1 || w.Body.Bytes()[0] != plaintext[len(plaintext)-1] {
+		t.Fatalf("GET final byte mismatch: got %v, want %v", w.Body.Bytes(), plaintext[len(plaintext)-1])
+	}
+	if got := mockClient.lastGetRange; got == nil || !strings.HasSuffix(*got, strconv.Itoa(len(encryptedData)-1)) {
+		t.Fatalf("backend range was not clamped to ciphertext end: got %v, ciphertext size %d", got, len(encryptedData))
 	}
 }

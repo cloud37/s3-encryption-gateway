@@ -988,6 +988,13 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			if crypto.IsChunkedFormat(headMeta) {
 				// Get plaintext size for range parsing
 				plaintextSize, err := crypto.GetPlaintextSizeFromMetadata(headMeta)
+				if exactSize, ok := chunkedPlaintextSizeFromCiphertext(headMeta); ok {
+					plaintextSize = exactSize
+					err = nil
+					if headMeta[crypto.MetaOriginalSize] == "" {
+						derivedPlaintextSize = fmt.Sprintf("%d", exactSize)
+					}
+				}
 				if err == nil {
 					// Parse range header to get plaintext byte range
 					start, end, err := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
@@ -995,6 +1002,9 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 						plaintextStart, plaintextEnd = start, end
 						// Calculate encrypted byte range for needed chunks
 						encryptedStart, encryptedEnd, err := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, start, end)
+						if err == nil {
+							encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, headMeta["Content-Length"])
+						}
 						if err == nil {
 							encryptedRange := fmt.Sprintf("bytes=%d-%d", encryptedStart, encryptedEnd)
 							backendRange = &encryptedRange
@@ -1059,6 +1069,9 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 							plaintextStart, plaintextEnd = parsedStart, parsedEnd
 							encStart, encEnd, encErr := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, parsedStart, parsedEnd)
 							if encErr == nil {
+								encEnd, encErr = clampEncryptedRangeEnd(encStart, encEnd, headMeta["Content-Length"])
+							}
+							if encErr == nil {
 								encRange := fmt.Sprintf("bytes=%d-%d", encStart, encEnd)
 								backendRange = &encRange
 								useRangeOptimization = true
@@ -1089,11 +1102,10 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Legacy chunked objects can be served correctly once we derive the
-	// plaintext size, but keep them on the full-fetch path. Their stored
-	// metadata is incomplete, so avoiding DecryptRangeOptimized here removes
-	// one more variable from Harbor pull compatibility while newer objects
-	// continue to use the optimized path once MetaOriginalSize is persisted.
+	// Legacy chunked objects can be served correctly once their plaintext size
+	// is derived, but keep them on the full-fetch path. Their stored metadata is
+	// incomplete, so avoiding DecryptRangeOptimized here prevents the range
+	// reader from relying on a manifest that lacks a persisted chunk count.
 	if derivedPlaintextSize != "" {
 		backendRange = nil
 		useRangeOptimization = false
@@ -1306,6 +1318,11 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
+	if rangeHeader == nil {
+		if plaintextSize, ok := plaintextSizeFromCiphertextMetadata(metadata); ok {
+			decMetadata["Content-Length"] = strconv.FormatInt(plaintextSize, 10)
+		}
+	}
 
 	// For range optimization, we already have the exact range in decryptedReader
 	// For non-optimized ranges, we need to buffer and apply range
@@ -1499,6 +1516,12 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			if !isEncryptionMetadata(k) {
 				w.Header().Set(k, v)
 			}
+		}
+		// The backend Content-Length is ciphertext length. The decrypted
+		// reader contains plaintext, so never allow a stale backend length to
+		// survive when the engine did not provide a replacement.
+		if _, ok := decMetadata["Content-Length"]; !ok {
+			w.Header().Del("Content-Length")
 		}
 		if versionID != nil && *versionID != "" {
 			w.Header().Set("x-amz-version-id", *versionID)
@@ -2096,22 +2119,16 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Restore original plaintext size if available.
-	// Priority:
-	//   1. x-amz-meta-encryption-original-size    — set by modern chunked Encrypt
-	//   2. x-amz-meta-original-content-length     — legacy alias
-	//   3. chunked format: derive from ciphertext size + MetaChunkSize (exact)
-	//   4. MPU-encrypted                           — read TotalPlainSize from manifest
-	//   5. fall through → return raw backend size  (unencrypted or unknown format)
+	// For chunked objects, derive from the backend ciphertext length first. The
+	// stored original-size metadata may be stale (for example after an object
+	// was written through an older gateway version); HEAD must agree with the
+	// plaintext byte count returned by GET.
 	//
 	// Without a correct plaintext Content-Length, clients (Docker, docker-distribution)
 	// compute byte-range requests based on the ciphertext size, which is larger.
 	// The gateway then returns wrong data for those ranges, causing digest mismatches
 	// and "unexpected EOF" on pull.
-	if originalSize, ok := metadata["x-amz-meta-encryption-original-size"]; ok {
-		filteredMetadata["Content-Length"] = originalSize
-	} else if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok {
-		filteredMetadata["Content-Length"] = originalSize
-	} else if metadata[crypto.MetaChunkedFormat] == "true" {
+	if metadata[crypto.MetaChunkedFormat] == "true" {
 		// Chunked single-PUT objects without MetaOriginalSize (e.g. stored before
 		// the size-recording fix, or via streaming PUT without Content-Length).
 		// Derive the exact plaintext size from the ciphertext Content-Length and
@@ -2135,6 +2152,19 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 				if plainSize > 0 {
 					filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
 				}
+			}
+		}
+	} else if originalSize, ok := metadata["x-amz-meta-encryption-original-size"]; ok {
+		filteredMetadata["Content-Length"] = originalSize
+	} else if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok {
+		filteredMetadata["Content-Length"] = originalSize
+	} else if metadata[crypto.MetaEncrypted] == "true" {
+		// Legacy single-object AEAD ciphertext contains one authentication tag.
+		// If the original-size metadata is absent or stale, expose the size of
+		// the bytes that GET will return rather than the backend ciphertext size.
+		if ctStr, ok := metadata["Content-Length"]; ok {
+			if ct, parseErr := strconv.ParseInt(ctStr, 10, 64); parseErr == nil && ct > 16 {
+				filteredMetadata["Content-Length"] = strconv.FormatInt(ct-16, 10)
 			}
 		}
 	} else if metadata[crypto.MetaMPUEncrypted] == "true" {
@@ -2490,6 +2520,65 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 	return 0, false, nil
 }
 
+// chunkedPlaintextSizeFromCiphertext returns the exact plaintext size for a
+// chunked object when the backend reports its ciphertext Content-Length.
+// Unlike chunkCount*chunkSize, this handles a short final chunk correctly.
+func chunkedPlaintextSizeFromCiphertext(metadata map[string]string) (int64, bool) {
+	if metadata == nil || metadata[crypto.MetaChunkedFormat] != "true" {
+		return 0, false
+	}
+	ct, err := strconv.ParseInt(metadata["Content-Length"], 10, 64)
+	if err != nil || ct <= 0 {
+		return 0, false
+	}
+	chunkSize := int64(crypto.DefaultChunkSize)
+	if cs, err := strconv.ParseInt(metadata[crypto.MetaChunkSize], 10, 64); err == nil && cs > 0 {
+		chunkSize = cs
+	}
+	const aeadTagSize = int64(16)
+	numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
+	plainSize := ct - numChunks*aeadTagSize
+	return plainSize, plainSize > 0
+}
+
+func plaintextSizeFromCiphertextMetadata(metadata map[string]string) (int64, bool) {
+	if metadata == nil {
+		return 0, false
+	}
+	if metadata[crypto.MetaMPUEncrypted] == "true" {
+		return 0, false
+	}
+	if metadata[crypto.MetaChunkedFormat] == "true" {
+		return chunkedPlaintextSizeFromCiphertext(metadata)
+	}
+	return 0, false
+}
+
+// clampEncryptedRangeEnd limits an optimised ciphertext range to the actual
+// stored object length. The range calculator works with nominal full chunks,
+// but the final encrypted chunk may be shorter than chunkSize+AEADTagSize.
+// Requesting the nominal end from strict S3-compatible backends can produce a
+// 416 response or a short read, typically exactly one 16-byte AEAD tag short.
+func clampEncryptedRangeEnd(start, end int64, contentLength string) (int64, error) {
+	if start < 0 || end < start {
+		return 0, fmt.Errorf("invalid encrypted range %d-%d", start, end)
+	}
+	if contentLength == "" {
+		return end, nil
+	}
+	ciphertextSize, err := strconv.ParseInt(contentLength, 10, 64)
+	if err != nil || ciphertextSize <= 0 {
+		return 0, fmt.Errorf("invalid ciphertext content length %q", contentLength)
+	}
+	if start >= ciphertextSize {
+		return 0, fmt.Errorf("encrypted range starts beyond object size: %d >= %d", start, ciphertextSize)
+	}
+	if end >= ciphertextSize {
+		end = ciphertextSize - 1
+	}
+	return end, nil
+}
+
 // handleHeadBucket handles HEAD bucket requests.
 
 // resolveListSizesByHead issues bounded concurrent HeadObject calls for the
@@ -2532,8 +2621,8 @@ func (h *Handler) resolveListSizesByHead(
 	// resolved carries results that arrived before the response deadline.
 	// It is buffered to the full length so goroutines never block on send.
 	resolved := make(chan struct {
-		idx  int
-		sz   int64
+		idx int
+		sz  int64
 	}, len(idxs))
 
 	var wg sync.WaitGroup
