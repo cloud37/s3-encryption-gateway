@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -358,6 +358,25 @@ func TestClassifyCopySource_Legacy(t *testing.T) {
 	assert.Equal(t, SourceClassLegacy, classification.Class)
 	assert.True(t, classification.IsEncrypted)
 	assert.False(t, classification.IsChunked)
+}
+
+func TestClassifyCopySource_MPUWinsOverGenericEncryptedMarker(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, _ := crypto.NewEngine([]byte("test-password-123456"))
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	mockClient.metadata["src-bucket/src-key"] = map[string]string{
+		crypto.MetaEncrypted:    "true",
+		crypto.MetaMPUEncrypted: "true",
+		crypto.MetaFallbackMode: "mpu",
+	}
+
+	classification, err := handler.classifyCopySource(context.Background(), mockClient, "src-bucket", "src-key", nil)
+	require.NoError(t, err)
+	assert.Equal(t, SourceClassMPUEncrypted, classification.Class)
+	assert.True(t, classification.IsEncrypted)
 }
 
 // Helper function to create a pointer to a string

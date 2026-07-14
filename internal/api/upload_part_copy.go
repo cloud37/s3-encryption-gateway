@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -451,20 +451,22 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		Class: SourceClassPlaintext,
 	}
 
-	if metadata[crypto.MetaChunkedFormat] == "true" {
+	// Check MPU before the generic encrypted marker. MPU objects may carry
+	// MetaEncrypted as well as MetaMPUEncrypted, but they are not legacy
+	// single-AEAD objects and must use the manifest-backed MPU path.
+	if metadata[crypto.MetaMPUEncrypted] == "true" {
+		// Object was assembled via the gateway's encrypted multipart upload
+		// path. Its ciphertext is a concatenation of AEAD-encrypted chunks;
+		// the plaintext DEK and manifest live in a companion .mpu-manifest
+		// object. Must not be treated as plaintext or legacy ciphertext.
+		sourceClass.Class = SourceClassMPUEncrypted
+		sourceClass.IsEncrypted = true
+	} else if metadata[crypto.MetaChunkedFormat] == "true" {
 		sourceClass.Class = SourceClassChunked
 		sourceClass.IsChunked = true
 		sourceClass.IsEncrypted = true
 	} else if metadata[crypto.MetaEncrypted] == "true" {
 		sourceClass.Class = SourceClassLegacy
-		sourceClass.IsEncrypted = true
-	} else if metadata[crypto.MetaMPUEncrypted] == "true" {
-		// Object was assembled via the gateway's encrypted multipart upload
-		// path. Its ciphertext is a concatenation of AEAD-encrypted chunks;
-		// the plaintext DEK and manifest live in a companion .mpu-manifest
-		// object. Must not be treated as plaintext — doing so would read
-		// raw ciphertext into the destination and corrupt the data.
-		sourceClass.Class = SourceClassMPUEncrypted
 		sourceClass.IsEncrypted = true
 	}
 
@@ -813,37 +815,14 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		}
 
 	case SourceClassMPUEncrypted:
-		// The source is an MPU-encrypted object. Decrypt it fully using the
-		// companion .mpu-manifest, then use the plaintext as the copy payload.
-		// This covers Harbor's moveBlob() path which copies the staging upload
-		// (_uploads/{uuid}/data) to the content-addressed blob location via
-		// UploadPartCopy.
-		srcMeta, err := s3Client.HeadObject(ctx, srcBucket, srcKey, srcVersionID)
+		// Harbor supplies a plaintext source range for each destination part.
+		// Decrypt only that range. Reading the entire staging blob here caused
+		// every copy-part request to hit the legacy 256 MiB cap, even though the
+		// source itself was an encrypted MPU and each destination part was only
+		// 10 MiB.
+		plaintextData, err = h.readMPUPlaintextRange(ctx, s3Client, srcBucket, srcKey, srcVersionID, srcRange)
 		if err != nil {
-			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: head mpu source: %w", err)
-		}
-		r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
-		if err != nil {
-			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get mpu source: %w", err)
-		}
-		defer r.Close()
-		decR, err := h.decryptMPUObject(ctx, srcBucket, srcKey, srcMeta, r, s3Client)
-		if err != nil {
-			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypt mpu source: %w", err)
-		}
-		plaintextData, err = io.ReadAll(io.LimitReader(decR, maxLegacyCap+1))
-		if err != nil {
-			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: read decrypted mpu source: %w", err)
-		}
-		if int64(len(plaintextData)) > maxLegacyCap {
-			return nil, 0, errLegacySourceTooLarge
-		}
-		if srcRange != nil {
-			start, end := srcRange.First, srcRange.Last
-			if end >= int64(len(plaintextData)) {
-				end = int64(len(plaintextData)) - 1
-			}
-			plaintextData = plaintextData[start : end+1]
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: read mpu source range: %w", err)
 		}
 
 	case SourceClassLegacy:
@@ -936,6 +915,121 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		ETag:         etag,
 		LastModified: time.Now(),
 	}, int64(len(plaintextData)), nil
+}
+
+// readMPUPlaintextRange decrypts only the requested plaintext range from an
+// encrypted MPU source. The manifest maps the range to the minimum complete
+// ciphertext chunk span, so memory use is proportional to one copy part.
+func (h *Handler) readMPUPlaintextRange(
+	ctx context.Context,
+	s3Client s3.Client,
+	bucket, key string,
+	versionID *string,
+	srcRange *s3.CopyPartRange,
+) ([]byte, error) {
+	meta, err := s3Client.HeadObject(ctx, bucket, key, versionID)
+	if err != nil {
+		return nil, fmt.Errorf("head source: %w", err)
+	}
+	manifestKey := meta[crypto.MetaFallbackPointer]
+	if manifestKey == "" {
+		manifestKey = key + ".mpu-manifest"
+	}
+	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get manifest: %w", err)
+	}
+	defer manifestReader.Close()
+	engine, err := h.getEncryptionEngine(bucket)
+	if err != nil {
+		return nil, err
+	}
+	plainManifest, _, err := engine.Decrypt(ctx, manifestReader, manifestMeta)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt manifest: %w", err)
+	}
+	manifestJSON, err := io.ReadAll(plainManifest)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
+	if err != nil {
+		return nil, err
+	}
+	if srcRange == nil {
+		srcRange = &s3.CopyPartRange{First: 0, Last: manifest.TotalPlainSize - 1}
+	}
+	pStart, pEnd, err := crypto.ParseHTTPRangeHeader(
+		fmt.Sprintf("bytes=%d-%d", srcRange.First, srcRange.Last), manifest.TotalPlainSize)
+	if err != nil {
+		return nil, err
+	}
+	encRange, err := manifest.EncRangeForPlaintextRange(pStart, pEnd)
+	if err != nil {
+		return nil, err
+	}
+	backendRange := fmt.Sprintf("bytes=%d-%d", encRange.EncStart, encRange.EncEnd)
+	r, _, err := s3Client.GetObject(ctx, bucket, key, versionID, &backendRange)
+	if err != nil {
+		return nil, fmt.Errorf("get ciphertext range: %w", err)
+	}
+	defer r.Close()
+	ciphertext, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	dek, err := h.unwrapMPUDEKFromManifest(ctx, manifest, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(dek)
+	ivPrefix, err := hexToIVPrefix(manifest.IVPrefix)
+	if err != nil {
+		return nil, err
+	}
+	uploadIDHash, err := decodeBase64ToFixed32(manifest.UploadIDHash)
+	if err != nil {
+		return nil, err
+	}
+	const encTagSize = 16
+	encChunkSize := manifest.ChunkSize + encTagSize
+	var plaintext []byte
+	consumed := 0
+	for pi := encRange.PartStartIdx; pi <= encRange.PartEndIdx; pi++ {
+		part := manifest.Parts[pi]
+		first := int32(0)
+		if pi == encRange.PartStartIdx {
+			first = encRange.ChunkStart
+		}
+		last := part.ChunkCount - 1
+		if pi == encRange.PartEndIdx {
+			last = encRange.ChunkEnd
+		}
+		partLen := int(part.EncLen) - int(first)*encChunkSize
+		if pi != encRange.PartEndIdx || last != part.ChunkCount-1 {
+			partLen = int(last-first+1) * encChunkSize
+		}
+		if consumed+partLen > len(ciphertext) {
+			partLen = len(ciphertext) - consumed
+		}
+		plain, err := crypto.DecryptMPUPartRange(ciphertext[consumed:consumed+partLen], dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, first, manifest.Algorithm)
+		if err != nil {
+			return nil, err
+		}
+		plaintext = append(plaintext, plain...)
+		consumed += partLen
+	}
+	base := int64(0)
+	for i := 0; i < encRange.PartStartIdx; i++ {
+		base += manifest.Parts[i].PlainLen
+	}
+	base += int64(encRange.ChunkStart) * int64(manifest.ChunkSize)
+	start := pStart - base
+	end := pEnd - base
+	if start < 0 || end >= int64(len(plaintext)) || start > end {
+		return nil, fmt.Errorf("decrypted range slice %d-%d outside %d bytes", start, end, len(plaintext))
+	}
+	return plaintext[start : end+1], nil
 }
 
 // uploadPartCopyFromMPUSource handles UploadPartCopy when the source is an
