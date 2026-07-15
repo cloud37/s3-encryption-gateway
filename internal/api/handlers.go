@@ -4221,14 +4221,6 @@ func (h *Handler) serveMPURangedGet(
 	}
 	defer objReader.Close()
 
-	ciphertext, err := io.ReadAll(objReader)
-	if err != nil {
-		h.logger.WithError(err).Error("serveMPURangedGet: read ciphertext")
-		(&S3Error{Code: "InternalError", Message: "Failed to read object", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-		return
-	}
-
 	// ── 5. Unwrap DEK ────────────────────────────────────────────────────────
 	dek, err := h.unwrapMPUDEKFromManifest(ctx, manifest, bucket, key)
 	if err != nil {
@@ -4255,16 +4247,28 @@ func (h *Handler) serveMPURangedGet(
 	}
 
 	// ── 6. Decrypt affected chunks ───────────────────────────────────────────
-	// ciphertext starts at byte rangeResult.EncStart which is the first byte of
-	// chunk rangeResult.ChunkStart in part rangeResult.PartStartIdx.
-	// Iterate through affected parts/chunks, consuming precise byte counts.
+	// The backend range starts at the first byte of ChunkStart in
+	// PartStartIdx. Decrypt and write one chunk at a time so memory usage is
+	// bounded by the encryption chunk size rather than the requested range.
 	const encTagSize = 16
-	encChunkSize := manifest.ChunkSize + encTagSize
+	var plaintextOffset int64
+	for i := 0; i < rangeResult.PartStartIdx; i++ {
+		plaintextOffset += manifest.Parts[i].PlainLen
+	}
+	plaintextOffset += int64(rangeResult.ChunkStart) * int64(manifest.ChunkSize)
 
-	var (
-		plaintext     []byte
-		bytesConsumed int
-	)
+	responseStarted := false
+	var written int64
+	writeRangeError := func(err error) {
+		if responseStarted {
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"bucket": bucket,
+				"key":    key,
+			}).Error("serveMPURangedGet: response write failed")
+			return
+		}
+		(&S3Error{Code: "InternalError", Message: "Failed to write object", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
+	}
 
 	for pi := rangeResult.PartStartIdx; pi <= rangeResult.PartEndIdx; pi++ {
 		part := manifest.Parts[pi]
@@ -4277,71 +4281,85 @@ func (h *Handler) serveMPURangedGet(
 			lastChunk = rangeResult.ChunkEnd
 		}
 
-		// Precise byte count for these chunks within the part.
-		var partCipherLen int
-		isLastPartOfRange := pi == rangeResult.PartEndIdx
-		if isLastPartOfRange && lastChunk == part.ChunkCount-1 {
-			// Consuming through the last chunk of this part: use EncLen to get
-			// the exact byte count (last chunk may be shorter than ChunkSize).
-			partEncStart := int64(firstChunk) * int64(encChunkSize)
-			partCipherLen = int(part.EncLen - partEncStart)
-		} else {
-			partCipherLen = int(lastChunk-firstChunk+1) * encChunkSize
-		}
-
-		if bytesConsumed+partCipherLen > len(ciphertext) {
-			partCipherLen = len(ciphertext) - bytesConsumed
-		}
-
-		partCipher := ciphertext[bytesConsumed : bytesConsumed+partCipherLen]
-		plain, err := crypto.DecryptMPUPartRange(partCipher, dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, firstChunk, manifest.Algorithm)
-		if err != nil {
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"bucket":     bucket,
-				"key":        key,
-				"part":       part.PartNumber,
-				"firstChunk": firstChunk,
-			}).Error("serveMPURangedGet: tamper detected")
-			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected")
-			if h.auditLogger != nil {
-				h.auditLogger.Log(&audit.AuditEvent{
-					EventType: audit.EventTypeMPUTamperDetected,
-					Timestamp: time.Now().UTC(),
-					Bucket:    bucket,
-					Key:       key,
-					Success:   false,
-					Metadata:  map[string]interface{}{"status": "tamper_detected_range"},
-				})
+		for ci := firstChunk; ci <= lastChunk; ci++ {
+			chunkPlainLen := int64(manifest.ChunkSize)
+			if ci == part.ChunkCount-1 {
+				chunkPlainLen = part.PlainLen - int64(ci)*int64(manifest.ChunkSize)
 			}
-			(&S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-			return
+			chunkEncLen := int(chunkPlainLen) + encTagSize
+			chunkCiphertext := make([]byte, chunkEncLen)
+			if _, err := io.ReadFull(objReader, chunkCiphertext); err != nil {
+				h.logger.WithError(err).WithFields(logrus.Fields{
+					"bucket": bucket,
+					"key":    key,
+					"part":   part.PartNumber,
+					"chunk":  ci,
+				}).Error("serveMPURangedGet: read ciphertext chunk")
+				writeRangeError(err)
+				if !responseStarted {
+					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+				}
+				return
+			}
+			plain, err := crypto.DecryptMPUPartRange(chunkCiphertext, dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, ci, manifest.Algorithm)
+			if err != nil {
+				h.logger.WithError(err).WithFields(logrus.Fields{
+					"bucket": bucket,
+					"key":    key,
+					"part":   part.PartNumber,
+					"chunk":  ci,
+				}).Error("serveMPURangedGet: tamper detected")
+				h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected")
+				if h.auditLogger != nil {
+					h.auditLogger.Log(&audit.AuditEvent{
+						EventType: audit.EventTypeMPUTamperDetected,
+						Timestamp: time.Now().UTC(),
+						Bucket:    bucket,
+						Key:       key,
+						Success:   false,
+						Metadata:  map[string]interface{}{"status": "tamper_detected_range"},
+					})
+				}
+				if responseStarted {
+					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), written)
+				} else {
+					(&S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
+					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+				}
+				return
+			}
+
+			chunkStart := plaintextOffset
+			chunkEnd := chunkStart + int64(len(plain)) - 1
+			writeStart := pStart
+			if writeStart < chunkStart {
+				writeStart = chunkStart
+			}
+			writeEnd := pEnd
+			if writeEnd > chunkEnd {
+				writeEnd = chunkEnd
+			}
+			if writeStart <= writeEnd {
+				plainStart := writeStart - chunkStart
+				plainEnd := writeEnd - chunkStart + 1
+				if !responseStarted {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pStart, pEnd, manifest.TotalPlainSize))
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", pEnd-pStart+1))
+					w.Header().Set("Content-Type", "application/octet-stream")
+					w.WriteHeader(http.StatusPartialContent)
+					responseStarted = true
+				}
+				n, writeErr := w.Write(plain[plainStart:plainEnd])
+				written += int64(n)
+				if writeErr != nil {
+					writeRangeError(writeErr)
+					return
+				}
+			}
+			plaintextOffset += chunkPlainLen
 		}
-		plaintext = append(plaintext, plain...)
-		bytesConsumed += partCipherLen
 	}
 
-	// ── 7. Slice to exact plaintext range ────────────────────────────────────
-	// plaintext starts at the beginning of ChunkStart in PartStartIdx.
-	var bufPlainStart int64
-	for i := 0; i < rangeResult.PartStartIdx; i++ {
-		bufPlainStart += manifest.Parts[i].PlainLen
-	}
-	bufPlainStart += int64(rangeResult.ChunkStart) * int64(manifest.ChunkSize)
-
-	sliceStart := pStart - bufPlainStart
-	sliceEnd := pEnd - bufPlainStart
-	if sliceEnd >= int64(len(plaintext)) {
-		sliceEnd = int64(len(plaintext)) - 1
-	}
-	plaintext = plaintext[sliceStart : sliceEnd+1]
-
-	// ── 8. Write HTTP 206 response ───────────────────────────────────────────
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pStart, pEnd, manifest.TotalPlainSize))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(plaintext)))
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusPartialContent)
-	written, _ := io.Copy(w, bytes.NewReader(plaintext))
 	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), written)
 }
 

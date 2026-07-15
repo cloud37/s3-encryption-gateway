@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -33,12 +33,31 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 type mpuMockS3Client struct {
-	mu        sync.Mutex
-	objects   map[string][]byte
-	metadata  map[string]map[string]string
-	parts     map[string][]byte            // key: "bucket|key|uploadID|partNumber"
-	partsMeta map[string]map[string]string // metadata frozen at CreateMultipartUpload
+	mu              sync.Mutex
+	objects         map[string][]byte
+	metadata        map[string]map[string]string
+	parts           map[string][]byte            // key: "bucket|key|uploadID|partNumber"
+	partsMeta       map[string]map[string]string // metadata frozen at CreateMultipartUpload
+	maxRangedRead   int
+	rangedReadCount int
 }
+
+type trackedMPURangeReader struct {
+	reader *bytes.Reader
+	client *mpuMockS3Client
+}
+
+func (r *trackedMPURangeReader) Read(p []byte) (int, error) {
+	readSize := len(p)
+	r.client.mu.Lock()
+	if readSize > r.client.maxRangedRead {
+		r.client.maxRangedRead = readSize
+	}
+	r.client.mu.Unlock()
+	return r.reader.Read(p)
+}
+
+func (r *trackedMPURangeReader) Close() error { return nil }
 
 func newMPUMockS3Client() *mpuMockS3Client {
 	return &mpuMockS3Client{
@@ -95,7 +114,13 @@ func (m *mpuMockS3Client) GetObject(ctx context.Context, bucket, key string, ver
 				if first < 0 || first > last {
 					return nil, nil, fmt.Errorf("invalid range %q", *rangeHeader)
 				}
-				return io.NopCloser(bytes.NewReader(data[first : last+1])), metaCopy, nil
+				m.mu.Lock()
+				m.rangedReadCount++
+				m.mu.Unlock()
+				return &trackedMPURangeReader{
+					reader: bytes.NewReader(data[first : last+1]),
+					client: m,
+				}, metaCopy, nil
 			}
 		}
 	}
@@ -540,6 +565,45 @@ func TestMPU_Issue3_RangedGET_CorrectBytes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMPU_Issue219_RangedGETStreaming verifies that a large ranged MPU GET
+// consumes backend ciphertext incrementally instead of asking the backend
+// reader for the complete range at once.
+func TestMPU_Issue219_RangedGETStreaming(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "issue219-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "issue219-bucket", "large.bin"
+	const partSize = 2 * 1024 * 1024
+	part1 := makeByteRamp(partSize, 0)
+	part2 := makeByteRamp(partSize, 1)
+	doCompleteUploadWithParts(t, router, bucket, key, [][]byte{part1, part2})
+
+	want := append(append([]byte(nil), part1...), part2...)
+	start := int64(64*1024 - 17)
+	end := int64(len(want) - 64*1024 + 16)
+	req := httptest.NewRequest("GET", "/"+bucket+"/"+key, nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("ranged GET: %d %s", w.Code, w.Body.String())
+	}
+	if got, wantLen := len(w.Body.Bytes()), int(end-start+1); got != wantLen {
+		t.Fatalf("ranged GET length: got %d, want %d", got, wantLen)
+	}
+	if !bytes.Equal(w.Body.Bytes(), want[start:end+1]) {
+		t.Fatal("ranged GET returned incorrect plaintext")
+	}
+	if got := mockClient.maxRangedRead; got > crypto.DefaultChunkSize+16 {
+		t.Fatalf("backend ranged reader was asked for %d bytes; want at most %d", got, crypto.DefaultChunkSize+16)
+	}
+	if mockClient.rangedReadCount == 0 {
+		t.Fatal("ranged GET did not use a backend range reader")
 	}
 }
 
@@ -1465,7 +1529,6 @@ encrypt_multipart_uploads: true
 	}
 }
 
-
 // TestMPU_ListParts_ReturnsPlaintextSizes verifies that when an encrypted MPU
 // upload has parts, the ListParts response returns the *plaintext* sizes from
 // Valkey rather than the encrypted sizes reported by the backend. This is
@@ -1690,8 +1753,9 @@ func TestMPU_ListObjects_InProgressReturnsPlaintextSize(t *testing.T) {
 // .mpu-manifest companion object (written before CompleteMultipartUpload).
 //
 // This is the exact path triggered by Docker Distribution's validateBlob():
-//   Stat(_uploads/{uuid}/data) → statHead() fails → statList() →
-//   ListObjectsV2(max-keys=1,prefix=...data) → <Size> must be plaintext.
+//
+//	Stat(_uploads/{uuid}/data) → statHead() fails → statList() →
+//	ListObjectsV2(max-keys=1,prefix=...data) → <Size> must be plaintext.
 func TestMPU_ListObjects_CompletedReturnsPlaintextSize(t *testing.T) {
 	handler, _, _ := newMPUTestHandler(t, "lstc-*")
 	router := mux.NewRouter()
