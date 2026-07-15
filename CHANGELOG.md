@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.11.3] — 2026-07-14
+## [0.11.4] — 2026-07-14
+
+Release 0.11.3 was skipped as it was built with a potential Buffer Overflow.
 
 ### Added
 
