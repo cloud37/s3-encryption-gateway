@@ -2349,7 +2349,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	// through ListObjects makes mirror/sync clients treat them as user data and
 	// delete them when the source does not contain the companion objects.
 	listResult.Objects = filterMPUManifestObjects(listResult.Objects)
-	for listResult.IsTruncated && int32(len(listResult.Objects)) < maxKeys && listResult.NextContinuationToken != "" {
+	for listResult.IsTruncated && len(listResult.Objects) < int(maxKeys) && listResult.NextContinuationToken != "" {
 		nextOpts := opts
 		nextOpts.ContinuationToken = listResult.NextContinuationToken
 		nextOpts.StartAfter = ""
@@ -2358,7 +2358,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		listResult.Objects = append(listResult.Objects, filterMPUManifestObjects(nextPage.Objects)...)
-		if int32(len(listResult.Objects)) >= maxKeys {
+		if len(listResult.Objects) >= int(maxKeys) {
 			listResult.Objects = listResult.Objects[:int(maxKeys)]
 			listResult.IsTruncated = true
 			listResult.NextContinuationToken = nextPage.NextContinuationToken
