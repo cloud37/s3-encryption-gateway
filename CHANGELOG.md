@@ -38,6 +38,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   processing. This resolves `Invalid ETag format` failures during multipart
   uploads.
 
+- **Encrypted MPU manifest visibility (issue #217):** Client-facing
+  `ListObjects` responses no longer expose gateway-owned `.mpu-manifest`
+  companion objects. This prevents synchronization tools such as `rclone`
+  from treating required encryption metadata as ordinary user objects and
+  deleting it. GET failures caused by a missing MPU manifest now return a
+  dedicated diagnostic without exposing the internal manifest key.
+
 ### Changed
 
 ### Removed
