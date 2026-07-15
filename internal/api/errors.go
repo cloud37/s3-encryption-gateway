@@ -10,6 +10,10 @@ import (
 	"github.com/aws/smithy-go"
 )
 
+// ErrMissingMPUManifest identifies an encrypted multipart object whose
+// gateway-owned manifest is unavailable.
+var ErrMissingMPUManifest = errors.New("encrypted multipart object manifest is missing")
+
 // S3Error represents an S3 API error response.
 type S3Error struct {
 	Code       string

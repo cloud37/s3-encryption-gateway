@@ -134,6 +134,7 @@ func TestConformance(t *testing.T) {
 				// Encrypted multipart uploads (ADR-0009 / V0.6-SEC-3).
 				// Requires Docker for a Valkey container (state store).
 				{"EncryptedMPU_RoundTrip", provider.CapEncryptedMPU, testEncryptedMPURoundTrip},
+				{"EncryptedMPU_ManifestHiddenAndMissingDiagnostic", provider.CapEncryptedMPU, testEncryptedMPUManifestIsHidden},
 				{"EncryptedMPU_AtRest", provider.CapEncryptedMPU, testEncryptedMPU_AtRest},
 				{"EncryptedMPU_AbortCleansState", provider.CapEncryptedMPU, testEncryptedMPUAbortCleansState},
 				{"EncryptedMPU_LargeObject", provider.CapEncryptedMPU, testEncryptedMPU_LargeObject},

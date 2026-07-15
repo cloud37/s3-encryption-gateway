@@ -1145,9 +1145,13 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 				"bucket": bucket,
 				"key":    key,
 			}).Error("Failed to decrypt MPU object")
+			message := "Failed to decrypt multipart encrypted object"
+			if errors.Is(err, ErrMissingMPUManifest) {
+				message = "Encrypted multipart object metadata is missing; the gateway MPU manifest could not be found"
+			}
 			s3Err := &S3Error{
 				Code:       "InternalError",
-				Message:    "Failed to decrypt multipart encrypted object",
+				Message:    message,
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusInternalServerError,
 			}
@@ -2341,6 +2345,30 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// MPU manifests are gateway-owned implementation details. Exposing them
+	// through ListObjects makes mirror/sync clients treat them as user data and
+	// delete them when the source does not contain the companion objects.
+	listResult.Objects = filterMPUManifestObjects(listResult.Objects)
+	for listResult.IsTruncated && int32(len(listResult.Objects)) < maxKeys && listResult.NextContinuationToken != "" {
+		nextOpts := opts
+		nextOpts.ContinuationToken = listResult.NextContinuationToken
+		nextOpts.StartAfter = ""
+		nextPage, pageErr := s3Client.ListObjects(ctx, bucket, prefix, nextOpts)
+		if pageErr != nil {
+			break
+		}
+		listResult.Objects = append(listResult.Objects, filterMPUManifestObjects(nextPage.Objects)...)
+		if int32(len(listResult.Objects)) >= maxKeys {
+			listResult.Objects = listResult.Objects[:int(maxKeys)]
+			listResult.IsTruncated = true
+			listResult.NextContinuationToken = nextPage.NextContinuationToken
+			break
+		}
+		listResult.CommonPrefixes = append(listResult.CommonPrefixes, nextPage.CommonPrefixes...)
+		listResult.NextContinuationToken = nextPage.NextContinuationToken
+		listResult.IsTruncated = nextPage.IsTruncated
+	}
+
 	// NOTE: ListObjects returns backend (ciphertext) sizes and ETags for
 	// completed single-PUT encrypted objects. Per-object HEAD translation is
 	// NOT done for the general case because it causes an N-fold latency
@@ -2458,6 +2486,20 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 
 	h.metrics.RecordS3Operation(r.Context(), "ListObjects", bucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(len(xmlResponse)))
+}
+
+const mpuManifestSuffix = ".mpu-manifest"
+
+// filterMPUManifestObjects removes gateway-owned MPU manifest objects from
+// client-facing listings. The backend still stores them for internal reads.
+func filterMPUManifestObjects(objects []s3.ObjectInfo) []s3.ObjectInfo {
+	filtered := objects[:0]
+	for _, object := range objects {
+		if !strings.HasSuffix(object.Key, mpuManifestSuffix) {
+			filtered = append(filtered, object)
+		}
+	}
+	return filtered
 }
 
 // lookupListObjectPlaintextSize returns the plaintext size for list results
@@ -4099,7 +4141,22 @@ func (h *Handler) serveMPURangedGet(
 	}
 	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
 	if err != nil {
-		s3Err := TranslateError(err, bucket, manifestKey)
+		if isS3NotFoundError(err) {
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"bucket":      bucket,
+				"key":         key,
+				"manifestKey": manifestKey,
+			}).Error("Encrypted multipart object metadata is missing")
+			(&S3Error{
+				Code:       "InternalError",
+				Message:    "Encrypted multipart object metadata is missing; the gateway MPU manifest could not be found",
+				Resource:   r.URL.Path,
+				HTTPStatus: http.StatusInternalServerError,
+			}).WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+			return
+		}
+		s3Err := TranslateError(err, bucket, key)
 		s3Err.WriteXML(w)
 		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
@@ -4398,7 +4455,10 @@ func (h *Handler) decryptMPUObject(ctx context.Context, bucket, key string, meta
 	}
 	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("decryptMPUObject: fetch manifest %q: %w", manifestKey, err)
+		if isS3NotFoundError(err) {
+			return nil, fmt.Errorf("decryptMPUObject: %w: %s", ErrMissingMPUManifest, manifestKey)
+		}
+		return nil, fmt.Errorf("decryptMPUObject: fetch manifest: %w", err)
 	}
 	defer manifestReader.Close()
 

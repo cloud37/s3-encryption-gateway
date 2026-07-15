@@ -1889,6 +1889,57 @@ func TestDeleteObject_CleansUpMPUManifest(t *testing.T) {
 	}
 }
 
+func TestFilterMPUManifestObjects(t *testing.T) {
+	objects := []s3.ObjectInfo{
+		{Key: "regular"},
+		{Key: "nested/object"},
+		{Key: "nested/object.mpu-manifest"},
+		{Key: "user.mpu-manifest"},
+	}
+
+	filtered := filterMPUManifestObjects(objects)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered %d objects, want 2", len(filtered))
+	}
+	if filtered[0].Key != "regular" || filtered[1].Key != "nested/object" {
+		t.Fatalf("filtered keys = %#v, want regular and nested/object", filtered)
+	}
+}
+
+func TestGetObjectMissingMPUManifestReturnsDedicatedError(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, err := crypto.NewEngine([]byte("test-password-123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mockClient.PutObject(context.Background(), "test-bucket", "object", bytes.NewReader([]byte("ciphertext")), map[string]string{
+		crypto.MetaMPUEncrypted:    "true",
+		crypto.MetaFallbackPointer: "object.mpu-manifest",
+	}, nil, "", nil, "", "", "", "", "")
+	mockClient.errors["test-bucket/object.mpu-manifest/get"] = &mockAPIError{code: "NoSuchKey", message: "manifest missing"}
+
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/test-bucket/object", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "Encrypted multipart object metadata is missing") {
+		t.Fatalf("body = %q, missing dedicated error", body)
+	}
+	if strings.Contains(body, "object.mpu-manifest") {
+		t.Fatalf("body exposes internal manifest key: %q", body)
+	}
+}
+
 func TestDeleteObject_ManifestNotFoundIsNoop(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)

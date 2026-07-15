@@ -5,7 +5,9 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"net/http"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -67,6 +69,69 @@ func testEncryptedMPURoundTrip(t *testing.T, inst provider.Instance) {
 	got := get(t, gw, inst.Bucket, key)
 	if !bytes.Equal(got, want) {
 		t.Errorf("encrypted MPU round-trip: got %d bytes, want %d bytes", len(got), len(want))
+	}
+}
+
+// testEncryptedMPUManifestIsHidden verifies that the gateway-owned manifest is
+// not exposed to client-facing ListObjects responses. It then removes the
+// manifest through the raw backend to reproduce issue #217 and verifies that
+// the gateway reports missing encryption metadata for the main object.
+func testEncryptedMPUManifestIsHidden(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	vk := provider.StartValkey(ctx, t)
+	gw := harness.StartGateway(t, inst,
+		harness.WithValkeyAddr(vk.Addr),
+		harness.WithEncryptedMPUForBucket(inst.Bucket),
+	)
+
+	key := uniqueKey(t)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+	part1 := bytes.Repeat([]byte("A"), 5*1024*1024)
+	part2 := []byte("manifest-hidden-tail")
+	etag1 := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, part1)
+	etag2 := uploadPart(t, gw, inst.Bucket, key, uploadID, 2, part2)
+	completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{{1, etag1}, {2, etag2}})
+
+	resp, err := gw.HTTPClient().Get(fmt.Sprintf("%s/%s?prefix=%s", gw.URL, inst.Bucket, key))
+	if err != nil {
+		t.Fatalf("list encrypted MPU: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("list encrypted MPU: status=%d err=%v body=%s", resp.StatusCode, readErr, body)
+	}
+	if bytes.Contains(body, []byte(key+".mpu-manifest")) {
+		t.Fatalf("ListObjects exposed gateway-owned manifest %q: %s", key+".mpu-manifest", body)
+	}
+	if !bytes.Contains(body, []byte("<Key>"+key+"</Key>")) {
+		t.Fatalf("ListObjects omitted main MPU object %q: %s", key, body)
+	}
+
+	backend := newS3Client(t, inst)
+	if err := backend.DeleteObject(ctx, inst.Bucket, key+".mpu-manifest", nil); err != nil {
+		t.Fatalf("delete manifest directly from backend: %v", err)
+	}
+
+	resp, err = gw.HTTPClient().Get(objectURL(gw, inst.Bucket, key))
+	if err != nil {
+		t.Fatalf("get object after manifest deletion: %v", err)
+	}
+	body, readErr = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read missing-manifest response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("get after manifest deletion: status=%d body=%s", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte("Encrypted multipart object metadata is missing")) {
+		t.Fatalf("missing-manifest response lacks diagnostic: %s", body)
+	}
+	if bytes.Contains(body, []byte(key+".mpu-manifest")) {
+		t.Fatalf("missing-manifest response exposes internal manifest key: %s", body)
 	}
 }
 
@@ -194,7 +259,6 @@ func testEncryptedMPUAbortCleansState(t *testing.T, inst provider.Instance) {
 		t.Errorf("GET after encrypted MPU abort: status %d, want 404", resp.StatusCode)
 	}
 }
-
 
 // testEncryptedMPU_LargeObject uploads a large MPU object (80 parts × 5 MiB =
 // ~400 MiB) and downloads it back end-to-end.  This is the conformance
