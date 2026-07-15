@@ -178,6 +178,66 @@ This suite is **not run in CI** (requires Docker and takes several minutes per
 configuration). It is intended for manual performance verification and
 regression detection between versions.
 
+### Large-list enumeration benchmark (`benchmark-list`)
+
+`make benchmark-list` is a Tier 3 manual benchmark for issue #216. It compares
+direct backend `ListObjectsV2` enumeration with enumeration through the
+in-process gateway. The benchmark runs against every registered provider:
+local Testcontainers providers when Docker is available, and external
+providers when their credentials are set. It is deliberately not registered
+in the conformance suite and is not called by any CI target.
+
+Each provider runs these scenarios:
+
+| Scenario | Dataset | Translation | Purpose |
+|----------|---------|-------------|---------|
+| `warm-cache` | Uploaded through gateway | Enabled | Steady-state Valkey cache path |
+| `cold-cache` | Uploaded directly to backend | Enabled | Cache misses without HEAD fallback |
+| `fallback-head` | Uploaded directly to backend | Enabled + fallback HEAD | Legacy-object HEAD amplification |
+| `translation-disabled` | Uploaded directly to backend | Disabled | Proxy/listing baseline |
+
+The benchmark reports direct and gateway wall-clock time, object counts,
+gateway `ListObjects` and `HeadObject` operations, Valkey cache hits/misses,
+and fallback HEAD calls. A count mismatch fails the run so a slow listing is
+not confused with an incomplete listing. Results are printed via `t.Logf` and
+can optionally be written as NDJSON:
+
+```bash
+# Local providers, 1,000 objects per scenario.
+make benchmark-list
+
+# 10,000 objects, 1 KiB each, 100 repetitions of 100-object pages.
+BENCH_LIST_OBJECTS=10000 BENCH_LIST_PAGE_SIZE=100 BENCH_LIST_ROUNDS=2 \
+  BENCH_LIST_JSON_OUT=/tmp/list-benchmark.ndjson \
+  make benchmark-list
+
+# MinIO only.
+GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 \
+  GATEWAY_TEST_SKIP_SEAWEEDFS=1 GATEWAY_TEST_SKIP_EXTERNAL=1 \
+  make benchmark-list
+
+# External providers whose credentials are configured, for example B2/Wasabi.
+GATEWAY_TEST_SKIP_MINIO=1 GATEWAY_TEST_SKIP_GARAGE=1 \
+  GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 \
+  make benchmark-list
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BENCH_LIST_OBJECTS` | `1000` | Objects created for each scenario |
+| `BENCH_LIST_OBJECT_SIZE` | `1024` | Plaintext bytes per object |
+| `BENCH_LIST_PAGE_SIZE` | `1000` | `ListObjectsV2` page size, capped at 1000 |
+| `BENCH_LIST_ROUNDS` | `1` | Complete listing repetitions |
+| `BENCH_LIST_JSON_OUT` | *(empty)* | Optional NDJSON output path |
+
+External runs use the existing provider credentials documented below, such as
+`B2_ACCESS_KEY_ID` / `B2_SECRET_ACCESS_KEY` / `B2_BUCKET_NAME` and
+`WASABI_ACCESS_KEY_ID` / `WASABI_SECRET_ACCESS_KEY` / `WASABI_BUCKET_NAME`.
+Use a disposable prefix or bucket for benchmark data. Wasabi is configured
+with `CleanupPolicySkipDelete` because of its minimum storage duration.
+
 ---
 
 ## Capability bitmap reference

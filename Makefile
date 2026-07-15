@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local benchmark-list lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -339,6 +339,24 @@ benchmark-local:
 	go test -count=1 -tags=conformance,benchmark_local -v -timeout 0 \
 		-run 'TestBenchmarkLocal' ./test/conformance/...
 
+# benchmark-list — manual large-list enumeration benchmark for issue #216.
+#
+# This target is intentionally separate from every conformance target and is
+# never invoked by CI. It runs local providers by default; use
+# GATEWAY_TEST_SKIP_* variables to select a provider or set
+# GATEWAY_TEST_SKIP_EXTERNAL=1 to exclude credential-based providers.
+#
+# Tuning:
+#   BENCH_LIST_OBJECTS=1000       objects to create per scenario
+#   BENCH_LIST_OBJECT_SIZE=1024   plaintext bytes per object
+#   BENCH_LIST_PAGE_SIZE=1000     ListObjectsV2 page size
+#   BENCH_LIST_ROUNDS=1           enumeration repetitions
+#   BENCH_LIST_JSON_OUT=...       optional NDJSON result path
+benchmark-list:
+	@echo "Starting manual list enumeration benchmark (not a CI target)..."
+	go test -count=1 -tags=conformance,benchmark_list -v -timeout 0 \
+		-run '^TestBenchmarkListEnumeration$$' ./test/conformance/...
+
 # Run key rotation conformance tests (tier-2, all registered providers).
 test-rotation:
 	@echo "Running key rotation conformance tests (all registered providers)..."
@@ -564,6 +582,7 @@ help:
 	@echo "  bench-macro-<prov>   - Run soak on one provider, write macro-<prov>.json (minio|garage|rustfs|seaweedfs)"
 	@echo "  bench-baseline     - Run micro + all four macros (full V0.6-QA-1 baseline)"
 	@echo "  benchmark-local    - Full local encryption benchmark matrix (4 providers × 18 configs)"
+	@echo "  benchmark-list     - Manual large-list enumeration benchmark (local/external providers; never CI)"
 	@echo "  test-rotation      - Run key rotation conformance tests (tier-2, all providers)"
 	@echo "  test-comprehensive - Run comprehensive test suite (tier-1 + local conformance + isolation check)"
 	@echo "  test-coverage      - Run tests with HTML coverage report"
