@@ -119,7 +119,7 @@ jobs:
       # ── Build and attach binaries to the same release ───────────────────────
       - name: Set up Go
         if: steps.version_check.outputs.already_released == 'false'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
