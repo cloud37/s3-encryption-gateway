@@ -17,7 +17,7 @@ track: ""
 image:
   repository: cloud37io/s3-encryption-gateway
   pullPolicy: IfNotPresent
-  tag: "0.11.4"
+  tag: "0.11.5"
 
 imagePullSecrets: []
 nameOverride: ""

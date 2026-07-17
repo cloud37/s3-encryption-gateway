@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.5] — 2026-07-18
+
+### Added
+
+- **Large-list enumeration benchmark (issue #216):** Added a manual benchmark
+  for comparing direct backend and gateway `ListObjectsV2` performance across
+  local and configured external providers, including warm-cache, cold-cache,
+  fallback-HEAD, and translation-disabled scenarios.
+
+### Security
+
+### Fixed
+
+- **Bounded-memory ranged encrypted MPU GETs (issue #219):** Ranged reads of
+  encrypted multipart objects now decrypt and stream one AEAD chunk at a time
+  instead of buffering the complete ciphertext range and accumulated plaintext.
+  This prevents concurrent large downloads from exhausting gateway memory while
+  preserving plaintext range mapping, response headers, and authentication
+  failure handling.
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+- Updated `github.com/aws/aws-sdk-go-v2/service/s3` from v1.105.1 to v1.105.2.
+- Updated `github.com/aws/smithy-go` from v1.27.3 to v1.27.4.
+- Updated the GitHub Actions `actions/setup-go` action to v7.
+
 ## [0.11.4] — 2026-07-14
 
 Release 0.11.3 was skipped as it was built with a potential Buffer Overflow.
