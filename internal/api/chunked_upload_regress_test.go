@@ -218,6 +218,48 @@ func TestChunkedGetUsesExactSizeWhenChunkCountIsPresent(t *testing.T) {
 	}
 }
 
+func TestChunkedRangeGetOverridesStaleOriginalSize(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	plaintext := bytes.Repeat([]byte("stale-size-"), 40)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+	encryptedData, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read encrypted data: %v", err)
+	}
+	// Simulate an object whose persisted original-size metadata is inflated by
+	// exactly one AEAD tag. The backend length remains authoritative.
+	metadata[crypto.MetaOriginalSize] = strconv.Itoa(len(plaintext) + 16)
+	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
+	mockClient.PutObject(context.Background(), "test-bucket", "stale-size", bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest("GET", "/test-bucket/stale-size", nil)
+	req.Header.Set("Range", "bytes=0-")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("GET expected 206, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), plaintext) {
+		t.Fatalf("GET body mismatch: got %d bytes, want %d", len(w.Body.Bytes()), len(plaintext))
+	}
+	if got := w.Header().Get("Content-Length"); got != strconv.Itoa(len(plaintext)) {
+		t.Fatalf("GET Content-Length = %q, want %d", got, len(plaintext))
+	}
+}
+
 func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)

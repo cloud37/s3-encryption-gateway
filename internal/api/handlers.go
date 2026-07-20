@@ -991,8 +991,13 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 				if exactSize, ok := chunkedPlaintextSizeFromCiphertext(headMeta); ok {
 					plaintextSize = exactSize
 					err = nil
-					if headMeta[crypto.MetaOriginalSize] == "" {
-						derivedPlaintextSize = fmt.Sprintf("%d", exactSize)
+					// The backend ciphertext length is authoritative. Replace
+					// stale original-size metadata, but keep optimized ranges
+					// enabled when the stored value already agrees.
+					storedSize, parseErr := strconv.ParseInt(headMeta[crypto.MetaOriginalSize], 10, 64)
+					headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", exactSize)
+					if parseErr != nil || storedSize != exactSize {
+						derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
 					}
 				}
 				if err == nil {
@@ -1000,24 +1005,34 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 					start, end, err := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
 					if err == nil {
 						plaintextStart, plaintextEnd = start, end
-						// Calculate encrypted byte range for needed chunks
-						encryptedStart, encryptedEnd, err := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, start, end)
-						if err == nil {
-							encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, headMeta["Content-Length"])
-						}
-						if err == nil {
-							encryptedRange := fmt.Sprintf("bytes=%d-%d", encryptedStart, encryptedEnd)
-							backendRange = &encryptedRange
-							useRangeOptimization = true
-							h.logger.WithFields(logrus.Fields{
-								"bucket":          bucket,
-								"key":             key,
-								"plaintext_range": fmt.Sprintf("%d-%d", start, end),
-								"encrypted_range": encryptedRange,
-							}).Debug("Using optimized range request for chunked encryption")
-						} else {
-							h.logger.WithError(err).Warn("Failed to calculate encrypted range, falling back to full fetch")
+						// A range covering the complete plaintext object does not
+						// benefit from ciphertext range optimisation. Fetch and
+						// decrypt the complete object instead; this avoids making
+						// Harbor's common `bytes=0-` request depend on range-reader
+						// chunk-boundary bookkeeping.
+						if start == 0 && end == plaintextSize-1 {
 							backendRange = nil
+							useRangeOptimization = false
+						} else {
+							// Calculate encrypted byte range for needed chunks
+							encryptedStart, encryptedEnd, err := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, start, end)
+							if err == nil {
+								encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, headMeta["Content-Length"])
+							}
+							if err == nil {
+								encryptedRange := fmt.Sprintf("bytes=%d-%d", encryptedStart, encryptedEnd)
+								backendRange = &encryptedRange
+								useRangeOptimization = true
+								h.logger.WithFields(logrus.Fields{
+									"bucket":          bucket,
+									"key":             key,
+									"plaintext_range": fmt.Sprintf("%d-%d", start, end),
+									"encrypted_range": encryptedRange,
+								}).Debug("Using optimized range request for chunked encryption")
+							} else {
+								h.logger.WithError(err).Warn("Failed to calculate encrypted range, falling back to full fetch")
+								backendRange = nil
+							}
 						}
 					} else {
 						h.logger.WithError(err).Warn("Failed to parse range header, falling back to full fetch")
@@ -1129,9 +1144,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// propagate it into the GetObject metadata so that DecryptRangeOptimized and
 	// the full-object decrypt path both have access to it.
 	if derivedPlaintextSize != "" {
-		if _, already := metadata[crypto.MetaOriginalSize]; !already {
-			metadata[crypto.MetaOriginalSize] = derivedPlaintextSize
-		}
+		metadata[crypto.MetaOriginalSize] = derivedPlaintextSize
 	}
 
 	// For MPU-encrypted objects, delegate to the MPU decrypt path.
