@@ -21,9 +21,10 @@ func BucketValidationMiddleware(proxiedBucket string, logger *logrus.Logger) fun
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Allow health check and metrics endpoints
+			// Only exact system endpoints bypass bucket validation. Prefix matching
+			// would treat S3 buckets such as "metrics-tenant" as system routes.
 			path := r.URL.Path
-			if path == "/health" || path == "/ready" || path == "/live" || path == "/metrics" || strings.HasPrefix(path, "/metrics") {
+			if path == "/health" || path == "/ready" || path == "/live" || path == "/metrics" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -71,10 +72,10 @@ func BucketValidationMiddleware(proxiedBucket string, logger *logrus.Logger) fun
 					}
 					if sourceBucket != "" && sourceBucket != proxiedBucket {
 						logger.WithFields(logrus.Fields{
-							"source_bucket": sourceBucket,
+							"source_bucket":  sourceBucket,
 							"proxied_bucket": proxiedBucket,
-							"path":          path,
-							"method":        r.Method,
+							"path":           path,
+							"method":         r.Method,
 						}).Warn("Access denied: copy source bucket does not match proxied bucket")
 
 						writeBucketAccessDeniedError(w, sourceBucket, path)
@@ -109,4 +110,3 @@ func writeBucketAccessDeniedError(w http.ResponseWriter, bucket, resource string
 	w.WriteHeader(s3Err.HTTPStatus)
 	xml.NewEncoder(w).Encode(s3Err)
 }
-

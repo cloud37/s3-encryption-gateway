@@ -251,6 +251,7 @@ func TestConformance(t *testing.T) {
 				{"Auth_PresignedURL_Expired", 0, testAuth_PresignedURL_Expired},
 				{"Auth_MultiCredential", 0, testAuth_MultiCredential},
 				{"Auth_ProxiedBucketFilter", 0, testAuth_ProxiedBucketFilter},
+				{"Auth_ProxiedBucketMetricsPrefixRejected", 0, testAuth_ProxiedBucketMetricsPrefixRejected},
 
 				// V1.0-COMPAT-1 SDK/Tool compatibility smoke tests
 				{"Compat_AWSGoV2", provider.CapSDKAWSGoV2, testCompatSmoke_AWSGoV2},

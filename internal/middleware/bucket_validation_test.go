@@ -119,7 +119,6 @@ func TestBucketValidationMiddleware_AllowsHealthEndpoints(t *testing.T) {
 		"/ready",
 		"/live",
 		"/metrics",
-		"/metrics/custom",
 	}
 
 	for _, path := range paths {
@@ -130,6 +129,37 @@ func TestBucketValidationMiddleware_AllowsHealthEndpoints(t *testing.T) {
 			mw.ServeHTTP(w, req)
 			if !handler.called {
 				t.Errorf("health/metrics endpoint %q should bypass bucket validation", path)
+			}
+		})
+	}
+}
+
+// TestBucketValidationMiddleware_DeniesSystemEndpointPrefixes verifies that
+// only exact system endpoint paths bypass single-bucket authorization.
+func TestBucketValidationMiddleware_DeniesSystemEndpointPrefixes(t *testing.T) {
+	handler := &okHandler{}
+	mw := BucketValidationMiddleware("my-bucket", silentLogger())(handler)
+
+	paths := []string{
+		"/metrics/custom",
+		"/metrics-other-bucket/key",
+		"/health-other-bucket/key",
+		"/ready-other-bucket/key",
+		"/live-other-bucket/key",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			handler.called = false
+			req := httptest.NewRequest("GET", path, nil)
+			w := httptest.NewRecorder()
+			mw.ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("expected 403 for system endpoint prefix %q, got %d", path, w.Code)
+			}
+			if handler.called {
+				t.Errorf("handler should NOT be called for system endpoint prefix %q", path)
 			}
 		})
 	}

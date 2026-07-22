@@ -472,3 +472,40 @@ func testAuth_ProxiedBucketFilter(t *testing.T, inst provider.Instance) {
 		t.Fatalf("proxied-bucket other: body missing AccessDenied: %s", string(body))
 	}
 }
+
+// testAuth_ProxiedBucketMetricsPrefixRejected verifies that an authenticated
+// request cannot use a metrics-prefixed S3 bucket path to bypass the
+// proxied_bucket authorization boundary.
+func testAuth_ProxiedBucketMetricsPrefixRejected(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst,
+		harness.WithAuth(config.GatewayCredential{
+			AccessKey: testAccessKey, SecretKey: testSecretKey, Label: "test-user",
+		}),
+		harness.WithConfigMutator(func(cfg *config.Config) {
+			cfg.ProxiedBucket = inst.Bucket
+		}),
+	)
+
+	otherBucket := "metrics-" + inst.Bucket
+	key := uniqueKey(t)
+	req, err := http.NewRequest("GET", objectURL(gw, otherBucket, key), nil)
+	if err != nil {
+		t.Fatalf("metrics-prefix bypass: new request: %v", err)
+	}
+	req.Host = req.URL.Host
+	signV4Headers(t, req, testAccessKey, testSecretKey, nil)
+
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("metrics-prefix bypass: request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("metrics-prefix bypass: status %d, want 403: %s", resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), "AccessDenied") {
+		t.Fatalf("metrics-prefix bypass: body missing AccessDenied: %s", string(body))
+	}
+}
