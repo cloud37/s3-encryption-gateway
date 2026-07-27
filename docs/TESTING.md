@@ -238,6 +238,52 @@ External runs use the existing provider credentials documented below, such as
 Use a disposable prefix or bucket for benchmark data. Wasabi is configured
 with `CleanupPolicySkipDelete` because of its minimum storage duration.
 
+### Real `rclone ncdu` benchmark (`benchmark-rclone-ncdu`)
+
+`make benchmark-rclone-ncdu` runs the actual interactive `rclone ncdu` command
+inside the pinned `rclone/rclone:1.68` container. It starts with a dataset
+uploaded through the gateway, then measures the same scan against the direct
+backend and the gateway. The container is given a TTY and the benchmark exits
+`ncdu` after the configurable settle period, so this exercises rclone's real
+scan path rather than an SDK-equivalent listing loop.
+
+This benchmark is separately gated with `benchmark_rclone_ncdu`, is not part of
+`TestConformance`, and is not run in CI. It uses local Testcontainers
+providers and configured external providers in the same way as
+`benchmark-list`.
+
+```bash
+# Default: 1,000 objects in ten nested prefixes, 1 KiB each.
+make benchmark-rclone-ncdu
+
+# Larger dataset and JSON results.
+BENCH_RCLONE_NCDU_OBJECTS=10000 \
+BENCH_RCLONE_NCDU_OBJECT_SIZE=1024 \
+BENCH_RCLONE_NCDU_SETTLE=10s \
+BENCH_RCLONE_NCDU_JSON_OUT=/tmp/rclone-ncdu.ndjson \
+make benchmark-rclone-ncdu
+
+# MinIO only.
+GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 \
+  GATEWAY_TEST_SKIP_SEAWEEDFS=1 GATEWAY_TEST_SKIP_EXTERNAL=1 \
+  make benchmark-rclone-ncdu
+```
+
+The result includes direct and gateway scan durations, exit codes, configured
+object count, and the gateway's list-size cache and fallback-HEAD metrics. The
+benchmark intentionally uses objects uploaded through the gateway, so a
+non-zero fallback-HEAD count indicates a cache/configuration problem rather
+than an expected legacy-object condition.
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BENCH_RCLONE_NCDU_OBJECTS` | `1000` | Objects uploaded for the scan |
+| `BENCH_RCLONE_NCDU_OBJECT_SIZE` | `1024` | Plaintext bytes per object |
+| `BENCH_RCLONE_NCDU_SETTLE` | `5m` | Safety deadline for the ncdu scan |
+| `BENCH_RCLONE_NCDU_JSON_OUT` | *(empty)* | Optional NDJSON output path |
+
 ---
 
 ## Capability bitmap reference

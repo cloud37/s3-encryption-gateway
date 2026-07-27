@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local benchmark-list lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local benchmark-list benchmark-rclone-ncdu lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -357,6 +357,14 @@ benchmark-list:
 	go test -count=1 -tags=conformance,benchmark_list -v -timeout 0 \
 		-run '^TestBenchmarkListEnumeration$$' ./test/conformance/...
 
+# benchmark-rclone-ncdu — runs the real interactive rclone ncdu command
+# against the direct backend and the gateway. This is a manual benchmark only
+# and is never invoked by CI.
+benchmark-rclone-ncdu:
+	@echo "Starting manual rclone ncdu benchmark (not a CI target)..."
+	go test -count=1 -tags=conformance,benchmark_rclone_ncdu -v -timeout 0 \
+		-run '^TestBenchmarkRcloneNcdu$$' ./test/conformance/...
+
 # Run key rotation conformance tests (tier-2, all registered providers).
 test-rotation:
 	@echo "Running key rotation conformance tests (all registered providers)..."
@@ -583,6 +591,7 @@ help:
 	@echo "  bench-baseline     - Run micro + all four macros (full V0.6-QA-1 baseline)"
 	@echo "  benchmark-local    - Full local encryption benchmark matrix (4 providers × 18 configs)"
 	@echo "  benchmark-list     - Manual large-list enumeration benchmark (local/external providers; never CI)"
+	@echo "  benchmark-rclone-ncdu - Manual real rclone ncdu benchmark (local/external providers; never CI)"
 	@echo "  test-rotation      - Run key rotation conformance tests (tier-2, all providers)"
 	@echo "  test-comprehensive - Run comprehensive test suite (tier-1 + local conformance + isolation check)"
 	@echo "  test-coverage      - Run tests with HTML coverage report"
