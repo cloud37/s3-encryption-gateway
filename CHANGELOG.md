@@ -6,7 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.11.6] — 2026-07-27
+## [0.11.7] — 2026-07-27
+
+Version `0.11.6` was built by CI but its release and tag were removed after
+the release pipeline failed. The release was skipped because the container
+build exposed a high-severity gRPC vulnerability in `google.golang.org/grpc`
+v1.81.1; the dependency is now updated to v1.82.1 in this release.
 
 ### Added
 
