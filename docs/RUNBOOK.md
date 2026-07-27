@@ -249,6 +249,12 @@ Objects uploaded before V1.0-S3-3 was deployed are **not** auto-indexed. They
 populate naturally as they are re-uploaded or copied. To warm them via normal
 listing traffic, temporarily enable the fallback HEAD batch:
 
+> **Warning:** Do not enable `fallback_head_enabled` without a persistent
+> Valkey/KeyDB store. Without persistent cache storage, every listing starts
+> cold and can issue one `HeadObject` request per uncached object. On a large
+> bucket or a remote provider this causes severe latency and can amplify
+> per-request API or billing costs.
+
 ```yaml
 list_size_translate:
   enabled: true

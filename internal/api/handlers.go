@@ -2382,6 +2382,24 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		listResult.IsTruncated = nextPage.IsTruncated
 	}
 
+	// Bypass buckets already store plaintext bytes, so backend sizes are
+	// authoritative and no size-cache lookup or fallback HEAD is needed.
+	// Skipping the entire translation pipeline also avoids unnecessary Valkey
+	// traffic for buckets matched by disable_encryption policies.
+	if h.policyManager != nil && h.policyManager.BucketDisablesEncryption(bucket) {
+		nextMarker := ""
+		if listResult.IsTruncated && len(listResult.Objects) > 0 {
+			nextMarker = listResult.Objects[len(listResult.Objects)-1].Key
+		}
+		xmlResponse := generateListObjectsXML(bucket, prefix, delimiter, listResult.Objects, listResult.CommonPrefixes, listResult.NextContinuationToken, nextMarker, listResult.IsTruncated, int(maxKeys))
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(xmlResponse))
+		h.metrics.RecordS3Operation(r.Context(), "ListObjects", bucket, time.Since(start))
+		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(len(xmlResponse)))
+		return
+	}
+
 	// NOTE: ListObjects returns backend (ciphertext) sizes and ETags for
 	// completed single-PUT encrypted objects. Per-object HEAD translation is
 	// NOT done for the general case because it causes an N-fold latency

@@ -2740,6 +2740,36 @@ func TestListObjects_SizeCache_WarmPath(t *testing.T) {
 	assert.Equal(t, 0, mockClient.headObjectCallCount)
 }
 
+func TestListObjects_DisableEncryptionSkipsSizeTranslation(t *testing.T) {
+	handler, mockClient, _ := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
+		Enabled:                 true,
+		FallbackHeadEnabled:     true,
+		FallbackHeadConcurrency: 2,
+		FallbackHeadTimeout:     time.Second,
+	})
+	policyDir := t.TempDir()
+	policyPath := filepath.Join(policyDir, "bypass.yaml")
+	policy := []byte("id: bypass\nbuckets: [\"plain-*\"]\ndisable_encryption: true\n")
+	require.NoError(t, os.WriteFile(policyPath, policy, 0600))
+	pm := config.NewPolicyManager()
+	require.NoError(t, pm.LoadPolicies([]string{policyPath}))
+	handler.policyManager = pm
+
+	ctx := context.Background()
+	_, err := mockClient.PutObject(ctx, "plain-bucket", "key1", bytes.NewReader([]byte("plaintext")), nil, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest("GET", "/plain-bucket?max-keys=1", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "<Size>9</Size>")
+	assert.Equal(t, 0, mockClient.headObjectCallCount)
+}
+
 func TestListObjects_SizeCache_ColdMiss_FallbackDisabled(t *testing.T) {
 	handler, mockClient, _ := newListObjectsTestHandlerWithSizeCache(t, config.ListSizeTranslateConfig{
 		Enabled:                 true,
