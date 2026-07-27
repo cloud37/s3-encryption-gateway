@@ -253,6 +253,9 @@ func TestConformance(t *testing.T) {
 				{"Auth_ProxiedBucketFilter", 0, testAuth_ProxiedBucketFilter},
 				{"Auth_ProxiedBucketMetricsPrefixRejected", 0, testAuth_ProxiedBucketMetricsPrefixRejected},
 
+				// V1.0-S3-3: disable_encryption buckets already expose plaintext sizes.
+				{"ListObjects_DisableEncryption_SizeAccuracy", 0, testListObjects_DisableEncryption_SizeAccuracy},
+
 				// V1.0-COMPAT-1 SDK/Tool compatibility smoke tests
 				{"Compat_AWSGoV2", provider.CapSDKAWSGoV2, testCompatSmoke_AWSGoV2},
 				{"Compat_Boto3", provider.CapSDKBoto3, testCompatSmoke_Boto3},

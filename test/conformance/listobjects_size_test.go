@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -311,6 +313,62 @@ func testListObjectsV1_SizeAccuracy(t *testing.T, inst provider.Instance) {
 
 	t.Logf("v1-size-accuracy: listed=%d (ciphertext) head=%d get=%d (plaintext=%d)",
 		listedSize, headSize, getSize, plaintextSize)
+}
+
+// testListObjects_DisableEncryption_SizeAccuracy verifies that a bucket using
+// disable_encryption exposes its backend plaintext size through both listing
+// API versions. The size-translation path must not alter or look up these
+// already-plaintext objects.
+func testListObjects_DisableEncryption_SizeAccuracy(t *testing.T, inst provider.Instance) {
+	t.Helper()
+
+	policyDir := t.TempDir()
+	policyPath := filepath.Join(policyDir, "disable-encryption.yaml")
+	policy := fmt.Sprintf("id: conformance-disable-encryption\nbuckets: [%q]\ndisable_encryption: true\n", inst.Bucket)
+	if err := os.WriteFile(policyPath, []byte(policy), 0600); err != nil {
+		t.Fatalf("write disable_encryption policy: %v", err)
+	}
+	pm := config.NewPolicyManager()
+	if err := pm.LoadPolicies([]string{policyPath}); err != nil {
+		t.Fatalf("load disable_encryption policy: %v", err)
+	}
+
+	gw := harness.StartGateway(t, inst, harness.WithPolicyManager(pm))
+	prefix := fmt.Sprintf("disable-size-%s/", uniqueSuffix(t))
+	key := prefix + "object.txt"
+	plaintext := []byte("disable_encryption size-accuracy conformance payload")
+	wantSize := int64(len(plaintext))
+	put(t, gw, inst.Bucket, key, plaintext)
+
+	for _, listType := range []string{"", "&list-type=2"} {
+		listURL := fmt.Sprintf("%s/%s?prefix=%s%s", gw.URL, inst.Bucket, prefix, listType)
+		resp, err := gw.HTTPClient().Get(listURL)
+		if err != nil {
+			t.Fatalf("LIST %q: %v", listType, err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read LIST %q response: %v", listType, readErr)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("LIST %q returned %d: %s", listType, resp.StatusCode, string(body))
+		}
+
+		var result s3ListBucketResult
+		if err := xml.Unmarshal(body, &result); err != nil {
+			t.Fatalf("unmarshal LIST %q response: %v", listType, err)
+		}
+		if len(result.Contents) != 1 {
+			t.Fatalf("LIST %q returned %d objects, want 1", listType, len(result.Contents))
+		}
+		if result.Contents[0].Key != key {
+			t.Errorf("LIST %q returned key %q, want %q", listType, result.Contents[0].Key, key)
+		}
+		if result.Contents[0].Size != wantSize {
+			t.Errorf("LIST %q size = %d, want plaintext size %d", listType, result.Contents[0].Size, wantSize)
+		}
+	}
 }
 
 // testListObjectsV2_SizeAccuracy verifies that ListObjectsV2 returns ciphertext
@@ -726,10 +784,10 @@ func testListObjectsV2_SizeAccuracy_MultiPage(t *testing.T, inst provider.Instan
 // The test writes objects directly to the backend (bypassing the gateway) so
 // the Valkey cache starts cold. It then enables fallback_head_enabled and
 // confirms that:
-//   1. The first listing resolves correct plaintext sizes via HEAD calls.
-//   2. A second listing (same gateway, same Valkey) returns the same correct
-//      sizes from the cache with no additional HEAD calls needed — confirming
-//      the fallback self-populates the cache.
+//  1. The first listing resolves correct plaintext sizes via HEAD calls.
+//  2. A second listing (same gateway, same Valkey) returns the same correct
+//     sizes from the cache with no additional HEAD calls needed — confirming
+//     the fallback self-populates the cache.
 func testListObjects_SizeAccuracy_FallbackHead(t *testing.T, inst provider.Instance) {
 	t.Helper()
 	ctx := context.Background()
