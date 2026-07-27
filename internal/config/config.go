@@ -23,23 +23,23 @@ import (
 
 // Config holds the complete application configuration.
 type Config struct {
-	ListenAddr     string               `yaml:"listen_addr" env:"LISTEN_ADDR"`
-	LogLevel       string               `yaml:"log_level" env:"LOG_LEVEL"`
-	ProxiedBucket  string               `yaml:"proxied_bucket" env:"PROXIED_BUCKET"` // If set, only this bucket will be accessible
-	Backend        BackendConfig        `yaml:"backend"`
-	Encryption     EncryptionConfig     `yaml:"encryption"`
-	Cache          CacheConfig          `yaml:"cache"`
-	Audit          AuditConfig          `yaml:"audit"`
-	TLS            TLSConfig            `yaml:"tls"`
-	Server         ServerConfig         `yaml:"server"`
-	RateLimit      RateLimitConfig      `yaml:"rate_limit"`
-	Tracing        TracingConfig        `yaml:"tracing"`
-	Metrics        MetricsConfig        `yaml:"metrics"`
-	Logging        LoggingConfig        `yaml:"logging"`
-	Admin          AdminConfig          `yaml:"admin"`
-	Auth           AuthConfig           `yaml:"auth"`
-	PolicyFiles    []string             `yaml:"policies" env:"POLICIES"`
-	MultipartState  MultipartStateConfig    `yaml:"multipart_state"`
+	ListenAddr        string                  `yaml:"listen_addr" env:"LISTEN_ADDR"`
+	LogLevel          string                  `yaml:"log_level" env:"LOG_LEVEL"`
+	ProxiedBucket     string                  `yaml:"proxied_bucket" env:"PROXIED_BUCKET"` // If set, only this bucket will be accessible
+	Backend           BackendConfig           `yaml:"backend"`
+	Encryption        EncryptionConfig        `yaml:"encryption"`
+	Cache             CacheConfig             `yaml:"cache"`
+	Audit             AuditConfig             `yaml:"audit"`
+	TLS               TLSConfig               `yaml:"tls"`
+	Server            ServerConfig            `yaml:"server"`
+	RateLimit         RateLimitConfig         `yaml:"rate_limit"`
+	Tracing           TracingConfig           `yaml:"tracing"`
+	Metrics           MetricsConfig           `yaml:"metrics"`
+	Logging           LoggingConfig           `yaml:"logging"`
+	Admin             AdminConfig             `yaml:"admin"`
+	Auth              AuthConfig              `yaml:"auth"`
+	PolicyFiles       []string                `yaml:"policies" env:"POLICIES"`
+	MultipartState    MultipartStateConfig    `yaml:"multipart_state"`
 	ListSizeTranslate ListSizeTranslateConfig `yaml:"list_size_translate"`
 }
 
@@ -803,7 +803,6 @@ type MultipartStateConfig struct {
 	Valkey ValkeyConfig `yaml:"valkey"`
 }
 
-
 // ListSizeTranslateConfig controls how ListObjects resolves plaintext sizes for
 // encrypted objects without issuing per-object HeadObject calls to the backend.
 type ListSizeTranslateConfig struct {
@@ -838,6 +837,9 @@ type ValkeyConfig struct {
 	WriteTimeout           time.Duration `yaml:"write_timeout" env:"VALKEY_WRITE_TIMEOUT"`
 	PoolSize               int           `yaml:"pool_size" env:"VALKEY_POOL_SIZE"`
 	MinIdleConns           int           `yaml:"min_idle_conns" env:"VALKEY_MIN_IDLE_CONNS"`
+	// HealthCheckInterval controls the periodic Valkey liveness probe. Zero
+	// uses the server default of 30 seconds.
+	HealthCheckInterval time.Duration `yaml:"health_check_interval" env:"VALKEY_HEALTH_CHECK_INTERVAL"`
 	// EncryptionPasswordEnv is the name of the environment variable holding the
 	// dedicated password for at-rest encryption of multipart-upload state in
 	// Valkey. If unset, falls back to the gateway's main encryption password
@@ -1236,6 +1238,11 @@ func loadFromEnv(config *Config) {
 	if v := os.Getenv("KMS_HEALTH_CHECK_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			config.Encryption.KeyManager.HealthCheckInterval = d
+		}
+	}
+	if v := os.Getenv("VALKEY_HEALTH_CHECK_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			config.MultipartState.Valkey.HealthCheckInterval = d
 		}
 	}
 	if v := os.Getenv("COSMIAN_KMS_ENDPOINT"); v != "" {
@@ -2223,7 +2230,7 @@ func (c *Config) Validate() error {
 		}
 	}
 
-		// V0.6-OBS-1 — profiling validation.
+	// V0.6-OBS-1 — profiling validation.
 	if c.Admin.Profiling.Enabled {
 		if !c.Admin.Enabled {
 			return fmt.Errorf("admin.profiling requires admin.enabled")

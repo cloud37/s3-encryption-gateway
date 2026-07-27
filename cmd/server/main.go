@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/admin"
 	"github.com/cloud37/s3-encryption-gateway/internal/api"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
@@ -28,6 +27,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/cloud37/s3-encryption-gateway/internal/util"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
 	"go.opentelemetry.io/otel"
@@ -667,15 +667,15 @@ func main() {
 	m.SetMetadataEncryptionEnabled(metadataKey != nil)
 
 	logger.WithFields(logrus.Fields{
-		"preferred_algorithm":       cfg.Encryption.PreferredAlgorithm,
-		"supported_algorithms":      cfg.Encryption.SupportedAlgorithms,
-		"chunked_mode":              chunkedMode,
-		"chunk_size":                chunkSize,
-		"kdf_algorithm":             cfg.Encryption.KDF.Algorithm,
-		"kdf_pbkdf2_iterations":     cfg.Encryption.KDF.PBKDF2.Iterations,
-		"kdf_argon2id_time":         cfg.Encryption.KDF.Argon2id.Time,
-		"kdf_argon2id_memory":       cfg.Encryption.KDF.Argon2id.Memory,
-		"kdf_argon2id_threads":      cfg.Encryption.KDF.Argon2id.Threads,
+		"preferred_algorithm":   cfg.Encryption.PreferredAlgorithm,
+		"supported_algorithms":  cfg.Encryption.SupportedAlgorithms,
+		"chunked_mode":          chunkedMode,
+		"chunk_size":            chunkSize,
+		"kdf_algorithm":         cfg.Encryption.KDF.Algorithm,
+		"kdf_pbkdf2_iterations": cfg.Encryption.KDF.PBKDF2.Iterations,
+		"kdf_argon2id_time":     cfg.Encryption.KDF.Argon2id.Time,
+		"kdf_argon2id_memory":   cfg.Encryption.KDF.Argon2id.Memory,
+		"kdf_argon2id_threads":  cfg.Encryption.KDF.Argon2id.Threads,
 	}).Info("Encryption configuration")
 
 	// V1.0-OBS-1 G5: set KDF algorithm active gauge at startup.
@@ -780,6 +780,13 @@ func main() {
 		}
 		handler.WithMPUStateStore(mpuStore)
 		m.SetMPUValkeyInsecure(!cfg.MultipartState.Valkey.TLS.Enabled)
+		defer func() {
+			if err := mpuStore.Close(); err != nil {
+				logger.WithError(err).Warn("Failed to close MPU Valkey state store cleanly")
+			}
+		}()
+		stopValkeyHC := mpupkg.StartHealthCheck(context.Background(), mpuStore, cfg.MultipartState.Valkey.HealthCheckInterval, m.SetMPUValkeyUp)
+		defer stopValkeyHC()
 		logger.WithField("addr", cfg.MultipartState.Valkey.Addr).Info("MPU Valkey state store initialised")
 	}
 

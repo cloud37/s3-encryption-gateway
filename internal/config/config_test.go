@@ -150,6 +150,7 @@ auth:
 	t.Setenv("VALKEY_INSECURE_ALLOW_PLAINTEXT", "false")
 	t.Setenv("VALKEY_TTL_SECONDS", "86400")
 	t.Setenv("VALKEY_POOL_SIZE", "32")
+	t.Setenv("VALKEY_HEALTH_CHECK_INTERVAL", "17s")
 
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
@@ -179,6 +180,9 @@ auth:
 	}
 	if cfg.MultipartState.Valkey.TTLSeconds != 86400 {
 		t.Errorf("expected TTLSeconds 86400, got %d", cfg.MultipartState.Valkey.TTLSeconds)
+	}
+	if cfg.MultipartState.Valkey.HealthCheckInterval != 17*time.Second {
+		t.Errorf("expected HealthCheckInterval 17s, got %s", cfg.MultipartState.Valkey.HealthCheckInterval)
 	}
 	if cfg.MultipartState.Valkey.PoolSize != 32 {
 		t.Errorf("expected PoolSize 32, got %d", cfg.MultipartState.Valkey.PoolSize)
@@ -1020,10 +1024,10 @@ func TestAdminProfilingConfig_Validate_OutOfRangeMaxProfileSeconds(t *testing.T)
 		secs    int
 		wantErr bool
 	}{
-		{0, true},   // below minimum
-		{601, true}, // above maximum
-		{1, false},  // minimum — OK
-		{60, false}, // typical — OK
+		{0, true},    // below minimum
+		{601, true},  // above maximum
+		{1, false},   // minimum — OK
+		{60, false},  // typical — OK
 		{600, false}, // maximum — OK
 	}
 
@@ -2194,11 +2198,11 @@ unknown_field: "value"
 
 func TestMetricsAddr_Validation(t *testing.T) {
 	tests := []struct {
-		name        string
-		metricsAddr string
-		adminAddr   string
+		name         string
+		metricsAddr  string
+		adminAddr    string
 		adminEnabled bool
-		wantErr     string
+		wantErr      string
 	}{
 		{
 			name:        "empty metrics addr is valid",
@@ -2365,8 +2369,6 @@ auth:
 		t.Errorf("Argon2id.Threads = %d, want %d", cfg.Encryption.KDF.Argon2id.Threads, 2)
 	}
 }
-
-
 
 func TestConfig_Validate_Argon2id_BadParams(t *testing.T) {
 	tests := []struct {
@@ -2621,5 +2623,3 @@ func TestMetadataEncryptionKey_BothSet(t *testing.T) {
 		t.Errorf("expected 'mutually exclusive' error, got: %v", err)
 	}
 }
-
-
