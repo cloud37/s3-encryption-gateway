@@ -6,6 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.6] — 2026-07-27
+
+### Added
+
+- **Real rclone ncdu benchmark (issue #216):** Added a manually-run,
+  TTY-backed benchmark that executes the real `rclone ncdu` client against
+  both the direct backend and the gateway. It records scan duration, object
+  counts, and size-cache metrics across registered providers, with optional
+  NDJSON output. The benchmark is isolated behind the
+  `conformance,benchmark_rclone_ncdu` build tags and is documented in
+  `docs/TESTING.md`.
+
+- **Disable-encryption listing conformance coverage (issue #216):** Added a
+  provider-agnostic Tier 2 test verifying that both ListObjects v1 and
+  ListObjectsV2 expose the exact plaintext size for objects in a bucket using
+  `disable_encryption`.
+
+### Security
+
+- **System endpoint prefix authorization:** Requests to paths such as
+  `/metrics-tenant/object` no longer bypass single-bucket authorization. Only
+  exact health, readiness, liveness, and metrics endpoint paths are treated as
+  system endpoints.
+
+### Fixed
+
+- **Full-object encrypted range reads:** Requests covering the complete
+  plaintext object now bypass ciphertext range optimization and use the full
+  fetch/decrypt path. Backend ciphertext length is treated as authoritative
+  when persisted plaintext-size metadata is stale, preventing range-reader
+  failures for common `bytes=0-` requests.
+
+- **AWS chunked encrypted multipart uploads (issue #228):** `UploadPart` now
+  decodes `STREAMING-*` AWS chunked request bodies before both encrypted and
+  plaintext multipart processing. This prevents chunk framing from being
+  interpreted as payload and avoids encrypted parts being reduced to AEAD
+  overhead only. Added encrypted, plaintext, and malformed-body regression
+  coverage.
+
+- **Continuous Valkey health metric (issue #232):**
+  `gateway_mpu_valkey_up` now receives an immediate startup probe and periodic
+  health updates, including failure and recovery transitions. The probe has a
+  one-second timeout, an idempotent shutdown path, and a configurable
+  `VALKEY_HEALTH_CHECK_INTERVAL` with a 30-second default.
+
+- **Bypass-bucket listing efficiency (issue #216):** ListObjects now skips
+  size-cache lookups, MPU manifest checks, and fallback `HeadObject` requests
+  for buckets matched by `disable_encryption`, because their backend sizes are
+  already plaintext sizes. The runbook now explicitly warns that enabling
+  fallback HEADs without persistent Valkey or KeyDB can cause one backend HEAD
+  request per uncached object on every cold listing.
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+- Updated `github.com/aws/aws-sdk-go-v2` and related modules.
+- Updated `github.com/ovh/kmip-go` to v0.9.2.
+- Updated `github.com/prometheus/client_golang` to v1.24.1.
+- Updated the Helm Valkey dependency to approximately v0.11.0.
+- Updated the GitHub Actions `actions/setup-python` action to v7.
+
 ## [0.11.5] — 2026-07-18
 
 ### Added
