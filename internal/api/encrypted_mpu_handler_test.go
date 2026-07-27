@@ -1337,6 +1337,78 @@ func TestHandleUploadPart_Success(t *testing.T) {
 	}
 }
 
+func TestHandleUploadPart_AWSChunkedEncrypted(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "chunked-enc-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("POST", "/chunked-enc-bucket/test-key?uploads=", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	uploadID := extractUploadID(t, w.Body.String())
+
+	plaintext := []byte("hello encrypted multipart chunked upload")
+	body := fmt.Sprintf("%x;chunk-signature=first\r\n%s\r\n0;chunk-signature=final\r\n", len(plaintext), plaintext)
+	req = httptest.NewRequest("PUT", "/chunked-enc-bucket/test-key?partNumber=1&uploadId="+uploadID, strings.NewReader(body))
+	req.Header.Set("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	req.Header.Set("x-amz-decoded-content-length", strconv.Itoa(len(plaintext)))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	partKey := fmt.Sprintf("chunked-enc-bucket|test-key|%s|1", uploadID)
+	ciphertext := mockClient.parts[partKey]
+	if len(ciphertext) == 0 {
+		t.Fatal("expected encrypted part to be stored")
+	}
+	state, err := handler.mpuStateStore.Get(context.Background(), uploadID)
+	if err != nil {
+		t.Fatalf("get MPU state: %v", err)
+	}
+	if state.Parts[0].PlainLen != int64(len(plaintext)) {
+		t.Fatalf("stored plaintext length = %d, want %d", state.Parts[0].PlainLen, len(plaintext))
+	}
+}
+
+func TestHandleUploadPart_AWSChunkedPlaintext(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "chunked-plain-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	plaintext := []byte("hello plaintext multipart chunked upload")
+	body := fmt.Sprintf("%x\r\n%s\r\n0\r\n", len(plaintext), plaintext)
+	req := httptest.NewRequest("PUT", "/chunked-plain-bucket/test-key?partNumber=1&uploadId=unregistered", strings.NewReader(body))
+	req.Header.Set("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	req.Header.Set("x-amz-decoded-content-length", strconv.Itoa(len(plaintext)))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	partKey := "chunked-plain-bucket|test-key|unregistered|1"
+	if got := string(mockClient.parts[partKey]); got != string(plaintext) {
+		t.Fatalf("stored plaintext = %q, want %q", got, plaintext)
+	}
+}
+
+func TestHandleUploadPart_AWSChunkedMalformedBody(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "chunked-invalid-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("PUT", "/chunked-invalid-bucket/test-key?partNumber=1&uploadId=unregistered", strings.NewReader("invalid\r\nbody\r\n0\r\n"))
+	req.Header.Set("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	req.Header.Set("x-amz-decoded-content-length", "4")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Fatal("malformed AWS chunked body must not be accepted")
+	}
+}
+
 func TestHandleCompleteMultipartUpload_Success(t *testing.T) {
 	handler, _, _ := newMPUTestHandler(t, "phaseC-*")
 	router := mux.NewRouter()

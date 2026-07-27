@@ -3550,9 +3550,22 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decode AWS streaming payloads before either MPU path. The chunk framing and
+	// signatures are transport data, not part of the plaintext to store.
+	var inputReader io.Reader = r.Body
+	contentSha256 := r.Header.Get("x-amz-content-sha256")
+	if strings.HasPrefix(contentSha256, "STREAMING-") {
+		inputReader = NewAwsChunkedReader(r.Body)
+		h.logger.WithFields(logrus.Fields{
+			"bucket": bucket,
+			"key":    key,
+			"mode":   contentSha256,
+		}).Debug("Detected AWS Chunked MPU upload, decoding stream before processing")
+	}
+
 	// Default: no encryption layer added here (plaintext parts per ADR 0002, or
 	// encrypted per-upload DEK below when the upload has a Valkey state record).
-	var encryptedReader io.Reader = r.Body
+	var encryptedReader io.Reader = inputReader
 	var contentLengthPtr *int64
 	// encMPUState is non-nil only for encrypted MPU parts; used after UploadPart
 	// to record the PartRecord without a second Valkey round-trip.
@@ -3607,7 +3620,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 
 		// Pass the pre-fetched state to avoid a second Valkey round-trip inside encryptMPUPart.
 		encryptStart := time.Now()
-		encReader, encLen, err := h.encryptMPUPartWithState(ctx, bucket, uploadID, int32(partNumber), r.Body, plainLen, uploadState)
+		encReader, encLen, err := h.encryptMPUPartWithState(ctx, bucket, uploadID, int32(partNumber), inputReader, plainLen, uploadState)
 		encMPUEncryptDuration = time.Since(encryptStart)
 		if err != nil {
 			h.logger.WithError(err).WithFields(logrus.Fields{
@@ -3681,7 +3694,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		// the AWS SDK's retry behaviour.
 		// V0.6-PERF-1 Phase D: use pooled seekable wrapper instead of io.ReadAll.
 		maxBuf := effectiveMaxPartBuffer(h.config)
-		sb, sbErr := s3.NewSeekableBody(r.Body, maxBuf)
+		sb, sbErr := s3.NewSeekableBody(inputReader, maxBuf)
 		if sbErr != nil {
 			h.logger.WithError(sbErr).Error("Failed to read multipart upload part")
 			code := "InternalError"
