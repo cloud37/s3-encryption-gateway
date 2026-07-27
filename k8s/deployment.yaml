@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: gateway
-        image: cloud37io/s3-encryption-gateway:0.11.6
+        image: cloud37io/s3-encryption-gateway:0.11.7
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
