@@ -365,7 +365,38 @@ export COSMIAN_KMS_KEYS="your-key-id:1"
 - Requires `ca_cert`, `client_cert`, and `client_key`
 - Not fully tested in CI — use with caution
 
-See [`docs/KMS_COMPATIBILITY.md`](docs/KMS_COMPATIBILITY.md) for detailed documentation. AWS KMS and Vault Transit adapters are on the roadmap.
+See [`docs/KMS_COMPATIBILITY.md`](docs/KMS_COMPATIBILITY.md) for detailed documentation.
+
+#### OpenBao / HashiCorp Vault Transit KMS
+
+The gateway supports envelope encryption through the Transit secrets engine in
+[OpenBao](https://openbao.org/) or HashiCorp Vault. The KEK remains
+non-exportable in the KMS, while the gateway sends each per-object DEK to the
+Transit engine for wrapping and unwrapping. The adapter supports token,
+AppRole, and Kubernetes authentication, TLS, health checks, and key rotation.
+
+The provider can be selected as `openbao`, `openbao-transit`, `vault`, or
+`vault-transit` because OpenBao and Vault expose the same Transit API.
+
+```yaml
+encryption:
+  key_manager:
+    enabled: true
+    provider: openbao
+    openbao:
+      address: "https://bao.example.com:8200"
+      transit_path: transit
+      key_name: s3gw-dek
+      auth:
+        method: kubernetes
+        role: s3-encryption-gateway
+      tls:
+        ca_cert: /etc/ssl/bao-ca.pem
+```
+
+See the [KMS Compatibility Guide](docs/KMS_COMPATIBILITY.md#openbao--vault-transit-adapter)
+for server setup, policy requirements, authentication options, and rotation
+guidance. AWS KMS remains on the roadmap.
 
 ### Compression
 
@@ -949,7 +980,8 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 ### v1.0
 
 - **AWS KMS adapter** — native envelope encryption with AWS-managed keys
-- **HashiCorp Vault Transit** — key management via Vault's Transit secrets engine
+- **OpenBao / HashiCorp Vault Transit** — supported KMS adapter for envelope encryption,
+  with token, AppRole, and Kubernetes authentication, health checks, and key rotation
 
 ### Shipped in previous versions
 
@@ -988,7 +1020,7 @@ We welcome contributions! Please see [`docs/DEVELOPMENT_GUIDE.md`](docs/DEVELOPM
 
 ### Areas Where We'd Love Help
 
-- **Additional KMS adapters** — AWS KMS, Vault Transit, Azure Key Vault, GCP Cloud KMS
+- **Additional KMS adapters** — AWS KMS, Azure Key Vault, GCP Cloud KMS
 - **Backend testing** — testing with more S3-compatible storage providers
 - **Interop matrix for encrypted multipart uploads** — verify AWS CLI, boto3, `aws-sdk-go-v2`, `minio-go` all round-trip correctly at 1 MiB / 8 MiB / 100 MiB / 500 MiB payload sizes against real backends
 - **Zero-copy streaming encrypt/decrypt** — currently `UploadPart` buffers one part at a time via `io.ReadAll` (V0.6-PERF-1 follow-up)
