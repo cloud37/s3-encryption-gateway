@@ -9,6 +9,38 @@ import (
 	"testing"
 )
 
+func TestEngine_StandardObjectMetadataRoundTrip(t *testing.T) {
+	engine, err := NewEngineWithChunking([]byte("metadata-round-trip-password"), "", nil, true, DefaultChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := map[string]string{
+		"Content-Type":        "text/plain",
+		"Cache-Control":       "max-age=3600",
+		"Content-Disposition": `attachment; filename="test.txt"`,
+	}
+	ciphertext, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("metadata")), original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, restored, err := engine.Decrypt(context.Background(), ciphertext, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := io.ReadAll(plain); string(got) != "metadata" {
+		t.Fatalf("plaintext mismatch: %q", got)
+	}
+	for key, want := range map[string]string{
+		"Content-Type":        "text/plain",
+		"Cache-Control":       original["Cache-Control"],
+		"Content-Disposition": original["Content-Disposition"],
+	} {
+		if restored[key] != want {
+			t.Errorf("%s = %q, want %q", key, restored[key], want)
+		}
+	}
+}
+
 func TestNewEngine(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -395,7 +427,6 @@ func TestEngine_OriginalETagPreservation(t *testing.T) {
 		t.Errorf("Decrypt() data mismatch")
 	}
 }
-
 
 func TestEncryptDecrypt_DefaultIterations(t *testing.T) {
 	eng, err := NewEngineWithOpts([]byte("test-password-12345"))

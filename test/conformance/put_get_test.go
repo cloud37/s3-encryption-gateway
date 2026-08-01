@@ -248,6 +248,9 @@ func testMetadataRoundTrip(t *testing.T, inst provider.Instance) {
 	req, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, key), bytes.NewReader(data))
 	req.Header.Set("x-amz-meta-test-key", "test-value")
 	req.Header.Set("x-amz-meta-another", "another-val")
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Cache-Control", "max-age=3600")
+	req.Header.Set("Content-Disposition", `attachment; filename="metadata.txt"`)
 	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
 		t.Fatalf("PUT with metadata: %v", err)
@@ -274,5 +277,31 @@ func testMetadataRoundTrip(t *testing.T, inst provider.Instance) {
 	io.Copy(io.Discard, resp2.Body)
 	if v := resp2.Header.Get("x-amz-meta-test-key"); v != "test-value" {
 		t.Errorf("HEAD x-amz-meta-test-key = %q, want %q", v, "test-value")
+	}
+	for header, want := range map[string]string{
+		"Content-Type":        "text/plain",
+		"Cache-Control":       "max-age=3600",
+		"Content-Disposition": `attachment; filename="metadata.txt"`,
+	} {
+		if got := resp2.Header.Get(header); got != want {
+			t.Errorf("HEAD %s = %q, want %q", header, got, want)
+		}
+	}
+
+	getReq, _ := http.NewRequest("GET", objectURL(gw, inst.Bucket, key), nil)
+	getResp, err := gw.HTTPClient().Do(getReq)
+	if err != nil {
+		t.Fatalf("GET metadata headers: %v", err)
+	}
+	defer getResp.Body.Close()
+	io.Copy(io.Discard, getResp.Body)
+	for header, want := range map[string]string{
+		"Content-Type":        "text/plain",
+		"Cache-Control":       "max-age=3600",
+		"Content-Disposition": `attachment; filename="metadata.txt"`,
+	} {
+		if got := getResp.Header.Get(header); got != want {
+			t.Errorf("GET %s = %q, want %q", header, got, want)
+		}
 	}
 }

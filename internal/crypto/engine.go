@@ -44,6 +44,8 @@ const (
 	MetaKMSKeyID             = "x-amz-meta-encryption-kms-id"
 	MetaKMSProvider          = "x-amz-meta-encryption-kms-provider"
 	MetaContentType          = "x-amz-meta-encryption-content-type"
+	MetaCacheControl         = "x-amz-meta-encryption-cache-control"
+	MetaContentDisposition   = "x-amz-meta-encryption-content-disposition"
 	// MetaKDFParams stores the KDF algorithm and parameters used to derive the
 	// per-object encryption key. Format: "pbkdf2-sha256:<iterations>" or
 	// "argon2id:<time>:<memory_kib>:<threads>".
@@ -528,6 +530,14 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	if contentType != "" {
 		encMetadata[MetaContentType] = contentType
 	}
+	if metadata != nil {
+		if value := metadata["Cache-Control"]; value != "" {
+			encMetadata[MetaCacheControl] = value
+		}
+		if value := metadata["Content-Disposition"]; value != "" {
+			encMetadata[MetaContentDisposition] = value
+		}
+	}
 	if envelope != nil {
 		encMetadata[MetaKeyVersion] = fmt.Sprintf("%d", envelope.KeyVersion)
 		if envelope.KeyID != "" {
@@ -843,6 +853,15 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 		}
 		decMetadata[k] = v
 	}
+	if v := expandedMetadata[MetaContentType]; v != "" {
+		decMetadata["Content-Type"] = v
+	}
+	if v := expandedMetadata[MetaCacheControl]; v != "" {
+		decMetadata["Cache-Control"] = v
+	}
+	if v := expandedMetadata[MetaContentDisposition]; v != "" {
+		decMetadata["Content-Disposition"] = v
+	}
 
 	// Restore original size if available
 	// The ciphertext was just read, so its length is more authoritative than
@@ -910,6 +929,14 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	}
 	if originalETag != "" {
 		encMetadata[MetaOriginalETag] = originalETag
+	}
+	if metadata != nil {
+		if value := metadata["Cache-Control"]; value != "" {
+			encMetadata[MetaCacheControl] = value
+		}
+		if value := metadata["Content-Disposition"]; value != "" {
+			encMetadata[MetaContentDisposition] = value
+		}
 	}
 	// Add chunked-specific metadata
 	encMetadata[MetaChunkedFormat] = "true"
@@ -1237,6 +1264,12 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 	// Preserve MetaContentType in minimal headers for AAD reconstruction.
 	if ct := fullMetadata[MetaContentType]; ct != "" {
 		minimalMetadata[MetaContentType] = ct
+	}
+	if value := fullMetadata[MetaCacheControl]; value != "" {
+		minimalMetadata[MetaCacheControl] = value
+	}
+	if value := fullMetadata[MetaContentDisposition]; value != "" {
+		minimalMetadata[MetaContentDisposition] = value
 	}
 
 	return streamingReader, minimalMetadata, nil
@@ -1576,6 +1609,15 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 		}
 		decMetadata[k] = v
 	}
+	if v := expandedMetadata[MetaContentType]; v != "" {
+		decMetadata["Content-Type"] = v
+	}
+	if v := expandedMetadata[MetaCacheControl]; v != "" {
+		decMetadata["Cache-Control"] = v
+	}
+	if v := expandedMetadata[MetaContentDisposition]; v != "" {
+		decMetadata["Content-Disposition"] = v
+	}
 
 	// Set Content-Length to the range size
 	rangeSize := plaintextEnd - plaintextStart + 1
@@ -1698,6 +1740,12 @@ func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[
 	// reconstruct AAD without falling back to the S3 Content-Type header.
 	if ct := fullMetadata[MetaContentType]; ct != "" {
 		minimalMetadata[MetaContentType] = ct
+	}
+	if value := fullMetadata[MetaCacheControl]; value != "" {
+		minimalMetadata[MetaCacheControl] = value
+	}
+	if value := fullMetadata[MetaContentDisposition]; value != "" {
+		minimalMetadata[MetaContentDisposition] = value
 	}
 
 	return bytes.NewReader(ciphertext), minimalMetadata, nil
@@ -1947,6 +1995,8 @@ func IsEncryptionMetadata(key string) bool {
 		key == MetaOriginalSize ||
 		key == MetaOriginalETag ||
 		key == MetaContentType ||
+		key == MetaCacheControl ||
+		key == MetaContentDisposition ||
 		key == MetaChunkedFormat ||
 		key == MetaChunkSize ||
 		key == MetaChunkCount ||

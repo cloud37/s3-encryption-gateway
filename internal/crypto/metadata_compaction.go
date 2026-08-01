@@ -98,6 +98,12 @@ func (c *MetadataCompactor) compactEncryptionMetadata(metadata map[string]string
 		if v := metadata[MetaContentType]; v != "" {
 			compacted["x-amz-meta-ct"] = v // content type
 		}
+		if v := metadata[MetaCacheControl]; v != "" {
+			compacted["x-amz-meta-ccache"] = v // cache control
+		}
+		if v := metadata[MetaContentDisposition]; v != "" {
+			compacted["x-amz-meta-cdisp"] = v // content disposition
+		}
 
 		// Chunked encryption metadata
 		if v := metadata[MetaChunkedFormat]; v != "" {
@@ -171,6 +177,12 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 		}
 		if v := metadata["x-amz-meta-ct"]; v != "" {
 			expanded[MetaContentType] = v
+		}
+		if v := metadata["x-amz-meta-ccache"]; v != "" {
+			expanded[MetaCacheControl] = v
+		}
+		if v := metadata["x-amz-meta-cdisp"]; v != "" {
+			expanded[MetaContentDisposition] = v
 		}
 		if v := metadata["x-amz-meta-c"]; v != "" {
 			expanded[MetaChunkedFormat] = v

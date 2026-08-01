@@ -670,7 +670,7 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 		}
 		// Add decrypted metadata
 		for k, v := range decMetadata {
-			if strings.HasPrefix(k, "x-amz-meta-") {
+			if strings.HasPrefix(k, "x-amz-meta-") || isStandardMetadata(k) {
 				w.Header().Set(k, v)
 			}
 		}
@@ -1690,6 +1690,12 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream" // Default to match MinIO's behavior
 	}
 	metadata["Content-Type"] = contentType
+	if cacheControl := r.Header.Get("Cache-Control"); cacheControl != "" {
+		metadata[crypto.MetaCacheControl] = cacheControl
+	}
+	if contentDisposition := r.Header.Get("Content-Disposition"); contentDisposition != "" {
+		metadata[crypto.MetaContentDisposition] = contentDisposition
+	}
 
 	// Get encryption engine for this bucket
 	engine, err := h.getEncryptionEngine(bucket)
@@ -1981,6 +1987,20 @@ func isStandardMetadata(key string) bool {
 	return standardHeaders[key]
 }
 
+// restoreEncryptedObjectHeaders maps standard object headers stored inside the
+// encrypted metadata envelope back to the S3 response header names.
+func restoreEncryptedObjectHeaders(dst, encryptedMetadata map[string]string) {
+	if value := encryptedMetadata[crypto.MetaContentType]; value != "" {
+		dst["Content-Type"] = value
+	}
+	if value := encryptedMetadata[crypto.MetaCacheControl]; value != "" {
+		dst["Cache-Control"] = value
+	}
+	if value := encryptedMetadata[crypto.MetaContentDisposition]; value != "" {
+		dst["Content-Disposition"] = value
+	}
+}
+
 // handleDeleteObject handles DELETE object requests.
 func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -2134,6 +2154,7 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 			filteredMetadata[k] = v
 		}
 	}
+	restoreEncryptedObjectHeaders(filteredMetadata, metadata)
 
 	// Restore original plaintext size if available.
 	// For chunked objects, derive from the backend ciphertext length first. The
