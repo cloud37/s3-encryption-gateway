@@ -4991,6 +4991,10 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	// decrypted via decryptMPUObject. Standard single-PUT encrypted objects are
 	// handled by the engine's Decrypt method.
 	var decryptedReader io.Reader
+	// sourceMetadata contains the client-visible metadata recovered from the
+	// plaintext object. Encrypted backends expose only the ciphertext headers,
+	// so the decrypt result is authoritative for standard object metadata.
+	sourceMetadata := srcMetadata
 	if srcMetadata[crypto.MetaMPUEncrypted] == "true" {
 		decryptedReader, err = h.decryptMPUObject(ctx, srcBucket, srcKey, srcMetadata, srcReader, s3Client)
 		if err != nil {
@@ -5012,7 +5016,8 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		// V0.6-PERF-1 Phase C: pass srcReader directly to Decrypt — the engine
 		// already handles buffering for legacy AEAD and streams for chunked.
 		// The intermediate decryptedData []byte allocation is eliminated here.
-		decryptedReader, _, err = srcEngine.Decrypt(r.Context(), srcReader, srcMetadata)
+		var decryptedMetadata map[string]string
+		decryptedReader, decryptedMetadata, err = srcEngine.Decrypt(r.Context(), srcReader, srcMetadata)
 		if err != nil {
 			h.logger.WithError(err).Error("Failed to decrypt source object for copy")
 			s3Err := &S3Error{
@@ -5024,6 +5029,11 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 			s3Err.WriteXML(w)
 			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 			return
+		}
+		for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
+			if value := decryptedMetadata[key]; value != "" {
+				sourceMetadata[key] = value
+			}
 		}
 	}
 
@@ -5044,7 +5054,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	// does not override it, matching S3's default metadata-directive behavior.
 	for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
 		if _, overridden := dstMetadata[key]; !overridden {
-			if value := srcMetadata[key]; value != "" {
+			if value := sourceMetadata[key]; value != "" {
 				dstMetadata[key] = value
 			}
 		}
