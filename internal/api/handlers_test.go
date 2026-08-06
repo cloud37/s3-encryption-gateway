@@ -1864,7 +1864,7 @@ func TestDeleteObject_CleansUpMPUManifest(t *testing.T) {
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with primary object AND its MPU manifest
-	mockClient.PutObject(context.Background(), "test-bucket", "test-key", bytes.NewReader([]byte("test data")), nil, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "test-key", bytes.NewReader([]byte("test data")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
 	mockClient.PutObject(context.Background(), "test-bucket", "test-key.mpu-manifest", bytes.NewReader([]byte("manifest data")), nil, nil, "", nil, "", "", "", "", "")
 
 	router := mux.NewRouter()
@@ -1949,8 +1949,8 @@ func TestDeleteObject_ManifestNotFoundIsNoop(t *testing.T) {
 	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
-	// Pre-populate with primary object only (NO manifest)
-	mockClient.PutObject(context.Background(), "test-bucket", "test-key", bytes.NewReader([]byte("test data")), nil, nil, "", nil, "", "", "", "", "")
+	// Pre-populate with an MPU-marked primary object only (NO manifest).
+	mockClient.PutObject(context.Background(), "test-bucket", "test-key", bytes.NewReader([]byte("test data")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
 
 	// Simulate NoSuchKey for the manifest delete
 	mockClient.errors["test-bucket/test-key.mpu-manifest/delete"] = &mockAPIError{code: "NoSuchKey", message: "not found"}
@@ -1970,6 +1970,30 @@ func TestDeleteObject_ManifestNotFoundIsNoop(t *testing.T) {
 	_, _, err := mockClient.GetObject(context.Background(), "test-bucket", "test-key", nil, nil)
 	if err == nil {
 		t.Error("primary object should have been deleted")
+	}
+}
+
+func TestDeleteObject_NonMPUDoesNotProbeOrDeleteManifest(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+	mockClient.PutObject(context.Background(), "test-bucket", "test-key", bytes.NewReader([]byte("test data")), nil, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "test-key.mpu-manifest", bytes.NewReader([]byte("manifest")), nil, nil, "", nil, "", "", "", "", "")
+	mockClient.errors["test-bucket/test-key.mpu-manifest/delete"] = &mockAPIError{code: "unexpected", message: "manifest must not be deleted"}
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest("DELETE", "/test-bucket/test-key", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	if _, _, err := mockClient.GetObject(context.Background(), "test-bucket", "test-key.mpu-manifest", nil, nil); err != nil {
+		t.Fatalf("non-MPU manifest was removed: %v", err)
 	}
 }
 
@@ -2013,8 +2037,8 @@ func TestDeleteObjects_CleansUpMPUManifests(t *testing.T) {
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with objects AND their manifests
-	mockClient.PutObject(context.Background(), "test-bucket", "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
-	mockClient.PutObject(context.Background(), "test-bucket", "key2", bytes.NewReader([]byte("data2")), nil, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "key1", bytes.NewReader([]byte("data1")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "key2", bytes.NewReader([]byte("data2")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
 	mockClient.PutObject(context.Background(), "test-bucket", "key1.mpu-manifest", bytes.NewReader([]byte("manifest1")), nil, nil, "", nil, "", "", "", "", "")
 	mockClient.PutObject(context.Background(), "test-bucket", "key2.mpu-manifest", bytes.NewReader([]byte("manifest2")), nil, nil, "", nil, "", "", "", "", "")
 
@@ -2059,7 +2083,7 @@ func TestDeleteObjects_ManifestNotFoundIsNoop(t *testing.T) {
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with primary objects only (NO manifests)
-	mockClient.PutObject(context.Background(), "test-bucket", "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "key1", bytes.NewReader([]byte("data1")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -2088,8 +2112,8 @@ func TestDeleteObjects_PartialManifestCleanupFailure(t *testing.T) {
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with objects AND their manifests
-	mockClient.PutObject(context.Background(), "test-bucket", "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
-	mockClient.PutObject(context.Background(), "test-bucket", "key2", bytes.NewReader([]byte("data2")), nil, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "key1", bytes.NewReader([]byte("data1")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
+	mockClient.PutObject(context.Background(), "test-bucket", "key2", bytes.NewReader([]byte("data2")), map[string]string{crypto.MetaMPUEncrypted: "true"}, nil, "", nil, "", "", "", "", "")
 	mockClient.PutObject(context.Background(), "test-bucket", "key1.mpu-manifest", bytes.NewReader([]byte("manifest1")), nil, nil, "", nil, "", "", "", "", "")
 	mockClient.PutObject(context.Background(), "test-bucket", "key2.mpu-manifest", bytes.NewReader([]byte("manifest2")), nil, nil, "", nil, "", "", "", "", "")
 

@@ -63,6 +63,7 @@ func TestConformance(t *testing.T) {
 				{"ListObjects_SizeAccuracy_CacheCoherence", provider.CapSizeTranslation, testListObjects_SizeAccuracy_CacheCoherence},
 				{"DeleteObject", 0, testDeleteObject},
 				{"DeleteObjects", provider.CapBatchDelete, testDeleteObjects},
+				{"DeleteVersionedEncryptedMPU", provider.CapVersioning, testDeleteVersionedEncryptedMPU},
 				{"CopyObject", 0, testCopyObject},
 				{"RangedRead", 0, testRangedRead},
 				{"RangedRead_CrossChunk", 0, testRangedRead_CrossChunk},

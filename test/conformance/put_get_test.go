@@ -4,6 +4,7 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"fmt"
@@ -12,6 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
@@ -203,6 +207,75 @@ func testDeleteObjects(t *testing.T, inst provider.Instance) {
 			t.Errorf("GET %q after batch delete returned %d, want 404", k, r.StatusCode)
 		}
 	}
+}
+
+// testDeleteVersionedEncryptedMPU verifies that deleting an encrypted MPU
+// through a versioned backend creates one primary delete marker and removes
+// the existing manifest version without creating a second marker.
+func testDeleteVersionedEncryptedMPU(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	client := newS3CompatClient(t, inst)
+	_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket:                  aws.String(inst.Bucket),
+		VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+	})
+	if err != nil {
+		t.Skipf("versioning unavailable: %v", err)
+	}
+
+	gw := harness.StartGateway(t, inst)
+	key := uniqueKey(t)
+	backend := newS3Client(t, inst)
+	if _, err := backend.PutObject(ctx, inst.Bucket, key, strings.NewReader("versioned-delete"), map[string]string{
+		"x-amz-meta-encrypted-mpu": "true",
+	}, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put primary object: %v", err)
+	}
+	if _, err := backend.PutObject(ctx, inst.Bucket, key+".mpu-manifest", strings.NewReader("manifest"), nil, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put manifest object: %v", err)
+	}
+
+	req, _ := http.NewRequest("DELETE", objectURL(gw, inst.Bucket, key), nil)
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE returned %d", resp.StatusCode)
+	}
+
+	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(inst.Bucket), Prefix: aws.String(key)})
+	if err != nil {
+		t.Fatalf("ListObjectVersions: %v", err)
+	}
+	markers := 0
+	for _, marker := range versions.DeleteMarkers {
+		if marker.Key != nil && *marker.Key == key {
+			markers++
+		}
+	}
+	if markers != 1 {
+		t.Fatalf("delete markers for primary object = %d, want 1", markers)
+	}
+	manifestVersions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(inst.Bucket),
+		Prefix: aws.String(key + ".mpu-manifest"),
+	})
+	if err != nil {
+		t.Fatalf("ListObjectVersions manifest: %v", err)
+	}
+	manifestMarkers := 0
+	for _, marker := range manifestVersions.DeleteMarkers {
+		if marker.Key != nil && *marker.Key == key+".mpu-manifest" {
+			manifestMarkers++
+		}
+	}
+	if manifestMarkers != 0 {
+		t.Fatalf("delete markers for manifest = %d, want 0", manifestMarkers)
+	}
+
 }
 
 // testCopyObject verifies CopyObject preserves plaintext round-trip.
