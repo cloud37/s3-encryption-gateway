@@ -194,6 +194,80 @@ func testSelfContained_AES_StandardMetadataRoundTrip(t *testing.T, inst provider
 	t.Run("GET", func(t *testing.T) { assertStandardMetadata(t, getResp) })
 }
 
+// testSelfContained_AES_CopyObjectStandardMetadata verifies that CopyObject
+// inherits plaintext metadata recovered from a self-contained encrypted source.
+func testSelfContained_AES_CopyObjectStandardMetadata(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	km := makeAESKEKManager(t)
+	gw := harness.StartGateway(t, inst, harness.WithKeyManager(km))
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	data := []byte("self-contained copy metadata")
+
+	putReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, srcKey), bytes.NewReader(data))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.Header.Set("Cache-Control", "max-age=99")
+	putReq.Header.Set("Content-Disposition", `attachment; filename="copy.json"`)
+	putResp, err := gw.HTTPClient().Do(putReq)
+	if err != nil {
+		t.Fatalf("source PUT: %v", err)
+	}
+	io.Copy(io.Discard, putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("source PUT: status %d", putResp.StatusCode)
+	}
+
+	copyReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+inst.Bucket+"/"+srcKey)
+	copyResp, err := gw.HTTPClient().Do(copyReq)
+	if err != nil {
+		t.Fatalf("CopyObject: %v", err)
+	}
+	io.Copy(io.Discard, copyResp.Body)
+	copyResp.Body.Close()
+	if copyResp.StatusCode != http.StatusOK {
+		t.Fatalf("CopyObject: status %d", copyResp.StatusCode)
+	}
+
+	assertHeaders := func(t *testing.T, resp *http.Response) {
+		t.Helper()
+		for header, want := range map[string]string{
+			"Content-Type":        "application/json",
+			"Cache-Control":       "max-age=99",
+			"Content-Disposition": `attachment; filename="copy.json"`,
+		} {
+			if got := resp.Header.Get(header); got != want {
+				t.Errorf("%s = %q, want %q", header, got, want)
+			}
+		}
+	}
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
+	headResp, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatalf("copied object HEAD: %v", err)
+	}
+	defer headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		t.Fatalf("copied object HEAD: status %d", headResp.StatusCode)
+	}
+	assertHeaders(t, headResp)
+
+	getResp, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, dstKey))
+	if err != nil {
+		t.Fatalf("copied object GET: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("copied object GET: status %d", getResp.StatusCode)
+	}
+	assertHeaders(t, getResp)
+	got, _ := io.ReadAll(getResp.Body)
+	if !bytes.Equal(got, data) {
+		t.Errorf("copied object body = %q, want %q", got, data)
+	}
+}
+
 // testSelfContained_AES_AtRest verifies that objects written through the
 // self-contained AES KEK gateway are stored as ciphertext on the backend:
 //
