@@ -1973,6 +1973,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func isStandardMetadata(key string) bool {
+	key = http.CanonicalHeaderKey(key)
 	standardHeaders := map[string]bool{
 		"Content-Type":        true,
 		"Content-Length":      true,
@@ -3135,6 +3136,11 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 			if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
 				metadata[strings.ToLower(k)] = v[0]
 			}
+		}
+	}
+	for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
+		if value := r.Header.Get(key); value != "" {
+			metadata[key] = value
 		}
 	}
 
@@ -5029,15 +5035,18 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	for k, v := range r.Header {
 		if len(v) > 0 {
 			if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") || isStandardMetadata(k) {
-				dstMetadata[strings.ToLower(k)] = v[0]
+				dstMetadata[http.CanonicalHeaderKey(k)] = v[0]
 			}
 		}
 	}
 
-	// Preserve Content-Type from source object if not specified in copy request
-	if _, hasContentType := dstMetadata["Content-Type"]; !hasContentType {
-		if srcContentType, ok := srcMetadata["Content-Type"]; ok {
-			dstMetadata["Content-Type"] = srcContentType
+	// Preserve standard object metadata from the source when the copy request
+	// does not override it, matching S3's default metadata-directive behavior.
+	for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
+		if _, overridden := dstMetadata[key]; !overridden {
+			if value := srcMetadata[key]; value != "" {
+				dstMetadata[key] = value
+			}
 		}
 	}
 

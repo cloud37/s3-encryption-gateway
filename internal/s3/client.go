@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
@@ -600,6 +600,12 @@ func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID 
 	if result.ContentType != nil {
 		metadata["Content-Type"] = *result.ContentType
 	}
+	if result.CacheControl != nil {
+		metadata["Cache-Control"] = *result.CacheControl
+	}
+	if result.ContentDisposition != nil {
+		metadata["Content-Disposition"] = *result.ContentDisposition
+	}
 	if result.ETag != nil {
 		metadata["ETag"] = *result.ETag
 	}
@@ -681,6 +687,12 @@ func (c *s3Client) HeadObject(ctx context.Context, bucket, key string, versionID
 	}
 	if result.ContentType != nil {
 		metadata["Content-Type"] = *result.ContentType
+	}
+	if result.CacheControl != nil {
+		metadata["Cache-Control"] = *result.CacheControl
+	}
+	if result.ContentDisposition != nil {
+		metadata["Content-Disposition"] = *result.ContentDisposition
 	}
 	if result.ETag != nil {
 		metadata["ETag"] = *result.ETag
@@ -777,6 +789,22 @@ func convertMetadata(metadata map[string]string) map[string]string {
 	return result
 }
 
+func cloneMetadataWithoutStandardHeaders(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	result := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		switch strings.ToLower(key) {
+		case "content-type", "cache-control", "content-disposition":
+			continue
+		default:
+			result[key] = value
+		}
+	}
+	return result
+}
+
 // extractMetadata extracts metadata from S3 response.
 // AWS SDK v2 returns metadata keys WITHOUT the x-amz-meta- prefix (it strips it automatically).
 // We add the prefix back for consistency with our internal representation.
@@ -806,10 +834,23 @@ func extractMetadata(metadata map[string]string) map[string]string {
 
 // CreateMultipartUpload initiates a multipart upload.
 func (c *s3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
+	contentType := metadata["Content-Type"]
+	cacheControl := metadata["Cache-Control"]
+	contentDisposition := metadata["Content-Disposition"]
+	metadata = cloneMetadataWithoutStandardHeaders(metadata)
 	input := &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(bucket),
 		Key:      aws.String(key),
 		Metadata: convertMetadata(metadata),
+	}
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	}
+	if cacheControl != "" {
+		input.CacheControl = aws.String(cacheControl)
+	}
+	if contentDisposition != "" {
+		input.ContentDisposition = aws.String(contentDisposition)
 	}
 	if cannedACL != "" {
 		input.ACL = types.ObjectCannedACL(cannedACL)

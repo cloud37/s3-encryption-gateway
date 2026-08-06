@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -80,13 +80,13 @@ func TestApplyRangeRequest_Errors(t *testing.T) {
 		header  string
 		wantErr string
 	}{
-		{"range=0-4", "invalid range header format"},       // missing "bytes="
-		{"bytes=abc-5", "invalid start"},                   // non-numeric start
-		{"bytes=0-abc", "invalid end"},                     // non-numeric end
-		{"bytes=5-2", "range not satisfiable"},             // end < start
-		{"bytes=100-200", "range not satisfiable"},         // beyond data
-		{"bytes=0", "invalid range format"},                // no hyphen
-		{"bytes=-abc", "invalid suffix range"},             // invalid suffix
+		{"range=0-4", "invalid range header format"}, // missing "bytes="
+		{"bytes=abc-5", "invalid start"},             // non-numeric start
+		{"bytes=0-abc", "invalid end"},               // non-numeric end
+		{"bytes=5-2", "range not satisfiable"},       // end < start
+		{"bytes=100-200", "range not satisfiable"},   // beyond data
+		{"bytes=0", "invalid range format"},          // no hyphen
+		{"bytes=-abc", "invalid suffix range"},       // invalid suffix
 	}
 	for _, tc := range cases {
 		_, err := applyRangeRequest(data, tc.header)
@@ -465,6 +465,40 @@ func TestHandleCopyObject_Success(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("handleCopyObject: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleCopyObject_PreservesStandardMetadata(t *testing.T) {
+	mockClient := newMockS3Client()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	engine, _ := crypto.NewEngine([]byte("copy-metadata-password-123456"))
+	h := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+
+	mockClient.objects["srcbucket/source"] = []byte("copy content")
+	mockClient.metadata["srcbucket/source"] = map[string]string{
+		"Content-Type":        "text/plain",
+		"Cache-Control":       "max-age=60",
+		"Content-Disposition": `attachment; filename="source.txt"`,
+	}
+	req := httptest.NewRequest("PUT", "/dstbucket/destination", nil)
+	req.Header.Set("x-amz-copy-source", "srcbucket/source")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("copy returned %d: %s", w.Code, w.Body.String())
+	}
+	metadata := mockClient.metadata["dstbucket/destination"]
+	for key, want := range map[string]string{
+		crypto.MetaContentType:        "text/plain",
+		crypto.MetaCacheControl:       "max-age=60",
+		crypto.MetaContentDisposition: `attachment; filename="source.txt"`,
+	} {
+		if got := metadata[key]; got != want {
+			t.Errorf("destination %s = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -1123,7 +1157,7 @@ func TestHandleGetObject_DecryptionFailure(t *testing.T) {
 		"x-amz-meta-encrypted":            "true",
 		"x-amz-meta-encryption-algorithm": "AES256-GCM",
 		"x-amz-meta-encryption-key-salt":  "YWJjZGVmZ2hpamtsbW5vcA==", // fake base64 salt
-		"x-amz-meta-encryption-iv":        "YWJjZGVmZ2g=",              // fake base64 IV
+		"x-amz-meta-encryption-iv":        "YWJjZGVmZ2g=",             // fake base64 IV
 	}
 
 	req := httptest.NewRequest("GET", "/testbucket/corrupt-obj", nil)
@@ -1285,6 +1319,38 @@ func TestHandleCreateMultipartUpload(t *testing.T) {
 	}
 }
 
+func TestHandleCreateMultipartUpload_PreservesStandardMetadata(t *testing.T) {
+	mockClient := newMockS3Client()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	engine, _ := crypto.NewEngine([]byte("mpu-metadata-password-123456"))
+	h := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+
+	req := httptest.NewRequest("POST", "/testbucket/mpu-meta?uploads", nil)
+	req.Header.Set("Content-Type", "image/png")
+	req.Header.Set("Cache-Control", "max-age=120")
+	req.Header.Set("Content-Disposition", `inline; filename="image.png"`)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create MPU returned %d: %s", w.Code, w.Body.String())
+	}
+	mockClient.locksMu.Lock()
+	metadata := mockClient.lastMPUMetadata
+	mockClient.locksMu.Unlock()
+	for key, want := range map[string]string{
+		"Content-Type":        "image/png",
+		"Cache-Control":       "max-age=120",
+		"Content-Disposition": `inline; filename="image.png"`,
+	} {
+		if got := metadata[key]; got != want {
+			t.Errorf("MPU %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestHandleAbortMultipartUpload(t *testing.T) {
 	_, router := newCoverageTestHandler(t)
 	req := httptest.NewRequest("DELETE", "/testbucket/testkey?uploadId=upload-id-123", nil)
@@ -1299,11 +1365,11 @@ func TestHandleAbortMultipartUpload(t *testing.T) {
 
 func TestFilterS3Metadata(t *testing.T) {
 	metadata := map[string]string{
-		"x-amz-meta-foo":   "bar",
-		"Content-Type":      "application/json",
-		"Content-Length":    "100",
-		"x-amz-meta-key2":  "val2",
-		"x-custom-header":  "skip",
+		"x-amz-meta-foo":  "bar",
+		"Content-Type":    "application/json",
+		"Content-Length":  "100",
+		"x-amz-meta-key2": "val2",
+		"x-custom-header": "skip",
 	}
 
 	t.Run("no filter keys", func(t *testing.T) {

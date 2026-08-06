@@ -133,6 +133,50 @@ func testMultipartBasic(t *testing.T, inst provider.Instance) {
 	}
 }
 
+func testMultipartStandardMetadata(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst)
+	key := uniqueKey(t)
+	u := fmt.Sprintf("%s/%s/%s?uploads", gw.URL, inst.Bucket, key)
+	req, _ := http.NewRequest("POST", u, nil)
+	req.Header.Set("Content-Type", "image/png")
+	req.Header.Set("Cache-Control", "max-age=300")
+	req.Header.Set("Content-Disposition", `inline; filename="multipart.png"`)
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("initiate MPU: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initiate MPU: %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, result.UploadID) })
+	etag := uploadPart(t, gw, inst.Bucket, key, result.UploadID, 1, []byte("multipart metadata"))
+	completeMultipartUpload(t, gw, inst.Bucket, key, result.UploadID, []mpuPart{{1, etag}})
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, key), nil)
+	head, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer head.Body.Close()
+	for header, want := range map[string]string{
+		"Content-Type": "image/png", "Cache-Control": "max-age=300",
+		"Content-Disposition": `inline; filename="multipart.png"`,
+	} {
+		if got := head.Header.Get(header); got != want {
+			t.Errorf("HEAD %s = %q, want %q", header, got, want)
+		}
+	}
+}
+
 // testMultipartAbort verifies that an aborted multipart upload leaves no
 // object at the key.
 func testMultipartAbort(t *testing.T, inst provider.Instance) {

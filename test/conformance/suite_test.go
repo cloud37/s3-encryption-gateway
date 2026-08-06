@@ -74,6 +74,7 @@ func TestConformance(t *testing.T) {
 
 				// Multipart operations.
 				{"Multipart_Basic", provider.CapMultipartUpload, testMultipartBasic},
+				{"Multipart_StandardMetadata", provider.CapMultipartUpload, testMultipartStandardMetadata},
 				{"Multipart_Abort", provider.CapMultipartUpload, testMultipartAbort},
 				{"Multipart_ListParts", provider.CapMultipartUpload, testMultipartListParts},
 				{"Multipart_UploadPartETagQuoted", provider.CapMultipartUpload, testMultipartUploadPartETagQuoted},

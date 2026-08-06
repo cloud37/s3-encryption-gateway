@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.8] — 2026-08-06
+
+### Added
+
+- **Valkey health outage conformance coverage (issue #232):** Added provider-
+  agnostic Tier 2 coverage for `gateway_mpu_valkey_up` transitions from healthy
+  to unhealthy when the shared Valkey endpoint becomes unavailable. The test
+  covers both single-gateway and two-gateway configurations.
+
+- **V1.0 implementation planning:** Added implementation plans for the
+  authentication, observability, and S3 workstreams in `docs/plans/`, along
+  with their related issue-tracker entries.
+
+- **OpenBao / HashiCorp Vault Transit documentation:** Documented the Transit
+  KMS adapter, including token, AppRole, and Kubernetes authentication, TLS,
+  health checks, and key rotation configuration.
+
+### Security
+
+### Fixed
+
+- **Standard object metadata preservation (issue #236):** Encrypted objects now
+  preserve and restore `Content-Type`, `Cache-Control`, and `Content-Disposition`
+  across direct `PutObject`, `CopyObject`, and multipart uploads. Copy operations
+  inherit source metadata unless the destination request explicitly overrides it,
+  while multipart initiation maps these values to the backend's native S3 object
+  fields so they survive completion. The metadata remains intact through chunked,
+  legacy, fallback, and compacted encryption formats, and HEAD/GET responses
+  expose the original values, including through the Signature V4 forwarding path.
+  Added unit and provider-agnostic conformance coverage for direct writes, copies,
+  and completed multipart uploads.
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+- Updated the AWS SDK for Go v2 monorepo, including `service/s3` to v1.106.5,
+  and `github.com/aws/smithy-go` to v1.27.6.
+- Updated `github.com/redis/go-redis/v9` to v9.22.0.
+- Updated OpenTelemetry modules to v1.45.0 and the HTTP instrumentation to
+  v0.61.0.
+- Updated gRPC to v1.83.0 and related generated API modules.
+
 ## [0.11.7] — 2026-07-27
 
 Version `0.11.6` was built by CI but its release and tag were removed after

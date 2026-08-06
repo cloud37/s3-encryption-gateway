@@ -214,7 +214,19 @@ func testCopyObject(t *testing.T, inst provider.Instance) {
 	dstKey := uniqueKey(t)
 	data := []byte("copy-source-data")
 
-	put(t, gw, inst.Bucket, srcKey, data)
+	putReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, srcKey), bytes.NewReader(data))
+	putReq.Header.Set("Content-Type", "text/plain")
+	putReq.Header.Set("Cache-Control", "max-age=600")
+	putReq.Header.Set("Content-Disposition", `attachment; filename="copy-source.txt"`)
+	putResp, err := gw.HTTPClient().Do(putReq)
+	if err != nil {
+		t.Fatalf("PutObject source: %v", err)
+	}
+	io.Copy(io.Discard, putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("PutObject source: %d", putResp.StatusCode)
+	}
 
 	// CopyObject via x-amz-copy-source header.
 	req, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
@@ -232,6 +244,20 @@ func testCopyObject(t *testing.T, inst provider.Instance) {
 	got := get(t, gw, inst.Bucket, dstKey)
 	if !bytes.Equal(got, data) {
 		t.Errorf("CopyObject round-trip mismatch")
+	}
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
+	headResp, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatalf("CopyObject HEAD: %v", err)
+	}
+	defer headResp.Body.Close()
+	for header, want := range map[string]string{
+		"Content-Type": "text/plain", "Cache-Control": "max-age=600",
+		"Content-Disposition": `attachment; filename="copy-source.txt"`,
+	} {
+		if got := headResp.Header.Get(header); got != want {
+			t.Errorf("CopyObject HEAD %s = %q, want %q", header, got, want)
+		}
 	}
 }
 

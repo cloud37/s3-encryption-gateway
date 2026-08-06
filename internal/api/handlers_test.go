@@ -83,6 +83,7 @@ type mockS3Client struct {
 	lastMPUGrantRead     string
 	lastMPUGrantReadACP  string
 	lastMPUGrantWriteACP string
+	lastMPUMetadata      map[string]string
 
 	headObjectCallCount int
 }
@@ -279,6 +280,7 @@ func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, o
 
 func (m *mockS3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	m.locksMu.Lock()
+	m.lastMPUMetadata = metadata
 	m.lastMPUCannedACL = cannedACL
 	m.lastMPUGrantFullCtrl = grantFullControl
 	m.lastMPUGrantRead = grantRead
