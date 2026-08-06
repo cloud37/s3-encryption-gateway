@@ -27,6 +27,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Versioned MPU manifest deletion (issue #240):** Object and batch deletes now
+  inspect primary-object metadata before attempting companion manifest cleanup,
+  avoiding unnecessary manifest operations for ordinary objects. Encrypted MPU
+  manifests are resolved with `HEAD` and deleted by their exact version ID when
+  supported, preventing an extra delete marker on versioned backends. Added unit
+  and provider-agnostic conformance coverage.
+
+- **Passthrough ranged GETs (issue #242):** Ranged reads of unencrypted
+  passthrough objects now forward the requested range to the backend and stream
+  the already-sliced response without applying the absolute range a second
+  time. This fixes `416 InvalidRange` responses for ranges starting at a
+  nonzero offset, including the ranged reads used by restic restores. Added
+  unit and multi-provider conformance coverage.
+
 - **Standard object metadata preservation (issue #236):** Encrypted objects now
   preserve and restore `Content-Type`, `Cache-Control`, and `Content-Disposition`
   across direct `PutObject`, `CopyObject`, and multipart uploads. Copy operations
