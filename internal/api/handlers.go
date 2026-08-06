@@ -2039,6 +2039,36 @@ func restoreEncryptedObjectHeaders(dst, encryptedMetadata map[string]string) {
 	if value := encryptedMetadata[crypto.MetaContentDisposition]; value != "" {
 		dst["Content-Disposition"] = value
 	}
+	if value := encryptedMetadata["Content-Type"]; value != "" {
+		dst["Content-Type"] = value
+	}
+	if value := encryptedMetadata["Cache-Control"]; value != "" {
+		dst["Cache-Control"] = value
+	}
+	if value := encryptedMetadata["Content-Disposition"]; value != "" {
+		dst["Content-Disposition"] = value
+	}
+	if value := encryptedMetadata["encryption-content-type"]; value != "" {
+		dst["Content-Type"] = value
+	}
+	if value := encryptedMetadata["encryption-cache-control"]; value != "" {
+		dst["Cache-Control"] = value
+	}
+	if value := encryptedMetadata["encryption-content-disposition"]; value != "" {
+		dst["Content-Disposition"] = value
+	}
+}
+
+func restoreCompactedEncryptedObjectHeaders(dst, metadata map[string]string) {
+	if value := metadata["x-amz-meta-ct"]; value != "" {
+		dst["Content-Type"] = value
+	}
+	if value := metadata["x-amz-meta-ccache"]; value != "" {
+		dst["Cache-Control"] = value
+	}
+	if value := metadata["x-amz-meta-cdisp"]; value != "" {
+		dst["Content-Disposition"] = value
+	}
 }
 
 // cleanupMPUManifest removes the companion manifest only when the primary
@@ -2217,6 +2247,24 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
+	// A self-contained envelope stores the original standard headers in the
+	// gateway encryption metadata. The backend Content-Type is only the generic
+	// ciphertext type and must not win during response restoration.
+	if metadata[crypto.MetaContentType] == "" {
+		if value := metadata["encryption-content-type"]; value != "" {
+			metadata[crypto.MetaContentType] = value
+		}
+	}
+	if metadata[crypto.MetaCacheControl] == "" {
+		if value := metadata["encryption-cache-control"]; value != "" {
+			metadata[crypto.MetaCacheControl] = value
+		}
+	}
+	if metadata[crypto.MetaContentDisposition] == "" {
+		if value := metadata["encryption-content-disposition"]; value != "" {
+			metadata[crypto.MetaContentDisposition] = value
+		}
+	}
 
 	// Filter out encryption metadata and restore original metadata
 	filteredMetadata := make(map[string]string)
@@ -2227,6 +2275,7 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	restoreEncryptedObjectHeaders(filteredMetadata, metadata)
+	restoreCompactedEncryptedObjectHeaders(filteredMetadata, metadata)
 
 	// Restore original plaintext size if available.
 	// For chunked objects, derive from the backend ciphertext length first. The
@@ -2306,6 +2355,26 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	for k, v := range filteredMetadata {
 		w.Header().Set(k, v)
 	}
+	// Set restored standard headers after copying backend headers so the
+	// ciphertext Content-Type cannot overwrite the plaintext value.
+	if value := metadata[crypto.MetaContentType]; value != "" {
+		w.Header().Set("Content-Type", value)
+	}
+	if value := metadata[crypto.MetaCacheControl]; value != "" {
+		w.Header().Set("Cache-Control", value)
+	}
+	if value := metadata[crypto.MetaContentDisposition]; value != "" {
+		w.Header().Set("Content-Disposition", value)
+	}
+	if value := metadata["encryption-content-type"]; value != "" {
+		w.Header().Set("Content-Type", value)
+	}
+	if value := metadata["encryption-cache-control"]; value != "" {
+		w.Header().Set("Cache-Control", value)
+	}
+	if value := metadata["encryption-content-disposition"]; value != "" {
+		w.Header().Set("Content-Disposition", value)
+	}
 
 	// Preserve version ID in response if present
 	if versionID != nil && *versionID != "" {
@@ -2319,6 +2388,9 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 
 // isEncryptionMetadata checks if a metadata key is related to encryption.
 func isEncryptionMetadata(key string) bool {
+	if strings.HasPrefix(key, "encryption-") {
+		key = "x-amz-meta-" + key
+	}
 	encryptionKeys := []string{
 		"x-amz-meta-encryption-algorithm",
 		"x-amz-meta-encryption-key-salt",

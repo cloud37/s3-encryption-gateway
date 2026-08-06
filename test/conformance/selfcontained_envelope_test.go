@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"io"
+	"net/http"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -112,6 +113,85 @@ func testSelfContained_AES_EnvelopeRoundTrip(t *testing.T, inst provider.Instanc
 		t.Errorf("AES envelope round-trip: content mismatch (got %d bytes, want %d)",
 			len(got), len(selfContainedPlaintext))
 	}
+}
+
+// testSelfContained_AES_StandardMetadataRoundTrip covers the production path
+// reported in issue #236: self-contained envelope encryption must preserve
+// standard object headers, not only user metadata and plaintext bytes.
+func testSelfContained_AES_StandardMetadataRoundTrip(t *testing.T, inst provider.Instance) {
+	t.Helper()
+
+	km := makeAESKEKManager(t)
+	gw := harness.StartGateway(t, inst, harness.WithKeyManager(km))
+	key := uniqueKey(t)
+
+	req, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, key), bytes.NewReader([]byte("self-contained metadata")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cache-Control", "max-age=3600")
+	req.Header.Set("Content-Disposition", `attachment; filename="object.json"`)
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("self-contained metadata PUT: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self-contained metadata PUT: status %d", resp.StatusCode)
+	}
+
+	// Inspect backend metadata directly as well as the gateway response. This
+	// catches the original regression where Cache-Control and Content-Disposition
+	// were persisted in gateway metadata but MetaContentType was omitted.
+	rawClient := newBypassS3Client(t, inst)
+	rawHead, err := rawClient.HeadObject(context.Background(), &awss3.HeadObjectInput{
+		Bucket: aws.String(inst.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		t.Fatalf("self-contained metadata backend HEAD: %v", err)
+	}
+	t.Logf("backend metadata: %#v", rawHead.Metadata)
+	if rawHead.ContentType == nil || *rawHead.ContentType != "application/octet-stream" {
+		t.Errorf("backend ciphertext ContentType = %q, want application/octet-stream", aws.ToString(rawHead.ContentType))
+	}
+	if rawHead.Metadata["encryption-content-type"] != "application/json" {
+		t.Errorf("backend encryption-content-type = %q, want application/json", rawHead.Metadata["encryption-content-type"])
+	}
+
+	assertStandardMetadata := func(t *testing.T, resp *http.Response) {
+		t.Helper()
+		for header, want := range map[string]string{
+			"Content-Type":        "application/json",
+			"Cache-Control":       "max-age=3600",
+			"Content-Disposition": `attachment; filename="object.json"`,
+		} {
+			if got := resp.Header.Get(header); got != want {
+				t.Errorf("%s = %q, want %q", header, got, want)
+			}
+		}
+	}
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, key), nil)
+	headResp, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatalf("self-contained metadata HEAD: %v", err)
+	}
+	defer headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		t.Fatalf("self-contained metadata HEAD: status %d", headResp.StatusCode)
+	}
+	t.Run("HEAD", func(t *testing.T) { assertStandardMetadata(t, headResp) })
+
+	getReq, _ := http.NewRequest("GET", objectURL(gw, inst.Bucket, key), nil)
+	getResp, err := gw.HTTPClient().Do(getReq)
+	if err != nil {
+		t.Fatalf("self-contained metadata GET: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("self-contained metadata GET: status %d", getResp.StatusCode)
+	}
+	t.Run("GET", func(t *testing.T) { assertStandardMetadata(t, getResp) })
 }
 
 // testSelfContained_AES_AtRest verifies that objects written through the

@@ -930,6 +930,9 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	if originalETag != "" {
 		encMetadata[MetaOriginalETag] = originalETag
 	}
+	if contentType != "" {
+		encMetadata[MetaContentType] = contentType
+	}
 	if metadata != nil {
 		if value := metadata["Cache-Control"]; value != "" {
 			encMetadata[MetaCacheControl] = value
