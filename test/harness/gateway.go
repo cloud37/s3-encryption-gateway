@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
 	"github.com/cloud37/s3-encryption-gateway/internal/admin"
 	"github.com/cloud37/s3-encryption-gateway/internal/api"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
@@ -30,9 +31,9 @@ import (
 // All test interaction with the gateway should go through the URL field.
 type Gateway struct {
 	// URL is the base HTTP address of the gateway, e.g. "http://127.0.0.1:41523".
-	URL    string
+	URL string
 	// Addr is the host:port the gateway is listening on.
-	Addr   string
+	Addr string
 	// Metrics is the Prometheus registry used by this gateway instance.
 	// Conformance tests can query it to assert metric emission.
 	Metrics *prometheus.Registry
@@ -253,6 +254,8 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	)
 	if o.mpuStore != nil {
 		handler.WithMPUStateStore(o.mpuStore)
+		stopHealthCheck := mpu.StartHealthCheck(context.Background(), o.mpuStore, cfg.MultipartState.Valkey.HealthCheckInterval, m.SetMPUValkeyUp)
+		t.Cleanup(stopHealthCheck)
 		// Wire the ListObjects size cache, sharing the Valkey connection pool.
 		cfg.ListSizeTranslate.Enabled = true
 		if vs, ok := o.mpuStore.(*mpu.ValkeyStateStore); ok {
@@ -357,7 +360,7 @@ ready:
 			admin.RegisterPprofRoutes(
 				adminSrv.Mux(),
 				adminCfg.Profiling,
-				m,  // *metrics.Metrics satisfies ProfilingMetrics
+				m,   // *metrics.Metrics satisfies ProfilingMetrics
 				nil, // audit logger — nil OK in tests (checked inside handler)
 				logger,
 			)

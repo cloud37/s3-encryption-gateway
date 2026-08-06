@@ -253,6 +253,9 @@ func TestConformance(t *testing.T) {
 				{"Auth_ProxiedBucketFilter", 0, testAuth_ProxiedBucketFilter},
 				{"Auth_ProxiedBucketMetricsPrefixRejected", 0, testAuth_ProxiedBucketMetricsPrefixRejected},
 
+				// Issue #232: Valkey health gauge transitions for single and HA gateways.
+				{"MPU_ValkeyHealth_SingleAndHA", provider.CapEncryptedMPU, testMPUValkeyHealthSingleAndHA},
+
 				// V1.0-S3-3: disable_encryption buckets already expose plaintext sizes.
 				{"ListObjects_DisableEncryption_SizeAccuracy", 0, testListObjects_DisableEncryption_SizeAccuracy},
 

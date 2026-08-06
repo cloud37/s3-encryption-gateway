@@ -12,6 +12,7 @@ import (
 	"os"
 	"testing"
 
+	tc "github.com/testcontainers/testcontainers-go"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 )
 
@@ -20,7 +21,16 @@ type ValkeyInstance struct {
 	// Addr is host:port, e.g. "127.0.0.1:6379".
 	Addr string
 	// Password is empty for the default no-auth configuration.
-	Password string
+	Password  string
+	container tc.Container
+}
+
+// Stop makes the Valkey endpoint unavailable without removing the fixture.
+func (v ValkeyInstance) Stop(ctx context.Context) error {
+	if v.container == nil {
+		return nil
+	}
+	return v.container.Stop(ctx, nil)
 }
 
 // StartValkey starts an ephemeral Valkey container via Testcontainers and
@@ -51,6 +61,7 @@ func StartValkey(ctx context.Context, t *testing.T) ValkeyInstance {
 	}
 
 	return ValkeyInstance{
-		Addr: fmt.Sprintf("%s:%s", host, port.Port()),
+		Addr:      fmt.Sprintf("%s:%s", host, port.Port()),
+		container: c,
 	}
 }
