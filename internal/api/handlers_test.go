@@ -762,6 +762,42 @@ func TestHandler_HandleGetObject(t *testing.T) {
 	}
 }
 
+func TestHandler_HandleGetObject_PassthroughRangeWithOffset(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
+
+	data := bytes.Repeat([]byte("0123456789"), 100)
+	mockClient.PutObject(context.Background(), "test-bucket", "passthrough-key", bytes.NewReader(data), map[string]string{
+		"Content-Length": strconv.Itoa(len(data)),
+	}, nil, "", nil, "", "", "", "", "")
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest("GET", "/test-bucket/passthrough-key", nil)
+	req.Header.Set("Range", "bytes=137-248")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("expected status 206, got %d: %s", w.Code, w.Body.String())
+	}
+	if got, want := w.Header().Get("Content-Range"), "bytes 137-248/1000"; got != want {
+		t.Errorf("Content-Range = %q, want %q", got, want)
+	}
+	if got, want := w.Header().Get("Content-Length"), "112"; got != want {
+		t.Errorf("Content-Length = %q, want %q", got, want)
+	}
+	if !bytes.Equal(w.Body.Bytes(), data[137:249]) {
+		t.Errorf("passthrough range body does not match source slice")
+	}
+	if mockClient.lastGetRange == nil || *mockClient.lastGetRange != "bytes=137-248" {
+		t.Errorf("backend range = %v, want bytes=137-248", mockClient.lastGetRange)
+	}
+}
+
 func TestHandler_HandleDeleteObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)

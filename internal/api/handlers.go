@@ -930,6 +930,8 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// For legacy/buffered encryption: fetch full object, decrypt, then apply range
 	var backendRange *string
 	var useRangeOptimization bool
+	var passthroughRange bool
+	var passthroughRangeStart, passthroughRangeEnd, passthroughObjectSize int64
 	var plaintextStart, plaintextEnd int64
 	// derivedPlaintextSize holds the MetaOriginalSize value computed from the
 	// ciphertext Content-Length when the object lacks MetaOriginalSize in its
@@ -1114,6 +1116,18 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Not encrypted or HEAD failed: forward range to backend as-is.
 			backendRange = rangeHeader
+			if headErr == nil {
+				// The backend will apply this range. Do not apply it again to
+				// the already-sliced response below.
+				if size, sizeErr := strconv.ParseInt(headMeta["Content-Length"], 10, 64); sizeErr == nil && size > 0 {
+					if rangeStart, rangeEnd, rangeErr := crypto.ParseHTTPRangeHeader(*rangeHeader, size); rangeErr == nil {
+						passthroughRange = true
+						passthroughRangeStart = rangeStart
+						passthroughRangeEnd = rangeEnd
+						passthroughObjectSize = size
+					}
+				}
+			}
 		}
 	}
 
@@ -1145,6 +1159,31 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// the full-object decrypt path both have access to it.
 	if derivedPlaintextSize != "" {
 		metadata[crypto.MetaOriginalSize] = derivedPlaintextSize
+	}
+
+	if passthroughRange {
+		for k, v := range metadata {
+			if !isEncryptionMetadata(k) {
+				w.Header().Set(k, v)
+			}
+		}
+		if versionID != nil && *versionID != "" {
+			w.Header().Set("x-amz-version-id", *versionID)
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", passthroughRangeStart, passthroughRangeEnd, passthroughObjectSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(passthroughRangeEnd-passthroughRangeStart+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		var writeTimeout time.Duration
+		if h.config != nil {
+			writeTimeout = h.config.Server.WriteTimeout
+		}
+		written, copyErr := copyWithDeadlineRefresh(w, reader, writeTimeout)
+		if copyErr != nil {
+			h.logger.WithError(copyErr).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Warn("Failed to write passthrough range response")
+		}
+		h.metrics.RecordS3Operation(r.Context(), "GetObject", bucket, time.Since(start))
+		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), written)
+		return
 	}
 
 	// For MPU-encrypted objects, delegate to the MPU decrypt path.

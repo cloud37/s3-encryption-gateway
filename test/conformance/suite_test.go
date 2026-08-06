@@ -67,6 +67,7 @@ func TestConformance(t *testing.T) {
 				{"CopyObject", 0, testCopyObject},
 				{"RangedRead", 0, testRangedRead},
 				{"RangedRead_CrossChunk", 0, testRangedRead_CrossChunk},
+				{"Passthrough_RangedRead", 0, testPassthroughRangedRead},
 
 				// Encryption round-trips (chunked + legacy AEAD).
 				{"Chunked_RoundTrip", 0, testChunkedRoundTrip},

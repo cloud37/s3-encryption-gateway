@@ -4,6 +4,10 @@ package conformance
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
@@ -86,5 +90,49 @@ func testRangedRead_CrossChunk(t *testing.T, inst provider.Instance) {
 					tc.start, tc.end, len(got), len(want))
 			}
 		})
+	}
+}
+
+// testPassthroughRangedRead verifies ranges on objects stored directly in the
+// backend, without gateway encryption metadata.
+func testPassthroughRangedRead(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gateway := harness.StartGateway(t, inst)
+	backend := newS3Client(t, inst)
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	key := uniqueKey(t)
+	if _, err := backend.PutObject(context.Background(), inst.Bucket, key, bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put passthrough object: %v", err)
+	}
+
+	start, end := int64(1000), int64(1099)
+	req, err := http.NewRequest("GET", objectURL(gateway, inst.Bucket, key), nil)
+	if err != nil {
+		t.Fatalf("create passthrough range request: %v", err)
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	resp, err := gateway.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("passthrough range request: %v", err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read passthrough range response: %v", err)
+	}
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("passthrough range status %d, want 206: %s", resp.StatusCode, string(got))
+	}
+	if want := fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)); resp.Header.Get("Content-Range") != want {
+		t.Fatalf("passthrough Content-Range %q, want %q", resp.Header.Get("Content-Range"), want)
+	}
+	if want := fmt.Sprintf("%d", end-start+1); resp.Header.Get("Content-Length") != want {
+		t.Fatalf("passthrough Content-Length %q, want %q", resp.Header.Get("Content-Length"), want)
+	}
+	if !bytes.Equal(got, data[start:end+1]) {
+		t.Fatalf("passthrough range [%d-%d]: got %d bytes with incorrect content", start, end, len(got))
 	}
 }
