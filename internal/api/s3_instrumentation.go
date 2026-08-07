@@ -133,6 +133,13 @@ func (h *Handler) s3InstrumentationMiddleware(next http.Handler) http.Handler {
 func (h *Handler) instrumentS3(operation string, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bucket := mux.Vars(r)["bucket"]
+		op := operation
+		if op == "PutObject" && r.Header.Get("X-Amz-Copy-Source") != "" {
+			op = "CopyObject"
+		}
+		if op == "UploadPart" && r.Header.Get("X-Amz-Copy-Source") != "" {
+			op = "UploadPartCopy"
+		}
 		recorder := &s3ResponseRecorder{ResponseWriter: w}
 		if r.Body != nil && !strings.HasPrefix(r.Header.Get("x-amz-content-sha256"), "STREAMING-") {
 			r.Body = &countingReadCloser{ReadCloser: r.Body, onRead: func(n int64) {
@@ -143,7 +150,7 @@ func (h *Handler) instrumentS3(operation string, next http.HandlerFunc) http.Han
 		}
 		defer func() {
 			if h.metrics != nil {
-				h.metrics.RecordS3ClientRequest(r.Context(), operation, bucket, recorder.StatusCode())
+				h.metrics.RecordS3ClientRequest(r.Context(), op, bucket, recorder.StatusCode())
 				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "out", recorder.BytesWritten())
 			}
 		}()
