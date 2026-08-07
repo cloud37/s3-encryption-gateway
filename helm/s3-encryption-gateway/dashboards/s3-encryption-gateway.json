@@ -162,7 +162,7 @@
       "type": "timeseries",
       "title": "Client Error Ratio",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
-      "targets": [{"expr": "sum(rate(s3_client_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",bucket=~\"$bucket\",status_code=~\"4..|5..\"\"}[$interval])) / sum(rate(s3_client_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",bucket=~\"$bucket\"}[$interval]))", "legendFormat": "error ratio"}],
+      "targets": [{"expr": "sum(rate(s3_client_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",bucket=~\"$bucket\",status_code=~\"4..|5..\"}[$interval])) / sum(rate(s3_client_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",bucket=~\"$bucket\"}[$interval]))", "legendFormat": "error ratio"}],
       "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
       "options": {"legend": {"displayMode": "list"}}
     },

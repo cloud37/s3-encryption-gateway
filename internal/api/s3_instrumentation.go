@@ -113,11 +113,20 @@ func (h *Handler) s3InstrumentationMiddleware(next http.Handler) http.Handler {
 		bucket := mux.Vars(r)["bucket"]
 		op := s3OperationName(r)
 		recorder := &s3ResponseRecorder{ResponseWriter: w}
-		next.ServeHTTP(recorder, r)
-		if h.metrics != nil {
-			h.metrics.RecordS3ClientRequest(r.Context(), op, bucket, recorder.StatusCode())
-			h.metrics.RecordS3ClientBytes(r.Context(), bucket, "out", recorder.BytesWritten())
+		if r.Body != nil && !strings.HasPrefix(r.Header.Get("x-amz-content-sha256"), "STREAMING-") {
+			r.Body = &countingReadCloser{ReadCloser: r.Body, onRead: func(n int64) {
+				if h.metrics != nil {
+					h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+				}
+			}}
 		}
+		defer func() {
+			if h.metrics != nil {
+				h.metrics.RecordS3ClientRequest(r.Context(), op, bucket, recorder.StatusCode())
+				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "out", recorder.BytesWritten())
+			}
+		}()
+		next.ServeHTTP(recorder, r)
 	})
 }
 
@@ -125,29 +134,44 @@ func (h *Handler) instrumentS3(operation string, next http.HandlerFunc) http.Han
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bucket := mux.Vars(r)["bucket"]
 		recorder := &s3ResponseRecorder{ResponseWriter: w}
-		next.ServeHTTP(recorder, r)
-		if h.metrics != nil {
-			h.metrics.RecordS3ClientRequest(r.Context(), operation, bucket, recorder.StatusCode())
-			h.metrics.RecordS3ClientBytes(r.Context(), bucket, "out", recorder.BytesWritten())
+		if r.Body != nil && !strings.HasPrefix(r.Header.Get("x-amz-content-sha256"), "STREAMING-") {
+			r.Body = &countingReadCloser{ReadCloser: r.Body, onRead: func(n int64) {
+				if h.metrics != nil {
+					h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+				}
+			}}
 		}
+		defer func() {
+			if h.metrics != nil {
+				h.metrics.RecordS3ClientRequest(r.Context(), operation, bucket, recorder.StatusCode())
+				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "out", recorder.BytesWritten())
+			}
+		}()
+		next.ServeHTTP(recorder, r)
 	})
+}
+
+type countingReadCloser struct {
+	io.ReadCloser
+	onRead func(int64)
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if n > 0 && r.onRead != nil {
+		r.onRead(int64(n))
+	}
+	return n, err
 }
 
 func s3OperationName(r *http.Request) string {
 	q := r.URL.Query()
-	for _, item := range []struct{ key, op string }{
-		{"partNumber", "UploadPart"}, {"uploads", "CreateMultipartUpload"},
-		{"delete", "DeleteObjects"}, {"tagging", "ObjectTagging"}, {"acl", "ACL"}, {"retention", "ObjectRetention"},
-		{"legal-hold", "ObjectLegalHold"}, {"object-lock", "ObjectLock"}, {"lifecycle", "BucketLifecycle"},
-		{"policy", "BucketPolicy"}, {"cors", "BucketCORS"}, {"versioning", "BucketVersioning"},
-		{"encryption", "BucketEncryption"}, {"location", "GetBucketLocation"}, {"notification", "BucketNotification"},
-		{"replication", "BucketReplication"}, {"logging", "BucketLogging"}, {"requestPayment", "BucketRequestPayment"},
-		{"website", "BucketWebsite"}, {"inventory", "BucketInventory"}, {"analytics", "BucketAnalytics"},
-		{"intelligent-tiering", "BucketIntelligentTiering"}, {"restore", "RestoreObject"}, {"select", "SelectObjectContent"},
-	} {
-		if _, ok := q[item.key]; ok {
-			return item.op
-		}
+	key := mux.Vars(r)["key"] != "" && strings.Contains(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if r.URL.Path == "/" {
+		return "ListBuckets"
+	}
+	if r.Method == http.MethodOptions {
+		return "CORSPreflight"
 	}
 	if _, ok := q["uploadId"]; ok {
 		switch r.Method {
@@ -159,10 +183,49 @@ func s3OperationName(r *http.Request) string {
 			return "AbortMultipartUpload"
 		}
 	}
-	if r.URL.Path == "/" {
-		return "ListBuckets"
+	if _, ok := q["partNumber"]; ok {
+		return "UploadPart"
 	}
-	if mux.Vars(r)["key"] != "" {
+	if _, ok := q["uploads"]; ok {
+		if key && r.Method == http.MethodPost {
+			return "CreateMultipartUpload"
+		}
+		if !key && r.Method == http.MethodGet {
+			return "ListMultipartUploads"
+		}
+	}
+	if r.Header.Get("X-Amz-Copy-Source") != "" {
+		if key && r.Method == http.MethodPut {
+			return "CopyObject"
+		}
+	}
+	if key {
+		for _, item := range []struct{ query, get, put, del string }{
+			{"retention", "GetObjectRetention", "PutObjectRetention", ""},
+			{"legal-hold", "GetObjectLegalHold", "PutObjectLegalHold", ""},
+			{"tagging", "GetObjectTagging", "PutObjectTagging", "DeleteObjectTagging"},
+			{"acl", "GetObjectACL", "PutObjectACL", ""},
+		} {
+			if _, ok := q[item.query]; ok {
+				switch r.Method {
+				case http.MethodGet:
+					return item.get
+				case http.MethodPut:
+					return item.put
+				case http.MethodDelete:
+					return item.del
+				}
+			}
+		}
+		if _, ok := q["restore"]; ok {
+			return "RestoreObject"
+		}
+		if _, ok := q["select"]; ok {
+			return "SelectObjectContent"
+		}
+		if _, ok := q["select-type"]; ok {
+			return "SelectObjectContent"
+		}
 		switch r.Method {
 		case http.MethodGet:
 			return "GetObject"
@@ -173,6 +236,35 @@ func s3OperationName(r *http.Request) string {
 		case http.MethodHead:
 			return "HeadObject"
 		}
+	}
+	for _, item := range []struct{ query, get, put, del string }{
+		{"object-lock", "GetObjectLockConfiguration", "PutObjectLockConfiguration", ""},
+		{"lifecycle", "GetBucketLifecycle", "PutBucketLifecycle", "DeleteBucketLifecycle"},
+		{"policy", "GetBucketPolicy", "PutBucketPolicy", "DeleteBucketPolicy"},
+		{"cors", "GetBucketCors", "PutBucketCors", "DeleteBucketCors"},
+		{"versioning", "GetBucketVersioning", "PutBucketVersioning", ""},
+		{"encryption", "GetBucketEncryption", "PutBucketEncryption", "DeleteBucketEncryption"},
+		{"acl", "GetBucketACL", "PutBucketACL", ""}, {"location", "GetBucketLocation", "", ""},
+		{"notification", "GetBucketNotification", "PutBucketNotification", ""},
+		{"replication", "GetBucketReplication", "PutBucketReplication", "DeleteBucketReplication"},
+		{"logging", "GetBucketLogging", "PutBucketLogging", ""}, {"requestPayment", "GetBucketRequestPayment", "PutBucketRequestPayment", ""},
+		{"website", "GetBucketWebsite", "PutBucketWebsite", "DeleteBucketWebsite"},
+		{"inventory", "GetBucketInventory", "PutBucketInventory", "DeleteBucketInventory"},
+		{"analytics", "GetBucketAnalytics", "", ""}, {"intelligent-tiering", "", "PutBucketIntelligentTiering", ""},
+	} {
+		if _, ok := q[item.query]; ok {
+			switch r.Method {
+			case http.MethodGet:
+				return item.get
+			case http.MethodPut:
+				return item.put
+			case http.MethodDelete:
+				return item.del
+			}
+		}
+	}
+	if _, ok := q["delete"]; ok {
+		return "DeleteObjects"
 	}
 	switch r.Method {
 	case http.MethodGet:

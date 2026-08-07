@@ -479,10 +479,26 @@ Metrics endpoint routing (in priority order):
 
 - **HTTP**: request counts, durations, bytes transferred
 - **S3 operations**: operation counts, durations, error rates
+- **S3 client traffic**: `s3_client_requests_total{operation,bucket,status_code}`
+  counts each matched S3 route once; `s3_client_bytes_total{bucket,direction}`
+  counts application-body bytes actually consumed (`in`) or written (`out`).
+  AWS streaming upload framing, TLS/HTTP headers, backend retries, and internal
+  UploadPartCopy traffic are excluded. Range responses count only returned
+  plaintext bytes, and partial stream failures count only successful writes.
+  `METRICS_ENABLE_BUCKET_LABEL=false` collapses bucket labels to `*`; enabling
+  it exposes bucket names and increases cardinality. The health, readiness,
+  liveness, metrics, and admin routes do not emit these families.
 - **Encryption**: encryption/decryption counts, durations, throughput
 - **System**: active connections, goroutines, memory usage
 
 Key metric names: `http_requests_total`, `encryption_operations_total`, `active_connections`, `goroutines_total`, `memory_alloc_bytes`.
+
+Example client-traffic queries:
+
+```promql
+sum by (bucket, direction) (rate(s3_client_bytes_total{bucket=~"$bucket"}[5m]))
+sum by (bucket, operation, status_code) (rate(s3_client_requests_total{bucket=~"$bucket"}[5m]))
+```
 
 Seven metrics track the multipart-encryption hot path:
 

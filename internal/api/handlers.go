@@ -1758,11 +1758,6 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Check for any STREAMING- header value (e.g. STREAMING-AWS4-HMAC-SHA256-PAYLOAD or STREAMING-UNSIGNED-PAYLOAD-TRAILER)
 	var inputReader io.Reader = r.Body
 	contentSha256 := r.Header.Get("x-amz-content-sha256")
-	inputReader = &clientInputReader{r: inputReader, onRead: func(n int64) {
-		if h.metrics != nil {
-			h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
-		}
-	}}
 	if strings.HasPrefix(contentSha256, "STREAMING-") {
 		inputReader = &clientInputReader{r: NewAwsChunkedReader(r.Body), onRead: func(n int64) {
 			if h.metrics != nil {
@@ -3752,11 +3747,6 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	// signatures are transport data, not part of the plaintext to store.
 	var inputReader io.Reader = r.Body
 	contentSha256 := r.Header.Get("x-amz-content-sha256")
-	inputReader = &clientInputReader{r: inputReader, onRead: func(n int64) {
-		if h.metrics != nil {
-			h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
-		}
-	}}
 	if strings.HasPrefix(contentSha256, "STREAMING-") {
 		inputReader = &clientInputReader{r: NewAwsChunkedReader(r.Body), onRead: func(n int64) {
 			if h.metrics != nil {

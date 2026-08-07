@@ -818,6 +818,9 @@ podDisruptionBudget:
 # env: METRICS_ADDR (set to ":<port>" by the deployment template)
 metrics:
   port: 0          # e.g. 9090 — set to a non-zero value to enable dedicated listener
+  # Controls bucket labels on all bucket-labelled S3 metrics, including
+  # s3_client_requests_total and s3_client_bytes_total. Disabled mode uses
+  # bucket="*"; enabling exposes bucket names and increases cardinality.
   enableBucketLabel: false  # METRICS_ENABLE_BUCKET_LABEL
 
 # Prometheus ServiceMonitor (requires Prometheus Operator)

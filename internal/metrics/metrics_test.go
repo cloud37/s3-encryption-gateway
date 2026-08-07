@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +102,49 @@ func TestMetrics_RecordS3ClientMetrics_BucketLabelDisabledUsesWildcard(t *testin
 	}
 	if got := testutil.ToFloat64(m.s3ClientBytesTotal.WithLabelValues("*", "out")); got != 7 {
 		t.Fatalf("byte count = %v, want 7", got)
+	}
+}
+
+func TestMetrics_RecordS3ClientMetrics_ListBucketsUsesEmptyBucketWhenEnabled(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
+	m.RecordS3ClientRequest(context.Background(), "ListBuckets", "", http.StatusOK)
+	if got := testutil.ToFloat64(m.s3ClientRequestsTotal.WithLabelValues("ListBuckets", "", "200")); got != 1 {
+		t.Fatalf("request count = %v, want 1", got)
+	}
+}
+
+func TestMetrics_OBS2_DoesNotChangeExistingMetricLabelSchemas(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
+	m.RecordHTTPRequest(context.Background(), "GET", "/bucket/key", http.StatusOK, time.Second, 1)
+	m.RecordS3Operation(context.Background(), "GetObject", "bucket", time.Second)
+	m.RecordS3Error(context.Background(), "GetObject", "bucket", "backend")
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"http_requests_total":           {"method", "path", "status"},
+		"http_request_bytes_total":      {"method", "path"},
+		"s3_operations_total":           {"operation", "bucket"},
+		"s3_operation_duration_seconds": {"operation", "bucket"},
+		"s3_operation_errors_total":     {"operation", "bucket", "error_type"},
+	}
+	for _, mf := range mfs {
+		labels, ok := want[mf.GetName()]
+		if !ok || len(mf.GetMetric()) == 0 {
+			continue
+		}
+		got := make([]string, 0, len(mf.GetMetric()[0].GetLabel()))
+		for _, label := range mf.GetMetric()[0].GetLabel() {
+			got = append(got, label.GetName())
+		}
+		sort.Strings(got)
+		sort.Strings(labels)
+		if strings.Join(got, ",") != strings.Join(labels, ",") {
+			t.Errorf("%s labels=%v want=%v", mf.GetName(), got, labels)
+		}
 	}
 }
 

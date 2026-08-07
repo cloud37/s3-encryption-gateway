@@ -73,3 +73,55 @@ func TestS3Instrumentation_RecordsClientVisibleErrorStatusOnce(t *testing.T) {
 		t.Fatalf("missing output metric: %s", body)
 	}
 }
+
+func TestS3Instrumentation_RecordsRequestBodyInput(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	router := mux.NewRouter()
+	router.Handle("/{bucket}", h.instrumentS3("DeleteObjects", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})).Methods("POST")
+	request := httptest.NewRequest(http.MethodPost, "/bucket?delete", strings.NewReader("<Delete/>"))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	metricsResponse := httptest.NewRecorder()
+	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricsResponse.Body.String(), `s3_client_bytes_total{bucket="bucket",direction="in"} 9`) {
+		t.Fatalf("missing input metric: %s", metricsResponse.Body.String())
+	}
+}
+
+func TestS3OperationName_DistinguishesSpecializedRoutes(t *testing.T) {
+	cases := []struct{ method, target, want string }{
+		{http.MethodGet, "/bucket?uploads", "ListMultipartUploads"},
+		{http.MethodOptions, "/bucket/key", "CORSPreflight"},
+		{http.MethodGet, "/bucket/key?tagging", "GetObjectTagging"},
+		{http.MethodPut, "/bucket?versioning", "PutBucketVersioning"},
+		{http.MethodPost, "/bucket/key?select-type=2", "SelectObjectContent"},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(tc.method, tc.target, nil)
+		r = mux.SetURLVars(r, map[string]string{"bucket": "bucket", "key": "key"})
+		if got := s3OperationName(r); got != tc.want {
+			t.Errorf("%s %s = %q, want %q", tc.method, tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestS3Instrumentation_HealthRoutesDoNotEmitS3ClientMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	h := &Handler{metrics: metrics.NewMetricsWithRegistry(reg)}
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	for _, path := range []string{"/health", "/ready", "/readyz", "/live", "/livez"} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	metricsResponse := httptest.NewRecorder()
+	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if strings.Contains(metricsResponse.Body.String(), "s3_client_requests_total") || strings.Contains(metricsResponse.Body.String(), "s3_client_bytes_total") {
+		t.Fatalf("system routes emitted S3 client metrics: %s", metricsResponse.Body.String())
+	}
+}

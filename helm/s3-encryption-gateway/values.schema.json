@@ -307,7 +307,7 @@
         },
         "enableBucketLabel": {
           "type": "boolean",
-          "description": "Expose bucket names as a Prometheus label (METRICS_ENABLE_BUCKET_LABEL). Disabled by default to avoid leaking bucket names."
+          "description": "Controls bucket labels on all bucket-labelled S3 metrics, including s3_client_requests_total and s3_client_bytes_total. Disabled mode emits bucket=\\\"*\\\"; enabled mode exposes bucket names and increases cardinality. Client byte directions are in and out."
         }
       }
     },

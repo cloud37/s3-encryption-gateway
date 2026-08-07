@@ -27,7 +27,9 @@ func TestCopyProxyResponse(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	copyProxyResponse(w, backendResp)
+	if _, err := copyProxyResponse(w, backendResp); err != nil {
+		t.Fatal(err)
+	}
 
 	result := w.Result()
 
@@ -71,7 +73,9 @@ func TestCopyProxyResponse_LifecycleHeaders_NotStripped(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	copyProxyResponse(w, backendResp)
+	if _, err := copyProxyResponse(w, backendResp); err != nil {
+		t.Fatal(err)
+	}
 
 	result := w.Result()
 
@@ -263,7 +267,6 @@ func TestHandlePassthrough_BackendNotConfigured(t *testing.T) {
 	}
 }
 
-
 // --- getClientIP / getRequestID coverage ------------------------------------
 
 func TestGetClientIP_Fallback(t *testing.T) {
@@ -291,7 +294,6 @@ func TestGetRequestID_Empty(t *testing.T) {
 		t.Errorf("expected empty, got %s", id)
 	}
 }
-
 
 // --- validateTags unit tests (V1.0-S3-1 coverage gap) -----------------------
 
@@ -518,5 +520,3 @@ func TestHandlePassthrough_NegativeContentLength_NoPanic(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
-
-

@@ -122,7 +122,7 @@ var hopByHopHeaders = []string{
 // copyProxyResponse copies the status code, filtered headers, and body from an
 // upstream HTTP response to the client ResponseWriter. Hop-by-hop headers are
 // stripped before copying.
-func copyProxyResponse(w http.ResponseWriter, resp *http.Response) int64 {
+func copyProxyResponse(w http.ResponseWriter, resp *http.Response) (int64, error) {
 	for _, h := range hopByHopHeaders {
 		resp.Header.Del(h)
 	}
@@ -132,8 +132,7 @@ func copyProxyResponse(w http.ResponseWriter, resp *http.Response) int64 {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	n, _ := io.Copy(w, resp.Body)
-	return n
+	return io.Copy(w, resp.Body)
 }
 
 // forwardToBackend creates and sends a request to the configured S3 backend.
@@ -284,7 +283,6 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 		s3Err.WriteXML(w)
 		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		h.metrics.RecordS3Error(r.Context(), operation, bucket, s3Err.Code)
-		h.metrics.RecordS3Error(r.Context(), operation, bucket, s3Err.Code)
 		if h.auditLogger != nil {
 			h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), false, err, time.Since(start))
 		}
@@ -292,11 +290,14 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 	}
 	defer resp.Body.Close()
 
-	bytesOut := copyProxyResponse(w, resp)
+	bytesOut, copyErr := copyProxyResponse(w, resp)
 	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), bytesOut)
 	h.metrics.RecordS3Operation(r.Context(), operation, bucket, time.Since(start))
 	if resp.StatusCode >= http.StatusBadRequest {
 		h.metrics.RecordS3Error(r.Context(), operation, bucket, strconv.Itoa(resp.StatusCode))
+	}
+	if copyErr != nil {
+		h.metrics.RecordS3Error(r.Context(), operation, bucket, "client_stream")
 	}
 	if h.auditLogger != nil {
 		h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), true, nil, time.Since(start))
