@@ -173,6 +173,12 @@ func s3OperationName(r *http.Request) string {
 	if r.Method == http.MethodOptions {
 		return "CORSPreflight"
 	}
+	if r.Header.Get("X-Amz-Copy-Source") != "" && key && r.Method == http.MethodPut {
+		if _, ok := q["partNumber"]; ok {
+			return "UploadPartCopy"
+		}
+		return "CopyObject"
+	}
 	if _, ok := q["uploadId"]; ok {
 		switch r.Method {
 		case http.MethodGet:
@@ -192,11 +198,6 @@ func s3OperationName(r *http.Request) string {
 		}
 		if !key && r.Method == http.MethodGet {
 			return "ListMultipartUploads"
-		}
-	}
-	if r.Header.Get("X-Amz-Copy-Source") != "" {
-		if key && r.Method == http.MethodPut {
-			return "CopyObject"
 		}
 	}
 	if key {
