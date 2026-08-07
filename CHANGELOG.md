@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Issue #236 regression coverage:** Added provider-agnostic Tier 2 coverage
+  for copying objects encrypted with the self-contained AES key manager. The
+  test verifies that `Content-Type`, `Cache-Control`, and `Content-Disposition`
+  survive `CopyObject` and remain available on both HEAD and GET responses,
+  ensuring the completed metadata fix does not regress on the copy path.
+
+- **Changelog-backed GitHub Release notes (issue #236):** Release automation now publishes
+  the matching version section from `CHANGELOG.md` as the GitHub Release notes,
+  with validation for missing, empty, or duplicate entries and a link back to
+  the full changelog. Added a local-only backfill script that previews updates
+  for existing releases and supports explicitly applying changes to all
+  releases or a selected version.
+
+### Security
+
+### Fixed
+
+- **Standard object metadata restoration (issue #236):** Completed the
+  standard metadata fix for the non-chunked self-contained key-management path.
+  `Content-Type` is now persisted alongside `Cache-Control` and
+  `Content-Disposition`, and HEAD responses apply restored plaintext metadata
+  after backend ciphertext headers so `application/octet-stream` cannot
+  overwrite the original content type. Copy operations use metadata returned
+  by source decryption, preserving the same values when encrypted objects are
+  copied.
+
+### Changed
+
+### Removed
+
+### Dependencies
+
 ## [0.11.8] — 2026-08-06
 
 ### Added
