@@ -121,6 +121,21 @@ func TestS3ClientRequestsCardinality_UsesBoundedOperationAndStatusLabels(t *test
 	}
 }
 
+func TestS3ClientMetrics_DisabledBucketLabelCollapsesBuckets(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: false})
+	for _, bucket := range []string{"a", "b", "c"} {
+		m.RecordS3ClientRequest(context.Background(), "GetObject", bucket, http.StatusOK)
+		m.RecordS3ClientBytes(context.Background(), bucket, "in", 2)
+	}
+	if got := testutil.ToFloat64(m.s3ClientBytesTotal.WithLabelValues("*", "in")); got != 6 {
+		t.Fatalf("bytes=%v", got)
+	}
+	if got := testutil.ToFloat64(m.s3ClientRequestsTotal.WithLabelValues("GetObject", "*", "200")); got != 3 {
+		t.Fatalf("requests=%v", got)
+	}
+}
+
 // TestPprofRequestsCardinality_BoundedAt44 verifies the DoD requirement that
 // s3_gateway_admin_pprof_requests_total has at most 11 endpoints × 4 outcomes
 // = 44 label combinations (V0.6-OBS-1).

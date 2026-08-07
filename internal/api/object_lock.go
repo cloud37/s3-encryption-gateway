@@ -15,10 +15,12 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -155,6 +157,21 @@ func readLimitedBody(r *http.Request) ([]byte, *S3Error) {
 	return body, nil
 }
 
+func recordObjectLockSemantic(h *Handler, w http.ResponseWriter, ctx context.Context, operation, bucket string, start time.Time) {
+	if h == nil || h.metrics == nil {
+		return
+	}
+	status := http.StatusOK
+	if recorder, ok := w.(interface{ StatusCode() int }); ok {
+		status = recorder.StatusCode()
+	}
+	if status >= http.StatusBadRequest {
+		h.metrics.RecordS3Error(ctx, operation, bucket, strconv.Itoa(status))
+		return
+	}
+	h.metrics.RecordS3Operation(ctx, operation, bucket, time.Since(start))
+}
+
 // decodeStrictXML decodes XML with the stdlib decoder configured strictly
 // (defaults: entity expansion disabled, no DOCTYPE processing). Returns a
 // user-friendly 400 MalformedXML on decode failure.
@@ -173,6 +190,7 @@ func (h *Handler) handlePutObjectRetention(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
+	defer recordObjectLockSemantic(h, w, r.Context(), "PutObjectRetention", bucket, start)
 
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
@@ -235,6 +253,7 @@ func (h *Handler) handleGetObjectRetention(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
+	defer recordObjectLockSemantic(h, w, r.Context(), "GetObjectRetention", bucket, start)
 
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
@@ -278,6 +297,7 @@ func (h *Handler) handlePutObjectLegalHold(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
+	defer recordObjectLockSemantic(h, w, r.Context(), "PutObjectLegalHold", bucket, start)
 
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
@@ -331,6 +351,7 @@ func (h *Handler) handleGetObjectLegalHold(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
+	defer recordObjectLockSemantic(h, w, r.Context(), "GetObjectLegalHold", bucket, start)
 
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
@@ -373,6 +394,7 @@ func (h *Handler) handlePutObjectLockConfiguration(w http.ResponseWriter, r *htt
 	start := time.Now()
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
+	defer recordObjectLockSemantic(h, w, r.Context(), "PutObjectLockConfiguration", bucket, start)
 
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
@@ -435,6 +457,7 @@ func (h *Handler) handleGetObjectLockConfiguration(w http.ResponseWriter, r *htt
 	start := time.Now()
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
+	defer recordObjectLockSemantic(h, w, r.Context(), "GetObjectLockConfiguration", bucket, start)
 
 	s3Client, err := h.getS3Client(r)
 	if err != nil {

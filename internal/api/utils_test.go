@@ -13,7 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func TestCopyProxyResponse(t *testing.T) {
+func TestCopyProxyResponse_ReturnsActualBytesWritten(t *testing.T) {
 	backendResp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header: http.Header{
@@ -27,8 +27,12 @@ func TestCopyProxyResponse(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	if _, err := copyProxyResponse(w, backendResp); err != nil {
+	bytesCopied, err := copyProxyResponse(w, backendResp)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if bytesCopied != 5 {
+		t.Fatalf("bytes copied=%d, want 5", bytesCopied)
 	}
 
 	result := w.Result()
@@ -204,6 +208,40 @@ func TestHandlePassthrough_BackendError(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "<Code>InternalError</Code>") {
 		t.Errorf("expected InternalError in response, got: %s", body)
+	}
+}
+
+func TestHandlePassthrough_RecordsSemanticOperationAndStatus(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	defer backend.Close()
+	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, logger: logrus.New(), metrics: getTestMetrics()}
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, httptest.NewRequest(http.MethodGet, "/b?location", nil), "GetBucketLocation", "b", "")
+	if w.Code != http.StatusOK || w.Body.String() != "ok" {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlePassthrough_ChunkedBackendCountsActualBytesOut(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Del("Content-Length")
+		_, _ = w.Write([]byte("chunked"))
+	}))
+	defer backend.Close()
+	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, logger: logrus.New(), metrics: getTestMetrics()}
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, httptest.NewRequest(http.MethodGet, "/b?location", nil), "GetBucketLocation", "b", "")
+	if w.Body.String() != "chunked" {
+		t.Fatalf("body=%q", w.Body.String())
+	}
+}
+
+func TestHandlePassthrough_BackendFailureRecordsBadGatewayStatus(t *testing.T) {
+	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: "http://127.0.0.1:1"}}, logger: logrus.New(), metrics: getTestMetrics()}
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, httptest.NewRequest(http.MethodGet, "/b?location", nil), "GetBucketLocation", "b", "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502", w.Code)
 	}
 }
 

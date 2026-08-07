@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bufio"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +49,172 @@ func TestS3ResponseRecorder_PreservesOptionalInterfaces(t *testing.T) {
 	if got := w.Unwrap(); got != r {
 		t.Fatal("Unwrap did not return underlying writer")
 	}
+}
+
+type optionalResponseWriter struct {
+	http.ResponseWriter
+	flushed bool
+	pushed  string
+}
+
+func (w *optionalResponseWriter) Flush() { w.flushed = true }
+func (w *optionalResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client)), nil
+}
+func (w *optionalResponseWriter) Push(target string, _ *http.PushOptions) error {
+	w.pushed = target
+	return nil
+}
+
+func TestS3ResponseRecorder_OptionalInterfacesDelegate(t *testing.T) {
+	base := &optionalResponseWriter{ResponseWriter: httptest.NewRecorder()}
+	w := &s3ResponseRecorder{ResponseWriter: base}
+	w.Flush()
+	if !base.flushed {
+		t.Fatal("Flush was not delegated")
+	}
+	if err := w.Push("/asset", nil); err != nil || base.pushed != "/asset" {
+		t.Fatalf("Push delegation: %v %q", err, base.pushed)
+	}
+	conn, _, err := w.Hijack()
+	if err != nil {
+		t.Fatalf("Hijack delegation: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestS3ResponseRecorder_ReadFromCountsBytes(t *testing.T) {
+	w := &s3ResponseRecorder{ResponseWriter: httptest.NewRecorder()}
+	n, err := w.ReadFrom(strings.NewReader("reader-from"))
+	if err != nil || n != 11 || w.BytesWritten() != 11 {
+		t.Fatalf("ReadFrom n=%d err=%v bytes=%d", n, err, w.BytesWritten())
+	}
+}
+
+type readerFromResponseWriter struct {
+	http.ResponseWriter
+	readFromBytes int64
+}
+
+func (w *readerFromResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	n, err := io.Copy(io.Discard, r)
+	w.readFromBytes += n
+	return n, err
+}
+
+func TestS3ResponseRecorder_ReadFromDelegates(t *testing.T) {
+	base := &readerFromResponseWriter{ResponseWriter: httptest.NewRecorder()}
+	w := &s3ResponseRecorder{ResponseWriter: base}
+	n, err := w.ReadFrom(strings.NewReader("delegated"))
+	if err != nil || n != 9 || w.BytesWritten() != 9 || base.readFromBytes != 9 {
+		t.Fatalf("n=%d err=%v recorder=%d underlying=%d", n, err, w.BytesWritten(), base.readFromBytes)
+	}
+}
+
+func TestS3ResponseRecorder_UnsupportedOptionalInterfaces(t *testing.T) {
+	w := &s3ResponseRecorder{ResponseWriter: httptest.NewRecorder()}
+	if _, _, err := w.Hijack(); err != http.ErrNotSupported {
+		t.Fatalf("Hijack err=%v", err)
+	}
+	if err := w.Push("/asset", nil); err != http.ErrNotSupported {
+		t.Fatalf("Push err=%v", err)
+	}
+}
+
+type partialResponseWriter struct{ http.ResponseWriter }
+
+func (w *partialResponseWriter) Write(p []byte) (int, error) { return len(p) / 2, io.ErrShortWrite }
+
+func TestS3Instrumentation_GetObjectPartialWriteCountsSuccessfulBytes(t *testing.T) {
+	w := &s3ResponseRecorder{ResponseWriter: &partialResponseWriter{ResponseWriter: httptest.NewRecorder()}}
+	n, err := w.Write([]byte("123456"))
+	if n != 3 || err == nil || w.BytesWritten() != 3 {
+		t.Fatalf("partial write n=%d err=%v bytes=%d", n, err, w.BytesWritten())
+	}
+}
+
+func TestS3Instrumentation_GetObjectCountsActualPlaintextBytesOut(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	r := mux.NewRouter()
+	r.Handle("/{bucket}/{key}", h.instrumentS3("GetObject", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("plain")) })).Methods("GET")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/b/k", nil))
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="out"}`); got != 5 {
+		t.Fatalf("bytes=%v", got)
+	}
+}
+
+func TestS3Instrumentation_GetObjectRangeCountsOnlyWrittenRange(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	r := mux.NewRouter()
+	r.Handle("/{bucket}/{key}", h.instrumentS3("GetObject", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("range")) })).Methods("GET")
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/b/k", nil))
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="out"}`); got != 5 {
+		t.Fatalf("range bytes=%v", got)
+	}
+}
+
+func TestS3Instrumentation_PutObjectCountsActualPlaintextBytesIn(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	r := mux.NewRouter()
+	r.Handle("/{bucket}/{key}", h.instrumentS3("PutObject", func(_ http.ResponseWriter, req *http.Request) { _, _ = io.ReadAll(req.Body) })).Methods("PUT")
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPut, "/b/k", strings.NewReader("plain")))
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="in"}`); got != 5 {
+		t.Fatalf("input bytes=%v", got)
+	}
+}
+
+func TestS3Instrumentation_PutObjectStreamingAWSChunkedCountsDecodedBytes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	r := mux.NewRouter()
+	r.Handle("/{bucket}/{key}", h.instrumentS3("PutObject", func(_ http.ResponseWriter, req *http.Request) {
+		decoded := &clientInputReader{r: NewAwsChunkedReader(req.Body), onRead: func(n int64) { m.RecordS3ClientBytes(req.Context(), "b", "in", n) }}
+		_, _ = io.ReadAll(decoded)
+	})).Methods("PUT")
+	req := httptest.NewRequest(http.MethodPut, "/b/k", strings.NewReader("5\r\nhello\r\n0\r\n"))
+	req.Header.Set("x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="in"}`); got != 5 {
+		t.Fatalf("decoded bytes=%v", got)
+	}
+}
+
+func TestS3Instrumentation_UploadPartSDKRetryDoesNotDoubleCountInput(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	r := mux.NewRouter()
+	r.Handle("/{bucket}/{key}", h.instrumentS3("UploadPart", func(_ http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		_, _ = io.Copy(io.Discard, strings.NewReader(string(body)))
+	})).Methods("PUT")
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPut, "/b/k", strings.NewReader("retry-safe")))
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="in"}`); got != 10 {
+		t.Fatalf("input bytes=%v", got)
+	}
+}
+
+func gatheredMetricValue(reg *prometheus.Registry, metric string) float64 {
+	r := httptest.NewRecorder()
+	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, line := range strings.Split(r.Body.String(), "\n") {
+		if strings.HasPrefix(line, metric+" ") {
+			var value float64
+			_, _ = fmt.Sscanf(line, metric+" %f", &value)
+			return value
+		}
+	}
+	return 0
 }
 
 func TestS3Instrumentation_RecordsClientVisibleErrorStatusOnce(t *testing.T) {

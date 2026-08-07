@@ -27,9 +27,12 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 )
 
@@ -49,6 +52,28 @@ func newLockTestHandler(t *testing.T) (*Handler, *mockS3Client, *mux.Router) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	return handler, mockClient, router
+}
+
+func TestObjectLockSemanticParity_RecordsOperation(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(mockClient, engine, logger, metrics.NewMetricsWithRegistry(reg))
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	future := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	req := httptest.NewRequest(http.MethodPut, "/b/k?retention=", strings.NewReader(fmt.Sprintf(`<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>%s</RetainUntilDate></Retention>`, future)))
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	text := httptest.NewRecorder()
+	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(text, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(text.Body.String(), `s3_operations_total{bucket="b",operation="PutObjectRetention"} 1`) {
+		t.Fatalf("missing semantic metric: %s", text.Body.String())
+	}
 }
 
 // --------------------------- routing & XML ----------------------------

@@ -11,17 +11,43 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestUploadPartCopy_ClientMetricsExcludeInternalCopyBytes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewMetricsWithRegistry(reg)
+	h := &Handler{metrics: m}
+	router := mux.NewRouter()
+	router.Handle("/{bucket}/{key}", h.instrumentS3("UploadPart", func(w http.ResponseWriter, r *http.Request) {
+		m.RecordUploadPartCopy("plaintext", "ok", 1024, time.Millisecond)
+		_, _ = w.Write([]byte("client"))
+	})).Methods(http.MethodPut)
+	req := httptest.NewRequest(http.MethodPut, "/b/k", strings.NewReader("input"))
+	req = mux.SetURLVars(req, map[string]string{"bucket": "b", "key": "k"})
+	router.ServeHTTP(httptest.NewRecorder(), req)
+	metricsResponse := httptest.NewRecorder()
+	promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricsResponse.Body.String(), `gateway_upload_part_copy_bytes_total{source_mode="plaintext"} 1024`) {
+		t.Fatalf("internal copy metric missing: %s", metricsResponse.Body.String())
+	}
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="out"}`); got != 6 {
+		t.Fatalf("client output bytes=%v", got)
+	}
+}
 
 func TestParseCopySource(t *testing.T) {
 	tests := []struct {
