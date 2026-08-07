@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **V1.0-OBS-2:** Added client-boundary S3 request/status and plaintext byte metrics with bounded per-bucket labels, plus per-bucket dashboard filtering and throughput/error panels.
+
 - **Issue #236 regression coverage:** Added provider-agnostic Tier 2 coverage
   for copying objects encrypted with the self-contained AES key manager. The
   test verifies that `Content-Type`, `Cache-Control`, and `Content-Disposition`

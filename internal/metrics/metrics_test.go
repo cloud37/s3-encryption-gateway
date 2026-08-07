@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestNewMetrics(t *testing.T) {
@@ -58,6 +59,48 @@ func TestMetrics_RecordS3Error(t *testing.T) {
 	m.RecordS3Error(context.Background(), "GetObject", "test-bucket", "NoSuchKey")
 
 	// Metrics are registered with prometheus, verify they don't panic
+}
+
+func TestMetrics_RecordS3ClientBytes_LabelsAndValues(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
+	m.RecordS3ClientBytes(context.Background(), "bucket", "in", 12)
+	m.RecordS3ClientBytes(context.Background(), "bucket", "out", 8)
+	m.RecordS3ClientBytes(context.Background(), "bucket", "in", 0)
+	m.RecordS3ClientBytes(context.Background(), "bucket", "in", -1)
+	m.RecordS3ClientBytes(context.Background(), "bucket", "other", 100)
+
+	if got := testutil.ToFloat64(m.s3ClientBytesTotal.WithLabelValues("bucket", "in")); got != 12 {
+		t.Fatalf("in bytes = %v, want 12", got)
+	}
+	if got := testutil.ToFloat64(m.s3ClientBytesTotal.WithLabelValues("bucket", "out")); got != 8 {
+		t.Fatalf("out bytes = %v, want 8", got)
+	}
+}
+
+func TestMetrics_RecordS3ClientRequest_NumericStatusCode(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
+	m.RecordS3ClientRequest(context.Background(), "GetObject", "bucket", http.StatusNotFound)
+
+	if got := testutil.ToFloat64(m.s3ClientRequestsTotal.WithLabelValues("GetObject", "bucket", "404")); got != 1 {
+		t.Fatalf("request count = %v, want 1", got)
+	}
+}
+
+func TestMetrics_RecordS3ClientMetrics_BucketLabelDisabledUsesWildcard(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: false})
+	m.RecordS3ClientRequest(context.Background(), "ListBuckets", "", http.StatusOK)
+	m.RecordS3ClientBytes(context.Background(), "bucket-a", "out", 3)
+	m.RecordS3ClientBytes(context.Background(), "bucket-b", "out", 4)
+
+	if got := testutil.ToFloat64(m.s3ClientRequestsTotal.WithLabelValues("ListBuckets", "*", "200")); got != 1 {
+		t.Fatalf("request count = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.s3ClientBytesTotal.WithLabelValues("*", "out")); got != 7 {
+		t.Fatalf("byte count = %v, want 7", got)
+	}
 }
 
 // TestMetrics_RecordUploadPartCopy verifies the UploadPartCopy metric surface

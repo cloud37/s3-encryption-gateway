@@ -516,3 +516,15 @@ but reject PUT/POST operations. This is the correct degraded-mode posture.
 | `gateway_mpu_state_legacy_reads_total` is increasing after migration window | A gateway replica was restarted without the new password, or a plaintext backup was restored | Ensure all replicas use the same `VALKEY_ENCRYPTION_PASSWORD`; check for Valkey RDB restores |
 | Multipart uploads fail with `mpu: state decrypt failed` | Encryption password was rotated without draining in-flight uploads | Follow the key-rotation procedure (drain uploads first) |
 | Startup warning: `encrypt_state is false` | `valkey.encrypt_state: false` is set in config | Remove the override to re-enable at-rest encryption |
+## Per-Bucket Traffic
+
+Use the client-boundary metrics to distinguish application traffic from backend
+and encryption throughput:
+
+```promql
+sum by (bucket, direction) (rate(s3_client_bytes_total[5m]))
+sum by (bucket, operation, status_code) (rate(s3_client_requests_total[5m]))
+```
+
+These counters exclude headers, TLS framing, backend retries, and internal
+server-side copies.

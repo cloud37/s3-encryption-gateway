@@ -71,6 +71,17 @@ You can configure `redact_metadata_keys` to prevent sensitive metadata fields fr
 
 Prometheus metrics are exposed at `/metrics`.
 
+### Client traffic metrics (V1.0-OBS-2)
+
+The gateway exposes `s3_client_requests_total{operation,bucket,status_code}` for one completed S3 route per request and `s3_client_bytes_total{bucket,direction}` for actual application-body bytes at the client boundary. Input bytes are counted after AWS streaming framing is decoded; output bytes are counted only when successfully written. Headers, TLS framing, backend retries, and internal copy traffic are excluded.
+
+`METRICS_ENABLE_BUCKET_LABEL` controls bucket labels for these metrics. Disabled mode collapses all buckets to `*`; enabled mode preserves the parsed bucket label. Labels never contain object keys, upload IDs, credentials, paths, or error text.
+
+```promql
+sum by (bucket, direction) (rate(s3_client_bytes_total{bucket=~"$bucket"}[5m]))
+sum by (bucket, operation, status_code) (rate(s3_client_requests_total{bucket=~"$bucket"}[5m]))
+```
+
 ### Key Metrics
 
 - `s3_gateway_http_requests_total`: Total count of HTTP requests

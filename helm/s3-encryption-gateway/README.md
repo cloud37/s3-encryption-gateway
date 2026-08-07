@@ -1265,3 +1265,9 @@ For issues, feature requests, or questions:
 ## License
 
 MIT License — see [LICENSE](https://github.com/cloud37/s3-encryption-gateway/blob/main/LICENSE) for details.
+### Client Traffic Metrics
+
+`s3_client_requests_total{operation,bucket,status_code}` counts completed S3
+routes and `s3_client_bytes_total{bucket,direction}` counts application-body
+bytes at the client boundary. Set `metrics.enableBucketLabel: true` to retain
+bucket labels; disabled mode uses `*` to bound cardinality.

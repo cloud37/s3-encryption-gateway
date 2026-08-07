@@ -951,3 +951,9 @@ histogram_quantile(0.95, rate(chunk_processing_duration_seconds_bucket[5m]))
 - **Development**: See [`DEVELOPMENT_GUIDE.md`](DEVELOPMENT_GUIDE.md)
 - **Security Audit**: See [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md)
 - **API Implementation**: See [`S3_API_IMPLEMENTATION.md`](S3_API_IMPLEMENTATION.md)
+## Client Traffic Metrics
+
+Set `METRICS_ENABLE_BUCKET_LABEL=true` when per-bucket dashboards are needed.
+The setting applies to the S3 client metric families
+`s3_client_requests_total` and `s3_client_bytes_total`; the default `false`
+collapses bucket labels to `*`.

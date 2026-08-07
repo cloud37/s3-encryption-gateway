@@ -1,0 +1,17 @@
+templates:
+  - deployment.yaml
+release:
+  name: s3eg-test
+  namespace: default
+values:
+  - ../values.yaml
+tests:
+  - it: should set METRICS_ENABLE_BUCKET_LABEL when enabled
+    set:
+      metrics.enableBucketLabel: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: METRICS_ENABLE_BUCKET_LABEL
+            value: "true"

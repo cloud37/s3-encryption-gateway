@@ -233,10 +233,11 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/live", h.handleLive).Methods("GET")
 	r.HandleFunc("/livez", h.handleLive).Methods("GET") // k8s-convention alias
 
-	r.HandleFunc("/", h.handleListBuckets).Methods("GET")
+	r.Handle("/", h.instrumentS3("ListBuckets", h.handleListBuckets)).Methods("GET")
 
 	// S3 API routes
 	s3Router := r.PathPrefix("/").Subrouter()
+	s3Router.Use(h.s3InstrumentationMiddleware)
 
 	// Multipart upload routes (must be registered first to ensure query parameter matching)
 	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCreateMultipartUpload).Methods("POST").Queries("uploads", "")
@@ -1757,8 +1758,17 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Check for any STREAMING- header value (e.g. STREAMING-AWS4-HMAC-SHA256-PAYLOAD or STREAMING-UNSIGNED-PAYLOAD-TRAILER)
 	var inputReader io.Reader = r.Body
 	contentSha256 := r.Header.Get("x-amz-content-sha256")
+	inputReader = &clientInputReader{r: inputReader, onRead: func(n int64) {
+		if h.metrics != nil {
+			h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+		}
+	}}
 	if strings.HasPrefix(contentSha256, "STREAMING-") {
-		inputReader = NewAwsChunkedReader(r.Body)
+		inputReader = &clientInputReader{r: NewAwsChunkedReader(r.Body), onRead: func(n int64) {
+			if h.metrics != nil {
+				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+			}
+		}}
 		h.logger.WithFields(logrus.Fields{
 			"bucket": bucket,
 			"key":    key,
@@ -3742,8 +3752,17 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	// signatures are transport data, not part of the plaintext to store.
 	var inputReader io.Reader = r.Body
 	contentSha256 := r.Header.Get("x-amz-content-sha256")
+	inputReader = &clientInputReader{r: inputReader, onRead: func(n int64) {
+		if h.metrics != nil {
+			h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+		}
+	}}
 	if strings.HasPrefix(contentSha256, "STREAMING-") {
-		inputReader = NewAwsChunkedReader(r.Body)
+		inputReader = &clientInputReader{r: NewAwsChunkedReader(r.Body), onRead: func(n int64) {
+			if h.metrics != nil {
+				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+			}
+		}}
 		h.logger.WithFields(logrus.Fields{
 			"bucket": bucket,
 			"key":    key,

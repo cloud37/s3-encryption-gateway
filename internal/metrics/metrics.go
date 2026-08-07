@@ -32,6 +32,8 @@ type Metrics struct {
 	httpRequestsTotal                 *prometheus.CounterVec
 	httpRequestDuration               *prometheus.HistogramVec
 	httpRequestBytes                  *prometheus.CounterVec
+	s3ClientRequestsTotal             *prometheus.CounterVec
+	s3ClientBytesTotal                *prometheus.CounterVec
 	s3OperationsTotal                 *prometheus.CounterVec
 	s3OperationDuration               *prometheus.HistogramVec
 	s3OperationErrors                 *prometheus.CounterVec
@@ -214,6 +216,20 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 				Help: "Total bytes transferred in HTTP requests",
 			},
 			[]string{"method", "path"},
+		),
+		s3ClientRequestsTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "s3_client_requests_total",
+				Help: "Total number of completed S3 client requests by operation, bucket, and numeric status code",
+			},
+			[]string{"operation", "bucket", "status_code"},
+		),
+		s3ClientBytesTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "s3_client_bytes_total",
+				Help: "Total S3 application-body bytes transferred at the client boundary",
+			},
+			[]string{"bucket", "direction"},
 		),
 		s3OperationsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
@@ -766,12 +782,44 @@ func sanitizePathLabel(path string) string {
 	return "/" + segs[0] + "/*"
 }
 
+// bucketLabel applies the configured bucket-label policy to all S3 metrics.
+func (m *Metrics) bucketLabel(bucket string) string {
+	if m == nil || !m.config.EnableBucketLabel {
+		return "*"
+	}
+	return bucket
+}
+
+// RecordS3ClientRequest records one completed S3 route with a numeric status code.
+func (m *Metrics) RecordS3ClientRequest(ctx context.Context, operation, bucket string, statusCode int) {
+	if m == nil || m.s3ClientRequestsTotal == nil {
+		return
+	}
+	labels := prometheus.Labels{
+		"operation":   operation,
+		"bucket":      m.bucketLabel(bucket),
+		"status_code": strconv.Itoa(statusCode),
+	}
+	if exemplar := getExemplar(ctx); exemplar != nil {
+		if adder, ok := m.s3ClientRequestsTotal.With(labels).(prometheus.ExemplarAdder); ok {
+			adder.AddWithExemplar(1, exemplar)
+			return
+		}
+	}
+	m.s3ClientRequestsTotal.With(labels).Inc()
+}
+
+// RecordS3ClientBytes records positive client-visible application bytes.
+func (m *Metrics) RecordS3ClientBytes(ctx context.Context, bucket, direction string, bytes int64) {
+	if m == nil || m.s3ClientBytesTotal == nil || bytes <= 0 || (direction != "in" && direction != "out") {
+		return
+	}
+	m.s3ClientBytesTotal.WithLabelValues(m.bucketLabel(bucket), direction).Add(float64(bytes))
+}
+
 // RecordS3Operation records an S3 operation metric.
 func (m *Metrics) RecordS3Operation(ctx context.Context, operation, bucket string, duration time.Duration) {
-	bucketLabel := bucket
-	if !m.config.EnableBucketLabel {
-		bucketLabel = "*"
-	}
+	bucketLabel := m.bucketLabel(bucket)
 
 	if exemplar := getExemplar(ctx); exemplar != nil {
 		if adder, ok := m.s3OperationsTotal.WithLabelValues(operation, bucketLabel).(prometheus.ExemplarAdder); ok {
@@ -793,10 +841,7 @@ func (m *Metrics) RecordS3Operation(ctx context.Context, operation, bucket strin
 
 // RecordS3Error records an S3 operation error.
 func (m *Metrics) RecordS3Error(ctx context.Context, operation, bucket, errorType string) {
-	bucketLabel := bucket
-	if !m.config.EnableBucketLabel {
-		bucketLabel = "*"
-	}
+	bucketLabel := m.bucketLabel(bucket)
 
 	if exemplar := getExemplar(ctx); exemplar != nil {
 		if adder, ok := m.s3OperationErrors.WithLabelValues(operation, bucketLabel, errorType).(prometheus.ExemplarAdder); ok {

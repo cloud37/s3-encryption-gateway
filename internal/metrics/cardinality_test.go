@@ -45,7 +45,7 @@ func TestRecordHTTPRequest_Cardinality(t *testing.T) {
 
 	// Check that we have collapsed paths
 	// We expect /mybucket/* and /otherbucket/*
-	
+
 	// Verify /mybucket/* count is 2
 	countMyBucket := testutil.ToFloat64(m.httpRequestsTotal.WithLabelValues("GET", "/mybucket/*", "OK"))
 	assert.Equal(t, 2.0, countMyBucket)
@@ -70,7 +70,7 @@ func TestRecordS3Operation_DisableBucketLabel(t *testing.T) {
 
 	// Verify that specific buckets are NOT tracked
 	// Note: testutil.ToFloat64 panics or returns 0 if label values don't match existing metric.
-	// However, since we didn't record them, we can't easily check for "absence" with ToFloat64 
+	// However, since we didn't record them, we can't easily check for "absence" with ToFloat64
 	// without knowing if it returns 0 for non-existent label set or if it errors.
 	// But checking the aggregate "*" is sufficient to prove logic path was taken.
 }
@@ -85,6 +85,40 @@ func TestRecordS3Error_DisableBucketLabel(t *testing.T) {
 
 	count := testutil.ToFloat64(m.s3OperationErrors.WithLabelValues("GetObject", "*", "NoSuchKey"))
 	assert.Equal(t, 2.0, count)
+}
+
+func TestS3ClientBytesCardinality_BoundedByBucketAndDirection(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
+	for _, bucket := range []string{"a", "b", "c"} {
+		for _, direction := range []string{"in", "out"} {
+			m.RecordS3ClientBytes(context.Background(), bucket, direction, 1)
+		}
+	}
+	mfs, err := reg.Gather()
+	assert.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "s3_client_bytes_total" {
+			continue
+		}
+		if got := len(mf.GetMetric()); got != 6 {
+			t.Fatalf("byte series=%d, want 6", got)
+		}
+	}
+}
+
+func TestS3ClientRequestsCardinality_UsesBoundedOperationAndStatusLabels(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
+	m.RecordS3ClientRequest(context.Background(), "GetObject", "bucket", http.StatusOK)
+	m.RecordS3ClientRequest(context.Background(), "GetObject", "bucket", http.StatusNotFound)
+	mfs, err := reg.Gather()
+	assert.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "s3_client_requests_total" && len(mf.GetMetric()) != 2 {
+			t.Fatalf("request series=%d, want 2", len(mf.GetMetric()))
+		}
+	}
 }
 
 // TestPprofRequestsCardinality_BoundedAt44 verifies the DoD requirement that
@@ -140,4 +174,3 @@ func TestSetAdminProfilingEnabled_Gauge(t *testing.T) {
 	got = testutil.ToFloat64(m.gatewayAdminProfilingEnabled)
 	assert.Equal(t, 0.0, got, "expected gauge=0 when profiling disabled")
 }
-
