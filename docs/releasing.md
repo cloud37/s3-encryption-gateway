@@ -60,7 +60,9 @@ grep -q '"spdxVersion"' sbom.spdx.json && echo "SBOM is valid"
 ### 4. Update CHANGELOG
 
 Ensure `CHANGELOG.md` has an entry for the new version with all significant
-changes documented.
+changes documented. The release workflow extracts the matching version section
+and publishes it as the GitHub Release notes. The release will fail if the
+version entry is missing, empty, or duplicated.
 
 ### 5. Verify Chart Version
 
@@ -85,6 +87,8 @@ After tagging, the `helm.yml` release workflow:
 7. Signs the Docker Hub image digest and attaches the SBOM attestation using
    cosign keyless OIDC signing (Sigstore transparency log).
 8. Syncs the chart README to the `gh-pages` branch.
+9. Updates the GitHub Release notes from the matching `CHANGELOG.md` section
+   and links back to the full changelog.
 
 ### Required Secrets
 
@@ -96,6 +100,34 @@ settings (Settings → Secrets → Actions):
   `cloud37io/s3-encryption-gateway`
 
 ## Post-Release
+
+### Backfill Existing Releases
+
+The CI workflow updates release notes for new releases. To locally backfill
+older releases from their matching `CHANGELOG.md` sections, first preview the
+changes:
+
+```bash
+bash scripts/backfill-release-notes.sh
+```
+
+The preview does not modify GitHub. After reviewing the release list, apply the
+updates explicitly:
+
+```bash
+bash scripts/backfill-release-notes.sh --apply
+```
+
+To update only one release, specify its version:
+
+```bash
+bash scripts/backfill-release-notes.sh --version 0.11.8 --apply
+```
+
+Use `--limit NUMBER` to restrict the number of releases inspected, or
+`--repo OWNER/REPO` for a repository other than the current one. The script
+skips unrelated or draft releases and reports releases without a usable
+changelog section.
 
 ### Artifact Hub
 
