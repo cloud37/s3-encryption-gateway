@@ -265,6 +265,9 @@ jobs:
           chmod +x helm/s3-encryption-gateway/scripts/test-chart.sh
           helm/s3-encryption-gateway/scripts/test-chart.sh
 
+      - name: Changelog release-notes test
+        run: bash scripts/test-extract-changelog-section.sh
+
       - name: Package chart
         run: |
           cd helm

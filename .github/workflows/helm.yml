@@ -97,6 +97,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract changelog entry
+        if: steps.version_check.outputs.already_released == 'false'
+        run: |
+          bash scripts/extract-changelog-section.sh \
+            CHANGELOG.md \
+            "${{ steps.version_check.outputs.chart_version }}" \
+            > /tmp/release-notes.md
+
       - name: Run chart-releaser
         if: steps.version_check.outputs.already_released == 'false'
         uses: helm/chart-releaser-action@v1.7.0
@@ -105,6 +113,20 @@ jobs:
           config: .github/cr.yaml
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Update GitHub release notes
+        if: steps.version_check.outputs.already_released == 'false'
+        run: |
+          {
+            cat /tmp/release-notes.md
+            printf '\nSee the [full changelog](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md).\n'
+          } > /tmp/release-notes-with-link.md
+
+          gh release edit "${{ steps.version_check.outputs.release_tag }}" \
+            --notes-file /tmp/release-notes-with-link.md \
+            --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
       # ── Mark pre-release versions explicitly on GitHub ──────────────────────
       - name: Mark release as pre-release if version contains a pre-release suffix
