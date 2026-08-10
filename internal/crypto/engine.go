@@ -1396,6 +1396,24 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 		}
 		decMetadata[k] = v
 	}
+	if v := metadata[MetaContentType]; v != "" {
+		decMetadata["Content-Type"] = v
+	}
+	if v := metadata[MetaCacheControl]; v != "" {
+		decMetadata["Cache-Control"] = v
+	}
+	if v := metadata[MetaContentDisposition]; v != "" {
+		decMetadata["Content-Disposition"] = v
+	}
+	if v := metadata["encryption-content-type"]; v != "" {
+		decMetadata["Content-Type"] = v
+	}
+	if v := metadata["encryption-cache-control"]; v != "" {
+		decMetadata["Cache-Control"] = v
+	}
+	if v := metadata["encryption-content-disposition"]; v != "" {
+		decMetadata["Content-Disposition"] = v
+	}
 
 	// Restore the plaintext size. For chunked objects, derive it from the
 	// ciphertext length when available because MetaChunkCount*MetaChunkSize is
