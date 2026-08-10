@@ -555,6 +555,9 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	// This replaces all individual encryption metadata keys with a single
 	// AES-256-GCM sealed blob under MetaEncryptedMetadata.
 	if e.metadataKey != nil {
+		contentTypeMetadata := encMetadata[MetaContentType]
+		cacheControlMetadata := encMetadata[MetaCacheControl]
+		contentDispositionMetadata := encMetadata[MetaContentDisposition]
 		blob, err := e.encryptMetadata(encMetadata)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -570,6 +573,17 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		// so that IsEncrypted works even without the metadata key (§2.6).
 		encMetadata[MetaEncrypted] = "true"
 		encMetadata[MetaEncryptedMetadata] = blob
+		// Keep client-visible standard headers outside the encrypted blob so
+		// HEAD and copy paths can restore them without reading the object body.
+		if contentTypeMetadata != "" {
+			encMetadata[MetaContentType] = contentTypeMetadata
+		}
+		if cacheControlMetadata != "" {
+			encMetadata[MetaCacheControl] = cacheControlMetadata
+		}
+		if contentDispositionMetadata != "" {
+			encMetadata[MetaContentDisposition] = contentDispositionMetadata
+		}
 	}
 
 	// Check if we need fallback metadata storage before encrypting.

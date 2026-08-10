@@ -69,7 +69,29 @@ func testUPC_Full(t *testing.T, inst provider.Instance) {
 
 	// Create destination MPU.
 	dstKey := uniqueKey(t)
-	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, dstKey)
+	initReq, _ := http.NewRequest("POST", fmt.Sprintf("%s/%s/%s?uploads", gw.URL, inst.Bucket, dstKey), nil)
+	initReq.Header.Set("Content-Type", "image/jpeg")
+	initReq.Header.Set("Cache-Control", "max-age=180")
+	initReq.Header.Set("Content-Disposition", `inline; filename="photo.jpg"`)
+	initResp, err := gw.HTTPClient().Do(initReq)
+	if err != nil {
+		t.Fatalf("UPC initiate MPU: %v", err)
+	}
+	initBody, _ := io.ReadAll(initResp.Body)
+	initResp.Body.Close()
+	if initResp.StatusCode != http.StatusOK {
+		t.Fatalf("UPC initiate MPU: %d: %s", initResp.StatusCode, initBody)
+	}
+	var initResult struct {
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.Unmarshal(initBody, &initResult); err != nil {
+		t.Fatalf("UPC initiate MPU XML: %v", err)
+	}
+	uploadID := initResult.UploadID
+	if uploadID == "" {
+		t.Fatal("UPC initiate MPU returned empty upload ID")
+	}
 	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID) })
 
 	etag := doUploadPartCopy(t, gw, inst.Bucket, dstKey, uploadID, 1,
@@ -79,6 +101,52 @@ func testUPC_Full(t *testing.T, inst provider.Instance) {
 	got := get(t, gw, inst.Bucket, dstKey)
 	if !bytes.Equal(got, srcData) {
 		t.Errorf("UPC_Full: round-trip mismatch (%d bytes vs %d expected)", len(got), len(srcData))
+	}
+}
+
+// testUPC_StandardMetadata verifies the source metadata remains available on
+// the completed destination object after UploadPartCopy.
+func testUPC_StandardMetadata(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst)
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	data := []byte("upload part copy metadata")
+	putReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, srcKey), bytes.NewReader(data))
+	putReq.Header.Set("Content-Type", "image/jpeg")
+	putReq.Header.Set("Cache-Control", "max-age=180")
+	putReq.Header.Set("Content-Disposition", `inline; filename="photo.jpg"`)
+	putResp, err := gw.HTTPClient().Do(putReq)
+	if err != nil {
+		t.Fatalf("UPC source PUT: %v", err)
+	}
+	io.Copy(io.Discard, putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("UPC source PUT: status %d", putResp.StatusCode)
+	}
+
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, dstKey)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID) })
+	etag := doUploadPartCopy(t, gw, inst.Bucket, dstKey, uploadID, 1, inst.Bucket, srcKey, "")
+	completeMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID, []mpuPart{{1, etag}})
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
+	headResp, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatalf("UPC destination HEAD: %v", err)
+	}
+	defer headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(headResp.Body)
+		t.Fatalf("UPC destination HEAD: status %d: %s", headResp.StatusCode, body)
+	}
+	for header, want := range map[string]string{
+		"Content-Type": "image/jpeg", "Cache-Control": "max-age=180",
+		"Content-Disposition": `inline; filename="photo.jpg"`,
+	} {
+		if got := headResp.Header.Get(header); got != want {
+			t.Errorf("UPC %s = %q, want %q", header, got, want)
+		}
 	}
 }
 

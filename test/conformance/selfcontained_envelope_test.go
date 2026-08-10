@@ -342,6 +342,57 @@ func testSelfContained_AES_ChunkedCopyObjectStandardMetadata(t *testing.T, inst 
 	}
 }
 
+// testLegacy_CopyObjectStandardMetadata verifies metadata inheritance when the
+// source uses the buffered legacy encryption format.
+func testLegacy_CopyObjectStandardMetadata(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst, harness.WithChunking(false))
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	data := []byte("legacy copy metadata")
+
+	putReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, srcKey), bytes.NewReader(data))
+	putReq.Header.Set("Content-Type", "application/pdf")
+	putReq.Header.Set("Cache-Control", "no-cache")
+	putReq.Header.Set("Content-Disposition", `inline; filename="legacy.pdf"`)
+	putResp, err := gw.HTTPClient().Do(putReq)
+	if err != nil {
+		t.Fatalf("legacy source PUT: %v", err)
+	}
+	io.Copy(io.Discard, putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("legacy source PUT: status %d", putResp.StatusCode)
+	}
+
+	copyReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+inst.Bucket+"/"+srcKey)
+	copyResp, err := gw.HTTPClient().Do(copyReq)
+	if err != nil {
+		t.Fatalf("legacy CopyObject: %v", err)
+	}
+	io.Copy(io.Discard, copyResp.Body)
+	copyResp.Body.Close()
+	if copyResp.StatusCode != http.StatusOK {
+		t.Fatalf("legacy CopyObject: status %d", copyResp.StatusCode)
+	}
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
+	headResp, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatalf("legacy copied HEAD: %v", err)
+	}
+	defer headResp.Body.Close()
+	for header, want := range map[string]string{
+		"Content-Type":        "application/pdf",
+		"Cache-Control":       "no-cache",
+		"Content-Disposition": `inline; filename="legacy.pdf"`,
+	} {
+		if got := headResp.Header.Get(header); got != want {
+			t.Errorf("legacy copied %s = %q, want %q", header, got, want)
+		}
+	}
+}
+
 // testSelfContained_AES_AWSCLICopyMetadata reproduces the exact AWS CLI
 // server-side copy workflow reported in issue #236.
 func testSelfContained_AES_AWSCLICopyMetadata(t *testing.T, inst provider.Instance) {
@@ -358,6 +409,110 @@ func testSelfContained_AES_AWSCLICopyMetadata(t *testing.T, inst provider.Instan
 	}
 	if err := runToolContainer(context.Background(), t, &awscliCopyMetadataRunner{}, env); err != nil {
 		t.Fatalf("awscli copy metadata: %v", err)
+	}
+}
+
+// testCopyObject_MetadataDirective verifies explicit destination metadata
+// replacement does not accidentally become source metadata inheritance.
+func testCopyObject_MetadataDirective(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst)
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	putReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, srcKey), bytes.NewReader([]byte("directive metadata")))
+	putReq.Header.Set("Content-Type", "image/png")
+	putReq.Header.Set("Cache-Control", "max-age=10")
+	putReq.Header.Set("Content-Disposition", `inline; filename="source.png"`)
+	resp, err := gw.HTTPClient().Do(putReq)
+	if err != nil {
+		t.Fatalf("directive source PUT: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("directive source PUT: %d", resp.StatusCode)
+	}
+
+	copyReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+inst.Bucket+"/"+srcKey)
+	copyReq.Header.Set("x-amz-metadata-directive", "REPLACE")
+	copyReq.Header.Set("Content-Type", "application/pdf")
+	copyReq.Header.Set("Cache-Control", "no-cache")
+	copyReq.Header.Set("Content-Disposition", `attachment; filename="destination.pdf"`)
+	resp, err = gw.HTTPClient().Do(copyReq)
+	if err != nil {
+		t.Fatalf("directive CopyObject: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("directive CopyObject: %d", resp.StatusCode)
+	}
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
+	head, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer head.Body.Close()
+	for header, want := range map[string]string{
+		"Content-Type": "application/pdf", "Cache-Control": "no-cache",
+		"Content-Disposition": `attachment; filename="destination.pdf"`,
+	} {
+		if got := head.Header.Get(header); got != want {
+			t.Errorf("REPLACE %s = %q, want %q", header, got, want)
+		}
+	}
+}
+
+// testEncryptedMetadata_CopyObject verifies CopyObject through the encrypted
+// metadata-blob path, independent of the self-contained key manager.
+func testEncryptedMetadata_CopyObject(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		t.Fatal(err)
+	}
+	gw := harness.StartGateway(t, inst, harness.WithMetadataEncryptionKey(keyBytes))
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	putReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, srcKey), bytes.NewReader([]byte("encrypted blob copy")))
+	putReq.Header.Set("Content-Type", "application/zip")
+	putReq.Header.Set("Cache-Control", "max-age=20")
+	putReq.Header.Set("Content-Disposition", `attachment; filename="archive.zip"`)
+	resp, err := gw.HTTPClient().Do(putReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("encrypted metadata PUT: %d", resp.StatusCode)
+	}
+
+	copyReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+inst.Bucket+"/"+srcKey)
+	resp, err = gw.HTTPClient().Do(copyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("encrypted metadata CopyObject: %d", resp.StatusCode)
+	}
+
+	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
+	head, err := gw.HTTPClient().Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer head.Body.Close()
+	for header, want := range map[string]string{
+		"Content-Type": "application/zip", "Cache-Control": "max-age=20",
+		"Content-Disposition": `attachment; filename="archive.zip"`,
+	} {
+		if got := head.Header.Get(header); got != want {
+			t.Errorf("encrypted metadata %s = %q, want %q", header, got, want)
+		}
 	}
 }
 

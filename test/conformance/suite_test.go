@@ -84,6 +84,7 @@ func TestConformance(t *testing.T) {
 
 				// UploadPartCopy.
 				{"UploadPartCopy_Full", provider.CapMultipartCopy, testUPC_Full},
+				{"UploadPartCopy_StandardMetadata", provider.CapMultipartCopy, testUPC_StandardMetadata},
 				{"UploadPartCopy_Range", provider.CapMultipartCopy, testUPC_Range},
 				{"UploadPartCopy_Plaintext", provider.CapMultipartCopy, testUPC_Plaintext},
 				{"UploadPartCopy_Legacy", provider.CapMultipartCopy, testUPC_Legacy},
@@ -179,7 +180,10 @@ func TestConformance(t *testing.T) {
 				{"SelfContained_AES_StandardMetadataRoundTrip", 0, testSelfContained_AES_StandardMetadataRoundTrip},
 				{"SelfContained_AES_CopyObjectStandardMetadata", 0, testSelfContained_AES_CopyObjectStandardMetadata},
 				{"SelfContained_AES_ChunkedCopyObjectStandardMetadata", 0, testSelfContained_AES_ChunkedCopyObjectStandardMetadata},
+				{"Legacy_CopyObjectStandardMetadata", 0, testLegacy_CopyObjectStandardMetadata},
 				{"SelfContained_AES_AWSCLICopyMetadata", 0, testSelfContained_AES_AWSCLICopyMetadata},
+				{"CopyObject_MetadataDirective", 0, testCopyObject_MetadataDirective},
+				{"EncryptedMetadata_CopyObject", 0, testEncryptedMetadata_CopyObject},
 				{"SelfContained_AES_AtRest", 0, testSelfContained_AES_AtRest},
 				{"SelfContained_AES_Rotation_DualRead", 0, testSelfContained_AES_Rotation_DualRead},
 				{"SelfContained_AES_RangedGet_LargeChunked", 0, testSelfContained_AES_RangedGet_LargeChunked},
