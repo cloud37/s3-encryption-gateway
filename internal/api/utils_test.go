@@ -10,6 +10,9 @@ import (
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
+	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )
 
@@ -214,11 +217,22 @@ func TestHandlePassthrough_BackendError(t *testing.T) {
 func TestHandlePassthrough_RecordsSemanticOperationAndStatus(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
 	defer backend.Close()
-	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, logger: logrus.New(), metrics: getTestMetrics()}
+	reg := prometheus.NewRegistry()
+	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, logger: logrus.New(), metrics: metrics.NewMetricsWithRegistry(reg)}
+	router := mux.NewRouter()
+	router.Handle("/{bucket}", h.instrumentS3("GetBucketLocation", func(w http.ResponseWriter, r *http.Request) {
+		h.handlePassthrough(w, r, "GetBucketLocation", "b", "")
+	})).Methods(http.MethodGet)
 	w := httptest.NewRecorder()
-	h.handlePassthrough(w, httptest.NewRequest(http.MethodGet, "/b?location", nil), "GetBucketLocation", "b", "")
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b?location", nil))
 	if w.Code != http.StatusOK || w.Body.String() != "ok" {
 		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if got := gatheredMetricValue(reg, `s3_operations_total{bucket="b",operation="GetBucketLocation"}`); got != 1 {
+		t.Fatalf("semantic operations=%v, want 1", got)
+	}
+	if got := gatheredMetricValue(reg, `s3_client_requests_total{bucket="b",operation="GetBucketLocation",status_code="200"}`); got != 1 {
+		t.Fatalf("client requests=%v, want 1", got)
 	}
 }
 
@@ -228,11 +242,19 @@ func TestHandlePassthrough_ChunkedBackendCountsActualBytesOut(t *testing.T) {
 		_, _ = w.Write([]byte("chunked"))
 	}))
 	defer backend.Close()
-	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, logger: logrus.New(), metrics: getTestMetrics()}
+	reg := prometheus.NewRegistry()
+	h := &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, logger: logrus.New(), metrics: metrics.NewMetricsWithRegistry(reg)}
+	router := mux.NewRouter()
+	router.Handle("/{bucket}", h.instrumentS3("GetBucketLocation", func(w http.ResponseWriter, r *http.Request) {
+		h.handlePassthrough(w, r, "GetBucketLocation", "b", "")
+	})).Methods(http.MethodGet)
 	w := httptest.NewRecorder()
-	h.handlePassthrough(w, httptest.NewRequest(http.MethodGet, "/b?location", nil), "GetBucketLocation", "b", "")
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b?location", nil))
 	if w.Body.String() != "chunked" {
 		t.Fatalf("body=%q", w.Body.String())
+	}
+	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="out"}`); got != 7 {
+		t.Fatalf("client output bytes=%v, want 7", got)
 	}
 }
 

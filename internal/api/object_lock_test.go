@@ -76,6 +76,28 @@ func TestObjectLockSemanticParity_RecordsOperation(t *testing.T) {
 	}
 }
 
+func TestObjectLockSemanticParity_RecordsError(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(mockClient, engine, logger, metrics.NewMetricsWithRegistry(reg))
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/b/k?retention=", strings.NewReader("<not-xml")))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", w.Code)
+	}
+	if got := gatheredMetricValue(reg, `s3_operation_errors_total{bucket="b",error_type="400",operation="PutObjectRetention"}`); got != 1 {
+		t.Fatalf("semantic errors=%v, want 1", got)
+	}
+}
+
 // --------------------------- routing & XML ----------------------------
 
 func TestHandlePutObjectRetention_ValidXML_Succeeds(t *testing.T) {
