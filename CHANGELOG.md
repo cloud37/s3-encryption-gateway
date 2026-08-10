@@ -8,9 +8,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **V1.0-OBS-2:** Added client-boundary S3 request/status and plaintext byte metrics with bounded per-bucket labels, plus per-bucket dashboard filtering and throughput/error panels.
+### Security
 
-- **Issue #236 regression coverage:** Added provider-agnostic Tier 2 coverage
+### Fixed
+
+### Changed
+
+### Removed
+
+### Dependencies
+
+## [0.11.9] — 2026-08-10
+
+### Added
+
+- **Client traffic observability (issue #230):** Added
+  `s3_client_requests_total{operation,bucket,status_code}` and
+  `s3_client_bytes_total{bucket,direction}` with bounded bucket labels and
+  exact-once route accounting. Client byte metrics count actual application
+  bytes, including decoded AWS streaming uploads and successful partial/range
+  writes, without counting SDK retries or internal copy traffic. Completed
+  semantic operation/error parity for passthrough and Object Lock routes,
+  distinguished CopyObject and UploadPartCopy operations, and preserved all
+  existing metric schemas. Added response-writer interface, partial-write,
+  streaming, retry, cardinality, passthrough, Object Lock, and internal-copy
+  regression coverage, together with Helm wiring tests and per-bucket Grafana
+  throughput, status, and error-ratio panels.
+
+- **Regression coverage (issue #236):** Added provider-agnostic Tier 2 coverage
   for copying objects encrypted with the self-contained AES key manager. The
   test verifies that `Content-Type`, `Cache-Control`, and `Content-Disposition`
   survive `CopyObject` and remain available on both HEAD and GET responses,
@@ -41,6 +66,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Removed
 
 ### Dependencies
+
+- Migrated the key-manager retry dependency to
+  `github.com/cenkalti/backoff/v7` while preserving existing retry behavior.
+- Updated the AWS SDK for Go v2 S3 module to v1.107.0 and
+  `github.com/aws/smithy-go` to v1.27.7.
+- Updated Testcontainers Go and its MinIO and Redis modules to v0.44.0.
+- Refreshed the Go module graph, including transitive Docker, OpenTelemetry,
+  and system utility dependencies.
 
 ## [0.11.8] — 2026-08-06
 
