@@ -268,6 +268,25 @@ func testSelfContained_AES_CopyObjectStandardMetadata(t *testing.T, inst provide
 	}
 }
 
+// testSelfContained_AES_AWSCLICopyMetadata reproduces the exact AWS CLI
+// server-side copy workflow reported in issue #236.
+func testSelfContained_AES_AWSCLICopyMetadata(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	km := makeAESKEKManager(t)
+	gw := harness.StartGateway(t, inst, harness.WithKeyManager(km))
+	env := sdkTestEnv{
+		Endpoint:  gw.URL,
+		Region:    inst.Region,
+		AccessKey: inst.AccessKey,
+		SecretKey: inst.SecretKey,
+		Bucket:    inst.Bucket,
+		Key:       compatUniqueKey(t),
+	}
+	if err := runToolContainer(context.Background(), t, &awscliCopyMetadataRunner{}, env); err != nil {
+		t.Fatalf("awscli copy metadata: %v", err)
+	}
+}
+
 // testSelfContained_AES_AtRest verifies that objects written through the
 // self-contained AES KEK gateway are stored as ciphertext on the backend:
 //

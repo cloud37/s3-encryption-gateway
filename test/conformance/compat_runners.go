@@ -11,9 +11,9 @@ import (
 // No Docker container is needed because the SDK is already a dependency.
 type awsGoV2Runner struct{}
 
-func (r *awsGoV2Runner) Name() string  { return "aws-sdk-go-v2" }
-func (r *awsGoV2Runner) Image() string { return "" } // in-process
-func (r *awsGoV2Runner) Script(env sdkTestEnv) string { return "" }
+func (r *awsGoV2Runner) Name() string                                 { return "aws-sdk-go-v2" }
+func (r *awsGoV2Runner) Image() string                                { return "" } // in-process
+func (r *awsGoV2Runner) Script(env sdkTestEnv) string                 { return "" }
 func (r *awsGoV2Runner) AssertOutput(code int, out, err string) error { return nil }
 
 // ─── boto3 runner (Python container) ────────────────────────────────────────
@@ -81,6 +81,38 @@ func (r *awscliRunner) Script(env sdkTestEnv) string {
 		"aws s3 rm s3://%[1]s/%[2]s --endpoint-url \"$GATEWAY_ENDPOINT\"\n"+
 		"echo 'awscli:OK'\n",
 		env.Bucket, env.Key)
+}
+
+// awscliCopyMetadataRunner reproduces the AWS CLI `s3 cp s3://... s3://...`
+// server-side copy request, including the CLI's source metadata handling.
+type awscliCopyMetadataRunner struct{}
+
+func (r *awscliCopyMetadataRunner) Name() string  { return "awscli-copy-metadata" }
+func (r *awscliCopyMetadataRunner) Image() string { return "amazon/aws-cli:2.22.0" }
+
+func (r *awscliCopyMetadataRunner) Script(env sdkTestEnv) string {
+	return fmt.Sprintf("set -e\n"+
+		"echo 'copy-metadata-test' > /tmp/source.txt\n"+
+		"aws s3 cp /tmp/source.txt s3://%[1]s/%[2]s --endpoint-url \"$GATEWAY_ENDPOINT\" --content-type image/png --cache-control max-age=99 --content-disposition 'attachment; filename=copy.png'\n"+
+		"aws s3 cp s3://%[1]s/%[2]s s3://%[1]s/%[2]s-copy --endpoint-url \"$GATEWAY_ENDPOINT\"\n"+
+		"content_type=$(aws s3api head-object --bucket %[1]s --key %[2]s-copy --endpoint-url \"$GATEWAY_ENDPOINT\" --query ContentType --output text)\n"+
+		"test \"$content_type\" = image/png || { echo \"FATAL: copied ContentType=$content_type, want image/png\"; exit 1; }\n"+
+		"cache_control=$(aws s3api head-object --bucket %[1]s --key %[2]s-copy --endpoint-url \"$GATEWAY_ENDPOINT\" --query CacheControl --output text)\n"+
+		"test \"$cache_control\" = max-age=99 || { echo \"FATAL: copied CacheControl=$cache_control, want max-age=99\"; exit 1; }\n"+
+		"content_disposition=$(aws s3api head-object --bucket %[1]s --key %[2]s-copy --endpoint-url \"$GATEWAY_ENDPOINT\" --query ContentDisposition --output text)\n"+
+		"test \"$content_disposition\" = 'attachment; filename=copy.png' || { echo \"FATAL: copied ContentDisposition=$content_disposition\"; exit 1; }\n"+
+		"echo 'awscli-copy-metadata:OK'\n",
+		env.Bucket, env.Key)
+}
+
+func (r *awscliCopyMetadataRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("awscli copy metadata exited %d", code)
+	}
+	if !strings.Contains(out, "awscli-copy-metadata:OK") {
+		return fmt.Errorf("awscli copy metadata: expected OK marker in stdout")
+	}
+	return nil
 }
 
 func (r *awscliRunner) AssertOutput(code int, out, _ string) error {
