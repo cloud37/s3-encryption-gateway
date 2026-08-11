@@ -109,8 +109,10 @@ func testS3Compat_GetBucketLocation(t *testing.T, inst provider.Instance) {
 		t.Fatalf("GetBucketLocation: %v", err)
 	}
 
-	if string(resp.LocationConstraint) == "" {
-		t.Errorf("GetBucketLocation: empty location for bucket %q", inst.Bucket)
+	// S3 represents us-east-1 as an empty LocationConstraint. Other
+	// S3-compatible providers may report their configured region instead.
+	if location := string(resp.LocationConstraint); location != "" && location != inst.Region {
+		t.Errorf("GetBucketLocation: got %q, want %q or empty", location, inst.Region)
 	}
 }
 
