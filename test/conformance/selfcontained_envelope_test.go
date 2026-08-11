@@ -291,18 +291,6 @@ func testSelfContained_AES_ChunkedCopyObjectStandardMetadata(t *testing.T, inst 
 		t.Fatalf("chunked source PUT: status %d", putResp.StatusCode)
 	}
 
-	copyReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
-	copyReq.Header.Set("x-amz-copy-source", "/"+inst.Bucket+"/"+srcKey)
-	copyResp, err := gw.HTTPClient().Do(copyReq)
-	if err != nil {
-		t.Fatalf("chunked CopyObject: %v", err)
-	}
-	io.Copy(io.Discard, copyResp.Body)
-	copyResp.Body.Close()
-	if copyResp.StatusCode != http.StatusOK {
-		t.Fatalf("chunked CopyObject: status %d", copyResp.StatusCode)
-	}
-
 	assertHeaders := func(t *testing.T, resp *http.Response) {
 		t.Helper()
 		for header, want := range map[string]string{
@@ -314,6 +302,37 @@ func testSelfContained_AES_ChunkedCopyObjectStandardMetadata(t *testing.T, inst 
 				t.Errorf("%s = %q, want %q", header, got, want)
 			}
 		}
+	}
+
+	// Direct downloads must expose plaintext headers before CopyObject consumes
+	// the same decrypted metadata to create its destination.
+	sourceGetResp, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, srcKey))
+	if err != nil {
+		t.Fatalf("chunked source GET: %v", err)
+	}
+	defer sourceGetResp.Body.Close()
+	if sourceGetResp.StatusCode != http.StatusOK {
+		t.Fatalf("chunked source GET: status %d", sourceGetResp.StatusCode)
+	}
+	assertHeaders(t, sourceGetResp)
+	sourceData, err := io.ReadAll(sourceGetResp.Body)
+	if err != nil {
+		t.Fatalf("chunked source GET body: %v", err)
+	}
+	if !bytes.Equal(sourceData, data) {
+		t.Errorf("chunked source body = %q, want %q", sourceData, data)
+	}
+
+	copyReq, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, dstKey), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+inst.Bucket+"/"+srcKey)
+	copyResp, err := gw.HTTPClient().Do(copyReq)
+	if err != nil {
+		t.Fatalf("chunked CopyObject: %v", err)
+	}
+	io.Copy(io.Discard, copyResp.Body)
+	copyResp.Body.Close()
+	if copyResp.StatusCode != http.StatusOK {
+		t.Fatalf("chunked CopyObject: status %d", copyResp.StatusCode)
 	}
 
 	headReq, _ := http.NewRequest("HEAD", objectURL(gw, inst.Bucket, dstKey), nil)
