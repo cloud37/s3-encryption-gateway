@@ -6,17 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.10] — 2026-08-11
+
 ### Added
+
+- **Issue #236 copy-path regression coverage:** Added provider-agnostic Tier 2
+  tests for AWS CLI server-side copies, chunked self-contained encryption,
+  legacy encryption, encrypted metadata blobs, explicit `REPLACE` metadata
+  directives, and `UploadPartCopy` after multipart completion. These tests
+  verify standard metadata and plaintext integrity across the remaining copy
+  paths instead of relying only on direct `PutObject` coverage. The chunked
+  self-contained flow also verifies the source object's direct GET response
+  before copying, ensuring browser and presigned downloads restore
+  `Content-Type`, `Cache-Control`, and `Content-Disposition` rather than
+  exposing the backend ciphertext headers.
+
+- **External-provider conformance hardening:** Added bounded request contexts
+  to compatibility and multipart helpers so stalled provider responses fail
+  with a useful timeout instead of consuming the entire test run. Added a
+  lower-cost legacy KDF fixture for the fallback MPU upgrade test so it checks
+  compatibility without imposing production PBKDF2 cost on every external run.
 
 ### Security
 
 ### Fixed
+
+- **Backblaze and Wasabi conformance capability declarations:** Corrected the
+  external-provider matrix to skip unsupported Backblaze object tagging and
+  AWS Go SDK compatibility checks, and unsupported Wasabi Object Lock checks.
+  Provider-specific S3 compatibility assertions now tolerate restricted
+  account permissions, provider-reported bucket locations, and `405` CORS
+  preflight responses.
+
+- **Chunked copy metadata restoration (issue #236):** Chunked decryption now
+  reconstructs the client-visible `Content-Type`, `Cache-Control`, and
+  `Content-Disposition` values before `CopyObject` re-encrypts the destination.
+  This prevents production-shaped self-contained chunked copies from falling
+  back to `application/octet-stream` or dropping cache and disposition headers.
+
+- **Encrypted metadata-blob copy preservation (issue #236):** Client-visible
+  standard headers remain available outside the encrypted metadata blob so
+  copy operations can inherit them without reading the source body.
 
 ### Changed
 
 ### Removed
 
 ### Dependencies
+
+- Updated the AWS SDK for Go v2 module family and related Smithy dependencies.
+- Updated AWS SDK for Go v2 core, config, credentials, S3, and transitive service
+  modules, including `service/s3` from v1.107.0 to v1.107.1.
 
 ## [0.11.9] — 2026-08-10
 
@@ -41,7 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   survive `CopyObject` and remain available on both HEAD and GET responses,
   ensuring the completed metadata fix does not regress on the copy path.
 
-- **Changelog-backed GitHub Release notes (issue #236):** Release automation now publishes
+- **Changelog-backed GitHub Release notes (issue #243):** Release automation now publishes
   the matching version section from `CHANGELOG.md` as the GitHub Release notes,
   with validation for missing, empty, or duplicate entries and a link back to
   the full changelog. Added a local-only backfill script that previews updates
