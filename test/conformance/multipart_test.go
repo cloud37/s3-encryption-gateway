@@ -4,22 +4,37 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
+const conformanceMPURequestTimeout = 90 * time.Second
+
+func conformanceMPUContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), conformanceMPURequestTimeout)
+}
+
 // initiateMultipartUpload starts a multipart upload and returns the uploadId.
 func initiateMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key string) string {
 	t.Helper()
 	u := fmt.Sprintf("%s/%s/%s?uploads", gw.URL, bucket, key)
-	resp, err := gw.HTTPClient().Post(u, "application/xml", nil)
+	ctx, cancel := conformanceMPUContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		t.Fatalf("InitiateMultipartUpload %q: create request: %v", key, err)
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
 		t.Fatalf("InitiateMultipartUpload %q: %v", key, err)
 	}
@@ -46,7 +61,12 @@ func uploadPart(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string,
 	t.Helper()
 	u := fmt.Sprintf("%s/%s/%s?partNumber=%d&uploadId=%s",
 		gw.URL, bucket, key, partNum, uploadID)
-	req, _ := http.NewRequest("PUT", u, bytes.NewReader(data))
+	ctx, cancel := conformanceMPUContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("UploadPart #%d: create request: %v", partNum, err)
+	}
 	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
 		t.Fatalf("UploadPart #%d: %v", partNum, err)
@@ -77,7 +97,12 @@ func completeMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key, upl
 	xmlParts.WriteString("</CompleteMultipartUpload>")
 
 	u := fmt.Sprintf("%s/%s/%s?uploadId=%s", gw.URL, bucket, key, uploadID)
-	req, _ := http.NewRequest("POST", u, strings.NewReader(xmlParts.String()))
+	ctx, cancel := conformanceMPUContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(xmlParts.String()))
+	if err != nil {
+		t.Fatalf("CompleteMultipartUpload: create request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/xml")
 	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
@@ -94,7 +119,13 @@ func completeMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key, upl
 func abortMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string) {
 	t.Helper()
 	u := fmt.Sprintf("%s/%s/%s?uploadId=%s", gw.URL, bucket, key, uploadID)
-	req, _ := http.NewRequest("DELETE", u, nil)
+	ctx, cancel := conformanceMPUContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
+	if err != nil {
+		t.Logf("AbortMultipartUpload: create request: %v (non-fatal)", err)
+		return
+	}
 	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
 		t.Logf("AbortMultipartUpload: %v (non-fatal)", err)

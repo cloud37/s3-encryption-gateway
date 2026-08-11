@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -251,16 +252,27 @@ func testSelfContained_AES_Rotation_EncryptedMPU(t *testing.T, inst provider.Ins
 // password-wrapped MPU DEKs).
 func testFallbackKeyManager_EncryptedMPU_LegacyUpgrade(t *testing.T, inst provider.Instance) {
 	t.Helper()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
 
 	// The password used by the legacy (pre-upgrade) gateway.
 	const legacyPassword = "legacy-gateway-password-long-enough"
 
 	vk := provider.StartValkey(ctx, t)
+	legacyKM, err := crypto.NewPasswordKeyManager([]byte(legacyPassword), crypto.WithPasswordKMPBKDF2(crypto.MinPBKDF2Iterations))
+	if err != nil {
+		t.Fatalf("NewPasswordKeyManager (legacy): %v", err)
+	}
+	t.Cleanup(func() { _ = legacyKM.Close(ctx) })
 
 	// Step 1: Upload with the old password-only gateway (no AES KEK).
 	gwLegacy := harness.StartGateway(t, inst,
 		harness.WithEncryptionPassword(legacyPassword),
+		// This test exercises fallback-format compatibility, not the production
+		// KDF cost. Keep the legacy fixture fast enough for the full external
+		// provider matrix, which creates many encrypted MPU states beforehand.
+		harness.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations),
+		harness.WithKeyManager(legacyKM),
 		harness.WithValkeyAddr(vk.Addr),
 		harness.WithEncryptedMPUForBucket(inst.Bucket),
 	)
@@ -280,11 +292,6 @@ func testFallbackKeyManager_EncryptedMPU_LegacyUpgrade(t *testing.T, inst provid
 
 	// Step 2: "Upgrade" to a new gateway with AES KEK primary + password fallback.
 	newKM := makeAESKEKManager(t)
-	legacyKM, err := crypto.NewPasswordKeyManager([]byte(legacyPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
-	if err != nil {
-		t.Fatalf("NewPasswordKeyManager (legacy): %v", err)
-	}
-	t.Cleanup(func() { _ = legacyKM.Close(ctx) })
 
 	fallbackKM := crypto.NewFallbackKeyManager(newKM, legacyKM)
 

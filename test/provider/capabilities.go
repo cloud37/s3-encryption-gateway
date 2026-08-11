@@ -9,7 +9,8 @@ type Capabilities uint64
 const (
 	// CapObjectLock indicates the backend supports Object Lock / WORM retention.
 	CapObjectLock Capabilities = 1 << iota
-	// CapObjectTagging indicates support for PutObjectTagging / GetObjectTagging.
+	// CapObjectTagging indicates support for PutObjectTagging / GetObjectTagging
+	// with tags persisted and returned by the backend.
 	CapObjectTagging
 	// CapMultipartUpload indicates support for the S3 multipart upload API.
 	CapMultipartUpload

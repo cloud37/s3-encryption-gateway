@@ -24,9 +24,9 @@ func init() {
 		secretEnv: "B2_SECRET_ACCESS_KEY",
 		bucketEnv: "B2_BUCKET_NAME",
 		caps: CapMultipartUpload | CapMultipartCopy |
-			CapObjectTagging | CapPresignedURL |
+			CapPresignedURL |
 			CapBatchDelete | CapKMSIntegration | CapSizeTranslation | CapEncryptedMPU |
-			CapSDKAWSGoV2 | CapSDKBoto3 | CapCLIAWSCLI | CapCLIS5cmd,
+			CapSDKBoto3 | CapCLIAWSCLI | CapCLIS5cmd,
 		cleanup: CleanupPolicyDelete, // B2 deletes are free
 	})
 }

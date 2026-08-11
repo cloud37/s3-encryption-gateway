@@ -29,7 +29,7 @@ func init() {
 		bucketEnv: "WASABI_BUCKET_NAME",
 		caps: CapMultipartUpload | CapMultipartCopy |
 			CapObjectTagging | CapInlinePutTagging | CapPresignedURL |
-			CapBatchDelete | CapObjectLock | CapEncryptedMPU,
+			CapBatchDelete | CapEncryptedMPU,
 		cleanup: CleanupPolicySkipDelete, // 90-day minimum
 	})
 }

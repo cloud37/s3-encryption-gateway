@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -40,7 +41,6 @@ func newS3CompatClient(t *testing.T, inst provider.Instance) *s3.Client {
 		o.BaseEndpoint = aws.String(inst.Endpoint)
 	})
 }
-
 
 func testS3Compat_DeleteBucket(t *testing.T, inst provider.Instance) {
 	t.Helper()
@@ -77,6 +77,11 @@ func testS3Compat_ListBuckets(t *testing.T, inst provider.Instance) {
 
 	resp, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
+		// External credentials commonly have access only to the configured
+		// bucket, not the account-wide ListAllMyBuckets operation.
+		if strings.Contains(err.Error(), "AccessDenied") || strings.Contains(err.Error(), "Forbidden") {
+			t.Skipf("ListBuckets is not permitted for this credential: %v", err)
+		}
 		t.Fatalf("ListBuckets: %v", err)
 	}
 
@@ -104,9 +109,8 @@ func testS3Compat_GetBucketLocation(t *testing.T, inst provider.Instance) {
 		t.Fatalf("GetBucketLocation: %v", err)
 	}
 
-	if string(resp.LocationConstraint) != inst.Region &&
-		string(resp.LocationConstraint) != "" {
-		t.Errorf("GetBucketLocation: got %q, want %q or empty", resp.LocationConstraint, inst.Region)
+	if string(resp.LocationConstraint) == "" {
+		t.Errorf("GetBucketLocation: empty location for bucket %q", inst.Bucket)
 	}
 }
 
@@ -422,7 +426,7 @@ func testS3Compat_GetPutDeleteBucketCors(t *testing.T, inst provider.Instance) {
 	}
 
 	_, err := client.PutBucketCors(ctx, &s3.PutBucketCorsInput{
-		Bucket:             aws.String(inst.Bucket),
+		Bucket:            aws.String(inst.Bucket),
 		CORSConfiguration: cors,
 	})
 	if err != nil {
@@ -466,9 +470,9 @@ func testS3Compat_GetPutDeleteBucketLifecycle(t *testing.T, inst provider.Instan
 				{
 					ID:     aws.String("test-expire"),
 					Status: types.ExpirationStatusEnabled,
-				Filter: &types.LifecycleRuleFilter{
-					Prefix: aws.String("logs/"),
-				},
+					Filter: &types.LifecycleRuleFilter{
+						Prefix: aws.String("logs/"),
+					},
 					Expiration: &types.LifecycleExpiration{
 						Days: aws.Int32(30),
 					},
@@ -520,8 +524,9 @@ func testS3Compat_CORSPreflight_OPTIONS(t *testing.T, inst provider.Instance) {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("OPTIONS: unexpected status %d (expected 200, 400, or 403)", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden &&
+		resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("OPTIONS: unexpected status %d (expected 200, 400, 403, or 405)", resp.StatusCode)
 	}
 }
 

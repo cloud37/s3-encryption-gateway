@@ -44,7 +44,11 @@ func newCompatS3Client(t *testing.T, gw *harness.Gateway, inst provider.Instance
 // AWS SDK Go v2 in-process. This covers all 7 operations from §1.3.
 func testCompatSmoke_AWSGoV2(t *testing.T, inst provider.Instance) {
 	t.Helper()
-	ctx := context.Background()
+	// External providers can leave an upstream response open when a request is
+	// rejected or eventually consistent. Bound the whole compatibility probe so
+	// one backend response cannot consume the suite's ten-minute timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	gw, env := newUniqueTestEnv(t, inst)
 	client := newCompatS3Client(t, gw, inst)
 
