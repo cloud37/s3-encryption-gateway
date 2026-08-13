@@ -1926,6 +1926,46 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		encryptedReader = ciphertextCounter
 	}
 
+	// The SDK rewinds the body to retry, so a non-seekable reader makes every
+	// retryable failure fatal ("failed to rewind transport stream for retry") and
+	// leaves ADR 0010's retry policy inert on this path. Buffer into the bounded
+	// wrapper handleUploadPart uses; see docs/plans/V0.6-PERF-1-plan.md §4.4.
+	//
+	// Gated on a known length that fits. NewSeekableBody has to drain maxBuf+1
+	// bytes before it can report ErrPartTooLarge, and a partially drained source
+	// cannot go back to streaming — so without a length up front, buffering is a
+	// one-way bet on a body that may not fit. Checking the length first makes the
+	// oversize branch unreachable instead of recoverable, which is why there is no
+	// 413 here as there is in handleUploadPart: reaching it would mean our own
+	// ciphertext length estimate was wrong, i.e. a server fault, not a too-large
+	// request. Unknown-length bodies keep streaming and stay single-attempt.
+	if maxBuf := effectiveMaxPartBuffer(h.config); contentLengthPtr != nil && *contentLengthPtr <= maxBuf {
+		if _, seekable := encryptedReader.(io.Seeker); !seekable {
+			sb, sbErr := s3.NewSeekableBody(encryptedReader, maxBuf)
+			if sbErr != nil {
+				h.logger.WithError(sbErr).WithFields(logrus.Fields{
+					"bucket": bucket,
+					"key":    key,
+				}).Error("Failed to buffer encrypted object for upload")
+				s3Err := &S3Error{
+					Code:       "InternalError",
+					Message:    "Failed to prepare object for upload",
+					Resource:   r.URL.Path,
+					HTTPStatus: http.StatusInternalServerError,
+				}
+				s3Err.WriteXML(w)
+				h.metrics.RecordS3Error(r.Context(), "PutObject", bucket, s3Err.Code)
+				h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+				return
+			}
+			// sb.Len is the exact ciphertext size, so prefer it over the value derived
+			// from plaintext size and per-chunk tag overhead.
+			encryptedReader = sb
+			encLen := sb.Len
+			contentLengthPtr = &encLen
+		}
+	}
+
 	// Upload encrypted object with filtered metadata (streaming)
 	etag, err := s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
