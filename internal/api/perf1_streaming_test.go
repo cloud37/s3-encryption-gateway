@@ -188,6 +188,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 	// dst-bucket/dst-key.
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -336,6 +337,7 @@ func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 	// CopyObject src-bkt/src-key → dst-bkt/dst-key.
 	req := httptest.NewRequest("PUT", "/dst-bkt/dst-key", nil)
 	req.Header.Set("x-amz-copy-source", "src-bkt/src-key")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 

@@ -84,11 +84,12 @@ const (
 //
 // Invariants preserved by this handler (see ADR 0006):
 //  1. Destination parts are plaintext (ADR 0002). No per-part encryption.
-//  2. Source-bucket READ authorisation is enforced implicitly because the
-//     same caller-derived S3 client (from h.getS3Client(r)) performs the
-//     HeadObject/GetObject. A caller without read access on the source
-//     surfaces AccessDenied from the backend, which TranslateError maps to
-//     HTTP 403.
+//  2. Source-bucket READ authorisation is enforced by AuthorizationMiddleware
+//     before this handler is reached, and re-enforced by
+//     authorizeCopyOperation inside the handler before any backend client is
+//     acquired. The copy source is parsed, validated against the caller's
+//     credential scope, and rejected with AccessDenied (HTTP 403) before any
+//     backend interaction.
 //  3. If the destination bucket policy sets RequireEncryption=true and the
 //     classified source is plaintext, the handler hard-refuses with 500
 //     InternalError (destination-policy / source-mode mismatch) and emits
@@ -146,17 +147,6 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Get S3 client. The caller's credentials are already validated by
-	// AuthMiddleware before reaching this handler; source-bucket read
-	// authorisation is enforced by the backend using the gateway's
-	// configured backend credentials.
-	s3Client, err := h.getS3Client(r)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to get S3 client")
-		h.writeS3ClientError(w, r, err, "PUT", start)
-		return
-	}
-
 	// Parse x-amz-copy-source header.
 	copySource := r.Header.Get("x-amz-copy-source")
 	if copySource == "" {
@@ -171,7 +161,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srcBucket, srcKey, srcVersionID, err := parseCopySource(copySource)
+	srcBucket, srcKey, srcVersionID, err := ParseCopySource(copySource)
 	if err != nil {
 		s3Err := &S3Error{
 			Code:       "InvalidArgument",
@@ -181,6 +171,33 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		}
 		s3Err.WriteXML(w)
 		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		return
+	}
+
+	// V1.0-AUTH-2: enforce the caller's scope for the destination and source
+	// buckets here as well, before the handler can acquire a backend client.
+	// AuthorizationMiddleware performs the same check before routing, but the
+	// handler must not depend on middleware ordering for its security boundary.
+	if err := h.authorizeCopyOperation(r, bucket, copySource); err != nil {
+		if errors.Is(err, ErrAccessDenied) {
+			writeAuthorizationDenied(w, r, h.auditLogger, "bucket_scope")
+		} else {
+			s3Err := &S3Error{
+				Code:       "InvalidArgument",
+				Message:    "Invalid x-amz-copy-source header",
+				Resource:   r.URL.Path,
+				HTTPStatus: http.StatusBadRequest,
+			}
+			s3Err.WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		}
+		return
+	}
+
+	s3Client, err := h.getS3Client(r)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to get S3 client")
+		h.writeS3ClientError(w, r, err, "PUT", start)
 		return
 	}
 
@@ -217,10 +234,9 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Classify the source object. This issues a single HeadObject using the
-	// caller's credentials, so an unauthorised caller gets AccessDenied
-	// (HTTP 403) from the backend — this is the source-bucket READ
-	// authorisation gate.
+	// Classify the source object. Scope authorization has already been enforced
+	// above; this HeadObject determines the encryption class so the copy can use
+	// the correct strategy.
 	sourceClass, err := h.classifyCopySource(ctx, s3Client, srcBucket, srcKey, srcVersionID)
 	if err != nil {
 		s3Err := TranslateError(err, srcBucket, srcKey)
@@ -438,9 +454,8 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 // classifyCopySource determines the encryption class of the source object
-// using a single HeadObject call. The HeadObject is issued with the
-// caller's credentials (via the provided s3Client), so unauthorised callers
-// surface AccessDenied here and short-circuit the copy.
+// using a single HeadObject call. The caller's scope for the source bucket is
+// enforced by authorizeCopyOperation before this handler reaches here.
 func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string) (*CopySourceMetadata, error) {
 	metadata, err := s3Client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {

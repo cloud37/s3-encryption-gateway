@@ -456,6 +456,112 @@ func TestConfig_BackendType_S3_DefaultsEmpty(t *testing.T) {
 
 // ---- V1.0-AUTH-1 GatewayCredential tests ---------------------------------
 
+func TestConfig_Validate_CredentialBucketsOmittedIsUnrestricted(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret"}}, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfig_Validate_CredentialBucketsExplicitEmptyIsDenyAll(t *testing.T) {
+	credentials := []GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: []string{}}}
+	if err := ValidateGatewayCredentials(credentials, true); err != nil {
+		t.Fatal(err)
+	}
+	if credentials[0].Buckets == nil {
+		t.Fatal("explicit empty scope became unrestricted")
+	}
+}
+
+func TestConfig_ResolvedCredentials_ExplicitEmptyBucketsIsDenyAll(t *testing.T) {
+	cfg := &Config{Auth: AuthConfig{Credentials: []GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: []string{}}}}}
+	credentials := cfg.ResolvedCredentials()
+	if credentials[0].Buckets == nil || len(credentials[0].Buckets) != 0 {
+		t.Fatalf("buckets=%#v", credentials[0].Buckets)
+	}
+}
+
+// TestConfig_ResolvedCredentials_MutationIsIsolated proves that mutating the
+// resolved output cannot corrupt the underlying configuration: slices are
+// deep-copied and struct fields are value copies.
+func TestConfig_ResolvedCredentials_MutationIsIsolated(t *testing.T) {
+	perm := ObjectPermissionReadOnly
+	cfg := &Config{Auth: AuthConfig{Credentials: []GatewayCredential{
+		{
+			AccessKey:         "key",
+			SecretKey:         "secret",
+			SecretKeyEnv:      "MUTATION_ISOLATION_SECRET",
+			Label:             "original",
+			Buckets:           []string{"tenant-a"},
+			Permissions:       &perm,
+			BucketPermissions: []BucketPermission{BucketPermissionCreate},
+		},
+	}}}
+	t.Setenv("MUTATION_ISOLATION_SECRET", "env-secret")
+
+	resolved := cfg.ResolvedCredentials()
+	if len(resolved) != 1 {
+		t.Fatalf("resolved len=%d", len(resolved))
+	}
+	// Mutate every mutable part of the resolved output.
+	resolved[0].AccessKey = "evil"
+	resolved[0].SecretKey = "evil-secret"
+	resolved[0].Label = "evil"
+	resolved[0].Buckets[0] = "evil-bucket"
+	resolved[0].BucketPermissions[0] = BucketPermissionDelete
+	*resolved[0].Permissions = ObjectPermissionReadWrite
+
+	original := cfg.Auth.Credentials[0]
+	if original.AccessKey != "key" || original.SecretKey != "secret" || original.Label != "original" {
+		t.Fatalf("config mutated by resolved output: %+v", original)
+	}
+	if original.SecretKeyEnv != "MUTATION_ISOLATION_SECRET" {
+		t.Fatalf("SecretKeyEnv mutated: %q", original.SecretKeyEnv)
+	}
+	if len(original.Buckets) != 1 || original.Buckets[0] != "tenant-a" {
+		t.Fatalf("Buckets mutated by resolved output: %+v", original.Buckets)
+	}
+	if len(original.BucketPermissions) != 1 || original.BucketPermissions[0] != BucketPermissionCreate {
+		t.Fatalf("BucketPermissions mutated by resolved output: %+v", original.BucketPermissions)
+	}
+	if original.Permissions == nil || *original.Permissions != ObjectPermissionReadOnly {
+		t.Fatalf("Permissions mutated by resolved output: %+v", original.Permissions)
+	}
+}
+
+func TestConfig_Validate_CredentialBucketPatterns(t *testing.T) {
+	for _, pattern := range []string{"*", "*foo", "foo*bar", "", "foo**", "foo bar", " foo", "foo\tbar"} {
+		if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: []string{pattern}}}, true); err == nil {
+			t.Fatalf("pattern %q accepted", pattern)
+		}
+	}
+}
+
+func TestConfig_Validate_CredentialBucketPatternsAccepted(t *testing.T) {
+	patterns := []string{"tenant-a", "shared-*"}
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: patterns}}, true); err != nil {
+		t.Fatalf("valid patterns rejected: %v", err)
+	}
+}
+
+func TestConfig_Validate_DuplicateCredentialBucketPattern(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: []string{"tenant", "tenant"}}}, true); err == nil {
+		t.Fatal("duplicate bucket pattern accepted")
+	}
+}
+
+func TestConfig_Validate_CredentialPermissions(t *testing.T) {
+	invalidPerm := ObjectPermission("invalid")
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Permissions: &invalidPerm}}, true); err == nil {
+		t.Fatal("invalid permission accepted")
+	}
+}
+
+func TestConfig_Validate_DuplicateCredentialAccessKey(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "one"}, {AccessKey: "key", SecretKey: "two"}}, true); err == nil {
+		t.Fatal("duplicate access key accepted")
+	}
+}
+
 func TestConfig_Validate_EmptyCredentials(t *testing.T) {
 	cfg := minValidConfig()
 	cfg.Auth.Credentials = []GatewayCredential{}
@@ -564,6 +670,105 @@ func TestConfig_Validate_ValidCredentials(t *testing.T) {
 	err := cfg.Validate()
 	if err != nil {
 		t.Fatalf("expected no error for valid credentials, got: %v", err)
+	}
+}
+
+func ptrPermission(p ObjectPermission) *ObjectPermission { return &p }
+
+func TestConfig_Validate_CredentialBucketPermissions(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", BucketPermissions: []BucketPermission{"invalid"}}}, true); err == nil {
+		t.Fatal("invalid bucket permission accepted")
+	}
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", BucketPermissions: []BucketPermission{BucketPermissionCreate, BucketPermissionDelete}}}, true); err != nil {
+		t.Fatalf("valid bucket permissions rejected: %v", err)
+	}
+}
+
+func TestConfig_Validate_DuplicateCredentialBucketPermission(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", BucketPermissions: []BucketPermission{BucketPermissionCreate, BucketPermissionCreate}}}, true); err == nil {
+		t.Fatal("duplicate bucket grant accepted")
+	}
+}
+
+func TestLoadFromEnv_CredentialFileAuthorization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("- access_key: file-ak\n  secret_key: file-sk\n  buckets: [file-*]\n  permissions: ro\n  bucket_permissions: [delete]\n"), 0600))
+	t.Setenv("AUTH_CREDENTIALS_FILE", path)
+	cfg := &Config{}
+	require.NoError(t, loadCredentialFile(cfg))
+	require.Len(t, cfg.Auth.Credentials, 1)
+	credential := cfg.Auth.Credentials[0]
+	assert.Equal(t, "file-ak", credential.AccessKey)
+	assert.Equal(t, []string{"file-*"}, credential.Buckets)
+	require.NotNil(t, credential.Permissions)
+	assert.Equal(t, ObjectPermissionReadOnly, *credential.Permissions)
+	assert.Equal(t, []BucketPermission{BucketPermissionDelete}, credential.BucketPermissions)
+}
+
+func TestLoadFromEnv_CredentialBucketsAbsentVersusEmpty(t *testing.T) {
+	require.NoError(t, os.Unsetenv("GW_CRED_0_BUCKETS"))
+	cfg := &Config{}
+	loadFromEnv(cfg)
+	if len(cfg.Auth.Credentials) != 0 {
+		t.Fatalf("unexpected credentials for absent env: %v", cfg.Auth.Credentials)
+	}
+	t.Setenv("GW_CRED_0_ACCESS_KEY", "env-ak")
+	t.Setenv("GW_CRED_0_SECRET_KEY", "env-sk")
+	t.Setenv("GW_CRED_0_BUCKETS", "")
+	cfg = &Config{}
+	loadFromEnv(cfg)
+	if cfg.Auth.Credentials[0].Buckets == nil || len(cfg.Auth.Credentials[0].Buckets) != 0 {
+		t.Fatalf("empty env scope was not preserved: %#v", cfg.Auth.Credentials[0].Buckets)
+	}
+}
+
+func TestLoadFromEnv_CredentialAuthorizationFields(t *testing.T) {
+	t.Setenv("GW_CRED_0_ACCESS_KEY", "env-ak")
+	t.Setenv("GW_CRED_0_SECRET_KEY", "env-sk")
+	t.Setenv("GW_CRED_0_BUCKETS", "bucket1,bucket2")
+	t.Setenv("GW_CRED_0_PERMISSIONS", "ro")
+	t.Setenv("GW_CRED_0_BUCKET_PERMISSIONS", "create,delete")
+	t.Setenv("GW_CRED_0_LABEL", "env-label")
+
+	cfg := &Config{}
+	loadFromEnv(cfg)
+
+	if len(cfg.Auth.Credentials) != 1 {
+		t.Fatalf("expected 1 credential, got %d", len(cfg.Auth.Credentials))
+	}
+	cred := cfg.Auth.Credentials[0]
+	if cred.AccessKey != "env-ak" {
+		t.Errorf("access_key = %q, want env-ak", cred.AccessKey)
+	}
+	if cred.SecretKey != "env-sk" {
+		t.Errorf("secret_key = %q, want env-sk", cred.SecretKey)
+	}
+	if len(cred.Buckets) != 2 || cred.Buckets[0] != "bucket1" || cred.Buckets[1] != "bucket2" {
+		t.Errorf("buckets = %v, want [bucket1 bucket2]", cred.Buckets)
+	}
+	if cred.Permissions == nil || *cred.Permissions != ObjectPermissionReadOnly {
+		t.Errorf("permissions = %v, want ro", cred.Permissions)
+	}
+	if len(cred.BucketPermissions) != 2 || cred.BucketPermissions[0] != BucketPermissionCreate || cred.BucketPermissions[1] != BucketPermissionDelete {
+		t.Errorf("bucket_permissions = %v, want [create delete]", cred.BucketPermissions)
+	}
+	if cred.Label != "env-label" {
+		t.Errorf("label = %q, want env-label", cred.Label)
+	}
+}
+
+func TestConfig_Validate_CredentialPermissionsEmptyIsInvalid(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Permissions: ptrPermission("")}}, true); err == nil {
+		t.Fatal("expected error for empty permissions, got nil")
+	} else if !strings.Contains(err.Error(), "permissions cannot be empty") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestConfig_Validate_CredentialPermissionsOmittedDefaultsToRW(t *testing.T) {
+	creds := []GatewayCredential{{AccessKey: "key", SecretKey: "secret", Permissions: nil}}
+	if err := ValidateGatewayCredentials(creds, true); err != nil {
+		t.Fatalf("expected no error for omitted permissions, got: %v", err)
 	}
 }
 
@@ -2622,4 +2827,41 @@ func TestMetadataEncryptionKey_BothSet(t *testing.T) {
 	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Errorf("expected 'mutually exclusive' error, got: %v", err)
 	}
+}
+
+func TestLoadCredentialFile_UnknownFieldsRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	credFile := filepath.Join(tmpDir, "credentials.yaml")
+	content := `
+- access_key: "test-key"
+  secret_key: "test-secret"
+  unknown_field: "value"
+`
+	require.NoError(t, os.WriteFile(credFile, []byte(content), 0644))
+	t.Setenv("AUTH_CREDENTIALS_FILE", credFile)
+
+	cfg := &Config{}
+	err := loadCredentialFile(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown")
+}
+
+func TestLoadCredentialFile_ValidCredentialsLoaded(t *testing.T) {
+	tmpDir := t.TempDir()
+	credFile := filepath.Join(tmpDir, "credentials.yaml")
+	content := `
+- access_key: "file-key"
+  secret_key: "file-secret"
+  label: "from-file"
+`
+	require.NoError(t, os.WriteFile(credFile, []byte(content), 0644))
+	t.Setenv("AUTH_CREDENTIALS_FILE", credFile)
+
+	cfg := &Config{}
+	err := loadCredentialFile(cfg)
+	require.NoError(t, err)
+	require.Len(t, cfg.Auth.Credentials, 1)
+	assert.Equal(t, "file-key", cfg.Auth.Credentials[0].AccessKey)
+	assert.Equal(t, "file-secret", cfg.Auth.Credentials[0].SecretKey)
+	assert.Equal(t, "from-file", cfg.Auth.Credentials[0].Label)
 }

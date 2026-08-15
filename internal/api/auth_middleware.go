@@ -18,6 +18,9 @@ var systemEndpoints = map[string]bool{
 	"/ready":   true,
 	"/live":    true,
 	"/metrics": true,
+	"/healthz": true,
+	"/readyz":  true,
+	"/livez":   true,
 }
 
 // isSystemEndpoint reports whether path is an unauthenticated system endpoint.
@@ -33,6 +36,7 @@ type contextKey int
 const (
 	// credentialLabelKey stores the resolved credential label in the request context.
 	credentialLabelKey contextKey = iota
+	credentialKey
 )
 
 // CredentialLabelFromContext returns the credential label attached to the
@@ -42,6 +46,12 @@ func CredentialLabelFromContext(r *http.Request) string {
 		return label
 	}
 	return ""
+}
+
+// CredentialFromContext returns the authenticated credential principal.
+func CredentialFromContext(r *http.Request) (Credential, bool) {
+	credential, ok := r.Context().Value(credentialKey).(Credential)
+	return credential, ok
 }
 
 // writeS3ClientError writes an S3-formatted error response for authentication
@@ -114,7 +124,7 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			}
 
 			// 2. Look up access key in credential store
-			secretKey, label, err := store.Lookup(creds.AccessKey)
+			credential, err := store.Lookup(creds.AccessKey)
 			if err != nil {
 				if err == ErrUnknownAccessKey {
 					logger.WithField("access_key", creds.AccessKey).Warn("Unknown access key")
@@ -131,7 +141,7 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			// 3. Validate signature
 			var sigErr error
 			if IsSignatureV4Request(r) {
-				sigErr = ValidateSignatureV4(r, secretKey, clockSkew)
+				sigErr = ValidateSignatureV4(r, credential.SecretKey, clockSkew)
 			} else if IsSignatureV2Request(r) {
 				// Enforce V4-only policy when configured.
 				if !allowSigV2 {
@@ -141,7 +151,7 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 					writeS3ClientError(w, r, ErrSignatureMismatch, r.Method)
 					return
 				}
-				sigErr = ValidateSignatureV2(r, secretKey, clockSkew)
+				sigErr = ValidateSignatureV2(r, credential.SecretKey, clockSkew)
 			} else {
 				// Credentials were extracted but no recognizable signature format
 				logger.WithField("access_key", creds.AccessKey).Warn("No recognizable signature in request")
@@ -165,9 +175,11 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			}
 
 			// 4. Attach label to context for downstream audit logging
-			if label != "" {
-				r = r.WithContext(context.WithValue(r.Context(), credentialLabelKey, label))
+			ctx := context.WithValue(r.Context(), credentialKey, credential)
+			if credential.Label != "" {
+				ctx = context.WithValue(ctx, credentialLabelKey, credential.Label)
 			}
+			r = r.WithContext(ctx)
 
 			// 5. Call next handler
 			next.ServeHTTP(w, r)
