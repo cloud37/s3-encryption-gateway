@@ -884,7 +884,10 @@
                 "properties": {
                   "accessKey": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "S3 access key ID for a gateway credential." },
                   "secretKey": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "S3 secret access key for a gateway credential." },
-                  "label": { "type": "string", "description": "Optional human-readable label for audit logs." }
+                  "label": { "type": "string", "description": "Optional human-readable label for audit logs." },
+                  "buckets": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[^*\\s][^*\\s]*(\\*)?$" }, "description": "Omit for unrestricted access; use [] to deny all buckets." },
+                  "permissions": { "type": "string", "enum": ["ro", "rw"], "description": "Object access permission; defaults to rw." },
+                  "bucketPermissions": { "type": "array", "items": { "type": "string", "enum": ["create", "delete"] }, "uniqueItems": true, "description": "Explicit bucket lifecycle grants." }
                 }
               }
             }
@@ -897,8 +900,8 @@
           "properties": {
             "endpoint":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend S3 endpoint URL (e.g. https://s3.amazonaws.com)." },
             "region":               { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "AWS/S3 region (e.g. us-east-1)." },
-            "accessKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend access key ID. Optional when useClientCredentials is true." },
-            "secretKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend secret access key. Optional when useClientCredentials is true." },
+            "accessKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend access key ID (required)." },
+            "secretKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend secret access key (required)." },
             "provider":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend provider identifier (e.g. aws, minio)." },
             "useSSL":               { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Use TLS for backend connections (\\\"true\\\"/\\\"false\\\")." },
             "usePathStyle":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Force path-style S3 URLs (required for MinIO, Ceph, etc.)." },
