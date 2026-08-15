@@ -125,6 +125,34 @@ func TestHandlePutObject_Chunked_SurvivesTransientBackend500(t *testing.T) {
 	}
 }
 
+// A declared "Content-Length: 0" is a known length, not an unknown-length
+// stream, so it goes through the same bounded wrapper and is retryable. The two
+// used to be indistinguishable because both left originalBytes at 0, which sent
+// a valid zero-byte upload down the streaming path and made it fail on the first
+// transient backend error.
+func TestHandlePutObject_ZeroLength_SurvivesTransientBackend500(t *testing.T) {
+	srv, backend := faultyPutBackend(1)
+	defer srv.Close()
+	router, _ := newRetryHandler(t, srv.URL, true)
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/empty-key", bytes.NewReader(nil))
+	req.ContentLength = 0
+	req.Header.Set("Content-Length", "0")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after the backend 500 is retried, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if got := backend.puts.Load(); got != 2 {
+		t.Errorf("expected 2 backend PUT attempts (1 fault + 1 retry), got %d", got)
+	}
+	// A declared length needs no back-calculation, so no copy-to-self fix-up.
+	if got := backend.copies.Load(); got != 0 {
+		t.Errorf("expected no metadata copy-to-self for a declared length, got %d", got)
+	}
+}
+
 // A body with no Content-Length keeps streaming and stays single-attempt: the
 // size is not known up front, so it cannot be checked against max_part_buffer
 // without draining the source, and a drained source cannot go back to streaming.

@@ -18,7 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against Backblaze B2 this was measured at roughly 3% of uploads. `PutObject`
   bodies of known length now go through the same bounded `SeekableBody` wrapper
   `UploadPart` already uses, capped by `server.max_part_buffer`, so the SDK can
-  replay them. Bodies of unknown length keep the streaming path unchanged. As a
+  replay them. A declared `Content-Length: 0` counts as a known length: it was
+  previously indistinguishable from an absent header, which sent a valid
+  zero-byte upload down the unknown-length streaming path. Bodies of genuinely
+  unknown length keep the streaming path unchanged. As a
   consequence of the body becoming seekable, these requests now also carry
   `Content-MD5` and a signed payload rather than `UNSIGNED-PAYLOAD`. Added unit
   coverage for the rewind contract in both directions and a

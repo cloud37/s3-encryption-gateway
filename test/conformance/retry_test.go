@@ -23,8 +23,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
 	internalconfig "github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
@@ -58,9 +58,9 @@ func startRetryGatewayAt(t *testing.T, backendURL string) *harness.Gateway {
 			cfg.Backend.UsePathStyle = true
 			cfg.Backend.UseSSL = false
 			// Speed up: keep 3 max attempts but use very small backoff.
-			cfg.Backend.Retry.InitialBackoff = 1e6  // 1 ms in nanoseconds
-			cfg.Backend.Retry.MaxBackoff = 10e6     // 10 ms
-			cfg.Backend.Retry.Jitter = "none"       // deterministic
+			cfg.Backend.Retry.InitialBackoff = 1e6 // 1 ms in nanoseconds
+			cfg.Backend.Retry.MaxBackoff = 10e6    // 10 ms
+			cfg.Backend.Retry.Jitter = "none"      // deterministic
 		}),
 	)
 }
@@ -205,8 +205,8 @@ func newRetryAfterServer(failN int) *retryAfterServer {
 	return s
 }
 
-func (s *retryAfterServer) Close() { s.srv.Close() }
-func (s *retryAfterServer) URL() string { return s.srv.URL }
+func (s *retryAfterServer) Close()        { s.srv.Close() }
+func (s *retryAfterServer) URL() string   { return s.srv.URL }
 func (s *retryAfterServer) requests() int { return int(atomic.LoadInt32(&s.called)) }
 
 func (s *retryAfterServer) handle(w http.ResponseWriter, r *http.Request) {

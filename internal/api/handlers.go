@@ -1708,17 +1708,23 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// sending to S3.  For AWS Chunked Uploads we use
 	// x-amz-decoded-content-length as that represents the actual object
 	// size, while the HTTP Content-Length includes chunk overhead.
+	// haveContentLength distinguishes a declared length from an absent one:
+	// originalBytes is 0 for both "Content-Length: 0" and no header at all, but
+	// only the latter is an unknown-length stream.
 	var originalBytes int64
+	var haveContentLength bool
 	decodedLen := r.Header.Get("x-amz-decoded-content-length")
 	if decodedLen != "" {
 		metadata["Content-Length"] = decodedLen
-		if v, err := strconv.ParseInt(decodedLen, 10, 64); err == nil {
+		if v, err := strconv.ParseInt(decodedLen, 10, 64); err == nil && v >= 0 {
 			originalBytes = v
+			haveContentLength = true
 		}
 	} else if contentLength := r.Header.Get("Content-Length"); contentLength != "" {
 		metadata["Content-Length"] = contentLength
-		if v, err := strconv.ParseInt(contentLength, 10, 64); err == nil {
+		if v, err := strconv.ParseInt(contentLength, 10, 64); err == nil && v >= 0 {
 			originalBytes = v
+			haveContentLength = true
 		}
 	}
 
@@ -1888,11 +1894,13 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// For legacy (non-chunked) encryption: the encrypted reader is a *bytes.Reader
 	// which reports its own length; contentLengthPtr stays nil so the S3 client
 	// derives it from the reader.
+	// Keyed on haveContentLength, not originalBytes > 0: a declared zero is a
+	// known length and must not be mistaken for an unknown-length stream.
 	var contentLengthPtr *int64
-	if originalBytes > 0 && encMetadata[crypto.MetaEncrypted] != "true" {
+	if haveContentLength && encMetadata[crypto.MetaEncrypted] != "true" {
 		// Bypass / passthrough mode: plaintext is stored as-is.
 		contentLengthPtr = &originalBytes
-	} else if encMetadata[crypto.MetaChunkedFormat] == "true" && originalBytes > 0 {
+	} else if encMetadata[crypto.MetaChunkedFormat] == "true" && haveContentLength {
 		// Determine chunk size from metadata
 		chunkSize := crypto.DefaultChunkSize
 		if csStr, ok := encMetadata[crypto.MetaChunkSize]; ok && csStr != "" {
@@ -1914,14 +1922,15 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// When originalBytes is unknown (e.g. chunked transfer encoding from client
-	// with no Content-Length), wrap the encrypted reader to count ciphertext bytes.
-	// After PutObject, back-calculate the plaintext size and persist it via a
-	// metadata-only copy-to-self. This ensures HeadObject returns the correct
-	// Content-Length so clients can issue correct range requests without the
-	// gateway needing to fetch and decrypt the full object on every range GET.
+	// When the plaintext size is unknown (e.g. chunked transfer encoding from a
+	// client with no Content-Length), wrap the encrypted reader to count
+	// ciphertext bytes. After PutObject, back-calculate the plaintext size and
+	// persist it via a metadata-only copy-to-self. This ensures HeadObject returns
+	// the correct Content-Length so clients can issue correct range requests
+	// without the gateway needing to fetch and decrypt the full object on every
+	// range GET. A declared length needs none of this, zero included.
 	var ciphertextCounter *countingReader
-	if originalBytes == 0 && encMetadata[crypto.MetaChunkedFormat] == "true" {
+	if !haveContentLength && encMetadata[crypto.MetaChunkedFormat] == "true" {
 		ciphertextCounter = newCountingReader(encryptedReader)
 		encryptedReader = ciphertextCounter
 	}
