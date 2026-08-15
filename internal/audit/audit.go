@@ -44,6 +44,9 @@ const (
 	// credential enumeration, signature-mismatch, replay attacks, and
 	// unauthenticated probe detection. Success: false always.
 	EventTypeAuthFailure EventType = "auth.failure"
+	// EventTypeAuthorizationDenied is emitted when an authenticated principal
+	// lacks permission for a requested S3 operation.
+	EventTypeAuthorizationDenied EventType = "auth.authorization_denied"
 )
 
 // AuditEvent represents a single audit log event.
@@ -331,5 +334,3 @@ func (l *auditLogger) GetEvents() []*AuditEvent {
 	copy(events, l.events)
 	return events
 }
-
-

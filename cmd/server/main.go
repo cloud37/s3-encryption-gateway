@@ -46,25 +46,27 @@ var (
 
 // ConfigChangeApplier holds references to components that can be updated during hot reload
 type ConfigChangeApplier struct {
-	logger         *logrus.Logger
-	tracerProvider *sdktrace.TracerProvider
-	RateLimiter    *middleware.RateLimiter
-	cache          cache.Cache
-	auditLogger    audit.Logger
-	config         *config.Config
-	policyManager  *config.PolicyManager
+	logger          *logrus.Logger
+	tracerProvider  *sdktrace.TracerProvider
+	RateLimiter     *middleware.RateLimiter
+	cache           cache.Cache
+	auditLogger     audit.Logger
+	config          *config.Config
+	policyManager   *config.PolicyManager
+	credentialStore api.CredentialStore
 }
 
 // NewConfigChangeApplier creates a new applier for configuration changes
-func NewConfigChangeApplier(logger *logrus.Logger, tracerProvider *sdktrace.TracerProvider, rateLimiter *middleware.RateLimiter, cache cache.Cache, auditLogger audit.Logger, initialConfig *config.Config, policyManager *config.PolicyManager) *ConfigChangeApplier {
+func NewConfigChangeApplier(logger *logrus.Logger, tracerProvider *sdktrace.TracerProvider, rateLimiter *middleware.RateLimiter, cache cache.Cache, auditLogger audit.Logger, initialConfig *config.Config, policyManager *config.PolicyManager, credentialStore api.CredentialStore) *ConfigChangeApplier {
 	return &ConfigChangeApplier{
-		logger:         logger,
-		tracerProvider: tracerProvider,
-		RateLimiter:    rateLimiter,
-		cache:          cache,
-		auditLogger:    auditLogger,
-		config:         initialConfig,
-		policyManager:  policyManager,
+		logger:          logger,
+		tracerProvider:  tracerProvider,
+		RateLimiter:     rateLimiter,
+		cache:           cache,
+		auditLogger:     auditLogger,
+		config:          initialConfig,
+		policyManager:   policyManager,
+		credentialStore: credentialStore,
 	}
 }
 
@@ -84,6 +86,22 @@ func stringSlicesEqual(a, b []string) bool {
 // ApplyConfigChanges applies non-crypto configuration changes to running components
 func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Config) error {
 	changes := []string{}
+	if a.credentialStore != nil {
+		credentials := newConfig.ResolvedCredentials()
+		defer func() {
+			for i := range credentials {
+				b := []byte(credentials[i].SecretKey)
+				for j := range b {
+					b[j] = 0
+				}
+				credentials[i].SecretKey = ""
+			}
+		}()
+		if err := a.credentialStore.Replace(credentials); err != nil {
+			return fmt.Errorf("replace credential store: %w", err)
+		}
+		changes = append(changes, "auth.credentials updated")
+	}
 
 	// Update log level
 	if oldConfig.LogLevel != newConfig.LogLevel {
@@ -755,9 +773,12 @@ func main() {
 	}
 	// Zero plaintext secrets from the transient slice; the store holds its own copy.
 	for i := range resolvedCreds {
-		resolvedCreds[i].SecretKey = strings.Repeat("\x00", len(resolvedCreds[i].SecretKey))
+		b := []byte(resolvedCreds[i].SecretKey)
+		for j := range b {
+			b[j] = 0
+		}
+		resolvedCreds[i].SecretKey = ""
 	}
-	resolvedCreds = nil
 	logger.WithField("count", len(cfg.Auth.Credentials)).Info("Gateway credential store initialized")
 
 	// Initialize API handler with Phase 5 features
@@ -806,11 +827,11 @@ func main() {
 	}
 	handler.WithSizeCache(sizeCache)
 
-	// Initialize configuration hot-reload (only if config file is specified)
+	// Initialize configuration hot-reload for a main config or credentials file.
 	var configReloader *config.ConfigReloader
 	var configApplier *ConfigChangeApplier
 
-	if configPath != "" { // Enable hot-reload for any non-empty config path
+	if configPath != "" || os.Getenv("AUTH_CREDENTIALS_FILE") != "" {
 		// Create config change applier
 		var rateLimiterPtr *middleware.RateLimiter
 		if cfg.RateLimit.Enabled {
@@ -822,7 +843,7 @@ func main() {
 			defer rateLimiterPtr.Stop()
 		}
 
-		configApplier = NewConfigChangeApplier(logger, tracerProvider, rateLimiterPtr, objectCache, auditLogger, cfg, policyManager)
+		configApplier = NewConfigChangeApplier(logger, tracerProvider, rateLimiterPtr, objectCache, auditLogger, cfg, policyManager, credStore)
 
 		// Create and start config reloader
 		var err error
@@ -884,9 +905,9 @@ func main() {
 		httpHandler = middleware.TracingMiddleware(cfg.Tracing.RedactSensitive, ipExtractor)(httpHandler)
 	}
 
-	// Apply bucket validation middleware if proxied bucket is configured
+	// AuthorizationMiddleware applies proxied_bucket as an intersection with each
+	// credential scope, including filtered ListBuckets responses.
 	if cfg.ProxiedBucket != "" {
-		httpHandler = middleware.BucketValidationMiddleware(cfg.ProxiedBucket, logger)(httpHandler)
 		logger.WithField("proxied_bucket", cfg.ProxiedBucket).Info("Single bucket proxy mode enabled")
 	}
 
@@ -915,6 +936,7 @@ func main() {
 	// business logic. It runs inside RecoveryMiddleware so panics during auth
 	// validation are caught, but it must be outermost among functional
 	// middleware so unauthenticated requests are rejected early.
+	httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, auditLogger)(httpHandler)
 	httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, auditLogger, cfg.Auth.AllowLegacySignatureV2)(httpHandler)
 
 	// RecoveryMiddleware wraps the ENTIRE chain so panics in any layer are caught.
