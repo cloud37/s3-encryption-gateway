@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **V1.0-AUTH-2:** Add per-credential bucket scopes and read-only/read-write authorization.
+- Restrict bucket lifecycle operations to explicit credential grants and filter ListBuckets responses by effective scope.
+- Fail closed on ambiguous route/query shapes: non-empty subresource selectors, mixed selectors, and parentless parameters can no longer fall through to generic CreateBucket/DeleteBucket handling, and `x-id` can accompany but never identify an operation.
+- CopyObject and UploadPartCopy now parse and authorize source and destination buckets inside the handlers before any backend client acquisition, independent of middleware ordering.
+
 ### Fixed
 
 - **Retryable `PutObject` bodies (ADR 0010):** A chunked-encrypted upload hands
@@ -28,6 +35,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PERF2_Retry_503_ChunkedPut` conformance case — the existing retry conformance
   tests all ran with chunking disabled, which yields a seekable body and never
   exercised rewind-on-retry.
+
+- **Documentation corrections (V1.0-AUTH-2):**
+  - Removed obsolete "Client Credentials Mode" section from Helm chart README and replaced it with a note that the gateway uses its own backend identity (ADR-0012).
+  - Corrected `docs/ARCHITECTURE.md` and `docs/DEPLOYMENT.md` to describe `PROXIED_BUCKET` as a global restriction that intersects with credential scope, not a per-credential field.
+  - Fixed malformed YAML indentation in `README.md`, `docs/S3_CLI_TOOLS.md`, and `config.yaml.example` for `auth.credentials` examples.
+- **Lint fixes (V1.0-AUTH-2):** Fixed unchecked `watcher.Close()` errors in `internal/config/config.go` hot-reload code and empty-branch warnings in `internal/api/auth.go`.
 
 ## [0.11.10] — 2026-08-11
 

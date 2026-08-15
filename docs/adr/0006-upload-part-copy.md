@@ -141,9 +141,7 @@ This prevents silent security degradation caused by configuration drift. Verifie
 
 ### Source-Bucket Read Authorisation
 
-The handler enforces source read authorisation implicitly by issuing the source `HeadObject` / `GetObject` through the same caller-derived S3 client (`h.getS3Client(r)`) used for the destination. When `UseClientCredentials` is enabled, each request carries the caller's SigV4 credentials; a caller without `s3:GetObject` on the source bucket receives `AccessDenied` from the backend, which `TranslateError` maps to HTTP 403.
-
-This avoids a dual-authorisation check implementation while guaranteeing that no cross-bucket read escalation is possible via UploadPartCopy. Verified by integration test `TestUploadPartCopy_CrossBucket_ReadDenied`.
+Source read authorisation is enforced before any backend interaction. `AuthorizationMiddleware` parses `x-amz-copy-source`, validates that both the source and destination buckets are within the caller's credential scope, and rejects the request with `AccessDenied` (HTTP 403) before routing. `handleUploadPartCopy` re-enforces the same check via `authorizeCopyOperation` before it can acquire a backend client, so the boundary does not depend on middleware ordering. This guarantees that no cross-bucket read escalation is possible via UploadPartCopy. Verified by `TestUploadPartCopy_SourceBucketOutOfScopeDeniedBeforeBackend`, which proves the denial occurs with zero backend-client acquisitions and zero backend calls.
 
 ### Legacy Fallback Cap
 

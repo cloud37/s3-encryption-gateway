@@ -4,6 +4,10 @@
 
 The S3 Encryption Gateway is a transparent proxy that sits between S3 clients and S3-compatible storage providers. It provides client-side encryption/decryption of objects while maintaining full S3 API compatibility.
 
+## Credential Authorization
+
+Authentication resolves a gateway-managed credential before authorization. Each credential has a bucket scope, object permission (`ro` or `rw`), and optional bucket lifecycle grants. Authorization is enforced before backend-capable handlers; copy operations authorize both source and destination. The shared backend identity is never used as a caller authorization boundary. Credential snapshots are immutable and reload atomically.
+
 ## Language Choice: Go
 
 After analyzing multiple languages, Go was selected for this project due to:
@@ -39,9 +43,10 @@ After analyzing multiple languages, Go was selected for this project due to:
 - **Technology**: Go's net/http with custom middleware
 - **Responsibilities**:
   - Parse and validate S3 API requests
-  - Authenticate every request via AuthMiddleware (credential lookup + AWS Signature V4/V2 validation) before any handler logic
-  - Route authenticated requests to appropriate handlers
-  - Apply optional `proxied_bucket` filter after successful authentication
+  - Authenticate every request via AuthMiddleware (credential lookup + AWS Signature V4/V2 validation)
+  - Authorize every request via AuthorizationMiddleware (bucket scope, permissions, and copy-source checks) before any backend-capable handler
+  - Route authenticated and authorized requests to appropriate handlers
+  - Apply optional global `PROXIED_BUCKET` filter as an additional scope restriction after successful authentication
   - Provide health check endpoints
 
 ### 2. Request Processor
@@ -103,48 +108,52 @@ After analyzing multiple languages, Go was selected for this project due to:
 
 ### Authentication Flow
 
-Every request must present valid AWS Signature V4 or V2 credentials. Authentication happens before any handler logic:
+Every request must present valid AWS Signature V4 or V2 credentials. Authentication and authorization happen before any handler logic:
 
 ```
 Client → AuthMiddleware: credential lookup + signature validation
-AuthMiddleware → Handler: proceed (with optional proxied_bucket filter applied)
-Handler → Backend S3: forward authenticated request
+AuthMiddleware → AuthorizationMiddleware: bucket scope, permissions, and copy-source checks
+AuthorizationMiddleware → Handler: proceed (with optional PROXIED_BUCKET intersection applied)
+Handler → Backend S3: forward authenticated and authorized request
 ```
 
-The gateway maintains a unified credential store (`auth.credentials`). Each entry contains an access key, secret key, and an optional `proxied_bucket` filter that restricts the credential to a single bucket after authentication succeeds.
+The gateway maintains a unified credential store (`auth.credentials`). Each entry contains an access key, secret key, bucket scope, and permission level. The global `PROXIED_BUCKET` setting (if configured) intersects with every credential's scope and can only narrow it, never expand it.
 
 ### Object Upload (PUT)
 ```
 1. Client → Gateway: PUT /bucket/key (with AWS Signature V4/V2)
 2. Gateway → AuthMiddleware: Validate signature against auth.credentials
-3. Gateway → RequestParser: Parse request
-4. RequestParser → EncryptionEngine: Encrypt object data
-5. EncryptionEngine → BackendClient: PUT encrypted data
-6. BackendClient → Gateway: Response
-7. Gateway → Client: Response (with modified metadata)
+3. Gateway → AuthorizationMiddleware: Validate bucket scope and permissions
+4. Gateway → RequestParser: Parse request
+5. RequestParser → EncryptionEngine: Encrypt object data
+6. EncryptionEngine → BackendClient: PUT encrypted data
+7. BackendClient → Gateway: Response
+8. Gateway → Client: Response (with modified metadata)
 ```
 
 ### Object Download (GET)
 ```
 1. Client → Gateway: GET /bucket/key (with AWS Signature V4/V2)
 2. Gateway → AuthMiddleware: Validate signature against auth.credentials
-3. Gateway → RequestParser: Parse request
-4. RequestParser → BackendClient: GET encrypted data
-5. BackendClient → EncryptionEngine: Decrypt object data
-6. EncryptionEngine → Gateway: Decrypted response
-7. Gateway → Client: Response (original data)
+3. Gateway → AuthorizationMiddleware: Validate bucket scope and permissions
+4. Gateway → RequestParser: Parse request
+5. RequestParser → BackendClient: GET encrypted data
+6. BackendClient → EncryptionEngine: Decrypt object data
+7. EncryptionEngine → Gateway: Decrypted response
+8. Gateway → Client: Response (original data)
 ```
 
 ### List Objects (GET with query params)
 ```
 1. Client → Gateway: GET /bucket/?list-type=2 (with AWS Signature V4/V2)
 2. Gateway → AuthMiddleware: Validate signature against auth.credentials
-3. Gateway → BackendClient: Forward request (object bodies are not encrypted)
-4. BackendClient → Gateway: Response (ciphertext sizes + ETags)
-5. Gateway → SizeCache (Valkey): HMGET plainsize:<bucket> for the listed keys
-6. Gateway → Gateway: substitute plaintext sizes for cache hits; optional bounded
+3. Gateway → AuthorizationMiddleware: Validate bucket scope and permissions
+4. Gateway → BackendClient: Forward request (object bodies are not encrypted)
+5. BackendClient → Gateway: Response (ciphertext sizes + ETags)
+6. Gateway → SizeCache (Valkey): HMGET plainsize:<bucket> for the listed keys
+7. Gateway → Gateway: substitute plaintext sizes for cache hits; optional bounded
    HEAD fallback for misses (list_size_translate, V1.0-S3-3)
-7. Gateway → Client: Response (plaintext sizes where known; ciphertext sizes
+8. Gateway → Client: Response (plaintext sizes where known; ciphertext sizes
    for unresolved keys — fail-soft, no 5xx)
 ```
 

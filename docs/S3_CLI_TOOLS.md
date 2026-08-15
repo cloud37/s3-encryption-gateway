@@ -19,7 +19,10 @@ ciphertext envelopes, auditing key usage, algorithm scanning), see
 4. [MinIO Client (`mc`)](#4-minio-client-mc)
 5. [Common Recipes](#5-common-recipes)
 6. [Verifying Encryption Is Active](#6-verifying-encryption-is-active)
-7. [Tool Comparison](#7-tool-comparison)
+7. [Credential Hot Reload](#7-credential-hot-reload)
+8. [Wildcard Grammar](#8-wildcard-grammar)
+9. [ListBuckets Filtering](#9-listbuckets-filtering)
+10. [Tool Comparison](#10-tool-comparison)
 
 ---
 
@@ -49,7 +52,11 @@ auth:
     - access_key: "my-gateway-access-key"
       secret_key_env: "GW_SECRET_KEY_1"
       label: "dev-client"
+      buckets: ["dev-data", "shared-*"]
+      permissions: "rw"
 ```
+
+Omit `buckets` for unrestricted access or use `buckets: []` to deny all buckets. `permissions: ro` allows reads only. Bucket creation and deletion need explicit `bucket_permissions` grants.
 
 Throughout this document, replace `my-gateway-access-key` / `changeme` with
 the credentials from your `gateway.yaml`.
@@ -605,7 +612,95 @@ to validate encryption; use the `s3eg-cli inspect` sub-command instead.
 
 ---
 
-## 7. Tool Comparison
+## 7. Credential Hot Reload
+
+File-backed credential and policy changes can be applied without restarting the
+gateway. Credentials supplied through process environment variables, including
+Helm-rendered values, require a process restart when changed.
+
+**Trigger methods:**
+
+- **SIGHUP** — Send `kill -HUP <pid>` (or `kubectl exec` into the container) to force an immediate reload.
+- **File watcher** — Updating a mounted `AUTH_CREDENTIALS_FILE` or the main `config.yaml` triggers an automatic reload.
+
+**What operators can change:**
+
+- `auth.credentials` entries (add, remove, or modify keys, scopes, permissions).
+- `bucket_permissions` grants.
+
+**What operators cannot change:**
+
+- Encryption password, key manager settings, or backend type (these require a process restart).
+
+**Verification:**
+
+```bash
+# Trigger reload
+kubectl exec deploy/s3-encryption-gateway -- kill -HUP 1
+
+# Check logs for confirmation
+kubectl logs deploy/s3-encryption-gateway | grep "Configuration reloaded"
+```
+
+Invalid reloads are rejected and the prior policy remains active.
+
+---
+
+## 8. Wildcard Grammar
+
+The `buckets` list in each credential entry supports exact names and trailing-prefix wildcards:
+
+| Pattern | Matches | Does not match |
+|---|---|---|
+| `exact-bucket` | `exact-bucket` | `exact-bucket-2` |
+| `tenant-*` | `tenant-a`, `tenant-b` | `other-tenant` |
+
+**Rules:**
+
+- Only **one** `*` is permitted.
+- The `*` must be the **last character** of the pattern.
+- `*` by itself is rejected.
+- Duplicate patterns within a single credential are rejected at startup.
+
+**Example:**
+
+```yaml
+auth:
+  credentials:
+    - access_key: "team-a-key"
+      secret_key_env: "TEAM_A_SECRET"
+      buckets: ["team-a-prod", "team-a-staging", "shared-*"]
+      permissions: "rw"
+```
+
+Omit `buckets` for unrestricted access; use `buckets: []` to intentionally deny all buckets.
+
+---
+
+## 9. ListBuckets Filtering
+
+The gateway filters `ListBuckets` responses so clients only see buckets they are authorized to access.
+
+**How it works:**
+
+1. The client calls `aws s3 ls` (or equivalent).
+2. The gateway forwards the request to the backend using its own backend identity.
+3. The returned bucket list is intersected with the caller's credential scope and the global `PROXIED_BUCKET` (if set).
+4. Buckets outside scope are removed before the response reaches the client.
+
+**Examples:**
+
+| Credential scope | PROXIED_BUCKET | Backend buckets | Client sees |
+|---|---|---|---|
+| `["app-*"]` | `""` | `app-1`, `app-2`, `logs` | `app-1`, `app-2` |
+| `[]` | `""` | `app-1`, `app-2` | *(empty)* |
+| omitted | `"app-1"` | `app-1`, `app-2` | `app-1` |
+
+If the caller has read-only (`ro`) permissions, `ListBuckets` is allowed. Write permissions (`rw`) also allow listing.
+
+---
+
+## 10. Tool Comparison
 
 | Feature | `awscli` | `s5cmd` | `mc` |
 |---|---|---|---|
