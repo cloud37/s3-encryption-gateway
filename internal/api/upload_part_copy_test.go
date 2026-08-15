@@ -101,7 +101,7 @@ func TestParseCopySource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bucket, key, version, err := parseCopySource(tt.source)
+			bucket, key, version, err := ParseCopySource(tt.source)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -145,6 +145,7 @@ func TestHandleUploadPartCopy_Dispatch(t *testing.T) {
 	t.Run("UploadPartCopy with copy source", func(t *testing.T) {
 		req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 		req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+		req = attachTestCredential(req)
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		// Should succeed with CopyPartResult XML
@@ -194,6 +195,7 @@ func TestHandleUploadPartCopy_ErrorCases(t *testing.T) {
 			if tt.rangeHeader != "" {
 				req.Header.Set("x-amz-copy-source-range", tt.rangeHeader)
 			}
+			req = attachTestCredential(req)
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 			assert.Equal(t, tt.expectHTTPCode, w.Code)
@@ -221,6 +223,7 @@ func TestHandleUploadPartCopy_PlaintextFastPath(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123",
 		bytes.NewReader([]byte("ignored body")))
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -254,6 +257,7 @@ func TestHandleUploadPartCopy_PlaintextWithRange(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
 	req.Header.Set("x-amz-copy-source-range", "bytes=2-5")
+	req = attachTestCredential(req)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -280,6 +284,7 @@ func TestHandleUploadPartCopy_SourceNotFound(t *testing.T) {
 	// The exact error code depends on how TranslateError handles the mock error
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/nonexistent-key")
+	req = attachTestCredential(req)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -305,6 +310,7 @@ func TestHandleUploadPartCopy_ResponseXML(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -410,15 +416,12 @@ func ptr(s string) *string {
 	return &s
 }
 
-// TestUploadPartCopy_CrossBucket_ReadDenied verifies the source-bucket READ
-// authorization gate: if the backend refuses the HeadObject on the source
-// with AccessDenied (the caller's SigV4 credentials lack s3:GetObject on
-// the source), the gateway surfaces 403 AccessDenied to the client rather
-// than silently falling through or masking the error.
-//
-// Plan DoD (V0.6-S3-1): "source-bucket read authorization checked on every
-// UploadPartCopy via the same policy path as GetObject; denial produces
-// 403 AccessDenied independently of destination write authorization".
+// TestUploadPartCopy_CrossBucket_ReadDenied verifies backend error
+// translation: when the backend refuses the source HeadObject, the handler
+// surfaces the backend's AccessDenied to the client. Gateway-side scope
+// authorization happens earlier — see
+// TestUploadPartCopy_SourceBucketOutOfScopeDeniedBeforeBackend, which proves
+// the middleware denies cross-bucket sources with zero backend calls.
 func TestUploadPartCopy_CrossBucket_ReadDenied(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
@@ -429,9 +432,10 @@ func TestUploadPartCopy_CrossBucket_ReadDenied(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	// Simulate the backend refusing the HeadObject on the source. In
-	// production this is what happens when the caller's credentials lack
-	// s3:GetObject on the source bucket.
+	// Simulate a backend that refuses HeadObject on the source (e.g. a
+	// provider-side failure surfaced as AccessDenied). Gateway-managed
+	// callers share the gateway's backend identity (ADR 0012); this covers
+	// the error-translation path, not caller-level authorization.
 	mockClient.errors["src-bucket/src-key/head"] = &mockAPIError{
 		code:    "AccessDenied",
 		message: "Access Denied",
@@ -439,6 +443,7 @@ func TestUploadPartCopy_CrossBucket_ReadDenied(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -475,6 +480,7 @@ func TestUploadPartCopy_PlaintextSource_EncryptedDestBucket_Refused(t *testing.T
 
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -509,6 +515,7 @@ func TestUploadPartCopy_PlaintextSource_NonRequiringBucket_Allowed(t *testing.T)
 
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -546,6 +553,7 @@ func TestUploadPartCopy_LegacySourceExceedsCap(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/legacy-big")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -582,6 +590,7 @@ func TestUploadPartCopy_SourceRangeExceeds5GiB(t *testing.T) {
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
 	// 5 GiB + 1 byte (range is inclusive: last - first + 1 = 5368709121)
 	req.Header.Set("x-amz-copy-source-range", "bytes=0-5368709120")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -624,6 +633,7 @@ func TestUploadPartCopy_MPU_AppendPartFailure_Returns503(t *testing.T) {
 
 	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID), nil)
 	req.Header.Set("x-amz-copy-source", "src-bucket/src-key")
+	req = attachTestCredential(req)
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 

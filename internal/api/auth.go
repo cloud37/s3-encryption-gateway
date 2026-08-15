@@ -428,10 +428,9 @@ func createCanonicalRequest(r *http.Request, isPresigned bool, signedHeaders []s
 			buf.WriteByte(':')
 			buf.WriteString(strings.Join(trimmedVals, ","))
 			buf.WriteByte('\n')
-		} else {
-			// Should header mismatch be error? AWS says yes.
-			// But for now let's assume it exists if it was signed.
 		}
+		// If a signed header is missing, AWS signature verification would fail.
+		// We assume the header exists if it was included in the signed headers list.
 	}
 	buf.WriteByte('\n')
 
@@ -448,12 +447,9 @@ func createCanonicalRequest(r *http.Request, isPresigned bool, signedHeaders []s
 		if ph != "" {
 			payloadHash = ph
 		}
-	} else {
-		// For presigned, it's strictly "UNSIGNED-PAYLOAD" for GET
-		// For PUT, it might be signed? usually UNSIGNED-PAYLOAD too for browser compatibility
-		// We'll assume UNSIGNED-PAYLOAD for presigned unless header is present (which is rare)
-		// Actually, "UNSIGNED-PAYLOAD" is the literal string used in signature calculation
 	}
+	// For presigned URLs the payload hash remains "UNSIGNED-PAYLOAD",
+	// which is the literal string baked into the signature calculation.
 	buf.WriteString(payloadHash)
 
 	return buf.String(), nil
