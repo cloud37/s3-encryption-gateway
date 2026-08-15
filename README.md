@@ -737,7 +737,9 @@ auth:
   credentials:
     - access_key: "YOUR_GATEWAY_ACCESS_KEY"
       secret_key: "YOUR_GATEWAY_SECRET_KEY"
-      # proxied_bucket: "optional-bucket-filter"
+      buckets: ["application-data", "shared-*"] # omit for unrestricted; [] denies all
+      permissions: "rw" # use "ro" for read-only object access
+      bucket_permissions: [] # explicit "create" and/or "delete" only
 
 backend:
   endpoint: "https://s3.amazonaws.com"

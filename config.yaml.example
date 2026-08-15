@@ -24,6 +24,10 @@ auth:
       # secret_key: ""           # Dev only — avoid in production
       secret_key_env: "GW_SECRET_KEY_1"  # Set via environment variable or Kubernetes secretKeyRef
       label: "primary-client"   # Optional — appears in audit logs
+      # Omit buckets for unrestricted access; [] intentionally denies all.
+      buckets: ["my-application", "shared-*"]
+      permissions: "rw"          # "ro" permits reads only; defaults to "rw"
+      bucket_permissions: []      # explicit "create" and/or "delete" only
 
   # To add multiple clients with separate credentials:
   #   - access_key: "service-account-key"
