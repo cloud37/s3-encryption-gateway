@@ -265,6 +265,19 @@ func TestConformance(t *testing.T) {
 				{"Auth_ProxiedBucketFilter", 0, testAuth_ProxiedBucketFilter},
 				{"Auth_ProxiedBucketMetricsPrefixRejected", 0, testAuth_ProxiedBucketMetricsPrefixRejected},
 
+				// V1.0-AUTH-2 — Per-credential authorization against live S3 backends.
+				{"Authorization_ExactAndWildcardBucketScopes", 0, testAuthorization_ExactAndWildcardBucketScopes},
+				{"Authorization_ExplicitEmptyScopeDeniesAll", 0, testAuthorization_ExplicitEmptyScopeDeniesAll},
+				{"Authorization_ReadOnlyCredential", 0, testAuthorization_ReadOnlyCredential},
+				{"Authorization_CopySourceAndDestinationScopes", 0, testAuthorization_CopySourceAndDestinationScopes},
+				{"Authorization_UploadPartCopySourceScope", provider.CapMultipartCopy, testAuthorization_UploadPartCopySourceScope},
+				{"Authorization_ListBucketsFiltered", 0, testAuthorization_ListBucketsFiltered},
+				{"Authorization_ProxiedBucketIntersection", 0, testAuthorization_ProxiedBucketIntersection},
+				{"Authorization_PresignedScopeEnforced", 0, testAuthorization_PresignedScopeEnforced},
+				{"Authorization_BucketLifecycleGrants", 0, testAuthorization_BucketLifecycleGrants},
+				{"Authorization_OperationPermissionMatrix", 0, testAuthorization_OperationPermissionMatrix},
+				{"Authorization_UnknownOperationsFailClosed", 0, testAuthorization_UnknownOperationsFailClosed},
+
 				// Issue #232: Valkey health gauge transitions for single and HA gateways.
 				{"MPU_ValkeyHealth_SingleAndHA", provider.CapEncryptedMPU, testMPUValkeyHealthSingleAndHA},
 
