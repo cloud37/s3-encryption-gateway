@@ -35,7 +35,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PERF2_Retry_503_ChunkedPut` conformance case — the existing retry conformance
   tests all ran with chunking disabled, which yields a seekable body and never
   exercised rewind-on-retry.
-
 - **Documentation corrections (V1.0-AUTH-2):**
   - Removed obsolete "Client Credentials Mode" section from Helm chart README and replaced it with a note that the gateway uses its own backend identity (ADR-0012).
   - Corrected `docs/ARCHITECTURE.md` and `docs/DEPLOYMENT.md` to describe `PROXIED_BUCKET` as a global restriction that intersects with credential scope, not a per-credential field.
