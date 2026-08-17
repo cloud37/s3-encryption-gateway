@@ -181,3 +181,79 @@ func testOpenBaoKMSTokenRenewal(t *testing.T, inst provider.Instance) {
 			len(got), len(plaintext))
 	}
 }
+
+// testOpenBaoKMSTokenRevocation is the regression test for the incident where a
+// gateway held a dead OpenBao token and served 403s indefinitely.
+//
+// It revokes the adapter's token out-of-band against a real OpenBao — the
+// production trigger, whether by explicit revoke, max_ttl, or a lease lost while
+// OpenBao was unreachable — and requires the gateway to recover on its own. The
+// AppRole TTL is deliberately long so the renewal goroutine's next scheduled
+// renewal is far away: recovery must come from on-demand re-authentication, not
+// from the lease clock.
+func testOpenBaoKMSTokenRevocation(t *testing.T, inst provider.Instance) {
+	t.Helper()
+
+	ctx := t.Context()
+
+	// A long TTL: the renewal goroutine will not wake during this test.
+	baoInst := provider.StartOpenBao(ctx, t, provider.WithOpenBaoAppRole(2*time.Hour))
+
+	km, err := crypto.NewOpenBaoTransitManager(crypto.OpenBaoTransitOptions{
+		Address: baoInst.Address,
+		KeyName: baoInst.KeyName,
+		Auth: crypto.OpenBaoAuthConfig{
+			Method:   "approle",
+			RoleID:   baoInst.AppRoleID,
+			SecretID: baoInst.AppRoleSecret,
+		},
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewOpenBaoTransitManager (approle): %v", err)
+	}
+	t.Cleanup(func() { _ = km.Close(ctx) })
+
+	gw := harness.StartGateway(t, inst, harness.WithKeyManager(km))
+
+	key := uniqueKey(t)
+	plaintext := []byte("token-revocation-test-object")
+	put(t, gw, inst.Bucket, key, plaintext)
+
+	if err := km.HealthCheck(ctx); err != nil {
+		t.Fatalf("HealthCheck before revocation: %v", err)
+	}
+
+	// Revoke every token AppRole login has issued. This is a real revocation:
+	// the adapter's credential stops working immediately, while the login
+	// endpoint stays open so re-authentication is possible.
+	if err := provider.RevokeAppRoleTokens(ctx, baoInst.Address); err != nil {
+		t.Fatalf("revoke approle tokens: %v", err)
+	}
+	t.Log("revoked all AppRole-issued tokens")
+
+	// The gateway must re-authenticate on its own. Anything longer than a few
+	// seconds means recovery is waiting on the lease clock.
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if lastErr = km.HealthCheck(ctx); lastErr == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("KMS never recovered after token revocation: %v", lastErr)
+	}
+
+	// The data plane must work too — both directions.
+	got := get(t, gw, inst.Bucket, key)
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("GET after revocation: content mismatch (got %d bytes, want %d)", len(got), len(plaintext))
+	}
+	key2 := uniqueKey(t)
+	put(t, gw, inst.Bucket, key2, plaintext)
+	if got2 := get(t, gw, inst.Bucket, key2); !bytes.Equal(got2, plaintext) {
+		t.Errorf("round-trip of a new object after revocation failed")
+	}
+}
