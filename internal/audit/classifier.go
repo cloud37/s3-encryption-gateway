@@ -8,14 +8,15 @@ import (
 type ObjectClass int
 
 const (
-	ClassModern      ObjectClass = iota // No migration needed
-	ClassA_XOR                          // SEC-2: XOR IV derivation
-	ClassB_NoAAD                        // SEC-4: no-AAD legacy
-	ClassC_Fallback_XOR                 // SEC-27 + SEC-2: v1 fallback + XOR IV
-	ClassC_Fallback_HKDF                // SEC-27: v1 fallback, HKDF IV already
-	ClassD_LegacyKDF                    // SEC-H03: legacy PBKDF2 100k, no KDF params metadata
-	ClassPlaintext                      // Not encrypted; skip
-	ClassUnknown                        // Cannot determine; log and skip
+	ClassModern          ObjectClass        = iota // No migration needed
+	ClassA_XOR                                     // SEC-2: XOR IV derivation
+	ClassB_NoAAD                                   // SEC-4: no-AAD legacy
+	ClassC_Fallback_XOR                            // SEC-27 + SEC-2: v1 fallback + XOR IV
+	ClassC_Fallback_HKDF                           // SEC-27: v1 fallback, HKDF IV already
+	ClassD_LegacyKDF                               // SEC-H03: legacy PBKDF2 100k, no KDF params metadata
+	ClassPlaintext                                 // Not encrypted; skip
+	ClassUnknown                                   // Cannot determine; log and skip
+	ClassE_ChunkedV1     = ClassUnknown + 1        // SEC-37: v1 chunked objects lack completeness authentication
 )
 
 // ClassToString returns a human-readable name for an ObjectClass.
@@ -33,6 +34,8 @@ func ClassToString(c ObjectClass) string {
 		return "class_c_fallback_hkdf"
 	case ClassD_LegacyKDF:
 		return "class_d_legacy_kdf"
+	case ClassE_ChunkedV1:
+		return "class_e_chunked_v1"
 	case ClassPlaintext:
 		return "plaintext"
 	case ClassUnknown:
@@ -112,6 +115,24 @@ func ClassifyObject(meta map[string]string) ObjectClass {
 		return ClassD_LegacyKDF
 	}
 
+	// Class E distinguishes legacy chunked v1 from modern chunked v2. Keep
+	// this after higher-priority legacy classifications above.
+	if isChunked {
+		// Older metadata may predate persisted manifests; retain its existing
+		// modern classification. A present manifest must be parseable.
+		if meta[crypto.MetaManifest] == "" {
+			return ClassModern
+		}
+		version, err := crypto.ChunkedFormatVersion(meta)
+		if err == nil && version == crypto.ChunkedFormatV1 {
+			return ClassE_ChunkedV1
+		}
+		if err == nil && version == crypto.ChunkedFormatV2 {
+			return ClassModern
+		}
+		return ClassUnknown
+	}
+
 	return ClassModern
 }
 
@@ -119,7 +140,7 @@ func ClassifyObject(meta map[string]string) ObjectClass {
 // Retained for compatibility; audit tools may use this to flag objects.
 func NeedsMigration(c ObjectClass) bool {
 	switch c {
-	case ClassA_XOR, ClassB_NoAAD, ClassC_Fallback_XOR, ClassC_Fallback_HKDF, ClassD_LegacyKDF:
+	case ClassA_XOR, ClassB_NoAAD, ClassC_Fallback_XOR, ClassC_Fallback_HKDF, ClassD_LegacyKDF, ClassE_ChunkedV1:
 		return true
 	default:
 		return false

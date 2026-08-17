@@ -138,12 +138,29 @@ func (r *DecryptReader) Read(p []byte) (n int, err error) {
 ### Overview
 For chunked encryption, range requests can be optimized by fetching and decrypting only the necessary chunks from S3, rather than downloading the entire encrypted object. This provides significant performance improvements for large objects with small range requests.
 
-### Chunked Encryption Format
-Objects are encrypted in fixed-size chunks with independent authentication:
+### Chunked Encryption Formats
+Chunked objects are versioned by the authenticated manifest. Version 1 remains
+readable for compatibility, while new objects use version 2:
+
+```text
+v1: DataRecord_0 || ... || DataRecord_(N-1)
+v2: DataRecord_0 || ... || DataRecord_(N-1) || TerminalRecord
+DataRecord_i = ciphertext(P_i) || 16-byte authentication tag
 ```
-Encrypted Object = Chunk_0 + Chunk_1 + ... + Chunk_N
-Chunk_i = IV_i + Ciphertext_i + AuthTag_i  (where each chunk is ChunkSize + 16 bytes)
-```
+
+For v2, `TerminalRecord` is exactly 32 bytes. Its AES-256-GCM plaintext is
+`uint64_be(N) || uint64_be(sum(len(P_i)))`, and an empty object is one terminal
+record encoding `(0, 0)`. The v2 data records use AAD
+`"chunked-v2/data" || 0x00 || uint64_be(i)` and HKDF nonce info
+`"chunked-v2/data-nonce" || 0x00 || uint64_be(i)`. The terminal uses AAD
+`"chunked-v2/terminal" || 0x00` and the separate HKDF domain
+`"chunked-v2/terminal-nonce" || 0x00`. All integer fields are big-endian.
+
+For plaintext size `P`, chunk size `S`, and `N = 0` when `P == 0`, otherwise
+`ceil(P/S)`, ciphertext sizes are `P + N*16` for v1 and `P + N*16 + 32` for
+v2. V1 uses its legacy HKDF nonce and nil AAD; it authenticates individual
+records but cannot prove that a complete trailing suffix is present. See
+[ADR 0016](adr/0016-authenticated-chunked-completeness.md).
 
 ### Range Request Processing
 
@@ -228,6 +245,12 @@ Range responses include the original object ETag (not the encrypted ETag) to mai
 ### Security Considerations
 
 #### Authentication Verification
+V2 range reads verify the separately fetched terminal before success and verify
+all selected data records. Full reads also verify the terminal at EOF, so a
+backend change after preflight cannot produce a clean complete stream. Unknown
+manifest versions fail closed before plaintext is returned. V1 range reads
+retain legacy touched-chunk verification only and are migration candidates.
+
 All chunks within the requested range have their authentication tags verified, ensuring:
 - **Integrity**: Tampered data is detected
 - **Confidentiality**: Only authorized decryption succeeds

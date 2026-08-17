@@ -36,7 +36,24 @@ s3eg-cli inspect --config gateway.yaml my-bucket path/to/object.txt
 ```
 
 The gateway's `Decrypt` path transparently handles all legacy formats. The
-`Encrypt` path produces objects with the current encryption parameters.
+`Encrypt` path produces the current v2 chunked format, including its
+authenticated terminal record.
+
+### Chunked v1 completeness migration
+
+Chunked v1 objects are readable, but their independently authenticated data
+records do not authenticate the expected object length. Removing complete
+trailing chunks can therefore go undetected. The read-only classifier reports
+these objects as `class_e_chunked_v1` and `NeedsMigration` is true; chunked v2
+objects remain `modern`. Unsupported or malformed manifests are `unknown` and
+must be investigated rather than migrated blindly.
+
+Inventory chunked objects with `s3eg-cli list-algorithm` or `inspect`, then
+rewrite each v1 object through the gateway using GET -> PUT. Verify afterward
+that the manifest reports version 2 and that the object is no longer classified
+as `class_e_chunked_v1`. Do not append a 32-byte trailer to v1 ciphertext in
+place: v2 changes the data AAD and nonce domains, so only a plaintext
+round-trip safely upgrades the object.
 
 ### Full bucket re-encryption
 

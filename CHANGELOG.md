@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **V1.0-SEC-37 authenticated chunked completeness:** New chunked v2 objects
+  authenticate their exact data-chunk count and plaintext size with a terminal
+  record, and unknown manifest versions fail closed. V1 chunked objects remain
+  readable for compatibility but are classified as `class_e_chunked_v1` and
+  require GET-through-gateway -> PUT-through-gateway re-encryption; no external
+  discovery tooling is required.
+
 ### Fixed
 
 - **Retryable `PutObject` bodies (ADR 0010):** A chunked-encrypted upload hands

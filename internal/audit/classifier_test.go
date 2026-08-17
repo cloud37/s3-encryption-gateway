@@ -1,6 +1,8 @@
 package audit
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
@@ -15,11 +17,93 @@ func TestClassify_Plaintext(t *testing.T) {
 	}
 }
 
+func chunkedManifest(version int) string {
+	data, _ := json.Marshal(map[string]any{"v": version, "cs": 65536, "iv": "AAAAAAAAAAAAAAAA"})
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+func TestClassify_ClassE_ChunkedV1(t *testing.T) {
+	meta := map[string]string{
+		crypto.MetaEncrypted:     "true",
+		crypto.MetaChunkedFormat: "true",
+		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      chunkedManifest(1),
+		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
+	}
+	if got := ClassifyObject(meta); got != ClassE_ChunkedV1 {
+		t.Fatalf("ClassifyObject(v1 chunked) = %s, want class_e_chunked_v1", ClassToString(got))
+	}
+}
+
+func TestClassify_ChunkedV2_IsModern(t *testing.T) {
+	meta := map[string]string{
+		crypto.MetaEncrypted:     "true",
+		crypto.MetaChunkedFormat: "true",
+		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      chunkedManifest(2),
+		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
+	}
+	if got := ClassifyObject(meta); got != ClassModern {
+		t.Fatalf("ClassifyObject(v2 chunked) = %s, want modern", ClassToString(got))
+	}
+}
+
+func TestClassify_ChunkedUnknown_IsUnknown(t *testing.T) {
+	meta := map[string]string{
+		crypto.MetaEncrypted:     "true",
+		crypto.MetaChunkedFormat: "true",
+		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      chunkedManifest(3),
+		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
+	}
+	if got := ClassifyObject(meta); got != ClassUnknown {
+		t.Fatalf("ClassifyObject(unknown chunked) = %s, want unknown", ClassToString(got))
+	}
+}
+
+func TestClassify_ChunkedMalformedManifest_IsUnknown(t *testing.T) {
+	meta := map[string]string{
+		crypto.MetaEncrypted:     "true",
+		crypto.MetaChunkedFormat: "true",
+		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      "not-base64",
+		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
+	}
+	if got := ClassifyObject(meta); got != ClassUnknown {
+		t.Fatalf("ClassifyObject(malformed chunked) = %s, want unknown", ClassToString(got))
+	}
+}
+
+func TestClassify_ClassE_ChunkedV1_LegacyKDFPrecedence(t *testing.T) {
+	meta := map[string]string{
+		crypto.MetaEncrypted:     "true",
+		crypto.MetaChunkedFormat: "true",
+		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      chunkedManifest(1),
+	}
+	if got := ClassifyObject(meta); got != ClassD_LegacyKDF {
+		t.Fatalf("ClassifyObject(v1 legacy KDF) = %s, want legacy KDF", ClassToString(got))
+	}
+}
+
+func TestClassToString_ClassE(t *testing.T) {
+	if got := ClassToString(ClassE_ChunkedV1); got != "class_e_chunked_v1" {
+		t.Fatalf("ClassToString(ClassE_ChunkedV1) = %q", got)
+	}
+}
+
+func TestNeedsMigration_ClassE(t *testing.T) {
+	if !NeedsMigration(ClassE_ChunkedV1) {
+		t.Fatal("NeedsMigration(ClassE_ChunkedV1) = false, want true")
+	}
+}
+
 func TestClassify_Modern_Chunked(t *testing.T) {
 	meta := map[string]string{
 		crypto.MetaEncrypted:     "true",
 		crypto.MetaChunkedFormat: "true",
 		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      chunkedManifest(2),
 		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
 	}
 	if got := ClassifyObject(meta); got != ClassModern {
@@ -51,9 +135,9 @@ func TestClassify_ClassA_XOR(t *testing.T) {
 
 func TestClassify_ClassB_NoAAD(t *testing.T) {
 	meta := map[string]string{
-		crypto.MetaEncrypted:    "true",
-		crypto.MetaLegacyNoAAD:  "true",
-		crypto.MetaAlgorithm:    crypto.AlgorithmAES256GCM,
+		crypto.MetaEncrypted:   "true",
+		crypto.MetaLegacyNoAAD: "true",
+		crypto.MetaAlgorithm:   crypto.AlgorithmAES256GCM,
 		// non-chunked (no MetaChunkedFormat)
 	}
 	if got := ClassifyObject(meta); got != ClassB_NoAAD {
@@ -63,8 +147,8 @@ func TestClassify_ClassB_NoAAD(t *testing.T) {
 
 func TestClassify_ClassC_FallbackXOR(t *testing.T) {
 	meta := map[string]string{
-		crypto.MetaEncrypted:      "true",
-		crypto.MetaFallbackMode:   "true",
+		crypto.MetaEncrypted:    "true",
+		crypto.MetaFallbackMode: "true",
 		// fallback-version absent → "1" (legacy)
 		// iv-deriv absent → XOR
 	}
@@ -103,6 +187,7 @@ func TestClassify_CompactEncryptedKey(t *testing.T) {
 		"x-amz-meta-e":           "true",
 		crypto.MetaChunkedFormat: "true",
 		crypto.MetaIVDerivation:  "hkdf-sha256",
+		crypto.MetaManifest:      chunkedManifest(2),
 		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
 	}
 	if got := ClassifyObject(meta); got != ClassModern {
@@ -138,6 +223,7 @@ func TestNeedsMigration(t *testing.T) {
 		{ClassC_Fallback_XOR, true},
 		{ClassC_Fallback_HKDF, true},
 		{ClassD_LegacyKDF, true},
+		{ClassE_ChunkedV1, true},
 	}
 	for _, tt := range tests {
 		t.Run(ClassToString(tt.class), func(t *testing.T) {
