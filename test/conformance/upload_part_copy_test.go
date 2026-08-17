@@ -326,3 +326,43 @@ func testUPC_CrossBucket(t *testing.T, inst provider.Instance) {
 		t.Errorf("UPC_CrossBucket: round-trip mismatch")
 	}
 }
+
+// testSEC37_UploadPartCopy_TruncatedChunkedV2Rejected verifies that a corrupt
+// chunked source cannot produce a usable copied part.
+func testSEC37_UploadPartCopy_TruncatedChunkedV2Rejected(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst, harness.WithChunking(true))
+	backend := newS3Client(t, inst)
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	put(t, gw, inst.Bucket, srcKey, bytes.Repeat([]byte("upc-truncate"), 20*1024))
+	truncateObject(t, backend, inst.Bucket, srcKey, 32)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, dstKey)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID) })
+
+	u := fmt.Sprintf("%s/%s/%s?partNumber=1&uploadId=%s", gw.URL, inst.Bucket, dstKey, uploadID)
+	req, err := http.NewRequest(http.MethodPut, u, nil)
+	if err != nil {
+		t.Fatalf("UploadPartCopy request: %v", err)
+	}
+	req.Header.Set("x-amz-copy-source", fmt.Sprintf("/%s/%s", inst.Bucket, srcKey))
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("UploadPartCopy: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("UploadPartCopy succeeded for truncated v2 source")
+	}
+	abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID)
+
+	check, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, dstKey))
+	if err != nil {
+		t.Fatalf("destination GET: %v", err)
+	}
+	io.Copy(io.Discard, check.Body)
+	check.Body.Close()
+	if check.StatusCode != http.StatusNotFound {
+		t.Errorf("destination status=%d, want 404", check.StatusCode)
+	}
+}

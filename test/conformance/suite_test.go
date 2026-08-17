@@ -73,6 +73,10 @@ func TestConformance(t *testing.T) {
 				{"Chunked_RoundTrip", 0, testChunkedRoundTrip},
 				{"Chunked_RangedRead", 0, testChunkedRangedRead},
 				{"Legacy_RoundTrip", 0, testLegacyRoundTrip},
+				{"SEC37_ChunkedV2_RoundTripAndHEAD", 0, testSEC37_ChunkedV2_RoundTripAndHEAD},
+				{"SEC37_ChunkedV2_TruncatedSuffix_FullGetRangeHEADFailClosed", 0, testSEC37_ChunkedV2_TruncatedSuffix_FullGetRangeHEADFailClosed},
+				{"SEC37_ChunkedV2_TruncatedSuffix_CopyObjectNoDestination", 0, testSEC37_ChunkedV2_TruncatedSuffix_CopyObjectNoDestination},
+				{"SEC37_UploadPartCopy_TruncatedChunkedV2Rejected", provider.CapMultipartCopy, testSEC37_UploadPartCopy_TruncatedChunkedV2Rejected},
 
 				// Multipart operations.
 				{"Multipart_Basic", provider.CapMultipartUpload, testMultipartBasic},

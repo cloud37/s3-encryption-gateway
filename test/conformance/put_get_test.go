@@ -334,6 +334,42 @@ func testCopyObject(t *testing.T, inst provider.Instance) {
 	}
 }
 
+// testSEC37_ChunkedV2_TruncatedSuffix_CopyObjectNoDestination verifies that
+// CopyObject authenticates the source before creating the destination.
+func testSEC37_ChunkedV2_TruncatedSuffix_CopyObjectNoDestination(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst, harness.WithChunking(true))
+	backend := newS3Client(t, inst)
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	put(t, gw, inst.Bucket, srcKey, bytes.Repeat([]byte("copy-truncate"), 20*1024))
+	truncateObject(t, backend, inst.Bucket, srcKey, 32)
+
+	req, err := http.NewRequest(http.MethodPut, objectURL(gw, inst.Bucket, dstKey), nil)
+	if err != nil {
+		t.Fatalf("CopyObject request: %v", err)
+	}
+	req.Header.Set("x-amz-copy-source", fmt.Sprintf("/%s/%s", inst.Bucket, srcKey))
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("CopyObject: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("CopyObject succeeded for truncated v2 source")
+	}
+
+	check, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, dstKey))
+	if err != nil {
+		t.Fatalf("destination GET: %v", err)
+	}
+	io.Copy(io.Discard, check.Body)
+	check.Body.Close()
+	if check.StatusCode != http.StatusNotFound {
+		t.Errorf("destination status=%d, want 404", check.StatusCode)
+	}
+}
+
 // testMetadataRoundTrip verifies that object metadata survives a PUT/GET cycle.
 // This catches the "cipher: message authentication failed" class of bug that
 // occurs when a backend mangles metadata (e.g. URL-encodes keys).

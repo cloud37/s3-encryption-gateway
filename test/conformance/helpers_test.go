@@ -172,3 +172,26 @@ func headMeta(t *testing.T, client s3.Client, bucket, key string) map[string]str
 	}
 	return meta
 }
+
+// truncateObject removes the authenticated terminal record from a chunked
+// object while preserving its provider-managed metadata. It uses only the
+// common S3 client contract, so it works across all conformance providers.
+func truncateObject(t *testing.T, client s3.Client, bucket, key string, suffix int) {
+	t.Helper()
+	ctx := context.Background()
+	body, metadata, err := client.GetObject(ctx, bucket, key, nil, nil)
+	if err != nil {
+		t.Fatalf("get encrypted object %s: %v", key, err)
+	}
+	ciphertext, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		t.Fatalf("read encrypted object %s: %v", key, err)
+	}
+	if suffix <= 0 || suffix >= len(ciphertext) {
+		t.Fatalf("invalid truncation suffix %d for %d-byte object", suffix, len(ciphertext))
+	}
+	if _, err := client.PutObject(ctx, bucket, key, bytes.NewReader(ciphertext[:len(ciphertext)-suffix]), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("replace truncated object %s: %v", key, err)
+	}
+}
