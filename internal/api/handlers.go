@@ -940,6 +940,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// downstream decryption paths (DecryptRangeOptimized, full decrypt) can
 	// also use the correct plaintext size.
 	var derivedPlaintextSize string
+	var forceFullFetch bool
 
 	// Get S3 client (may use client credentials if enabled)
 	// For Signature V4 requests, s3Client may be nil - we'll forward the request directly
@@ -989,6 +990,21 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		} else if headErr == nil && engine.IsEncrypted(headMeta) {
 			// Single-PUT chunked or legacy encrypted object.
 			if crypto.IsChunkedFormat(headMeta) {
+				missingOriginalSize := headMeta[crypto.MetaOriginalSize] == "" || headMeta[crypto.MetaChunkCount] == ""
+				forceFullFetch = missingOriginalSize
+				if forceFullFetch {
+					backendRange = nil
+					useRangeOptimization = false
+				}
+				chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, headMeta)
+				if preflightErr != nil {
+					h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+					return
+				}
+				if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) && chunkedInfo.PlaintextSize > 0 {
+					headMeta[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
+					derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
+				}
 				// Get plaintext size for range parsing
 				plaintextSize, err := crypto.GetPlaintextSizeFromMetadata(headMeta)
 				if exactSize, ok := chunkedPlaintextSizeFromCiphertext(headMeta); ok {
@@ -1110,6 +1126,15 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+				// v1 has no authenticated terminal and older objects may not have
+				// persisted original-size metadata. Do not issue a trailer/data
+				// range for that format; the full ciphertext is required for the
+				// established decrypt-and-slice path. Explicit v2 objects retain
+				// the optimized range path and its preflight above.
+				if missingOriginalSize {
+					backendRange = nil
+					useRangeOptimization = false
+				}
 			} else {
 				// Legacy format: must fetch full object, decrypt, then apply range.
 				backendRange = nil
@@ -1140,7 +1165,14 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		backendRange = nil
 		useRangeOptimization = false
 	}
+	if forceFullFetch {
+		backendRange = nil
+		useRangeOptimization = false
+	}
 
+	if forceFullFetch {
+		backendRange = nil
+	}
 	reader, metadata, err := s3Client.GetObject(ctx, bucket, key, versionID, backendRange)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
@@ -1154,6 +1186,19 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
+
+	// Authenticate the v2 terminal before any success headers or plaintext are
+	// exposed. Ranged GETs already performed this check during HEAD planning.
+	if crypto.IsChunkedFormat(metadata) && (rangeHeader == nil || !useRangeOptimization) && !forceFullFetch {
+		chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
+		if preflightErr != nil {
+			h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+			return
+		}
+		if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) && chunkedInfo.PlaintextSize > 0 {
+			metadata[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
+		}
+	}
 
 	// If the range pre-processing derived the plaintext size from the ciphertext,
 	// propagate it into the GetObject metadata so that DecryptRangeOptimized and
@@ -1908,10 +1953,10 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 				chunkSize = cs
 			}
 		}
-		// AEAD tag size for AES-GCM and ChaCha20-Poly1305 is 16 bytes
+		// V2 adds one fixed authenticated terminal after the per-chunk tags.
 		const aeadTagSize = 16
 		chunkCount := (originalBytes + int64(chunkSize) - 1) / int64(chunkSize)
-		encLen := originalBytes + chunkCount*int64(aeadTagSize)
+		encLen := originalBytes + chunkCount*int64(aeadTagSize) + crypto.ChunkedTerminalSize
 		contentLengthPtr = &encLen
 	}
 
@@ -2006,6 +2051,14 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 		const aeadTagSize = int64(16)
 		ct := ciphertextCounter.n
+		// V2 appends a fixed authenticated terminal record after the data
+		// chunks. Exclude it before solving the v1 data-size equation.
+		if encMetadata[crypto.MetaManifest] != "" {
+			ct -= crypto.ChunkedTerminalSize
+		}
+		if ct <= 0 {
+			return
+		}
 		// Solve: find plaintext p such that p + ceil(p/chunkSize)*16 == ct.
 		// Iterate from the upper bound downward until we find a consistent p.
 		maxChunks := (ct + chunkSize) / (chunkSize + aeadTagSize)
@@ -2282,7 +2335,6 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		h.writeS3ClientError(w, r, err, "HEAD", start)
 		return
 	}
-
 	// Extract version ID if provided
 	var versionID *string
 	if vid := r.URL.Query().Get("versionId"); vid != "" {
@@ -2300,6 +2352,16 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordS3Error(r.Context(), "HeadObject", bucket, s3Err.Code)
 		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
+	}
+	if crypto.IsChunkedFormat(metadata) {
+		chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
+		if preflightErr != nil {
+			h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+			return
+		}
+		if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
+			metadata[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
+		}
 	}
 	// A self-contained envelope stores the original standard headers in the
 	// gateway encryption metadata. The backend Content-Type is only the generic
@@ -2342,28 +2404,32 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	// The gateway then returns wrong data for those ranges, causing digest mismatches
 	// and "unexpected EOF" on pull.
 	if metadata[crypto.MetaChunkedFormat] == "true" {
-		// Chunked single-PUT objects without MetaOriginalSize (e.g. stored before
-		// the size-recording fix, or via streaming PUT without Content-Length).
-		// Derive the exact plaintext size from the ciphertext Content-Length and
-		// chunk size: each chunk adds exactly 16 bytes (AES-GCM/ChaCha20 AEAD tag).
-		// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16)) * 16
-		if ctStr, ok := metadata["Content-Length"]; ok {
-			if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
-				chunkSize := int64(crypto.DefaultChunkSize)
-				if csStr, ok2 := metadata[crypto.MetaChunkSize]; ok2 {
-					if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
-						chunkSize = cs
+		if original, parseErr := strconv.ParseInt(metadata[crypto.MetaOriginalSize], 10, 64); parseErr == nil && original >= 0 {
+			filteredMetadata["Content-Length"] = strconv.FormatInt(original, 10)
+		} else {
+			// Chunked single-PUT objects without MetaOriginalSize (e.g. stored before
+			// the size-recording fix, or via streaming PUT without Content-Length).
+			// Derive the exact plaintext size from the ciphertext Content-Length and
+			// chunk size: each chunk adds exactly 16 bytes (AES-GCM/ChaCha20 AEAD tag).
+			// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16)) * 16
+			if ctStr, ok := metadata["Content-Length"]; ok {
+				if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
+					chunkSize := int64(crypto.DefaultChunkSize)
+					if csStr, ok2 := metadata[crypto.MetaChunkSize]; ok2 {
+						if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
+							chunkSize = cs
+						}
 					}
-				}
-				const aeadTagSize = int64(16)
-				// Number of chunks = ceil(ciphertext / (chunkSize + tagSize))
-				numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
-				if numChunks < 1 {
-					numChunks = 1
-				}
-				plainSize := ct - numChunks*aeadTagSize
-				if plainSize > 0 {
-					filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
+					const aeadTagSize = int64(16)
+					// Number of chunks = ceil(ciphertext / (chunkSize + tagSize))
+					numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
+					if numChunks < 1 {
+						numChunks = 1
+					}
+					plainSize := ct - numChunks*aeadTagSize
+					if plainSize > 0 {
+						filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
+					}
 				}
 			}
 		}
@@ -2783,19 +2849,7 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 	}
 
 	if metadata[crypto.MetaChunkedFormat] == "true" {
-		chunkSize := int64(crypto.DefaultChunkSize)
-		if csStr, ok := metadata[crypto.MetaChunkSize]; ok {
-			if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
-				chunkSize = cs
-			}
-		}
-		const aeadTagSize = int64(16)
-		numChunks := (ciphertextSize + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
-		if numChunks < 1 {
-			numChunks = 1
-		}
-		plainSize := ciphertextSize - numChunks*aeadTagSize
-		if plainSize > 0 {
+		if plainSize, ok := plaintextSizeFromCiphertextMetadata(metadata); ok {
 			return plainSize, true, nil
 		}
 		return 0, false, nil
@@ -2827,10 +2881,40 @@ func chunkedPlaintextSizeFromCiphertext(metadata map[string]string) (int64, bool
 	if cs, err := strconv.ParseInt(metadata[crypto.MetaChunkSize], 10, 64); err == nil && cs > 0 {
 		chunkSize = cs
 	}
+	version := crypto.ChunkedFormatV1
+	if parsed, versionErr := crypto.ChunkedFormatVersion(metadata); versionErr == nil {
+		version = parsed
+	}
+	// A persisted manifest identifies the modern format even when a backend
+	// drops or cannot decode the compact version field. The terminal is part of
+	// v2's wire size and must not be treated as another data tag.
+	if metadata[crypto.MetaManifest] != "" && version == crypto.ChunkedFormatV1 {
+		if plain, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), crypto.ChunkedFormatV2); sizeErr == nil {
+			return plain, plain > 0
+		}
+	}
+	if version == crypto.ChunkedFormatV1 {
+		if original, parseErr := strconv.ParseInt(metadata[crypto.MetaOriginalSize], 10, 64); parseErr == nil && original >= 0 {
+			return original, true
+		}
+	}
+	if plain, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), version); sizeErr == nil {
+		return plain, plain > 0
+	}
 	const aeadTagSize = int64(16)
 	numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
 	plainSize := ct - numChunks*aeadTagSize
 	return plainSize, plainSize > 0
+}
+
+// chunkedFormatVersion treats chunked metadata without a manifest as legacy
+// v1. A decodable manifest is authoritative, including v2 so its terminal
+// preflight is not accidentally bypassed.
+func chunkedFormatVersion(metadata map[string]string) uint8 {
+	if version, err := crypto.ChunkedFormatVersion(metadata); err == nil {
+		return version
+	}
+	return crypto.ChunkedFormatV1
 }
 
 func plaintextSizeFromCiphertextMetadata(metadata map[string]string) (int64, bool) {
@@ -5128,6 +5212,22 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		return
 	}
 
+	// Validate the source terminal before opening it for decryption. This keeps
+	// a truncated v2 source from reaching destination encryption or PutObject.
+	sourceHead, headErr := s3Client.HeadObject(ctx, srcBucket, srcKey, srcVersionID)
+	if headErr != nil {
+		s3Err := TranslateError(headErr, srcBucket, srcKey)
+		s3Err.WriteXML(w)
+		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		return
+	}
+	if crypto.IsChunkedFormat(sourceHead) && sourceHead[crypto.MetaMPUEncrypted] != "true" {
+		if _, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
+			h.writeChunkedCompletenessError(w, r, srcBucket, preflightErr, start)
+			return
+		}
+	}
+
 	// Get source object (decrypt if encrypted)
 	srcReader, srcMetadata, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
 	if err != nil {
@@ -5382,6 +5482,118 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 
 	h.metrics.RecordS3Operation(r.Context(), "CopyObject", dstBucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
+}
+
+// preflightChunkedCompleteness authenticates the fixed v2 terminal record
+// without consuming the object body used by the subsequent operation. v1 is
+// deliberately accepted with an inferred size and no backend suffix request.
+func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
+	version, err := crypto.ChunkedFormatVersion(metadata)
+	if err != nil {
+		// Older chunked objects may not have a persisted manifest. Preserve
+		// their established v1 read behavior; v2 always carries a manifest.
+		if metadata[crypto.MetaManifest] == "" {
+			version = crypto.ChunkedFormatV1
+		} else {
+			return crypto.ChunkedObjectInfo{}, err
+		}
+	}
+	engine, err := h.getEncryptionEngine(bucket)
+	if err != nil {
+		return crypto.ChunkedObjectInfo{}, err
+	}
+	// A bypass bucket must reach the passthrough Decrypt path so encrypted
+	// objects retain the established 409 configuration-mismatch response.
+	// Trailer authentication is only meaningful for an active encryption
+	// engine; invoking the passthrough method would incorrectly turn that
+	// compatibility error into a generic integrity failure.
+	if _, bypass := engine.(crypto.PassthroughEngine); bypass {
+		return crypto.ChunkedObjectInfo{}, nil
+	}
+	if version == crypto.ChunkedFormatV1 {
+		if metadata["Content-Length"] == "" {
+			plain, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata)
+			if sizeErr != nil {
+				return crypto.ChunkedObjectInfo{Version: version}, nil
+			}
+			return crypto.ChunkedObjectInfo{Version: version, PlaintextSize: uint64(plain)}, nil
+		}
+		ciphertextSize, parseErr := strconv.ParseInt(metadata["Content-Length"], 10, 64)
+		if parseErr != nil || ciphertextSize < 0 {
+			return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: invalid ciphertext size", crypto.ErrChunkedObjectIncomplete)
+		}
+		chunkSize := int64(crypto.DefaultChunkSize)
+		if value, parseErr := strconv.ParseInt(metadata[crypto.MetaChunkSize], 10, 64); parseErr == nil && value > 0 {
+			chunkSize = value
+		}
+		plain, count, sizeErr := crypto.ChunkedPlaintextSize(ciphertextSize, int(chunkSize), version)
+		if sizeErr != nil {
+			return crypto.ChunkedObjectInfo{}, sizeErr
+		}
+		return crypto.ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil
+	}
+	ciphertextSize, err := strconv.ParseInt(metadata["Content-Length"], 10, 64)
+	if err != nil || ciphertextSize < 0 {
+		return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: invalid ciphertext size", crypto.ErrChunkedObjectIncomplete)
+	}
+	if ciphertextSize < crypto.ChunkedTerminalSize {
+		return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: short ciphertext", crypto.ErrChunkedObjectIncomplete)
+	}
+	var trailer io.ReadCloser
+	if metadata[crypto.MetaOriginalSize] == "" {
+		// Legacy-compatible metadata lacks the size needed to safely issue a
+		// suffix request. Fetch the complete object and authenticate its terminal
+		// from the buffered tail instead of turning the preflight into a range GET.
+		full, _, fullErr := s3Client.GetObject(ctx, bucket, key, versionID, nil)
+		if fullErr != nil {
+			return crypto.ChunkedObjectInfo{}, fullErr
+		}
+		data, readErr := io.ReadAll(full)
+		_ = full.Close()
+		if readErr != nil {
+			return crypto.ChunkedObjectInfo{}, readErr
+		}
+		trailer = io.NopCloser(bytes.NewReader(data[len(data)-crypto.ChunkedTerminalSize:]))
+	} else {
+		first := ciphertextSize - crypto.ChunkedTerminalSize
+		rangeHeader := fmt.Sprintf("bytes=%d-%d", first, ciphertextSize-1)
+		trailer, _, err = s3Client.GetObject(ctx, bucket, key, versionID, &rangeHeader)
+		if err != nil {
+			return crypto.ChunkedObjectInfo{}, err
+		}
+	}
+	if err != nil {
+		return crypto.ChunkedObjectInfo{}, err
+	}
+	defer trailer.Close()
+	return engine.AuthenticateChunkedTrailer(ctx, trailer, metadata, ciphertextSize)
+}
+
+// preflightChunkedCompletenessIfV2 preserves the established v1 read path.
+// An explicitly present but unsupported manifest is still sent through the
+// strict helper so it fails closed rather than being treated as v1.
+func (h *Handler) preflightChunkedCompletenessIfV2(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
+	if metadata[crypto.MetaManifest] == "" {
+		return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, nil
+	}
+	version, err := crypto.ChunkedFormatVersion(metadata)
+	if err != nil {
+		// Test doubles and older persisted v1 objects may advertise chunked
+		// encryption without a decodable manifest. Keep their v1 behavior.
+		return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, nil
+	}
+	if version == crypto.ChunkedFormatV1 {
+		return crypto.ChunkedObjectInfo{Version: version}, nil
+	}
+	return h.preflightChunkedCompleteness(ctx, s3Client, bucket, key, versionID, metadata)
+}
+
+func (h *Handler) writeChunkedCompletenessError(w http.ResponseWriter, r *http.Request, bucket string, err error, start time.Time) {
+	h.metrics.RecordEncryptionError(r.Context(), "decrypt", "chunked_completeness_failed")
+	h.logger.WithError(err).WithField("bucket", bucket).Error("Chunked object completeness check failed")
+	s3Err := &S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
+	s3Err.WriteXML(w)
+	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 }
 
 // handleDeleteObjects handles batch delete requests.

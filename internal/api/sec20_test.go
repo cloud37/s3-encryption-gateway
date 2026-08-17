@@ -32,6 +32,10 @@ func (m *mockEngine) DecryptRange(ctx context.Context, reader io.Reader, metadat
 	return reader, metadata, nil
 }
 
+func (m *mockEngine) AuthenticateChunkedTrailer(context.Context, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
+	return crypto.ChunkedObjectInfo{}, nil
+}
+
 func (m *mockEngine) IsEncrypted(metadata map[string]string) bool {
 	return false
 }

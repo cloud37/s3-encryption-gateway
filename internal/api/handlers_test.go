@@ -57,10 +57,11 @@ func (e *mockAPIError) ErrorFault() smithy.ErrorFault {
 
 // mockS3Client is a mock implementation of s3.Client for testing.
 type mockS3Client struct {
-	objects      map[string][]byte
-	metadata     map[string]map[string]string
-	errors       map[string]error
-	lastGetRange *string
+	objects              map[string][]byte
+	metadata             map[string]map[string]string
+	errors               map[string]error
+	lastGetRange         *string
+	lastPutContentLength *int64
 
 	// Object-Lock recording (V0.6-S3-2). Readers MUST hold mu; writers
 	// hold mu for write.
@@ -104,7 +105,14 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader
 		return "", err
 	}
 	data, _ := io.ReadAll(reader)
+	m.lastPutContentLength = contentLength
 	m.objects[bucket+"/"+key] = data
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	if _, ok := metadata["Content-Length"]; !ok {
+		metadata["Content-Length"] = strconv.Itoa(len(data))
+	}
 	m.metadata[bucket+"/"+key] = metadata
 	m.locksMu.Lock()
 	m.lastPutLock = lock
@@ -181,6 +189,11 @@ func (m *mockS3Client) HeadObject(ctx context.Context, bucket, key string, versi
 	}
 	if meta == nil {
 		meta = make(map[string]string)
+	}
+	if _, ok := meta["Content-Length"]; !ok {
+		if data, exists := m.objects[bucket+"/"+key]; exists {
+			meta["Content-Length"] = strconv.Itoa(len(data))
+		}
 	}
 	return meta, nil
 }
@@ -525,6 +538,38 @@ func TestHandler_HandlePutObject(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandlePutObject_ChunkedV2ContentLengthIncludesTerminal(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	if err != nil {
+		t.Fatalf("create chunked engine: %v", err)
+	}
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+
+	data := bytes.Repeat([]byte("v2"), 10*1024)
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/chunked-v2", bytes.NewReader(data))
+	req.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	w := httptest.NewRecorder()
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	stored := mockClient.objects["test-bucket/chunked-v2"]
+	chunkCount := (len(data) + 16*1024 - 1) / (16 * 1024)
+	want := len(data) + chunkCount*16 + crypto.ChunkedTerminalSize
+	if got := len(stored); got != want {
+		t.Fatalf("stored ciphertext length = %d, want %d", got, want)
+	}
+	if mockClient.lastPutContentLength == nil || *mockClient.lastPutContentLength != int64(want) {
+		t.Fatalf("declared ciphertext length = %v, want %d", mockClient.lastPutContentLength, want)
 	}
 }
 

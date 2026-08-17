@@ -757,6 +757,7 @@ func TestSEC29_ChunkedSourceBufferCap_uploadPartCopyChunked(t *testing.T) {
 		"src-bucket", "chunked-key", nil,
 		&s3.CopyPartRange{First: 0, Last: 1023},
 		testCap,
+		crypto.ChunkedObjectInfo{},
 	)
 
 	require.Error(t, err, "expected error when DecryptRange output exceeds cap")

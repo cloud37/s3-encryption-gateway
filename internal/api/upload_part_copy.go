@@ -58,6 +58,7 @@ type CopySourceMetadata struct {
 	Size        int64
 	IsChunked   bool
 	IsEncrypted bool
+	ChunkedInfo crypto.ChunkedObjectInfo
 }
 
 // CopyPartResultXML is the XML response body for UploadPartCopy.
@@ -322,7 +323,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 
 		case SourceClassChunked:
 			copyResult, bytesCopied, strategyErr = h.uploadPartCopyChunked(ctx, s3Client, bucket, key, uploadID, int32(partNumber),
-				srcBucket, srcKey, srcVersionID, srcRange, maxCopyPartRangeBytes)
+				srcBucket, srcKey, srcVersionID, srcRange, maxCopyPartRangeBytes, sourceClass.ChunkedInfo)
 
 		case SourceClassLegacy:
 			copyResult, bytesCopied, strategyErr = h.uploadPartCopyLegacy(ctx, s3Client, bucket, key, uploadID, int32(partNumber),
@@ -465,6 +466,16 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		sourceClass.Class = SourceClassChunked
 		sourceClass.IsChunked = true
 		sourceClass.IsEncrypted = true
+		if metadata[crypto.MetaManifest] != "" {
+			info, err := h.preflightChunkedCompleteness(ctx, s3Client, bucket, key, versionID, metadata)
+			if err != nil {
+				return nil, err
+			}
+			sourceClass.ChunkedInfo = info
+			if info.Authenticated && info.PlaintextSize <= uint64(^uint64(0)>>1) {
+				sourceClass.Size = int64(info.PlaintextSize)
+			}
+		}
 	} else if metadata[crypto.MetaEncrypted] == "true" {
 		sourceClass.Class = SourceClassLegacy
 		sourceClass.IsEncrypted = true
@@ -472,7 +483,7 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 
 	// Object size is available from Content-Length or OriginalSize (chunked)
 	// depending on the source format.
-	if sizeStr, ok := metadata["Content-Length"]; ok {
+	if sizeStr, ok := metadata["Content-Length"]; ok && !(sourceClass.IsChunked && sourceClass.ChunkedInfo.Authenticated) {
 		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
 			sourceClass.Size = size
 		}
@@ -495,7 +506,7 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 func (h *Handler) uploadPartCopyChunked(ctx context.Context, s3Client s3.Client,
 	dstBucket, dstKey, uploadID string, partNumber int32,
 	srcBucket, srcKey string, srcVersionID *string, srcRange *s3.CopyPartRange,
-	maxChunkedCap int64,
+	maxChunkedCap int64, chunkedInfo crypto.ChunkedObjectInfo,
 ) (*s3.CopyPartResult, int64, error) {
 
 	srcEngine, err := h.getEncryptionEngine(srcBucket)
@@ -511,6 +522,9 @@ func (h *Handler) uploadPartCopyChunked(ctx context.Context, s3Client s3.Client,
 	// Determine plaintext range. When no source range is specified, copy
 	// the full object (bounded by plaintext size from metadata).
 	plaintextSize, _ := crypto.GetPlaintextSizeFromMetadata(srcMetadata)
+	if chunkedInfo.Authenticated && chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
+		plaintextSize = int64(chunkedInfo.PlaintextSize)
+	}
 	var plaintextStart, plaintextEnd int64
 	if srcRange != nil {
 		plaintextStart = srcRange.First
@@ -780,6 +794,9 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, err
 		}
 		plaintextSize, _ := crypto.GetPlaintextSizeFromMetadata(srcMeta)
+		if sourceClass.ChunkedInfo.Authenticated && sourceClass.ChunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
+			plaintextSize = int64(sourceClass.ChunkedInfo.PlaintextSize)
+		}
 		var pStart, pEnd int64
 		if srcRange != nil {
 			pStart, pEnd = srcRange.First, srcRange.Last

@@ -76,6 +76,12 @@ func (m *mpuMockS3Client) PutObject(ctx context.Context, bucket, key string, rea
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.objects[bucket+"/"+key] = data
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	if _, ok := metadata["Content-Length"]; !ok {
+		metadata["Content-Length"] = strconv.Itoa(len(data))
+	}
 	cp := map[string]string{}
 	for k, v := range metadata {
 		cp[k] = v
