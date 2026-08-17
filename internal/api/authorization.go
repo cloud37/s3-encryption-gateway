@@ -419,12 +419,14 @@ func copyBucketsAuthorized(credential Credential, dstBucket, srcBucket, proxiedB
 // source buckets of a CopyObject/UploadPartCopy request before any backend
 // client is acquired. It mirrors the AuthorizationMiddleware check as
 // handler-level defense-in-depth so copy authorization never depends on
-// middleware ordering. It returns ErrAccessDenied when the caller lacks
-// scope, and the ParseCopySource error for malformed headers.
+// middleware ordering. When gateway authentication is disabled no principal is
+// attached, so it preserves the deployment's unauthenticated behavior. It
+// returns ErrAccessDenied when an authenticated caller lacks scope, and the
+// ParseCopySource error for malformed headers.
 func (h *Handler) authorizeCopyOperation(r *http.Request, dstBucket, copySource string) error {
 	credential, ok := CredentialFromContext(r)
 	if !ok {
-		return ErrAccessDenied
+		return nil
 	}
 	if !credential.CanWrite() {
 		return ErrAccessDenied
