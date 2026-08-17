@@ -6,15 +6,19 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"runtime"
-	"sync"
 
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
+	ChunkedFormatV1          uint8 = 1
+	ChunkedFormatV2          uint8 = 2
+	ChunkedTerminalSize            = 32
+	chunkedTerminalPlainSize       = 16
+
 	// Default chunk size for segmented encryption (64KB)
 	// This balances memory usage with encryption overhead
 	DefaultChunkSize = 64 * 1024
@@ -36,593 +40,360 @@ const (
 // ChunkManifest represents the encryption manifest for chunked objects.
 // It stores the IV for each chunk, allowing decryption without reading
 // the entire object first.
+// ErrUnsupportedChunkedVersion indicates a manifest version that this build cannot read.
+var ErrUnsupportedChunkedVersion = errors.New("unsupported chunked format version")
+
+// ErrChunkedObjectIncomplete indicates that authenticated object completeness could not be proven.
+var ErrChunkedObjectIncomplete = errors.New("chunked object completeness check failed")
+
+// ChunkedObjectInfo describes authenticated or inferred chunked object state.
+type ChunkedObjectInfo struct {
+	Version       uint8
+	ChunkCount    uint64
+	PlaintextSize uint64
+	Authenticated bool
+}
+
 type ChunkManifest struct {
-	Version      int      `json:"v"` // Format version (currently 1)
-	ChunkSize    int      `json:"cs"` // Size of each chunk in bytes
-	ChunkCount   int      `json:"cc"` // Number of chunks
-	BaseIV       string   `json:"iv"` // Base64-encoded base IV (for IV derivation)
+	Version      int      `json:"v"`             // Format version (currently 1)
+	ChunkSize    int      `json:"cs"`            // Size of each chunk in bytes
+	ChunkCount   int      `json:"cc"`            // Number of chunks
+	BaseIV       string   `json:"iv"`            // Base64-encoded base IV (for IV derivation)
 	IVs          []string `json:"ivs,omitempty"` // Optional: explicit IVs per chunk (if baseIV not used)
 	IVDerivation string   `json:"ivd,omitempty"` // IV derivation method: "hkdf-sha256" or "" (legacy XOR)
 }
 
 // chunkedEncryptReader implements streaming encryption in chunks.
-// Each chunk is encrypted independently with its own IV, allowing
-// true streaming without buffering the entire object.
 type chunkedEncryptReader struct {
 	source       io.Reader
 	aead         cipher.AEAD
 	baseIV       []byte
 	chunkSize    int
-	buffer       []byte
-	currentChunk []byte
-	chunkIndex   int
 	manifest     *ChunkManifest
 	bufferPool   *BufferPool
-	closed       bool
+	ctx          context.Context
+	version      uint8
+	terminalAEAD cipher.AEAD
+	index        uint64
+	plainSize    uint64
+	pending      []byte
+	terminal     []byte
+	done         bool
 	err          error
-	ctx          context.Context // Context for cancellation
-
-	// Parallel processing
-	parallel   bool
-	pending    chan *cryptoJob // Channel of jobs in order
-	workerPool chan struct{}   // Semaphore for concurrency control
-	startOnce  sync.Once       // Ensure pipeline starts only once (on first Read)
-	
-	// Buffer management for recycling
-	recycleBuf []byte
 }
 
-type cryptoJob struct {
-	index  int
-	input  []byte
-	output []byte
-	err    error
-	done   chan struct{}
-}
-
-// newChunkedEncryptReader creates a new chunked encryption reader.
-// It generates a base IV and derives per-chunk IVs deterministically.
+// newChunkedEncryptReader creates a legacy-compatible v1 reader.
 func newChunkedEncryptReader(source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool) (*chunkedEncryptReader, *ChunkManifest) {
 	return newChunkedEncryptReaderWithContext(context.Background(), source, aead, baseIV, chunkSize, bufferPool)
 }
 
-// newChunkedEncryptReaderWithContext creates a new chunked encryption reader with context support.
-// It generates a base IV and derives per-chunk IVs deterministically.
-func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool) (*chunkedEncryptReader, *ChunkManifest) {
+// newChunkedEncryptReaderWithContext accepts an optional version for old internal callers.
+func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, versions ...interface{}) (*chunkedEncryptReader, *ChunkManifest) {
+	version := ChunkedFormatV1
+	var terminal cipher.AEAD
+	for _, option := range versions {
+		switch value := option.(type) {
+		case uint8:
+			version = value
+		case cipher.AEAD:
+			terminal = value
+		}
+	}
 	if chunkSize < MinChunkSize {
 		chunkSize = MinChunkSize
 	}
 	if chunkSize > MaxChunkSize {
 		chunkSize = MaxChunkSize
 	}
-
-	manifest := &ChunkManifest{
-		Version:      1,
-		ChunkSize:    chunkSize,
-		BaseIV:       encodeBase64(baseIV),
-		IVDerivation: "hkdf-sha256",
-	}
-
-	return &chunkedEncryptReader{
-		source:       source,
-		aead:         aead,
-		baseIV:       baseIV,
-		chunkSize:    chunkSize,
-		buffer:       make([]byte, chunkSize),
-		currentChunk: nil,
-		chunkIndex:   0,
-		manifest:     manifest,
-		bufferPool:   bufferPool,
-		ctx:          ctx,
-		parallel:     true,
-	}, manifest
+	manifest := &ChunkManifest{Version: int(version), ChunkSize: chunkSize, BaseIV: encodeBase64(baseIV), IVDerivation: "hkdf-sha256"}
+	return &chunkedEncryptReader{source: source, aead: aead, terminalAEAD: terminal, baseIV: baseIV, chunkSize: chunkSize, manifest: manifest, bufferPool: bufferPool, ctx: ctx, version: version}, manifest
 }
 
-// deriveChunkIVHKDF derives a per-chunk IV using HKDF-Expand(SHA-256).
-// This is the recommended derivation method for all objects created from v1.0 onward.
+// deriveChunkIVHKDF preserves the v1 wire format for legacy reads.
 func deriveChunkIVHKDF(baseIV []byte, chunkIndex int) []byte {
-	info := make([]byte, 8+4)
+	info := make([]byte, 12)
 	copy(info, "chunk-iv")
-	binary.BigEndian.PutUint32(info[8:], uint32(chunkIndex)) // #nosec G115 — chunkIndex is bounded by object size / chunk size
+	binary.BigEndian.PutUint32(info[8:], uint32(chunkIndex)) // #nosec G115 -- legacy index encoding
 	r := hkdf.Expand(sha256.New, baseIV, info)
 	iv := make([]byte, len(baseIV))
-	io.ReadFull(r, iv)
+	_, _ = io.ReadFull(r, iv)
 	return iv
 }
 
-func (r *chunkedEncryptReader) deriveChunkIV(chunkIndex int) []byte {
-	return deriveChunkIVHKDF(r.baseIV, chunkIndex)
+func deriveLegacyChunkIV(baseIV []byte, chunkIndex int) []byte {
+	iv := append([]byte(nil), baseIV...)
+	var index [4]byte
+	binary.BigEndian.PutUint32(index[:], uint32(chunkIndex)) // #nosec G115 -- legacy index encoding
+	for i := 0; i < 4 && i < len(iv); i++ {
+		iv[len(iv)-1-i] ^= index[3-i]
+	}
+	return iv
 }
 
-// Read implements io.Reader for chunked encryption.
-// It reads from source, encrypts in chunks, and returns encrypted data.
+func readHKDFNonceWithSize(baseIV, info []byte, size int) ([]byte, error) {
+	result := make([]byte, size)
+	_, err := io.ReadFull(hkdf.New(sha256.New, baseIV, nil, info), result)
+	return result, err
+}
+
 func (r *chunkedEncryptReader) Read(p []byte) (int, error) {
-	if r.closed {
-		return 0, io.EOF
-	}
 	if r.err != nil {
 		return 0, r.err
 	}
-
-	// Ensure pipeline is started
-	r.startOnce.Do(r.startPipeline)
-
-	// Check for context cancellation
-	select {
-	case <-r.ctx.Done():
-		r.err = r.ctx.Err()
-		return 0, r.err
-	default:
+	if r.done && len(r.pending) == 0 {
+		return 0, io.EOF
 	}
-
-	totalRead := 0
-
-	for len(p) > totalRead {
-		// Check for context cancellation in the loop
-		select {
-		case <-r.ctx.Done():
-			r.err = r.ctx.Err()
-			if totalRead > 0 {
-				return totalRead, nil // Return what we have so far
-			}
-			return 0, r.err
-		default:
-		}
-
-		// If we have encrypted data in currentChunk, return it
-		if len(r.currentChunk) > 0 {
-			n := copy(p[totalRead:], r.currentChunk)
-			r.currentChunk = r.currentChunk[n:]
-			totalRead += n
-			
-			// If current chunk is fully consumed, recycle buffer
-			if len(r.currentChunk) == 0 && r.recycleBuf != nil {
-				if r.bufferPool != nil {
-					r.bufferPool.Put(r.recycleBuf)
-				}
-				r.recycleBuf = nil
-			}
+	written := 0
+	for written < len(p) {
+		if len(r.pending) > 0 {
+			n := copy(p[written:], r.pending)
+			r.pending = r.pending[n:]
+			written += n
 			continue
 		}
-
-		// Get next job from pipeline
-		job, ok := <-r.pending
-		if !ok {
-			// Pipeline closed (EOF from source)
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			r.closed = true
-			return 0, io.EOF
+		if r.done {
+			break
 		}
-
-		// Wait for job to complete
 		select {
-		case <-job.done:
 		case <-r.ctx.Done():
 			r.err = r.ctx.Err()
-			return totalRead, r.err
-		}
-
-		// Check job error
-		if job.err != nil {
-			r.err = job.err
-			return totalRead, r.err
-		}
-
-		// Process successful job
-		r.currentChunk = job.output
-		r.manifest.ChunkCount++
-		
-		// Keep reference to original buffer for recycling
-		// We only recycle if it came from pool (which we assume for now if pool exists)
-		if r.bufferPool != nil {
-			r.recycleBuf = job.output
-		}
-	}
-
-	return totalRead, nil
-}
-
-func (r *chunkedEncryptReader) startPipeline() {
-	concurrency := runtime.NumCPU()
-	if concurrency < 2 {
-		concurrency = 2
-	}
-	// Create buffered channel to hold pending jobs in order
-	// Buffer size allows reading ahead while workers process
-	r.pending = make(chan *cryptoJob, concurrency*2)
-	r.workerPool = make(chan struct{}, concurrency)
-
-	go r.feeder()
-}
-
-func (r *chunkedEncryptReader) feeder() {
-	defer close(r.pending)
-
-	chunkIdx := 0
-
-	for {
-		// Check context
-		select {
-		case <-r.ctx.Done():
-			return
+			return written, r.err
 		default:
 		}
-
-		// Allocate buffer
-		var buf []byte
-		if r.bufferPool != nil {
-			buf = r.bufferPool.Get(r.chunkSize)
-		} else {
-			buf = make([]byte, r.chunkSize)
-		}
-
-		// Read chunk
+		buf := make([]byte, r.chunkSize)
 		n, err := io.ReadFull(r.source, buf)
-		
-		// Handle read result
 		if n > 0 {
-			job := &cryptoJob{
-				index: chunkIdx,
-				input: buf[:n], // Slice to actual size
-				done:  make(chan struct{}),
+			pt := buf[:n]
+			var nonce []byte
+			var aad []byte
+			if r.version == ChunkedFormatV2 {
+				nonce, r.err = deriveChunkNonceHKDF(r.baseIV, r.version, r.index)
+				aad = buildChunkAAD(r.version, r.index)
+			} else {
+				nonce = deriveChunkIVHKDF(r.baseIV, int(r.index))
+				aad = nil
 			}
-			chunkIdx++
-
-			// Send to pending queue (blocks if full, providing backpressure)
-			select {
-			case r.pending <- job:
-			case <-r.ctx.Done():
-				return
+			if r.err != nil {
+				return written, r.err
 			}
-
-			// Acquire worker (blocks if max concurrency reached)
-			select {
-			case r.workerPool <- struct{}{}:
-			case <-r.ctx.Done():
-				return
+			r.pending = r.aead.Seal(nil, nonce, pt, aad)
+			if uint64(n) > ^uint64(0)-r.plainSize {
+				r.err = fmt.Errorf("plaintext size overflow")
+				return written, r.err
 			}
-
-			// Dispatch worker
-			go func(j *cryptoJob, buffer []byte) {
-				defer func() { <-r.workerPool }()
-				defer close(j.done)
-
-				// Reuse bufferPool for output to avoid allocation in Seal
-				var outBuf []byte
-				if r.bufferPool != nil {
-					// We need chunk size + tag size
-					// Seal appends, so we need capacity but length 0
-					reqSize := len(j.input) + tagSize
-					outBuf = r.bufferPool.Get(reqSize)
-					outBuf = outBuf[:0]
-				}
-				
-				j.output = r.encryptChunkParallel(j.index, j.input, outBuf)
-				
-				if r.bufferPool != nil {
-					r.bufferPool.Put(buffer)
-				}
-			}(job, buf)
+			r.plainSize += uint64(n)
+			r.index++
+			r.manifest.ChunkCount = int(r.index)
+			continue
 		}
-
-		if err != nil {
-			if err != io.EOF && err != io.ErrUnexpectedEOF {
-				// Report error via a job
-				job := &cryptoJob{
-					err:  err,
-					done: make(chan struct{}),
-				}
-				close(job.done)
-				select {
-				case r.pending <- job:
-				case <-r.ctx.Done():
-				}
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			r.err = err
+			return written, err
+		}
+		r.done = true
+		if r.version == ChunkedFormatV2 {
+			if r.terminalAEAD == nil {
+				r.err = fmt.Errorf("terminal AEAD is not configured")
+				return written, r.err
 			}
-			return
+			var nonce []byte
+			nonce, r.err = deriveTerminalNonceHKDF(r.baseIV, r.version)
+			if r.err == nil {
+				terminal := encodeChunkedTerminal(r.index, r.plainSize)
+				r.pending = r.terminalAEAD.Seal(nil, nonce, terminal[:], buildTerminalAAD(r.version))
+			}
+			if r.err != nil {
+				return written, r.err
+			}
 		}
 	}
-}
-
-// encryptChunkParallel encrypts a single chunk of plaintext.
-// It is safe for concurrent use.
-func (r *chunkedEncryptReader) encryptChunkParallel(index int, plaintext, outBuf []byte) []byte {
-	if len(plaintext) == 0 {
-		return nil
+	if written > 0 {
+		return written, nil
 	}
-
-	// Derive IV for this chunk
-	chunkIV := r.deriveChunkIV(index)
-
-	// Encrypt the chunk
-	// Seal appends to dst. Use outBuf if provided.
-	return r.aead.Seal(outBuf, chunkIV, plaintext, nil)
+	if r.done {
+		return 0, io.EOF
+	}
+	return 0, nil
 }
 
-// Close finalizes the encryption and returns the manifest.
-func (r *chunkedEncryptReader) Close() error {
-	r.closed = true
-	return nil
-}
+func (r *chunkedEncryptReader) Close() error { r.done = true; return nil }
 
-
-// chunkedDecryptReader implements streaming decryption from chunked format.
+// chunkedDecryptReader verifies v1 data records and v2's authenticated terminal.
 type chunkedDecryptReader struct {
 	source       io.Reader
 	aead         cipher.AEAD
+	terminalAEAD cipher.AEAD
 	manifest     *ChunkManifest
 	baseIV       []byte
 	chunkSize    int
-	buffer       []byte
-	currentChunk []byte
-	chunkIndex   int
 	bufferPool   *BufferPool
-	closed       bool
+	ctx          context.Context
+	version      uint8
+	index        uint64
+	plainSize    uint64
+	pending      []byte
+	lookbehind   []byte
+	done         bool
 	err          error
-	ctx          context.Context // Context for cancellation
-
-	// Parallel processing
-	parallel   bool
-	pending    chan *cryptoJob
-	workerPool chan struct{}
-	startOnce  sync.Once
-	
-	// Buffer management for recycling
-	recycleBuf []byte
 }
 
-// newChunkedDecryptReader creates a new chunked decryption reader.
 func newChunkedDecryptReader(source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
 	return newChunkedDecryptReaderWithContext(context.Background(), source, aead, manifest, bufferPool)
 }
 
-// newChunkedDecryptReaderWithContext creates a new chunked decryption reader with context support.
-func newChunkedDecryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
+func newChunkedDecryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminal ...cipher.AEAD) (*chunkedDecryptReader, error) {
+	if err := validateChunkedVersion(uint8(manifest.Version)); err != nil {
+		return nil, err
+	}
 	baseIV, err := decodeBase64(manifest.BaseIV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base IV: %w", err)
 	}
-
-	return &chunkedDecryptReader{
-		source:       source,
-		aead:         aead,
-		manifest:     manifest,
-		baseIV:       baseIV,
-		chunkSize:    manifest.ChunkSize,
-		buffer:       make([]byte, manifest.ChunkSize+tagSize), // Account for auth tag
-		currentChunk: nil,
-		chunkIndex:   0,
-		bufferPool:   bufferPool,
-		ctx:          ctx,
-		parallel:     true,
-	}, nil
+	var term cipher.AEAD
+	if len(terminal) > 0 {
+		term = terminal[0]
+	}
+	return &chunkedDecryptReader{source: source, aead: aead, terminalAEAD: term, manifest: manifest, baseIV: baseIV, chunkSize: manifest.ChunkSize, bufferPool: bufferPool, ctx: ctx, version: uint8(manifest.Version)}, nil
 }
 
-// deriveChunkIV derives an IV for a specific chunk.
-// If the manifest was written with the HKDF flag, HKDF derivation is used.
-// Otherwise, the legacy XOR path is used for backward compatibility.
-func (r *chunkedDecryptReader) deriveChunkIV(chunkIndex int) []byte {
-	if r.manifest.IVDerivation == "hkdf-sha256" {
-		return deriveChunkIVHKDF(r.baseIV, chunkIndex)
-	}
-	// Deprecated: used for objects without MetaIVDerivation flag. Remove no earlier than v3.0.
-	iv := make([]byte, len(r.baseIV))
-	copy(iv, r.baseIV)
-
-	indexBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(indexBytes, uint32(chunkIndex)) // #nosec G115 — chunkIndex is bounded by object size / chunk size
-
-	for i := 0; i < 4 && i < len(iv); i++ {
-		iv[len(iv)-1-i] ^= indexBytes[3-i]
-	}
-
-	return iv
-}
-
-// Read implements io.Reader for chunked decryption.
 func (r *chunkedDecryptReader) Read(p []byte) (int, error) {
-	if r.closed {
-		return 0, io.EOF
-	}
 	if r.err != nil {
 		return 0, r.err
 	}
-
-	r.startOnce.Do(r.startPipeline)
-
-	// Check for context cancellation
-	select {
-	case <-r.ctx.Done():
-		r.err = r.ctx.Err()
-		return 0, r.err
-	default:
+	if len(p) == 0 {
+		return 0, nil
 	}
-
-	totalRead := 0
-
-	for len(p) > totalRead {
-		// Check for context cancellation in the loop
+	written := 0
+	for written < len(p) {
+		if len(r.pending) > 0 {
+			n := copy(p[written:], r.pending)
+			r.pending = r.pending[n:]
+			written += n
+			continue
+		}
+		if r.done {
+			break
+		}
 		select {
 		case <-r.ctx.Done():
 			r.err = r.ctx.Err()
-			if totalRead > 0 {
-				return totalRead, nil // Return what we have so far
-			}
-			return 0, r.err
+			return written, r.err
 		default:
 		}
 
-		// If we have decrypted data, return it
-		if len(r.currentChunk) > 0 {
-			n := copy(p[totalRead:], r.currentChunk)
-			r.currentChunk = r.currentChunk[n:]
-			totalRead += n
-			
-			// Recycle buffer if fully consumed
-			if len(r.currentChunk) == 0 && r.recycleBuf != nil {
-				if r.bufferPool != nil {
-					r.bufferPool.Put(r.recycleBuf)
+		buf := make([]byte, r.chunkSize+tagSize)
+		n, err := io.ReadFull(r.source, buf)
+		if r.version == ChunkedFormatV2 {
+			if n > 0 {
+				r.lookbehind = append(r.lookbehind, buf[:n]...)
+			}
+			for len(r.lookbehind) > ChunkedTerminalSize+r.chunkSize+tagSize {
+				if err := r.decryptData(r.lookbehind[:r.chunkSize+tagSize]); err != nil {
+					r.err = fmt.Errorf("%w: invalid data record: %v", ErrChunkedObjectIncomplete, err)
+					return written, err
 				}
-				r.recycleBuf = nil
+				r.lookbehind = r.lookbehind[r.chunkSize+tagSize:]
+			}
+			if err == nil {
+				continue
+			}
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				r.err = err
+				return written, err
+			}
+			if len(r.lookbehind) < ChunkedTerminalSize {
+				r.err = fmt.Errorf("%w: missing or short terminal", ErrChunkedObjectIncomplete)
+				return written, r.err
+			}
+			bodyLen := len(r.lookbehind) - ChunkedTerminalSize
+			if bodyLen > 0 {
+				if err := r.decryptData(r.lookbehind[:bodyLen]); err != nil {
+					r.err = fmt.Errorf("%w: invalid data record: %v", ErrChunkedObjectIncomplete, err)
+					return written, r.err
+				}
+			}
+			if err := r.verifyTerminal(r.lookbehind[bodyLen:]); err != nil {
+				r.err = err
+				return written, err
+			}
+			r.lookbehind = nil
+			r.done = true
+			continue
+		}
+		if n > 0 {
+			if err := r.decryptData(buf[:n]); err != nil {
+				r.err = err
+				return written, err
 			}
 			continue
 		}
-
-		// Get next job from pipeline
-		job, ok := <-r.pending
-		if !ok {
-			// Pipeline closed (EOF from source)
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			r.closed = true
-			return 0, io.EOF
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			r.err = err
+			return written, err
 		}
-
-		// Wait for job to complete
-		select {
-		case <-job.done:
-		case <-r.ctx.Done():
-			r.err = r.ctx.Err()
-			return totalRead, r.err
-		}
-
-		// Check job error
-		if job.err != nil {
-			r.err = job.err
-			return totalRead, r.err
-		}
-
-		// Process successful job
-		r.currentChunk = job.output
-
-		// Store reference for recycling
-		if r.bufferPool != nil {
-			r.recycleBuf = job.output
-		}
+		r.done = true
 	}
-
-	return totalRead, nil
+	if written > 0 {
+		return written, nil
+	}
+	return 0, io.EOF
 }
 
-func (r *chunkedDecryptReader) startPipeline() {
-	concurrency := runtime.NumCPU()
-	if concurrency < 2 {
-		concurrency = 2
+func (r *chunkedDecryptReader) verifyTerminal(terminal []byte) error {
+	if len(terminal) != ChunkedTerminalSize || r.terminalAEAD == nil {
+		return fmt.Errorf("%w: missing or short terminal", ErrChunkedObjectIncomplete)
 	}
-	r.pending = make(chan *cryptoJob, concurrency*2)
-	r.workerPool = make(chan struct{}, concurrency)
-	go r.feeder()
-}
-
-func (r *chunkedDecryptReader) feeder() {
-	defer close(r.pending)
-	chunkIdx := 0
-
-	for {
-		select {
-		case <-r.ctx.Done():
-			return
-		default:
-		}
-
-		// Allocate buffer for encrypted chunk
-		// Needs to be chunkSize + tagSize
-		expectedSize := r.chunkSize + tagSize
-		var buf []byte
-		if r.bufferPool != nil {
-			buf = r.bufferPool.Get(expectedSize)
-		} else {
-			buf = make([]byte, expectedSize)
-		}
-
-		// Read encrypted chunk
-		n, err := io.ReadFull(r.source, buf)
-
-		if n > 0 {
-			job := &cryptoJob{
-				index: chunkIdx,
-				input: buf[:n],
-				done:  make(chan struct{}),
-			}
-			chunkIdx++
-
-			select {
-			case r.pending <- job:
-			case <-r.ctx.Done():
-				return
-			}
-
-			select {
-			case r.workerPool <- struct{}{}:
-			case <-r.ctx.Done():
-				return
-			}
-
-			go func(j *cryptoJob, buffer []byte) {
-				defer func() { <-r.workerPool }()
-				defer close(j.done)
-
-				// Reuse buffer for output? 
-				// Decryption: Open(dst, nonce, ciphertext, additionalData)
-				// If we use buffer pool for output, we avoid allocation
-				var outBuf []byte
-				if r.bufferPool != nil {
-					// Decrypted size is input size - tag size
-					reqSize := len(j.input) - tagSize
-					if reqSize > 0 {
-						outBuf = r.bufferPool.Get(reqSize)
-						outBuf = outBuf[:0]
-					}
-				}
-
-				var parallelErr error
-				j.output, parallelErr = r.decryptChunkParallel(j.index, j.input, outBuf)
-				if parallelErr != nil {
-					j.err = fmt.Errorf("failed to decrypt chunk %d: %w", j.index, parallelErr)
-				}
-
-				if r.bufferPool != nil {
-					r.bufferPool.Put(buffer)
-				}
-			}(job, buf)
-		}
-
-		if err != nil {
-			if err != io.EOF && err != io.ErrUnexpectedEOF {
-				job := &cryptoJob{
-					err:  err,
-					done: make(chan struct{}),
-				}
-				close(job.done)
-				select {
-				case r.pending <- job:
-				case <-r.ctx.Done():
-				}
-			}
-			return
-		}
+	nonce, err := deriveTerminalNonceHKDF(r.baseIV, r.version)
+	if err != nil {
+		return err
 	}
-}
-
-// decryptChunkParallel decrypts a single chunk of ciphertext.
-func (r *chunkedDecryptReader) decryptChunkParallel(index int, ciphertext, outBuf []byte) ([]byte, error) {
-	if len(ciphertext) == 0 {
-		return nil, nil
+	plain, err := r.terminalAEAD.Open(nil, nonce, terminal, buildTerminalAAD(r.version))
+	if err != nil {
+		return fmt.Errorf("%w: terminal authentication failed: %v", ErrChunkedObjectIncomplete, err)
 	}
-
-	chunkIV := r.deriveChunkIV(index)
-	return r.aead.Open(outBuf, chunkIV, ciphertext, nil)
-}
-
-// Close finalizes the decryption.
-func (r *chunkedDecryptReader) Close() error {
-	r.closed = true
+	count, size, err := decodeChunkedTerminal(plain)
+	if err != nil {
+		return err
+	}
+	if count != r.index || size != r.plainSize {
+		return fmt.Errorf("%w: terminal mismatch", ErrChunkedObjectIncomplete)
+	}
 	return nil
 }
 
+func (r *chunkedDecryptReader) decryptData(ciphertext []byte) error {
+	var nonce []byte
+	var aad []byte
+	var err error
+	if r.version == ChunkedFormatV2 {
+		nonce, err = deriveChunkNonceHKDF(r.baseIV, r.version, r.index)
+		aad = buildChunkAAD(r.version, r.index)
+	} else {
+		if r.manifest.IVDerivation == "hkdf-sha256" {
+			nonce = deriveChunkIVHKDF(r.baseIV, int(r.index))
+		} else {
+			nonce = deriveLegacyChunkIV(r.baseIV, int(r.index))
+		}
+	}
+	if err != nil {
+		return err
+	}
+	pt, err := r.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt chunk %d: %w", r.index, err)
+	}
+	r.pending = append(r.pending, pt...)
+	r.index++
+	if uint64(len(pt)) > ^uint64(0)-r.plainSize {
+		return fmt.Errorf("plaintext size overflow")
+	}
+	r.plainSize += uint64(len(pt))
+	return nil
+}
+func (r *chunkedDecryptReader) Close() error { r.done = true; return nil }
+
 // encodeManifest encodes a chunk manifest to JSON for storage in metadata.
+
 func encodeManifest(manifest *ChunkManifest) (string, error) {
 	data, err := json.Marshal(manifest)
 	if err != nil {
@@ -668,4 +439,76 @@ func loadManifestFromMetadata(metadata map[string]string) (*ChunkManifest, error
 	}
 
 	return decodeManifest(manifestEncoded)
+}
+
+// ChunkedFormatVersion returns the supported version from the encoded manifest.
+func ChunkedFormatVersion(metadata map[string]string) (uint8, error) {
+	manifest, err := loadManifestFromMetadata(metadata)
+	if err != nil {
+		return 0, err
+	}
+	switch manifest.Version {
+	case int(ChunkedFormatV1), int(ChunkedFormatV2):
+		return uint8(manifest.Version), nil
+	default:
+		return 0, ErrUnsupportedChunkedVersion
+	}
+}
+
+func deriveChunkNonceHKDF(baseIV []byte, version uint8, chunkIndex uint64) ([]byte, error) {
+	if version != ChunkedFormatV2 {
+		return nil, ErrUnsupportedChunkedVersion
+	}
+	info := make([]byte, len("chunked-v2/data-nonce")+1+8)
+	copy(info, "chunked-v2/data-nonce")
+	info[len("chunked-v2/data-nonce")] = 0
+	binary.BigEndian.PutUint64(info[len(info)-8:], chunkIndex)
+	return readHKDFNonce(baseIV, info)
+}
+
+func deriveTerminalNonceHKDF(baseIV []byte, version uint8) ([]byte, error) {
+	if version != ChunkedFormatV2 {
+		return nil, ErrUnsupportedChunkedVersion
+	}
+	return readHKDFNonce(baseIV, []byte("chunked-v2/terminal-nonce\x00"))
+}
+
+func readHKDFNonce(baseIV, info []byte) ([]byte, error) {
+	nonce := make([]byte, nonceSize)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, baseIV, nil, info), nonce); err != nil {
+		return nil, fmt.Errorf("derive chunk nonce: %w", err)
+	}
+	return nonce, nil
+}
+
+func buildChunkAAD(version uint8, chunkIndex uint64) []byte {
+	if version != ChunkedFormatV2 {
+		return nil
+	}
+	aad := make([]byte, len("chunked-v2/data")+1+8)
+	copy(aad, "chunked-v2/data")
+	aad[len("chunked-v2/data")] = 0
+	binary.BigEndian.PutUint64(aad[len(aad)-8:], chunkIndex)
+	return aad
+}
+
+func buildTerminalAAD(version uint8) []byte {
+	if version != ChunkedFormatV2 {
+		return nil
+	}
+	return []byte("chunked-v2/terminal\x00")
+}
+
+func encodeChunkedTerminal(chunkCount, plaintextSize uint64) [chunkedTerminalPlainSize]byte {
+	var encoded [chunkedTerminalPlainSize]byte
+	binary.BigEndian.PutUint64(encoded[:8], chunkCount)
+	binary.BigEndian.PutUint64(encoded[8:], plaintextSize)
+	return encoded
+}
+
+func decodeChunkedTerminal(plaintext []byte) (uint64, uint64, error) {
+	if len(plaintext) != chunkedTerminalPlainSize {
+		return 0, 0, fmt.Errorf("%w: invalid terminal length", ErrChunkedObjectIncomplete)
+	}
+	return binary.BigEndian.Uint64(plaintext[:8]), binary.BigEndian.Uint64(plaintext[8:]), nil
 }

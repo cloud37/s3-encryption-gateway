@@ -9,6 +9,125 @@ import (
 
 // calculateChunkRangeFromPlaintext calculates which chunks contain a given plaintext byte range.
 // Returns: startChunk, endChunk (inclusive), startOffsetInStartChunk, endOffsetInEndChunk
+func validateChunkedVersion(version uint8) error {
+	if version != ChunkedFormatV1 && version != ChunkedFormatV2 {
+		return ErrUnsupportedChunkedVersion
+	}
+	return nil
+}
+
+func validateChunkSize(chunkSize int) error {
+	if chunkSize > math.MaxInt-tagSize {
+		return fmt.Errorf("invalid chunk size: %d", chunkSize)
+	}
+	if chunkSize <= 0 {
+		return fmt.Errorf("invalid chunk size: %d", chunkSize)
+	}
+	return nil
+}
+
+// ChunkedDataChunkCount returns the number of authenticated data records.
+func ChunkedDataChunkCount(plaintextSize int64, chunkSize int) (uint64, error) {
+	if plaintextSize < 0 {
+		return 0, fmt.Errorf("negative plaintext size")
+	}
+	if err := validateChunkSize(chunkSize); err != nil {
+		return 0, err
+	}
+	if plaintextSize == 0 {
+		return 0, nil
+	}
+	return uint64((plaintextSize-1)/int64(chunkSize) + 1), nil
+}
+
+// ChunkedCiphertextSize returns the canonical ciphertext size for a chunked object.
+func ChunkedCiphertextSize(plaintextSize int64, chunkSize int, version uint8) (int64, error) {
+	if err := validateChunkedVersion(version); err != nil {
+		return 0, err
+	}
+	count, err := ChunkedDataChunkCount(plaintextSize, chunkSize)
+	if err != nil {
+		return 0, err
+	}
+	overhead := count * uint64(tagSize)
+	if version == ChunkedFormatV2 {
+		overhead += ChunkedTerminalSize
+	}
+	if overhead > uint64(math.MaxInt64) || uint64(plaintextSize) > uint64(math.MaxInt64)-overhead {
+		return 0, fmt.Errorf("chunked ciphertext size overflow")
+	}
+	return plaintextSize + int64(overhead), nil
+}
+
+// ChunkedPlaintextSize reverses the canonical size equation and returns count too.
+func ChunkedPlaintextSize(ciphertextSize int64, chunkSize int, version uint8) (int64, uint64, error) {
+	if err := validateChunkedVersion(version); err != nil {
+		return 0, 0, err
+	}
+	if ciphertextSize < 0 {
+		return 0, 0, fmt.Errorf("negative ciphertext size")
+	}
+	overhead := int64(0)
+	if version == ChunkedFormatV2 {
+		overhead = ChunkedTerminalSize
+	}
+	if ciphertextSize < overhead {
+		return 0, 0, fmt.Errorf("ciphertext shorter than terminal")
+	}
+	dataSize := ciphertextSize - overhead
+	if dataSize == 0 {
+		return 0, 0, nil
+	}
+	if err := validateChunkSize(chunkSize); err != nil {
+		return 0, 0, err
+	}
+	if version == ChunkedFormatV2 && dataSize < int64(tagSize) {
+		return 0, 0, fmt.Errorf("non-canonical chunked ciphertext size")
+	}
+	unit := uint64(chunkSize + tagSize)
+	candidate := uint64(dataSize) / unit
+	if candidate == 0 {
+		candidate = 1
+	}
+	for _, count := range []uint64{candidate, candidate + 1} {
+		if count > uint64(math.MaxInt64/tagSize) {
+			continue
+		}
+		plain := dataSize - int64(count*tagSize)
+		if plain < 0 {
+			continue
+		}
+		actual, err := ChunkedDataChunkCount(plain, chunkSize)
+		if err == nil && actual == count {
+			return plain, count, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("non-canonical chunked ciphertext size")
+}
+
+// ChunkedEncryptedDataRange returns a terminal-exclusive inclusive byte range.
+func ChunkedEncryptedDataRange(startChunk, endChunk uint64, chunkSize int, version uint8) (int64, int64, error) {
+	if err := validateChunkedVersion(version); err != nil {
+		return 0, 0, err
+	}
+	if err := validateChunkSize(chunkSize); err != nil {
+		return 0, 0, err
+	}
+	if endChunk < startChunk {
+		return 0, 0, fmt.Errorf("invalid chunk range")
+	}
+	unit := uint64(chunkSize) + tagSize
+	if startChunk > uint64(math.MaxInt64)/unit || endChunk+1 > uint64(math.MaxInt64)/unit {
+		return 0, 0, fmt.Errorf("encrypted range overflow")
+	}
+	start := startChunk * unit
+	end := (endChunk+1)*unit - 1
+	if end > uint64(math.MaxInt64) {
+		return 0, 0, fmt.Errorf("encrypted range overflow")
+	}
+	return int64(start), int64(end), nil
+}
+
 func calculateChunkRangeFromPlaintext(plaintextStart, plaintextEnd int64, chunkSize int, totalChunks int) (startChunk, endChunk int, startOffset, endOffset int) {
 	if chunkSize <= 0 || totalChunks <= 0 {
 		return 0, 0, 0, 0
@@ -51,7 +170,7 @@ func calculateEncryptedByteRange(startChunk, endChunk int, chunkSize int) (encry
 
 	encryptedChunkSize := int64(chunkSize + tagSize)
 	encryptedStart = int64(startChunk) * encryptedChunkSize
-	encryptedEnd = int64(endChunk+1) * encryptedChunkSize - 1
+	encryptedEnd = int64(endChunk+1)*encryptedChunkSize - 1
 
 	// Post-calculation sanity check: detect any overflow that may have occurred
 	if encryptedEnd < encryptedStart {
@@ -69,6 +188,10 @@ func CalculateEncryptedRangeForPlaintextRange(metadata map[string]string, plaint
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to load manifest: %w", err)
 	}
+	version, err := ChunkedFormatVersion(metadata)
+	if err != nil {
+		return 0, 0, err
+	}
 
 	// Backfill ChunkCount when the encrypt path left it at 0 (see engine.go
 	// DecryptRange for rationale). Without this backfill, the range is
@@ -78,6 +201,9 @@ func CalculateEncryptedRangeForPlaintextRange(metadata map[string]string, plaint
 		if plaintextSize, err2 := GetPlaintextSizeFromMetadata(metadata); err2 == nil && plaintextSize > 0 {
 			manifest.ChunkCount = int((plaintextSize + int64(manifest.ChunkSize) - 1) / int64(manifest.ChunkSize))
 		}
+	}
+	if manifest.ChunkCount <= 0 || manifest.ChunkSize <= 0 {
+		return 0, 0, fmt.Errorf("invalid chunked manifest")
 	}
 
 	// Calculate which chunks we need
@@ -89,7 +215,7 @@ func CalculateEncryptedRangeForPlaintextRange(metadata map[string]string, plaint
 	)
 
 	// Calculate encrypted byte range for those chunks
-	encryptedStart, encryptedEnd, err = calculateEncryptedByteRange(startChunk, endChunk, manifest.ChunkSize)
+	encryptedStart, encryptedEnd, err = ChunkedEncryptedDataRange(uint64(startChunk), uint64(endChunk), manifest.ChunkSize, version)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to calculate encrypted byte range: %w", err)
 	}
@@ -169,6 +295,28 @@ func ParseHTTPRangeHeader(rangeHeader string, totalSizeHint int64) (start, end i
 
 // GetPlaintextSizeFromMetadata extracts the approximate plaintext size from chunked metadata.
 func GetPlaintextSizeFromMetadata(metadata map[string]string) (int64, error) {
+	if original, ok := metadata[MetaOriginalSize]; ok {
+		if size, parseErr := strconv.ParseInt(original, 10, 64); parseErr == nil && size >= 0 {
+			return size, nil
+		}
+	}
+	if version, err := ChunkedFormatVersion(metadata); err == nil {
+		if ciphertext, ok := metadata["Content-Length"]; ok {
+			if size, parseErr := strconv.ParseInt(ciphertext, 10, 64); parseErr == nil {
+				plain, _, sizeErr := ChunkedPlaintextSize(size, mustChunkSize(metadata), version)
+				if sizeErr == nil {
+					return plain, nil
+				}
+			}
+		}
+		// Legacy callers often provide the original size but no canonical
+		// backend length. It is still the best available range hint.
+		if original, ok := metadata[MetaOriginalSize]; ok {
+			if size, parseErr := strconv.ParseInt(original, 10, 64); parseErr == nil {
+				return size, nil
+			}
+		}
+	}
 	chunkCountStr, ok1 := metadata[MetaChunkCount]
 	chunkSizeStr, ok2 := metadata[MetaChunkSize]
 
@@ -192,6 +340,11 @@ func GetPlaintextSizeFromMetadata(metadata map[string]string) (int64, error) {
 
 	// Approximate: (chunkCount - 1) * chunkSize + chunkSize
 	// Last chunk might be smaller, so this is an approximation
-	size := int64((chunkCount - 1) * chunkSize + chunkSize)
+	size := int64((chunkCount-1)*chunkSize + chunkSize)
 	return size, nil
+}
+
+func mustChunkSize(metadata map[string]string) int {
+	size, _ := strconv.Atoi(metadata[MetaChunkSize])
+	return size
 }

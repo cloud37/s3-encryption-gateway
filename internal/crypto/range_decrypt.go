@@ -10,21 +10,21 @@ import (
 // rangeDecryptReader decrypts only the chunks needed for a specific plaintext range.
 // This optimizes range requests by skipping unnecessary chunks during decryption.
 type rangeDecryptReader struct {
-	source            io.Reader
-	aead              cipher.AEAD
-	manifest          *ChunkManifest
-	baseIV            []byte
-	chunkSize         int
-	plaintextStart    int64
-	plaintextEnd      int64
-	startChunk        int
+	source             io.Reader
+	aead               cipher.AEAD
+	manifest           *ChunkManifest
+	baseIV             []byte
+	chunkSize          int
+	plaintextStart     int64
+	plaintextEnd       int64
+	startChunk         int
 	endChunk           int
 	startOffsetInChunk int
 	endOffsetInChunk   int
 	buffer             []byte
 	currentChunk       []byte
-	currentChunkIndex  int  // Absolute chunk index for IV derivation
-	sourceChunkIndex   int  // Relative index in the source stream (0, 1, 2, ...)
+	currentChunkIndex  int // Absolute chunk index for IV derivation
+	sourceChunkIndex   int // Relative index in the source stream (0, 1, 2, ...)
 	bytesReturned      int64
 	bufferPool         *BufferPool
 	closed             bool
@@ -105,6 +105,13 @@ func newRangeDecryptReader(
 // If the manifest was written with the HKDF flag, HKDF derivation is used.
 // Otherwise, the legacy XOR path is used for backward compatibility.
 func (r *rangeDecryptReader) deriveChunkIV(chunkIndex int) []byte {
+	if r.manifest.Version == int(ChunkedFormatV2) {
+		nonce, _ := deriveChunkNonceHKDF(r.baseIV, ChunkedFormatV2, uint64(chunkIndex))
+		return nonce
+	}
+	if r.manifest.IVDerivation != "hkdf-sha256" {
+		return deriveLegacyChunkIV(r.baseIV, chunkIndex)
+	}
 	if r.manifest.IVDerivation == "hkdf-sha256" {
 		return deriveChunkIVHKDF(r.baseIV, chunkIndex)
 	}
@@ -196,7 +203,11 @@ func (r *rangeDecryptReader) Read(p []byte) (int, error) {
 
 		// Decrypt the chunk
 		chunkIV := r.deriveChunkIV(r.currentChunkIndex)
-		plaintext, err := r.aead.Open(nil, chunkIV, r.buffer[:n], nil)
+		var aad []byte
+		if r.manifest.Version == int(ChunkedFormatV2) {
+			aad = buildChunkAAD(ChunkedFormatV2, uint64(r.currentChunkIndex))
+		}
+		plaintext, err := r.aead.Open(nil, chunkIV, r.buffer[:n], aad)
 		if err != nil {
 			r.err = fmt.Errorf("failed to decrypt chunk %d: %w", r.currentChunkIndex, err)
 			return totalRead, r.err

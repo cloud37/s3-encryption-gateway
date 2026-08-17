@@ -3,6 +3,7 @@ package crypto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -30,6 +31,10 @@ func (PassthroughEngine) DecryptRange(_ context.Context, r io.Reader, meta map[s
 		return nil, nil, ErrEncryptedObjectInBypassBucket
 	}
 	return r, meta, nil
+}
+
+func (PassthroughEngine) AuthenticateChunkedTrailer(_ context.Context, _ io.Reader, _ map[string]string, _ int64) (ChunkedObjectInfo, error) {
+	return ChunkedObjectInfo{}, fmt.Errorf("chunked trailer authentication is unavailable in passthrough mode")
 }
 
 func (PassthroughEngine) IsEncrypted(_ map[string]string) bool { return false }

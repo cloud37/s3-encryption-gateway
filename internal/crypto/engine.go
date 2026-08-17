@@ -88,6 +88,8 @@ type EncryptionEngine interface {
 	// Efficiently handles chunked sources by seeking within the encrypted stream.
 	DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
 
+	AuthenticateChunkedTrailer(ctx context.Context, trailer io.Reader, metadata map[string]string, ciphertextSize int64) (ChunkedObjectInfo, error)
+
 	// IsEncrypted checks if the metadata indicates the object is encrypted.
 	IsEncrypted(metadata map[string]string) bool
 
@@ -694,6 +696,11 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 
 	// Check if this is chunked format
 	if isChunkedFormat(expandedMetadata) {
+		if version, versionErr := ChunkedFormatVersion(expandedMetadata); versionErr != nil {
+			return nil, nil, versionErr
+		} else if version == ChunkedFormatV2 {
+			// Terminal AEAD is constructed below and passed to the stream reader.
+		}
 		return e.decryptChunked(ctx, reader, expandedMetadata)
 	}
 
@@ -1054,7 +1061,15 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 
 	// Create chunked encrypt reader directly from the source stream.
 	// No io.ReadAll — memory usage is bounded by the chunk pipeline.
-	chunkedReader, manifest := newChunkedEncryptReaderWithContext(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool)
+	terminalBlock, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create terminal cipher: %w", err)
+	}
+	terminalAEAD, err := cipher.NewGCM(terminalBlock)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", err)
+	}
+	chunkedReader, manifest := newChunkedEncryptReaderWithContext(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
 
 	// Encode manifest for storage
 	manifestEncoded, err := encodeManifest(manifest)
@@ -1186,7 +1201,15 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 	// fallback-v1 format is eliminated here. Each chunk is already authenticated
 	// by the chunked AEAD, so a second full-object Seal is both redundant and
 	// forces 2× peak memory allocation (chunkedBuf + Seal output).
-	chunkedReader, manifest := newChunkedEncryptReaderWithContext(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool)
+	terminalBlock, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create terminal cipher: %w", err)
+	}
+	terminalAEAD, err := cipher.NewGCM(terminalBlock)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", err)
+	}
+	chunkedReader, manifest := newChunkedEncryptReaderWithContext(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
 
 	// Encode manifest
 	manifestEncoded, err := encodeManifest(manifest)
@@ -1390,7 +1413,18 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 	aead := aeadCipher.(cipher.AEAD)
 
 	// Create chunked decrypt reader
-	chunkedReader, err := newChunkedDecryptReaderWithContext(ctx, reader, aead, manifest, e.bufferPool)
+	var terminalAEAD cipher.AEAD
+	if uint8(manifest.Version) == ChunkedFormatV2 {
+		terminalBlock, terminalErr := aes.NewCipher(key)
+		if terminalErr != nil {
+			return nil, nil, fmt.Errorf("failed to create terminal cipher: %w", terminalErr)
+		}
+		terminalAEAD, terminalErr = cipher.NewGCM(terminalBlock)
+		if terminalErr != nil {
+			return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", terminalErr)
+		}
+	}
+	chunkedReader, err := newChunkedDecryptReaderWithContext(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create chunked decrypt reader: %w", err)
 	}
@@ -1483,6 +1517,126 @@ func (e *engine) DecryptRange(ctx context.Context, reader io.Reader, metadata ma
 	return e.decryptRange(ctx, reader, metadata, plaintextStart, plaintextEnd, false)
 }
 
+func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, trailer io.Reader, metadata map[string]string, ciphertextSize int64) (ChunkedObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	expanded, err := e.compactor.ExpandMetadata(metadata)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	version, err := ChunkedFormatVersion(expanded)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	manifest, err := loadManifestFromMetadata(expanded)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	if version == ChunkedFormatV1 {
+		plain, count, sizeErr := ChunkedPlaintextSize(ciphertextSize, manifest.ChunkSize, version)
+		if sizeErr != nil {
+			return ChunkedObjectInfo{}, sizeErr
+		}
+		return ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil
+	}
+	if ciphertextSize < ChunkedTerminalSize {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: short ciphertext", ErrChunkedObjectIncomplete)
+	}
+	algorithm := expanded[MetaAlgorithm]
+	if algorithm == "" {
+		algorithm = AlgorithmAES256GCM
+	}
+	salt, err := decodeBase64(expanded[MetaKeySalt])
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	baseIV, err := decodeBase64(expanded[MetaIV])
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	var key []byte
+	if e.kmsManager != nil && expanded[MetaWrappedKeyCiphertext] != "" {
+		wrapped, decodeErr := decodeBase64(expanded[MetaWrappedKeyCiphertext])
+		if decodeErr != nil {
+			return ChunkedObjectInfo{}, decodeErr
+		}
+		key, err = e.kmsManager.UnwrapKey(ctx, &KeyEnvelope{KeyID: expanded[MetaKMSKeyID], KeyVersion: parseKeyVersion(expanded[MetaKeyVersion]), Provider: expanded[MetaKMSProvider], Ciphertext: wrapped}, expanded)
+	} else {
+		params, parseErr := ParseKDFParams(expanded[MetaKDFParams])
+		if parseErr != nil {
+			return ChunkedObjectInfo{}, parseErr
+		}
+		key, err = e.deriveKeyWithParams(salt, params)
+	}
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	defer zeroBytes(key)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	terminal, err := cipher.NewGCM(block)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	tail := make([]byte, ChunkedTerminalSize)
+	n, readErr := readChunkedTrailer(ctx, trailer, tail)
+	if readErr != nil || n != ChunkedTerminalSize {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: invalid trailer length", ErrChunkedObjectIncomplete)
+	}
+	var extra [1]byte
+	n, extraErr := readChunkedTrailer(ctx, trailer, extra[:])
+	if n != 0 || (extraErr != io.EOF && extraErr != io.ErrUnexpectedEOF) {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: trailing bytes", ErrChunkedObjectIncomplete)
+	}
+	nonce, err := deriveTerminalNonceHKDF(baseIV, version)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	plain, err := terminal.Open(nil, nonce, tail[:ChunkedTerminalSize], buildTerminalAAD(version))
+	if err != nil {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: %v", ErrChunkedObjectIncomplete, err)
+	}
+	count, size, err := decodeChunkedTerminal(plain)
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	canonical, err := ChunkedCiphertextSize(int64(size), manifest.ChunkSize, version)
+	if err != nil || canonical != ciphertextSize {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: size mismatch", ErrChunkedObjectIncomplete)
+	}
+	canonicalCount, err := ChunkedDataChunkCount(int64(size), manifest.ChunkSize)
+	if err != nil || count != canonicalCount {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: count mismatch", ErrChunkedObjectIncomplete)
+	}
+	return ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: size, Authenticated: true}, nil
+}
+
+func readChunkedTrailer(ctx context.Context, reader io.Reader, dst []byte) (int, error) {
+	read := 0
+	for read < len(dst) {
+		select {
+		case <-ctx.Done():
+			return read, ctx.Err()
+		default:
+		}
+		n, err := reader.Read(dst[read:])
+		read += n
+		if err != nil {
+			if read == len(dst) {
+				return read, nil
+			}
+			return read, err
+		}
+		if n == 0 {
+			return read, io.ErrNoProgress
+		}
+	}
+	return read, nil
+}
+
 // DecryptRangeOptimized is like DecryptRange but assumes the source reader
 // already begins at the first encrypted chunk required by the range (i.e.
 // the caller has already translated the plaintext range to a ciphertext
@@ -1527,10 +1681,23 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 		return nil, nil, fmt.Errorf("range optimization only supported for chunked format")
 	}
 
-	// Get plaintext size for validation
+	// Load manifest before deriving the size so the version-aware model can
+	// use the explicit chunk size and the writer's terminal overhead.
+	manifestForRange, manifestErr := loadManifestFromMetadata(expandedMetadata)
+	if manifestErr != nil {
+		return nil, nil, fmt.Errorf("failed to load manifest: %w", manifestErr)
+	}
+	// Get plaintext size for validation. Prefer the caller's original size when
+	// the stored content length is absent or is a legacy/non-canonical fixture.
 	plaintextSize, err := GetPlaintextSizeFromMetadata(expandedMetadata)
+	if err != nil && expandedMetadata[MetaOriginalSize] != "" {
+		plaintextSize, err = strconv.ParseInt(expandedMetadata[MetaOriginalSize], 10, 64)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get plaintext size: %w", err)
+	}
+	if manifestForRange.ChunkSize <= 0 {
+		return nil, nil, fmt.Errorf("invalid chunk size")
 	}
 
 	// Validate range (similar to HTTP range validation)
