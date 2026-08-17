@@ -23,8 +23,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
 	internalconfig "github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
@@ -58,9 +58,35 @@ func startRetryGatewayAt(t *testing.T, backendURL string) *harness.Gateway {
 			cfg.Backend.UsePathStyle = true
 			cfg.Backend.UseSSL = false
 			// Speed up: keep 3 max attempts but use very small backoff.
-			cfg.Backend.Retry.InitialBackoff = 1e6  // 1 ms in nanoseconds
-			cfg.Backend.Retry.MaxBackoff = 10e6     // 10 ms
-			cfg.Backend.Retry.Jitter = "none"       // deterministic
+			cfg.Backend.Retry.InitialBackoff = 1e6 // 1 ms in nanoseconds
+			cfg.Backend.Retry.MaxBackoff = 10e6    // 10 ms
+			cfg.Backend.Retry.Jitter = "none"      // deterministic
+		}),
+	)
+}
+
+// startRetryGatewayChunked is startRetryGateway with chunked encryption on, so
+// PutObject receives a streaming ciphertext reader rather than a *bytes.Reader.
+// Every other retry case here runs with the harness default (chunking off),
+// which yields a seekable body and therefore never exercises rewind-on-retry.
+func startRetryGatewayChunked(t *testing.T, toxic *toxicServer) *harness.Gateway {
+	t.Helper()
+	inst := provider.Instance{
+		Endpoint:     toxic.URL(),
+		Region:       "us-east-1",
+		AccessKey:    "retry-access",
+		SecretKey:    "retry-secret",
+		Bucket:       "retry-bucket",
+		ProviderName: "retry-chaos",
+	}
+	return harness.StartGateway(t, inst,
+		harness.WithChunking(true),
+		harness.WithConfigMutator(func(cfg *internalconfig.Config) {
+			cfg.Backend.UsePathStyle = true
+			cfg.Backend.UseSSL = false
+			cfg.Backend.Retry.InitialBackoff = 1e6
+			cfg.Backend.Retry.MaxBackoff = 10e6
+			cfg.Backend.Retry.Jitter = "none"
 		}),
 	)
 }
@@ -179,8 +205,8 @@ func newRetryAfterServer(failN int) *retryAfterServer {
 	return s
 }
 
-func (s *retryAfterServer) Close() { s.srv.Close() }
-func (s *retryAfterServer) URL() string { return s.srv.URL }
+func (s *retryAfterServer) Close()        { s.srv.Close() }
+func (s *retryAfterServer) URL() string   { return s.srv.URL }
 func (s *retryAfterServer) requests() int { return int(atomic.LoadInt32(&s.called)) }
 
 func (s *retryAfterServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +247,28 @@ func testRetry_TransientBackend503_MetricEmitted(t *testing.T, _ provider.Instan
 	// s3_backend_retries_total must have at least one time-series recorded.
 	if retryMetricSeries(t, gw, "s3_backend_retries_total") == 0 {
 		t.Error("s3_backend_retries_total: no series after 503 retries; retry metrics not wired")
+	}
+}
+
+// testRetry_ChunkedPut_TransientBackend503 is the same gate with chunked
+// encryption on. The ciphertext reader is not seekable, so unless the handler
+// buffers it the SDK cannot rewind the body and the retry fails with
+// "failed to rewind transport stream for retry" instead of succeeding.
+func testRetry_ChunkedPut_TransientBackend503(t *testing.T, _ provider.Instance) {
+	t.Helper()
+	backend := newToxicServer()
+	defer backend.Close()
+	gw := startRetryGatewayChunked(t, backend)
+
+	backend.reset()
+	backend.setBehavior(0, 2, http.StatusServiceUnavailable) // 2 failures then succeed
+
+	resp := putToGateway(t, gw, "retry-bucket", "503-chunked-key", []byte("chunked-payload"))
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 after retries on a chunked PUT, got %d", resp.StatusCode)
+	}
+	if n := backend.totalRequests(); n < 3 {
+		t.Errorf("expected ≥3 backend requests (2 retries + 1 success), got %d", n)
 	}
 }
 

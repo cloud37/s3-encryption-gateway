@@ -139,6 +139,28 @@ transient-503 class of faults the suite exercises today. Reference:
 **Incompatible.** The gateway is a single-backend proxy; hedging to
 alternative backends requires a backend pool that does not exist.
 
+## Addendum: retries require a rewindable body
+
+A retry replays the request, so the AWS SDK rewinds the body before the second
+attempt (`aws/retry/middleware.go`). A body that is not an `io.Seeker` cannot be
+rewound, and the SDK fails the operation with `failed to rewind transport stream
+for retry, request stream is not seekable` rather than retrying. Every policy
+decision above — classification, backoff, `max_attempts` — is therefore
+conditional on the caller supplying a seekable body, which this ADR originally
+left unstated.
+
+This is not hypothetical: `handlePutObject` streams chunked ciphertext, so the
+policy was inert on the main write path until the body was buffered. Callers
+satisfy the contract with `s3.NewSeekableBody`, bounded by
+`server.max_part_buffer` (see the ADR 0006 addendum and
+`docs/plans/V0.6-PERF-1-plan.md` §4.4). The remaining non-rewindable case is a
+body of unknown length, which stays single-attempt by design.
+
+Two consequences worth noting when reading the metrics: a give-up recorded
+against a non-seekable body never reached the network on its second attempt, and
+a seekable body also enables `Content-MD5` and payload signing in
+`s3Client.PutObject`, which key off the same type assertion.
+
 ## References
 
 1. *Cloud Native Go, 2nd Ed.* (Matthew A. Titmus, O'Reilly 2024), ch. 9

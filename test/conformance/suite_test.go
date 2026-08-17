@@ -217,6 +217,7 @@ func TestConformance(t *testing.T) {
 				// These use an in-process ToxicServer backend so no Docker is required.
 				// They verify Prometheus metric emission end-to-end (not just unit-test level).
 				{"PERF2_Retry_503_MetricEmitted", 0, testRetry_TransientBackend503_MetricEmitted},
+				{"PERF2_Retry_503_ChunkedPut", 0, testRetry_ChunkedPut_TransientBackend503},
 				{"PERF2_Retry_429_MetricEmitted", 0, testRetry_TransientBackend429_MetricEmitted},
 				{"PERF2_Retry_GiveUp_MetricEmitted", 0, testRetry_PersistentFailure_GiveUpMetricEmitted},
 				{"PERF2_Retry_BackoffHistogram", 0, testRetry_BackoffHistogramPopulated},
