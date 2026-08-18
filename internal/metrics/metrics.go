@@ -74,6 +74,9 @@ type Metrics struct {
 	mpuValkeyInsecure    prometheus.Gauge
 	mpuManifestBytes     prometheus.Histogram
 	mpuManifestStorage   *prometheus.CounterVec
+	mpuPartClaims        *prometheus.CounterVec
+	mpuStateTransitions  *prometheus.CounterVec
+	mpuLegacyInflight    prometheus.Gauge
 
 	// V0.6-OBS-1 — admin pprof profiling metrics.
 	// s3GatewayAdminPprofRequestsTotal counts pprof fetches per endpoint and
@@ -462,6 +465,17 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 				Help:    "Size of serialised MPU manifests in bytes.",
 				Buckets: []float64{256, 512, 1024, 1800, 4096, 16384},
 			},
+		),
+		mpuPartClaims: factory.NewCounterVec(
+			prometheus.CounterOpts{Name: "gateway_mpu_part_claims_total", Help: "Encrypted MPU part claim outcomes."},
+			[]string{"result"},
+		),
+		mpuStateTransitions: factory.NewCounterVec(
+			prometheus.CounterOpts{Name: "gateway_mpu_state_transitions_total", Help: "Encrypted MPU lifecycle state transitions."},
+			[]string{"from", "to", "result"},
+		),
+		mpuLegacyInflight: factory.NewGauge(
+			prometheus.GaugeOpts{Name: "gateway_mpu_legacy_inflight", Help: "Number of legacy encrypted MPUs requiring abort."},
 		),
 		mpuManifestStorage: factory.NewCounterVec(
 			prometheus.CounterOpts{
@@ -995,6 +1009,27 @@ func (m *Metrics) RecordMPUPart(result string) {
 		return
 	}
 	m.mpuPartsTotal.WithLabelValues(result).Inc()
+}
+
+func (m *Metrics) RecordMPUPartClaim(result string) {
+	if m == nil || m.mpuPartClaims == nil {
+		return
+	}
+	m.mpuPartClaims.WithLabelValues(result).Inc()
+}
+
+func (m *Metrics) RecordMPUStateTransition(from, to, result string) {
+	if m == nil || m.mpuStateTransitions == nil {
+		return
+	}
+	m.mpuStateTransitions.WithLabelValues(from, to, result).Inc()
+}
+
+func (m *Metrics) SetMPULegacyInflight(value float64) {
+	if m == nil || m.mpuLegacyInflight == nil {
+		return
+	}
+	m.mpuLegacyInflight.Set(value)
 }
 
 // RecordMPUStateStoreOp records a Valkey state store operation.

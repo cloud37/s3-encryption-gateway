@@ -431,6 +431,9 @@ func TestMetrics_NilSafe(t *testing.T) {
 
 	m.RecordMPUEncrypted("success")
 	m.RecordMPUPart("error")
+	m.RecordMPUPartClaim("reserved")
+	m.RecordMPUStateTransition("open", "completing", "success")
+	m.SetMPULegacyInflight(1)
 	m.RecordMPUStateStoreOp("create", "success", time.Millisecond)
 	m.SetMPUValkeyUp(true)
 	m.SetMPUValkeyInsecure(false)
@@ -453,6 +456,14 @@ func TestMetrics_MPUMethods(t *testing.T) {
 	m.RecordMPUEncrypted("success")
 	m.RecordMPUEncrypted("error")
 	m.RecordMPUPart("success")
+	m.RecordMPUPartClaim("reserved")
+	m.RecordMPUPartClaim("identical")
+	m.RecordMPUPartClaim("mismatch")
+	m.RecordMPUPartClaim("in_progress")
+	m.RecordMPUPartClaim("legacy_rejected")
+	m.RecordMPUStateTransition("open", "completing", "success")
+	m.RecordMPUStateTransition("completing", "open", "rollback")
+	m.SetMPULegacyInflight(2)
 	m.RecordMPUStateStoreOp("create", "success", time.Millisecond)
 	m.RecordMPUStateStoreOp("get", "error", time.Millisecond)
 	m.SetMPUValkeyUp(true)
@@ -477,6 +488,9 @@ func TestMetrics_MPUMethods(t *testing.T) {
 		"gateway_mpu_valkey_up",
 		"gateway_mpu_manifest_bytes",
 		"gateway_mpu_manifest_storage_total",
+		"gateway_mpu_part_claims_total",
+		"gateway_mpu_state_transitions_total",
+		"gateway_mpu_legacy_inflight",
 	}
 	for _, want := range wants {
 		if !names[want] {

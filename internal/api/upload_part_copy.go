@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -310,6 +312,10 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	// fast path is disabled. All source classes are decrypted and re-encrypted
 	// through the destination's per-upload DEK schedule (ADR 0009 §Consequences).
 	if h.bucketEncryptsMPU(bucket) {
+		if state, stateOK, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil || !stateOK || state == nil {
+			(&S3Error{Code: "OperationAborted", Message: "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
+			return
+		}
 		copyResult, bytesCopied, strategyErr = h.uploadPartCopyReencryptMPU(ctx, s3Client, bucket, key, uploadID,
 			int32(partNumber), srcBucket, srcKey, srcVersionID, srcRange, sourceClass, maxLegacyCap, maxCopyPartRangeBytes)
 	} else {
@@ -365,6 +371,8 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusServiceUnavailable,
 			}
+		} else if errors.Is(strategyErr, mpu.ErrPartContentMismatch) || errors.Is(strategyErr, mpu.ErrPartInProgress) {
+			s3Err = &S3Error{Code: "OperationAborted", Message: "Encrypted multipart part content is immutable; abort this upload and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}
 		}
 		s3Err.WriteXML(w)
 		h.logger.WithError(strategyErr).WithFields(logrus.Fields{
@@ -875,6 +883,37 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	}
 
 	// Step 2: Re-encrypt via the destination MPU DEK schedule.
+	var claimStore mpu.ClaimStateStore
+	var claim mpu.PartClaim
+	var reservation mpu.Reservation
+	if store, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok {
+		state, stateErr := h.mpuStateStore.Get(ctx, uploadID)
+		if stateErr != nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get destination state: %w", stateErr)
+		}
+		dek, dekErr := h.unwrapMPUDEK(ctx, state, dstBucket, uploadID)
+		if dekErr != nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: unwrap destination DEK: %w", dekErr)
+		}
+		claimBytes, claimErr := mpu.ComputePartClaim(dek, partNumber, int64(len(plaintextData)), bytes.NewReader(plaintextData))
+		zeroBytes(dek)
+		if claimErr != nil {
+			return nil, 0, claimErr
+		}
+		token := make([]byte, 16)
+		if _, err := rand.Read(token); err != nil {
+			return nil, 0, err
+		}
+		claim = mpu.PartClaim{PartNumber: partNumber, Claim: base64.RawURLEncoding.EncodeToString(claimBytes[:]), PlainLen: int64(len(plaintextData)), Token: base64.RawURLEncoding.EncodeToString(token)}
+		reservation, err = store.ReservePart(ctx, uploadID, claim)
+		if err != nil {
+			return nil, 0, err
+		}
+		if reservation.AlreadyDone {
+			return &s3.CopyPartResult{ETag: reservation.CommittedETag, LastModified: time.Now()}, int64(len(plaintextData)), nil
+		}
+		claimStore = store
+	}
 	encReader, encLen, err := h.encryptMPUPart(ctx, dstBucket, uploadID, partNumber, bytes.NewReader(plaintextData), int64(len(plaintextData)))
 	if err != nil {
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: re-encrypt: %w", err)
@@ -895,37 +934,49 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	}
 	etag, err := s3Client.UploadPart(ctx, dstBucket, dstKey, uploadID, partNumber, bytes.NewReader(encBytes), &encLen)
 	if err != nil {
+		if claimStore != nil {
+			_ = claimStore.ReleasePart(ctx, uploadID, partNumber, reservation.Token)
+		}
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: upload re-encrypted part: %w", err)
 	}
-
-	// Persist the part record. Fail-closed: a state-store hiccup here must
-	// return 503 so the client retries, matching handlers.go:2730-2757.
-	chunkCount := int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)) // #nosec G115 — max ~82k for 5 GiB parts, fits int32
-	if appendErr := h.mpuStateStore.AppendPart(ctx, uploadID, mpu.PartRecord{
-		PartNumber: partNumber,
-		ETag:       etag,
-		PlainLen:   int64(len(plaintextData)),
-		EncLen:     encLen,
-		ChunkCount: chunkCount,
-	}); appendErr != nil {
-		h.logger.WithError(appendErr).WithFields(logrus.Fields{
-			"bucket":     dstBucket,
-			"key":        dstKey,
-			"uploadID":   uploadID,
-			"partNumber": partNumber,
-		}).Error("mpu.append_part.failure: backend part written but state not recorded; returning 503 so client retries")
-		h.metrics.RecordS3Error(ctx, "AppendMPUPartState", dstBucket, "StateUnavailable")
-		if h.auditLogger != nil {
-			h.auditLogger.Log(&audit.AuditEvent{
-				EventType: audit.EventTypeMPUValkeyUnavail,
-				Timestamp: time.Now().UTC(),
-				Bucket:    dstBucket,
-				Key:       dstKey,
-				Success:   false,
-				Metadata:  map[string]interface{}{"upload_id": uploadID},
-			})
+	if claimStore != nil {
+		claim.ETag, claim.EncLen = etag, encLen
+		claim.ChunkCount = int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize))
+		if err := claimStore.CommitPart(ctx, uploadID, claim); err != nil {
+			_ = claimStore.ReleasePart(ctx, uploadID, partNumber, reservation.Token)
+			return nil, 0, errMPUStateUnavailable
 		}
-		return nil, 0, errMPUStateUnavailable
+	} else {
+		// Persist the part record for legacy append-only stores.
+		// Fail-closed: a state-store hiccup here must
+		// return 503 so the client retries, matching handlers.go:2730-2757.
+		chunkCount := int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)) // #nosec G115 — max ~82k for 5 GiB parts, fits int32
+		if appendErr := h.mpuStateStore.AppendPart(ctx, uploadID, mpu.PartRecord{
+			PartNumber: partNumber,
+			ETag:       etag,
+			PlainLen:   int64(len(plaintextData)),
+			EncLen:     encLen,
+			ChunkCount: chunkCount,
+		}); appendErr != nil {
+			h.logger.WithError(appendErr).WithFields(logrus.Fields{
+				"bucket":     dstBucket,
+				"key":        dstKey,
+				"uploadID":   uploadID,
+				"partNumber": partNumber,
+			}).Error("mpu.append_part.failure: backend part written but state not recorded; returning 503 so client retries")
+			h.metrics.RecordS3Error(ctx, "AppendMPUPartState", dstBucket, "StateUnavailable")
+			if h.auditLogger != nil {
+				h.auditLogger.Log(&audit.AuditEvent{
+					EventType: audit.EventTypeMPUValkeyUnavail,
+					Timestamp: time.Now().UTC(),
+					Bucket:    dstBucket,
+					Key:       dstKey,
+					Success:   false,
+					Metadata:  map[string]interface{}{"upload_id": uploadID},
+				})
+			}
+			return nil, 0, errMPUStateUnavailable
+		}
 	}
 
 	return &s3.CopyPartResult{
