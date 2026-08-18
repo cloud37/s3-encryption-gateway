@@ -1,6 +1,7 @@
 package mpu
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -18,6 +19,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestComputePartClaim_DomainAndEncoding(t *testing.T) {
+	dek := bytes.Repeat([]byte{0x01}, 32)
+	claim, err := ComputePartClaim(dek, 7, 5, bytes.NewReader([]byte("hello")))
+	require.NoError(t, err)
+	assert.Equal(t, "58147e9be6cf9baffe1c19707befc5b8989c25a901f89de21e52f161cca89e09", fmt.Sprintf("%x", claim))
+}
+
+func TestComputePartClaim_IdenticalInputStable(t *testing.T) {
+	dek := bytes.Repeat([]byte{0x42}, 32)
+	a, err := ComputePartClaim(dek, 1, 3, bytes.NewReader([]byte("abc")))
+	require.NoError(t, err)
+	b, err := ComputePartClaim(dek, 1, 3, bytes.NewReader([]byte("abc")))
+	require.NoError(t, err)
+	assert.Equal(t, a, b)
+}
 
 // newTestStore starts a miniredis server and returns a ValkeyStateStore backed by it.
 func newTestStore(t *testing.T) (*ValkeyStateStore, *miniredis.Miniredis) {
@@ -37,16 +54,16 @@ func newTestStore(t *testing.T) (*ValkeyStateStore, *miniredis.Miniredis) {
 
 func sampleState(uploadID string) *UploadState {
 	return &UploadState{
-		UploadID:      uploadID,
-		Bucket:        "test-bucket",
-		Key:           "test/key",
-		UploadIDHash:  UploadIDHashB64(uploadID),
-		WrappedDEK:    "c29tZXdyYXBwZWRkZWs=",
-		IVPrefixHex:   "aabbccddeeff11223344556677889900"[:24], // 12 bytes hex
-		Algorithm:     "AES256GCM",
-		ChunkSize:     65536,
+		UploadID:       uploadID,
+		Bucket:         "test-bucket",
+		Key:            "test/key",
+		UploadIDHash:   UploadIDHashB64(uploadID),
+		WrappedDEK:     "c29tZXdyYXBwZWRkZWs=",
+		IVPrefixHex:    "aabbccddeeff11223344556677889900"[:24], // 12 bytes hex
+		Algorithm:      "AES256GCM",
+		ChunkSize:      65536,
 		PolicySnapshot: PolicySnapshot{EncryptMultipartUploads: true},
-		CreatedAt:     time.Now().UTC().Truncate(time.Second),
+		CreatedAt:      time.Now().UTC().Truncate(time.Second),
 	}
 }
 

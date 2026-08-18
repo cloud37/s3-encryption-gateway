@@ -7,17 +7,21 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,36 +39,87 @@ var (
 	ErrUploadAlreadyExists = errors.New("mpu: upload already exists")
 	ErrStateUnavailable    = errors.New("mpu: state store unavailable")
 	ErrStateDecryptFailed  = errors.New("mpu: state decrypt failed")
+	ErrPartContentMismatch = errors.New("mpu: part content differs from immutable claim")
+	ErrPartInProgress      = errors.New("mpu: part reservation is in progress")
+	ErrInvalidStateVersion = errors.New("mpu: unsupported in-flight state version")
+	ErrInvalidPhase        = errors.New("mpu: upload is not open")
+	ErrRevisionConflict    = errors.New("mpu: state revision changed")
+	ErrCompleteMismatch    = errors.New("mpu: selected parts or etags do not match committed state")
+)
+
+const CurrentStateVersion uint8 = 2
+
+type UploadPhase string
+
+const (
+	UploadPhaseOpen       UploadPhase = "open"
+	UploadPhaseCompleting UploadPhase = "completing"
+	UploadPhaseCompleted  UploadPhase = "completed"
+	UploadPhaseAborting   UploadPhase = "aborting"
+	UploadPhaseAborted    UploadPhase = "aborted"
+)
+
+type PartStatus string
+
+const (
+	PartStatusReserved  PartStatus = "reserved"
+	PartStatusCommitted PartStatus = "committed"
 )
 
 // Versioned ciphertext format for at-rest encryption of state blobs.
 // Layout: version(1 byte) || nonce(12 bytes) || ciphertext(...) || tag(16 bytes)
 const (
-	stateEncryptionVersionLen = 1
-	stateEncryptionNonceLen   = 12
-	stateEncryptionTagLen     = 16
+	stateEncryptionVersionLen      = 1
+	stateEncryptionNonceLen        = 12
+	stateEncryptionTagLen          = 16
 	stateEncryptionVersionV1  byte = 0x01
 )
 
 // PartRecord holds per-part encryption metadata persisted in Valkey.
 type PartRecord struct {
+	PartNumber int32      `json:"pn"`
+	ETag       string     `json:"etag"`
+	PlainLen   int64      `json:"plain_len"`
+	EncLen     int64      `json:"enc_len"`
+	ChunkCount int32      `json:"chunks"`
+	Claim      string     `json:"claim,omitempty"`
+	Status     PartStatus `json:"status,omitempty"`
+	Token      string     `json:"token,omitempty"`
+}
+
+type PartClaim struct {
+	PartNumber int32      `json:"pn"`
+	Claim      string     `json:"claim"`
+	PlainLen   int64      `json:"plain_len"`
+	Status     PartStatus `json:"status"`
+	Token      string     `json:"token"`
+	ETag       string     `json:"etag,omitempty"`
+	EncLen     int64      `json:"enc_len,omitempty"`
+	ChunkCount int32      `json:"chunks,omitempty"`
+}
+
+type Reservation struct {
+	Token         string
+	Revision      uint64
+	CommittedETag string
+	AlreadyDone   bool
+}
+
+type SelectedPart struct {
 	PartNumber int32  `json:"pn"`
 	ETag       string `json:"etag"`
-	PlainLen   int64  `json:"plain_len"`
-	EncLen     int64  `json:"enc_len"`
-	ChunkCount int32  `json:"chunks"`
 }
 
 // UploadState holds the encryption state for an in-flight multipart upload.
 type UploadState struct {
-	UploadID     string `json:"upload_id"`
-	Bucket       string `json:"bucket"`
-	Key          string `json:"key"`
+	UploadID string `json:"upload_id"`
+	Bucket   string `json:"bucket"`
+	Key      string `json:"key"`
 	// UploadIDHash is hex(sha256(uploadID)) — stored so IVs can be reconstructed
 	// during decryption without re-querying the state.
 	UploadIDHash string `json:"uid_hash"`
 	// WrappedDEK is the JSON-serialised KeyEnvelope from the KeyManager.
-	WrappedDEK  string `json:"wrapped_dek"`
+	WrappedDEK string `json:"wrapped_dek"`
 	// IVPrefixHex is the hex-encoded 12-byte IV prefix used for per-part IV derivation.
 	IVPrefixHex string `json:"iv_prefix"`
 	Algorithm   string `json:"algorithm"`
@@ -78,6 +133,9 @@ type UploadState struct {
 	PolicySnapshot PolicySnapshot `json:"policy"`
 	Parts          []PartRecord   `json:"parts,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
+	StateVersion   uint8          `json:"state_version"`
+	Phase          UploadPhase    `json:"phase"`
+	Revision       uint64         `json:"revision"`
 }
 
 // PolicySnapshot captures the policy fields that affect multipart encryption.
@@ -111,6 +169,76 @@ type StateStore interface {
 	Close() error
 }
 
+// ClaimStateStore is the nonce-safe protocol implemented by version-2 stores.
+// It is separate from StateStore during the rollout so administrative and
+// legacy test stores can remain read/delete capable without accepting writes.
+type ClaimStateStore interface {
+	StateStore
+	ReservePart(context.Context, string, PartClaim) (Reservation, error)
+	ReleasePart(context.Context, string, int32, string) error
+	CommitPart(context.Context, string, PartClaim) error
+	BeginComplete(context.Context, string, []SelectedPart) (*UploadState, uint64, error)
+	Reopen(context.Context, string, uint64) error
+	FinalizeComplete(context.Context, string, uint64) error
+	BeginAbort(context.Context, string) (uint64, error)
+	FinalizeAbort(context.Context, string, uint64) error
+}
+
+const reservePartScript = `
+local meta = redis.call('HGET', KEYS[1], 'meta')
+if not meta then return {0} end
+local version = redis.call('HGET', KEYS[1], 'state_version')
+if version ~= '2' then return {1} end
+local phase = redis.call('HGET', KEYS[1], 'phase')
+if phase ~= 'open' then return {2} end
+local field = 'part:' .. ARGV[1]
+local current = redis.call('HGET', KEYS[1], field)
+if current then
+  local decoded = cjson.decode(current)
+  local claim = decoded.claim
+  local status = decoded.status
+  local etag = decoded.etag or ''
+  if claim ~= ARGV[2] then return {3} end
+  if status == 'reserved' then return {4} end
+  if status == 'committed' then return {5, etag} end
+end
+local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or '1') + 1
+local value = cjson.encode({pn=tonumber(ARGV[1]), claim=ARGV[2], plain_len=tonumber(ARGV[3]), status='reserved', token=ARGV[4]})
+redis.call('HSET', KEYS[1], field, value, 'revision', revision)
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+return {6, revision}
+`
+
+const commitPartScript = `
+local field = 'part:' .. ARGV[1]
+local current = redis.call('HGET', KEYS[1], field)
+if not current then return 0 end
+local decoded = cjson.decode(current)
+local claim = decoded.claim
+local token = decoded.token
+local status = decoded.status
+if claim ~= ARGV[2] or token ~= ARGV[3] then return 2 end
+if status == 'committed' then return 1 end
+if status ~= 'reserved' then return 2 end
+local value = cjson.encode({pn=tonumber(ARGV[1]), claim=ARGV[2], plain_len=tonumber(ARGV[4]), status='committed', token=ARGV[3], etag=ARGV[5], enc_len=tonumber(ARGV[6]), chunks=tonumber(ARGV[7])})
+local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or '1') + 1
+redis.call('HSET', KEYS[1], field, value, 'revision', revision)
+redis.call('EXPIRE', KEYS[1], ARGV[8])
+return 1
+`
+
+const releasePartScript = `
+local field = 'part:' .. ARGV[1]
+local current = redis.call('HGET', KEYS[1], field)
+if not current then return 0 end
+local decoded = cjson.decode(current)
+local token = decoded.token
+local status = decoded.status
+if status ~= 'reserved' or token ~= ARGV[2] then return 2 end
+redis.call('HDEL', KEYS[1], field)
+return 1
+`
+
 // uploadKey returns the Valkey hash key for an upload: mpu:<hex(sha256(uploadID))>.
 func uploadKey(uploadID string) string {
 	h := sha256.Sum256([]byte(uploadID))
@@ -118,8 +246,11 @@ func uploadKey(uploadID string) string {
 }
 
 const (
-	fieldMeta = "meta"
-	fieldPartPrefix = "part:"
+	fieldMeta         = "meta"
+	fieldPartPrefix   = "part:"
+	fieldStateVersion = "state_version"
+	fieldPhase        = "phase"
+	fieldRevision     = "revision"
 )
 
 // ValkeyStateStore implements StateStore backed by Valkey (via go-redis/v9).
@@ -435,6 +566,18 @@ func (s *ValkeyStateStore) DecryptState(ciphertext []byte) ([]byte, error) {
 }
 
 func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error {
+	if state == nil {
+		return fmt.Errorf("mpu: nil upload state")
+	}
+	if state.StateVersion == 0 {
+		state.StateVersion = CurrentStateVersion
+	}
+	if state.Phase == "" {
+		state.Phase = UploadPhaseOpen
+	}
+	if state.Revision == 0 {
+		state.Revision = 1
+	}
 	key := uploadKey(state.UploadID)
 	metaJSON, err := json.Marshal(state)
 	if err != nil {
@@ -451,20 +594,279 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 		s.metrics.IncMPUStateEncryptedWrites("create")
 	}
 
-	pipe := s.client.TxPipeline()
-	hsetnx := pipe.HSetNX(ctx, key, fieldMeta, value)
-	pipe.Expire(ctx, key, s.ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
+	hsetnx, err := s.client.HSetNX(ctx, key, fieldMeta, value).Result()
+	if err != nil {
 		return wrapRedisErr(err)
 	}
 
 	// HSETNX returns false when the key already exists.
-	if !hsetnx.Val() {
+	if !hsetnx {
 		return ErrUploadAlreadyExists
+	}
+	if err := s.client.HSet(ctx, key, fieldStateVersion, state.StateVersion, fieldPhase, string(state.Phase), fieldRevision, state.Revision).Err(); err != nil {
+		return wrapRedisErr(err)
+	}
+	if err := s.client.Expire(ctx, key, s.ttl).Err(); err != nil {
+		return wrapRedisErr(err)
 	}
 	// V1.0-OBS-1 G7: increment active MPU upload gauge on successful create.
 	s.metrics.IncMPUActiveUploads()
 	return nil
+}
+
+// ComputePartClaim returns the keyed, domain-separated commitment for a part's
+// exact plaintext. The reader is bounded by the caller's existing MPU limits.
+func ComputePartClaim(dek []byte, partNumber int32, plainLen int64, r io.Reader) ([32]byte, error) {
+	var out [32]byte
+	if len(dek) == 0 || r == nil || partNumber < 1 || partNumber > 10000 || plainLen < 0 {
+		return out, fmt.Errorf("mpu: invalid part claim input")
+	}
+	h := hmac.New(sha256.New, dek)
+	if _, err := h.Write([]byte("s3eg:mpu-part-claim:v1\x00")); err != nil {
+		return out, err
+	}
+	var encoded [12]byte
+	binary.BigEndian.PutUint32(encoded[:4], uint32(partNumber))
+	binary.BigEndian.PutUint64(encoded[4:], uint64(plainLen))
+	if _, err := h.Write(encoded[:]); err != nil {
+		return out, err
+	}
+	count, err := io.Copy(h, io.LimitReader(r, plainLen))
+	if err != nil {
+		return out, fmt.Errorf("mpu: compute part claim: %w", err)
+	}
+	if count != plainLen {
+		return out, fmt.Errorf("mpu: plaintext length mismatch: got %d, expected %d", count, plainLen)
+	}
+	return [32]byte(h.Sum(nil)), nil
+}
+
+func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, part PartClaim) (Reservation, error) {
+	if part.PartNumber < 1 || part.PartNumber > 10000 || part.Claim == "" || part.Token == "" || part.PlainLen < 0 {
+		return Reservation{}, fmt.Errorf("mpu: invalid part claim")
+	}
+	result, err := s.client.Eval(ctx, reservePartScript, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.PlainLen, part.Token, int(s.ttl/time.Second)).Result()
+	if err != nil {
+		return Reservation{}, wrapRedisErr(err)
+	}
+	values, ok := result.([]interface{})
+	if !ok || len(values) == 0 {
+		return Reservation{}, fmt.Errorf("mpu: malformed reserve result")
+	}
+	code, ok := redisInt(values[0])
+	if !ok {
+		return Reservation{}, fmt.Errorf("mpu: malformed reserve code")
+	}
+	switch code {
+	case 0:
+		return Reservation{}, ErrUploadNotFound
+	case 1:
+		return Reservation{}, ErrInvalidStateVersion
+	case 2:
+		return Reservation{}, ErrInvalidPhase
+	case 3:
+		return Reservation{}, ErrPartContentMismatch
+	case 4:
+		return Reservation{}, ErrPartInProgress
+	case 5:
+		var etag string
+		if len(values) > 1 {
+			etag, _ = values[1].(string)
+		}
+		return Reservation{CommittedETag: etag, AlreadyDone: true}, nil
+	case 6:
+		if len(values) < 2 {
+			return Reservation{}, fmt.Errorf("mpu: malformed reserve revision")
+		}
+		revision, ok := redisInt(values[1])
+		if !ok {
+			return Reservation{}, fmt.Errorf("mpu: malformed reserve revision")
+		}
+		return Reservation{Token: part.Token, Revision: uint64(revision)}, nil
+	default:
+		return Reservation{}, fmt.Errorf("mpu: unknown reserve result %d", code)
+	}
+}
+
+func (s *ValkeyStateStore) CommitPart(ctx context.Context, uploadID string, part PartClaim) error {
+	if part.Token == "" || part.Claim == "" {
+		return fmt.Errorf("mpu: invalid commit claim")
+	}
+	result, err := s.client.Eval(ctx, commitPartScript, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.Token, part.PlainLen, part.ETag, part.EncLen, part.ChunkCount, int(s.ttl/time.Second)).Result()
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	code, ok := redisInt(result)
+	if !ok {
+		return fmt.Errorf("mpu: malformed commit result")
+	}
+	switch code {
+	case 0:
+		return ErrUploadNotFound
+	case 1:
+		return nil
+	case 2:
+		return ErrRevisionConflict
+	default:
+		return fmt.Errorf("mpu: unknown commit result %d", code)
+	}
+}
+
+func (s *ValkeyStateStore) ReleasePart(ctx context.Context, uploadID string, partNumber int32, token string) error {
+	if partNumber < 1 || token == "" {
+		return fmt.Errorf("mpu: invalid release claim")
+	}
+	result, err := s.client.Eval(ctx, releasePartScript, []string{uploadKey(uploadID)}, partNumber, token).Result()
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	code, ok := redisInt(result)
+	if !ok {
+		return fmt.Errorf("mpu: malformed release result")
+	}
+	if code == 0 {
+		return ErrUploadNotFound
+	}
+	if code != 1 {
+		return ErrRevisionConflict
+	}
+	return nil
+}
+
+func (s *ValkeyStateStore) BeginComplete(ctx context.Context, uploadID string, selected []SelectedPart) (*UploadState, uint64, error) {
+	state, err := s.Get(ctx, uploadID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if state.StateVersion != CurrentStateVersion {
+		return nil, 0, ErrInvalidStateVersion
+	}
+	if state.Phase != UploadPhaseOpen {
+		return nil, 0, ErrInvalidPhase
+	}
+	if len(selected) == 0 {
+		return nil, 0, ErrCompleteMismatch
+	}
+	parts := make([]PartRecord, 0, len(selected))
+	byNumber := make(map[int32]PartRecord, len(state.Parts))
+	for _, part := range state.Parts {
+		byNumber[part.PartNumber] = part
+	}
+	var previous int32
+	for i, requested := range selected {
+		if requested.PartNumber < 1 || requested.PartNumber > 10000 || (i > 0 && requested.PartNumber <= previous) {
+			return nil, 0, ErrCompleteMismatch
+		}
+		part, ok := byNumber[requested.PartNumber]
+		if !ok || (part.Status != "" && part.Status != PartStatusCommitted) || !sameETag(part.ETag, requested.ETag) {
+			return nil, 0, fmt.Errorf("%w: part=%d found=%t status=%q stored_etag=%q requested_etag=%q", ErrCompleteMismatch, requested.PartNumber, ok, part.Status, part.ETag, requested.ETag)
+		}
+		parts = append(parts, part)
+		previous = requested.PartNumber
+	}
+	state.Parts = parts
+	state.Phase = UploadPhaseCompleting
+	state.Revision++
+	if err := s.persistControl(ctx, uploadID, state); err != nil {
+		return nil, 0, err
+	}
+	return state, state.Revision, nil
+}
+
+func sameETag(a, b string) bool {
+	trim := func(value string) string { return strings.Trim(value, "\"") }
+	return trim(a) == trim(b)
+}
+
+func (s *ValkeyStateStore) Reopen(ctx context.Context, uploadID string, revision uint64) error {
+	state, err := s.Get(ctx, uploadID)
+	if err != nil {
+		return err
+	}
+	if state.Revision != revision || state.Phase != UploadPhaseCompleting {
+		return ErrRevisionConflict
+	}
+	state.Phase = UploadPhaseOpen
+	state.Revision++
+	return s.persistControl(ctx, uploadID, state)
+}
+
+func (s *ValkeyStateStore) FinalizeComplete(ctx context.Context, uploadID string, revision uint64) error {
+	state, err := s.Get(ctx, uploadID)
+	if err != nil {
+		return err
+	}
+	if state.Revision != revision || state.Phase != UploadPhaseCompleting {
+		return ErrRevisionConflict
+	}
+	state.Phase = UploadPhaseCompleted
+	return s.persistControl(ctx, uploadID, state)
+}
+
+func (s *ValkeyStateStore) BeginAbort(ctx context.Context, uploadID string) (uint64, error) {
+	state, err := s.Get(ctx, uploadID)
+	if err != nil {
+		return 0, err
+	}
+	if state.StateVersion != 0 && state.StateVersion != CurrentStateVersion {
+		return 0, ErrInvalidStateVersion
+	}
+	if state.Phase != "" && state.Phase != UploadPhaseOpen {
+		return 0, ErrInvalidPhase
+	}
+	state.Phase = UploadPhaseAborting
+	state.Revision++
+	if err := s.persistControl(ctx, uploadID, state); err != nil {
+		return 0, err
+	}
+	return state.Revision, nil
+}
+
+func (s *ValkeyStateStore) FinalizeAbort(ctx context.Context, uploadID string, revision uint64) error {
+	state, err := s.Get(ctx, uploadID)
+	if err != nil {
+		return err
+	}
+	if state.Revision != revision || state.Phase != UploadPhaseAborting {
+		return ErrRevisionConflict
+	}
+	state.Phase = UploadPhaseAborted
+	return s.persistControl(ctx, uploadID, state)
+}
+
+func (s *ValkeyStateStore) persistControl(ctx context.Context, uploadID string, state *UploadState) error {
+	metaState := *state
+	// Part records are durable hash fields; keeping them out of meta avoids
+	// duplicating records when Get reconstructs the state.
+	metaState.Parts = nil
+	meta, err := json.Marshal(&metaState)
+	if err != nil {
+		return err
+	}
+	if s.encryptState {
+		meta, err = s.EncryptState(meta)
+		if err != nil {
+			return err
+		}
+	}
+	key := uploadKey(uploadID)
+	pipe := s.client.TxPipeline()
+	pipe.HSet(ctx, key, fieldMeta, meta, fieldStateVersion, state.StateVersion, fieldPhase, string(state.Phase), fieldRevision, state.Revision)
+	pipe.Expire(ctx, key, s.ttl)
+	_, err = pipe.Exec(ctx)
+	return wrapRedisErr(err)
+}
+
+func redisInt(value interface{}) (int64, bool) {
+	switch v := value.(type) {
+	case int64:
+		return v, true
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		return n, err == nil
+	default:
+		return 0, false
+	}
 }
 
 // Get retrieves UploadState and all part records.
@@ -476,6 +878,12 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	}
 	if len(fields) == 0 {
 		return nil, ErrUploadNotFound
+	}
+	if version, ok := fields[fieldStateVersion]; ok {
+		v, err := strconv.ParseUint(version, 10, 8)
+		if err != nil || uint8(v) != CurrentStateVersion {
+			return nil, ErrInvalidStateVersion
+		}
 	}
 
 	metaRaw, ok := fields[fieldMeta]
@@ -511,6 +919,12 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	if err := json.Unmarshal(metaBytes, &state); err != nil {
 		return nil, fmt.Errorf("mpu: unmarshal state: %w", err)
 	}
+	if state.StateVersion != 0 && state.StateVersion != CurrentStateVersion {
+		return nil, ErrInvalidStateVersion
+	}
+	if mirrored, ok := fields[fieldPhase]; ok && state.Phase != "" && mirrored != string(state.Phase) {
+		return nil, fmt.Errorf("mpu: state phase mirror mismatch")
+	}
 
 	// Reconstruct part records from individual hash fields.
 	for k, v := range fields {
@@ -530,6 +944,9 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 // AppendPart adds a PartRecord and refreshes the TTL.
 func (s *ValkeyStateStore) AppendPart(ctx context.Context, uploadID string, part PartRecord) error {
 	key := uploadKey(uploadID)
+	if part.Status == "" {
+		part.Status = PartStatusCommitted
+	}
 
 	// Verify key exists before appending.
 	exists, err := s.client.Exists(ctx, key).Result()
@@ -648,6 +1065,9 @@ func (s *ValkeyStateStore) Close() error {
 
 // wrapRedisErr converts redis-level errors into domain sentinel errors.
 func wrapRedisErr(err error) error {
+	if err == nil {
+		return nil
+	}
 	if errors.Is(err, redis.Nil) {
 		return ErrUploadNotFound
 	}
