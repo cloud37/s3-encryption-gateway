@@ -8,6 +8,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Retryable `PutObject` bodies (ADR 0010):** A chunked-encrypted upload hands
+  `PutObject` a streaming ciphertext reader, which is not an `io.Seeker`. The AWS
+  SDK rewinds the request body before a retry, so on that path every retryable
+  backend failure aborted with `failed to rewind transport stream for retry,
+  request stream is not seekable` instead of being retried, leaving the backend
+  retry policy inert on the one path that carries every ordinary write. A
+  transient backend `500` therefore surfaced to the client as a hard error;
+  against Backblaze B2 this was measured at roughly 3% of uploads. `PutObject`
+  bodies of known length now go through the same bounded `SeekableBody` wrapper
+  `UploadPart` already uses, capped by `server.max_part_buffer`, so the SDK can
+  replay them. A declared `Content-Length: 0` counts as a known length: it was
+  previously indistinguishable from an absent header, which sent a valid
+  zero-byte upload down the unknown-length streaming path. Bodies of genuinely
+  unknown length keep the streaming path unchanged. As a
+  consequence of the body becoming seekable, these requests now also carry
+  `Content-MD5` and a signed payload rather than `UNSIGNED-PAYLOAD`. Added unit
+  coverage for the rewind contract in both directions and a
+  `PERF2_Retry_503_ChunkedPut` conformance case — the existing retry conformance
+  tests all ran with chunking disabled, which yields a seekable body and never
+  exercised rewind-on-retry.
+
 - **OpenBao/Vault adapter never recovered from a token that died early.** The
   adapter delegated token lifetime to a `LifetimeWatcher` created without a
   `RenewBehavior`. The zero value is `RenewBehaviorIgnoreErrors`, under which a
