@@ -41,11 +41,9 @@ type mockBaoServer struct {
 	downStatus        int  // if non-zero, EVERY endpoint returns this status
 	leaseSeconds      int  // lease_duration issued by login/renew. Default 2.
 
-	// token lifecycle. Tokens handed out by the login endpoints are recorded so
-	// a test can expire them mid-flight (max_ttl reached, revoked, or the lease
-	// lost while the server was unreachable). An expired token 403s on every
-	// authenticated path, exactly as OpenBao does — the login endpoints stay
-	// open, so the only way back is a fresh login.
+	// token lifecycle. Tokens handed out by the login endpoints are recorded so a
+	// test can expire them mid-flight; an expired token then 403s on every
+	// authenticated path while the login endpoints stay open.
 	issuedTokens []string
 	expired      map[string]bool
 
@@ -197,12 +195,11 @@ func (m *mockBaoServer) setRenewNonRenewable(b bool) {
 	m.mu.Unlock()
 }
 func (m *mockBaoServer) setRenewStatus(s int) { m.mu.Lock(); m.renewStatus = s; m.mu.Unlock() }
-func (m *mockBaoServer) setDown(s int)    { m.mu.Lock(); m.downStatus = s; m.mu.Unlock() }
-func (m *mockBaoServer) setLease(sec int) { m.mu.Lock(); m.leaseSeconds = sec; m.mu.Unlock() }
+func (m *mockBaoServer) setDown(s int)        { m.mu.Lock(); m.downStatus = s; m.mu.Unlock() }
+func (m *mockBaoServer) setLease(sec int)     { m.mu.Lock(); m.leaseSeconds = sec; m.mu.Unlock() }
 
 // expireIssuedTokens invalidates every token handed out so far, so only a fresh
-// login can restore service. Models max_ttl expiry / revocation / a lease lost
-// while the server was unreachable.
+// login can restore service (max_ttl, revocation, or a lease lost in an outage).
 func (m *mockBaoServer) expireIssuedTokens() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

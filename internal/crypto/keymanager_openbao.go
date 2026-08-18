@@ -42,18 +42,10 @@ import (
 //   - The active version is owned by the server (latest_version) and read live,
 //     not held in an in-memory slice.
 //   - Transit issues no dynamic leases; the only lifecycle object is the auth
-//     token. It is kept alive on two independent paths, because either one alone
-//     leaves a hole:
-//     PROACTIVE — a background goroutine drives a LifetimeWatcher and re-logs-in
-//     when renewal can no longer extend the lease (see the auth & token
-//     renewal section below).
-//     REACTIVE  — any request rejected with 401/403 triggers an immediate
-//     re-login and one retry (withAuthRetry).
-//     The reactive path is not belt-and-braces: the watcher only discovers a
-//     dead token when it next attempts a renewal, which is up to ~2/3 of the
-//     lease away, so a token that dies out-of-band (revoked, max_ttl, or a
-//     lease lost while OpenBao was unreachable) would otherwise 403 every
-//     request until the lease clock caught up.
+//     token, kept alive on two paths: a background LifetimeWatcher that
+//     re-logs-in when renewal fails, and withAuthRetry, which re-logs-in on any
+//     401/403. Both are needed — the watcher only notices a dead token at its
+//     next renewal attempt, up to ~2/3 of the lease away.
 
 const (
 	defaultOpenBaoProvider    = "openbao-transit"
@@ -71,17 +63,9 @@ const (
 	openBaoAuthKubernetes = "kubernetes"
 
 	// minLoginInterval floors the interval between login ATTEMPTS on every path.
-	// Without it two pathologies mint tokens as fast as the network allows:
-	// re-login succeeding while requests still 403 (a role that lost its transit
-	// policy), and a token that can log in but not renew-self (the policy in
-	// docs/KMS_COMPATIBILITY.md with token_no_default_policy and no renew-self
-	// grant). Both are unbounded token-minting loops, and a token is server
-	// state — the lease table grows until storage does.
-	//
-	// One second, not longer: this also bounds worst-case recovery latency on
-	// the reactive path, and a floor is only meant to make a storm harmless, not
-	// to slow down the common case. The renewal goroutine layers exponential
-	// backoff on top for the specific case of a lease it can never renew.
+	// A token is server state, so an unthrottled re-login loop grows the KMS
+	// lease table until storage runs out. One second: the floor only has to make
+	// a storm harmless, and the renewal loop layers backoff on top.
 	minLoginInterval = time.Second
 )
 
@@ -156,35 +140,28 @@ type openBaoTransitManager struct {
 	stopRenew chan struct{}
 	renewDone chan struct{}
 
-	// authGen increments on every successful login. A caller reads it before a
+	// authGen increments on every successful login. A caller captures it before a
 	// request and passes it back when asking for a refresh, so N concurrent 403s
-	// collapse into ONE re-login: the first caller wins, the rest observe a
-	// changed generation and simply retry with the new token.
-	//
-	// Atomic, NOT guarded by authSem. Every request reads it, and authSem is held
-	// across a login round-trip — reading under that lock would park the whole
+	// collapse into ONE re-login. Atomic, not guarded by authSem: that semaphore
+	// is held across the login round-trip, so reading under it would park the
 	// data plane behind the login it is waiting for.
 	authGen atomic.Uint64
 
-	// authSem serialises logins: depth-1, so send == acquire and receive ==
-	// release. A channel rather than a Mutex because acquiring must be
-	// cancellable — see acquireAuth.
+	// authSem serialises logins: depth-1, so send == acquire, receive == release.
+	// A channel rather than a Mutex because acquiring must be cancellable.
 	authSem chan struct{}
-	// lastLoginAttempt floors the rate of login ATTEMPTS, not successes. Keying
-	// on successes leaves the throttle disengaged exactly when login is failing
-	// (a revoked secret_id, a detached policy), which is when a storm is most
-	// likely and least useful. Written only under authSem.
+	// lastLoginAttempt floors login ATTEMPTS, not successes: keying on successes
+	// disengages the throttle exactly when login is failing, which is when a
+	// storm is most likely. Written only under authSem.
 	lastLoginAttempt time.Time
-	// freshSecret hands a login performed on the data path to the renewal
-	// goroutine so it re-watches the new lease instead of the stale one.
-	// Buffered, depth 1, so publishing never blocks.
+	// freshSecret hands a data-path login to the renewal goroutine so it watches
+	// the new lease. Buffered depth 1, so publishing never blocks.
 	freshSecret chan leaseUpdate
 }
 
-// leaseUpdate carries a lease plus the auth generation it belongs to. The
-// generation is what makes the hand-off safe: the renewal goroutine may log in
-// on its own while an update sits in the buffer, and a queued lease for a
-// superseded token must be discarded rather than watched.
+// leaseUpdate carries a lease plus the auth generation it belongs to: the
+// renewal goroutine may log in itself while an update sits in the buffer, and a
+// queued lease for a superseded token must be discarded rather than watched.
 type leaseUpdate struct {
 	gen    uint64
 	secret *bao.Secret
@@ -258,10 +235,8 @@ func NewOpenBaoTransitManager(opts OpenBaoTransitOptions) (KeyManager, error) {
 
 	loginCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	// Through the same path every later login takes, so the generation and
-	// lastAuthAt bookkeeping lives in exactly one place and the startup login is
-	// counted by gateway_kms_reauth_total like the metric's help text says.
-	// Uncontended here: nothing else holds a reference to m yet.
+	// Through the same path every later login takes, so generation bookkeeping
+	// and the reauth metric live in one place. Uncontended: m is not shared yet.
 	m.authSem <- struct{}{}
 	loginSecret, err := m.loginLocked(loginCtx)
 	<-m.authSem
@@ -296,8 +271,7 @@ func (m *openBaoTransitManager) WrapKey(ctx context.Context, plaintext []byte, _
 	if len(plaintext) == 0 {
 		return nil, errors.New("keymanager/openbao: plaintext DEK is empty")
 	}
-	// Contract: every method returns ErrProviderUnavailable after Close. The
-	// client itself is re-resolved per attempt inside doRead/doWrite.
+	// Closed check only: doRead/doWrite re-resolve the client per attempt.
 	if _, err := m.activeClient(); err != nil {
 		return nil, err
 	}
@@ -344,8 +318,6 @@ func (m *openBaoTransitManager) UnwrapKey(ctx context.Context, envelope *KeyEnve
 	}
 	// Closed check first: the interface requires every method to return
 	// ErrProviderUnavailable after Close, regardless of arguments.
-	// Contract: every method returns ErrProviderUnavailable after Close. The
-	// client itself is re-resolved per attempt inside doRead/doWrite.
 	if _, err := m.activeClient(); err != nil {
 		return nil, err
 	}
@@ -639,9 +611,8 @@ func toInt(v any) (int, bool) {
 
 // ---- auth & token renewal --------------------------------------------------
 
-// baoStatus extracts the HTTP status from an OpenBao API error. The status ->
-// meaning table lives here only; classifyError and isOpenBaoAuthError both read
-// it rather than each unwrapping *bao.ResponseError themselves.
+// baoStatus extracts the HTTP status from an OpenBao API error, so classifyError
+// and isOpenBaoAuthError share one place that unwraps *bao.ResponseError.
 func baoStatus(err error) (int, bool) {
 	var respErr *bao.ResponseError
 	if !errors.As(err, &respErr) {
@@ -650,10 +621,9 @@ func baoStatus(err error) (int, bool) {
 	return respErr.StatusCode, true
 }
 
-// isOpenBaoAuthError reports whether err is OpenBao rejecting the credential
-// itself (401/403) rather than any other failure. This is the only class of
-// error a re-login can fix; 5xx, timeouts and connection errors are the
-// server's problem and must not trigger one.
+// isOpenBaoAuthError reports whether OpenBao rejected the credential itself
+// (401/403) — the only class of error a re-login can fix. 5xx, timeouts and
+// connection errors are the server's problem and must not trigger one.
 func isOpenBaoAuthError(err error) bool {
 	code, ok := baoStatus(err)
 	return ok && (code == http.StatusForbidden || code == http.StatusUnauthorized)
@@ -665,13 +635,9 @@ func (m *openBaoTransitManager) authGeneration() uint64 {
 	return m.authGen.Load()
 }
 
-// acquireAuth takes the login semaphore, giving up when ctx expires, and reports
-// whether it was acquired. Release with releaseAuth.
-//
-// Cancellable acquisition is the point: a login round-trip happens while the
-// semaphore is held, and a request that cannot afford to wait that long must be
-// able to walk away rather than overrun its own deadline. Whoever holds it is
-// very likely performing the login that fixes the caller's problem anyway.
+// acquireAuth takes the login semaphore, giving up when ctx expires. Release
+// with releaseAuth. Cancellable because a login round-trip happens under it, and
+// a caller that cannot afford that wait must be able to walk away.
 func (m *openBaoTransitManager) acquireAuth(ctx context.Context) bool {
 	select {
 	case m.authSem <- struct{}{}:
@@ -684,11 +650,9 @@ func (m *openBaoTransitManager) acquireAuth(ctx context.Context) bool {
 func (m *openBaoTransitManager) releaseAuth() { <-m.authSem }
 
 // loginLocked logs in and bumps the auth generation. Callers must hold authSem.
-// It returns the login secret so the caller can hand a fresh lease to the
-// renewal goroutine; it does not publish one itself.
+// It returns the login secret for the caller to publish; it does not publish.
 func (m *openBaoTransitManager) loginLocked(ctx context.Context) (*bao.Secret, error) {
-	// The floor lives here rather than in one caller, so BOTH the renewal
-	// goroutine and the on-demand path are covered by construction.
+	// Floored here, not in the callers, so every login path is covered.
 	if wait := minLoginInterval - time.Since(m.lastLoginAttempt); wait > 0 {
 		if !sleepCtx(ctx, wait) {
 			return nil, ctx.Err()
@@ -712,9 +676,7 @@ func (m *openBaoTransitManager) loginLocked(ctx context.Context) (*bao.Secret, e
 }
 
 // publishFreshLease hands a lease to the renewal goroutine so it stops watching
-// the dead one. Only meaningful while that goroutine is running; otherwise the
-// send is skipped so a *bao.Secret is not pinned in the buffer for the lifetime
-// of the manager.
+// the dead one.
 func (m *openBaoTransitManager) publishFreshLease(gen uint64, secret *bao.Secret) {
 	if secret == nil {
 		return
@@ -723,9 +685,7 @@ func (m *openBaoTransitManager) publishFreshLease(gen uint64, secret *bao.Secret
 	live := m.renewing && !m.closed
 	m.mu.RUnlock()
 	if !live {
-		// No goroutine will ever drain it, so sending would pin the secret (and
-		// the whole login response) for the lifetime of the manager.
-		return
+		return // nothing would drain it; sending would pin the secret forever
 	}
 	select {
 	case m.freshSecret <- leaseUpdate{gen: gen, secret: secret}:
@@ -734,16 +694,11 @@ func (m *openBaoTransitManager) publishFreshLease(gen uint64, secret *bao.Secret
 }
 
 // refreshAuth re-logs-in on demand, unless another caller already did so since
-// gen was captured. Rate-limited by minOnDemandReauthInterval.
-//
-// The login inherits the calling request's deadline rather than taking a longer
-// one of its own: this runs inline in a request, so it must not overrun the
-// caller's timeout. The renewal goroutine's reauth path is the one that gets a
-// generous budget, because nobody is waiting on it.
-//
-// The "token" auth method is exempt: the operator owns that token's lifecycle
-// and there is nothing to re-fetch, so a refresh would burn the rate limit
-// re-setting the same dead string.
+// gen was captured. It runs inline in a request, so it borrows the caller's
+// deadline rather than a generous one of its own; the renewal goroutine's reauth
+// path is the one nobody is waiting on. The "token" method is exempt: there is
+// nothing to re-fetch, so a refresh would burn the floor on the same dead
+// string.
 func (m *openBaoTransitManager) refreshAuth(ctx context.Context, gen uint64) error {
 	if m.authMethod() == openBaoAuthToken {
 		return errors.New("keymanager/openbao: static token auth cannot be refreshed")
@@ -755,28 +710,24 @@ func (m *openBaoTransitManager) refreshAuth(ctx context.Context, gen uint64) err
 		return ErrProviderUnavailable
 	}
 
-	// Cheap checks BEFORE taking the semaphore: a caller that is not going to
-	// log in must not queue behind one, or it burns its whole deadline waiting
-	// for a lock only to discover it had nothing to do.
+	// Checked BEFORE the semaphore: a caller with nothing to do must not first
+	// burn its deadline queueing behind someone else's login.
 	if m.authGeneration() != gen {
 		return nil // someone already re-logged-in; just retry
 	}
 
-	// Leave the retry some budget. Handing the login the caller's entire
-	// deadline means a slow login "succeeds" into an already-expired context and
-	// the retried operation fails anyway.
+	// Leave the retry some budget: a login handed the whole deadline can
+	// "succeed" into an already-expired context.
 	lctx, cancel := context.WithTimeout(ctx, m.reauthBudget(ctx))
 	defer cancel()
 
 	if !m.acquireAuth(lctx) {
-		// Gave up waiting. Whoever holds the semaphore is logging in right now,
-		// so the caller's next attempt will most likely succeed anyway.
+		// Whoever holds it is logging in now, so the next attempt likely works.
 		return errors.New("keymanager/openbao: timed out waiting to re-login")
 	}
 	defer m.releaseAuth()
 
-	// Re-check under the semaphore: the holder we waited for may have been
-	// logging in on our behalf.
+	// The holder we waited for may have logged in on our behalf.
 	if m.authGeneration() != gen {
 		return nil
 	}
@@ -816,17 +767,11 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// withAuthRetry runs op and, if it fails because the credential was rejected,
-// re-logs-in once and runs it again.
-//
-// This is the reactive half of token lifecycle management; the renewal goroutine
-// is the proactive half. See the token-lifecycle note in the file header for why
-// both are needed.
-//
-// It does not depend on data-plane traffic to fire: CircuitBreakerKeyManager
-// delegates HealthCheck straight through without consulting breaker state, so
-// the 30s health-check loop reaches this even with the breaker open and the S3
-// front end idle.
+// withAuthRetry runs op and, if the credential was rejected, re-logs-in once and
+// runs it again — the reactive half of token lifecycle management (see the file
+// header). It does not need data-plane traffic to fire: CircuitBreakerKeyManager
+// delegates HealthCheck through without consulting breaker state, so the 30s
+// health-check loop reaches it even with the breaker open.
 func (m *openBaoTransitManager) withAuthRetry(ctx context.Context, op func() (*bao.Secret, error)) (*bao.Secret, error) {
 	gen := m.authGeneration()
 	secret, err := op()
@@ -834,9 +779,7 @@ func (m *openBaoTransitManager) withAuthRetry(ctx context.Context, op func() (*b
 		return secret, err
 	}
 	if rerr := m.refreshAuth(ctx, gen); rerr != nil {
-		// Re-login is impossible or throttled: surface the original auth error,
-		// which is the more useful diagnosis.
-		return secret, err
+		return secret, err // re-login impossible or throttled; the 403 is the better diagnosis
 	}
 	return op()
 }
@@ -845,8 +788,7 @@ func (m *openBaoTransitManager) withAuthRetry(ctx context.Context, op func() (*b
 // credential.
 func (m *openBaoTransitManager) doWrite(ctx context.Context, path string, data map[string]any) (*bao.Secret, error) {
 	return m.withAuthRetry(ctx, func() (*bao.Secret, error) {
-		// Re-resolved per attempt: the retry runs after a login round-trip, and
-		// Close may have landed in between.
+		// Re-resolved per attempt: Close may land during the login round-trip.
 		client, err := m.activeClient()
 		if err != nil {
 			return nil, err
@@ -966,10 +908,9 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 	const maxBackoff = 5 * time.Minute
 
 	for {
-		// If we have no renewable secret, re-login before watching. Note that
-		// `backoff` is deliberately NOT reset here on a successful login: a login
-		// that succeeds and is immediately followed by a watcher that cannot renew
-		// is the storm case below, and resetting would defeat its escalation.
+		// If we have no renewable secret, re-login before watching. `backoff` is
+		// deliberately NOT reset on success: login-then-cannot-renew is the storm
+		// case below, and resetting would defeat its escalation.
 		if secret == nil || secret.Auth == nil || !secret.Auth.Renewable || secret.Auth.LeaseDuration == 0 {
 			ns, err := m.reauth(stop)
 			if err != nil {
@@ -982,16 +923,12 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 			secret = ns
 		}
 
-		// RenewBehavior matters here. The zero value is RenewBehaviorIgnoreErrors,
-		// under which a failing renew-self does NOT close DoneCh: the watcher
-		// keeps looping until the ORIGINAL lease elapses, so a token revoked or
-		// expired early goes unnoticed for up to a full lease period (1h in a
-		// typical deployment) while every request 403s. ErrorOnErrors surfaces the
-		// failure immediately so this loop can re-login.
-		//
-		// The cost of that promptness is the storm handled below: the watcher
-		// issues its first renew-self IMMEDIATELY on Start (no initial sleep), so
-		// a lease that can never be renewed comes straight back through DoneCh.
+		// The zero RenewBehavior is IgnoreErrors, under which a failing renew-self
+		// does NOT close DoneCh: the watcher spins until the ORIGINAL lease
+		// elapses, so a token that died early goes unnoticed for up to a full
+		// lease period while every request 403s. ErrorOnErrors reports it at once.
+		// The cost is the storm handled below — the first renew-self is issued
+		// immediately on Start, so an unrenewable lease returns straight away.
 		watcher, err := m.client.NewLifetimeWatcher(&bao.LifetimeWatcherInput{
 			Secret:        secret,
 			RenewBehavior: bao.RenewBehaviorErrorOnErrors,
@@ -1006,9 +943,8 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 		}
 		go watcher.Start()
 
-		// renewed distinguishes "this token was fine for a while and has now aged
-		// out" from "this token could never be renewed at all". Only the former
-		// deserves an immediate re-login.
+		// renewed separates "worked for a while, now aged out" from "never
+		// renewable at all". Only the former deserves an immediate re-login.
 		renewed := false
 		restartWatch := false
 		for !restartWatch {
@@ -1027,21 +963,18 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 					backoff = time.Second
 					break
 				}
-				// The watcher never managed a single renewal, so re-logging in
-				// produces another token that also cannot be renewed — an
-				// unbounded token-minting loop against the KMS, since every
-				// iteration is a real login. This is reachable from a role granted
-				// lookup-self but not renew-self. Back off instead.
+				// Never renewed once, so a re-login only mints another token that
+				// cannot be renewed either — an unbounded loop of real logins,
+				// reachable from a role with lookup-self but not renew-self.
 				if !sleepOrStop(stop, backoff) {
 					return
 				}
 				backoff = nextBackoff(backoff, maxBackoff)
 
 			case u := <-m.freshSecret:
-				// The data path re-authenticated. Adopt its lease only if it is
-				// still the current one: this goroutine may have logged in itself
-				// while the update sat in the buffer, in which case adopting the
-				// queued lease would leave the token actually in use unrenewed.
+				// The data path re-authenticated. Adopt its lease only if still
+				// current: this goroutine may have logged in itself meanwhile, and
+				// adopting a superseded lease leaves the live token unrenewed.
 				if u.gen != m.authGeneration() {
 					continue // stale; keep watching what we have
 				}
@@ -1085,15 +1018,14 @@ func (m *openBaoTransitManager) reauth(stop <-chan struct{}) (*bao.Secret, error
 		case <-ctx.Done():
 		}
 	}()
-	// Share authSem with the on-demand path so the two can never log in
-	// concurrently, and so a data-path caller that captured the old generation
-	// sees this login and simply retries instead of minting a second token.
+	// Shares authSem with the on-demand path, so the two never log in
+	// concurrently and a data-path caller retries instead of minting a token.
 	if !m.acquireAuth(ctx) {
 		return nil, ctx.Err()
 	}
 	defer m.releaseAuth()
-	// No publishFreshLease: this IS the renewal goroutine, and loginLocked
-	// returns the secret straight back to it.
+	// No publishFreshLease: this IS the renewal goroutine; loginLocked hands the
+	// secret straight back.
 	return m.loginLocked(ctx)
 }
 

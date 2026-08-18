@@ -207,41 +207,26 @@ path "transit/keys/s3gw-dek/rotate" { capabilities = ["update"] }
 # path "auth/token/renew-self"  { capabilities = ["update"] }
 ```
 
-Granting `lookup-self` without `renew-self` is the one combination worth calling
-out: the gateway starts, passes its health check, and wraps and unwraps happily,
-because nothing on the request path needs to renew. Only the background renewal
-goroutine is broken, and it degrades quietly — it re-logs-in under exponential
-backoff instead of renewing, so the symptom is a slow climb in
-`gateway_kms_reauth_total` rather than any user-visible failure.
+Granting `lookup-self` without `renew-self` degrades quietly: nothing on the
+request path renews, so only the background goroutine is broken and it re-logs-in
+under backoff instead. The symptom is a slow climb in `gateway_kms_reauth_total`,
+not a user-visible failure.
 
 Auth methods: `token` (`auth.token` or `auth.token_source` = `env:`/`file:`),
 `approle` (`role_id` + `secret_id`/`secret_id_source`), and `kubernetes`
 (`role` + `jwt_path`). No Vault Agent sidecar is required. Prefer a **periodic**
 token on the role.
 
-For `approle`/`kubernetes` the token is kept alive on two independent paths:
-
-- **Proactive** — a background goroutine drives an OpenBao `LifetimeWatcher` and
-  re-logs-in as soon as a renewal fails (max_ttl, revocation, server restart).
-- **Reactive** — any request the server rejects with 401/403 triggers a re-login
-  and one retry, within at most `minLoginInterval` (1s).
-
-Both are needed. The watcher only discovers a dead token when it next attempts a
-renewal, which is up to ~2/3 of the lease away, so a token that dies out-of-band
-would otherwise be answered with `403` on every request until the lease clock
-caught up.
-
-Two guards keep recovery from becoming a stampede. Concurrent callers are
-coalesced by an auth generation, so a burst of 403s yields one re-login rather
-than one per request; and every login attempt on every path — including the
-renewal goroutine's — is floored at one per second. The floor is keyed on
-attempts, not successes, so it still holds when the login itself is what is
-failing. Note that a re-login being possible does not make it useful: if the
-credential is refused outright, requests fail for as long as that lasts, and
-`gateway_kms_reauth_total{outcome="failure"}` is the signal to look at.
-
-The `token` method is not re-authenticated — the operator owns that credential's
-lifecycle, and there is nothing for the adapter to re-fetch.
+For `approle`/`kubernetes` the token is kept alive on two paths: the background
+goroutine re-logs-in as soon as a renewal fails, and any request rejected with
+401/403 triggers a re-login and one retry. Both are needed — the watcher only
+notices a dead token at its next renewal attempt, up to ~2/3 of the lease away,
+so a token that dies out-of-band would otherwise 403 every request until the
+lease clock caught up. Concurrent 403s coalesce into one re-login and every login
+attempt is floored at one per second, so recovery cannot become a stampede. If
+the credential is refused outright, requests fail until an operator fixes the
+role; `gateway_kms_reauth_total{outcome="failure"}` is the signal. The `token`
+method is not re-authenticated — the operator owns that credential's lifecycle.
 
 Key rotation: a single `transit/keys/<key>/rotate` advances `latest_version`;
 new objects wrap with the new version while older objects keep decrypting

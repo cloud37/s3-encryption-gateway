@@ -54,22 +54,12 @@ func TestOpenBao_Renewal_RecoversAfterOutage(t *testing.T) {
 		srv.getLoginCount()-loginsBefore, km.HealthCheck(context.Background()))
 }
 
-// TestOpenBao_RecoversFromRevokedTokenWhileServerHealthy isolates the defect
-// behind the production incident.
-//
-// The token is revoked (max_ttl reached / revoked / lease lost across an outage)
-// while OpenBao itself is perfectly reachable. A single re-login restores
-// service, and the login endpoint is available the whole time, so the adapter
-// must not sit on the dead token waiting for the lease clock.
-//
-// Without the reactive path this fails: the LifetimeWatcher only reports a
-// renewal failure at its next scheduled renewal, and nothing on the data path
-// triggers a re-login, so every request 403s for up to a full lease period (1h in
-// production).
-//
-// Recovery is transparent to the caller — the rejected request re-authenticates
-// and retries in place — so the assertion is that the call SUCCEEDS and that a
-// fresh login is what made it succeed.
+// TestOpenBao_RecoversFromRevokedTokenWhileServerHealthy isolates the defect: the
+// token is dead while OpenBao stays reachable, so one re-login restores service
+// and the adapter must not wait out the lease clock. Without the reactive path
+// nothing on the data path triggers that login and every request 403s for up to a
+// full lease period. Recovery is transparent to the caller, so the assertion is
+// that the call succeeds AND that a fresh login is what made it succeed.
 func TestOpenBao_RecoversFromRevokedTokenWhileServerHealthy(t *testing.T) {
 	srv := newMockBaoServer(t)
 	// A long lease: this is the window the adapter must NOT wait out. Production
@@ -127,10 +117,8 @@ func TestOpenBao_ReauthIsCoalesced(t *testing.T) {
 		KeyName: "test-key",
 		Auth:    OpenBaoAuthConfig{Method: "kubernetes", Role: "s3-gateway", JWT: "jwt"},
 		Timeout: 2 * time.Second,
-		// Renewal off: the watcher issues its first renew-self immediately on
-		// start, which would race the revocation below and contribute a second,
-		// legitimate login. This test is about the DATA path coalescing, so the
-		// background path is excluded to keep the count exact.
+		// Renewal off: the watcher's t=0 renew-self would race the revocation and
+		// add a second, legitimate login. This test counts the DATA path only.
 		DisableRenewal: true,
 	})
 	if err != nil {
@@ -171,12 +159,8 @@ func TestOpenBao_ReauthIsCoalesced(t *testing.T) {
 }
 
 // TestOpenBao_BackgroundRenewalRecoversRevokedToken covers the PROACTIVE path in
-// isolation: the renewal goroutine must notice a dead token and re-login with no
-// help from the data path.
-//
-// The test deliberately makes no WrapKey/HealthCheck calls while waiting, so
-// withAuthRetry cannot be what recovers it — only the LifetimeWatcher firing
-// DoneCh and the loop re-logging-in can move loginCount.
+// isolation: no WrapKey/HealthCheck call is made while waiting, so withAuthRetry
+// cannot be what recovers it — only the watcher firing DoneCh moves loginCount.
 func TestOpenBao_BackgroundRenewalRecoversRevokedToken(t *testing.T) {
 	srv := newMockBaoServer(t)
 	srv.setLease(4)
@@ -210,21 +194,13 @@ func TestOpenBao_BackgroundRenewalRecoversRevokedToken(t *testing.T) {
 	t.Fatal("renewal goroutine never re-logged-in after the token was revoked")
 }
 
-// TestOpenBao_DeadTokenDoesNotStormRenewals pins the RenewBehavior fix.
-//
-// Under the default RenewBehaviorIgnoreErrors, a failing renew-self does not end
-// the watch AND the library leaves sleepDuration at zero on the error path, so
-// the watcher busy-loops on renew-self until the grace window near the end of
-// the original lease. With a production token_ttl of 1h that is minutes of
-// unthrottled requests aimed at an OpenBao that is, by construction, already
-// having a bad day — and every gateway replica does it at once.
-//
-// RenewBehaviorErrorOnErrors ends the watch on the first failure so the loop
-// re-logs-in instead of spinning.
-//
-// Note the watcher issues its first renew-self IMMEDIATELY on Start, with no
-// initial sleep, so the rejected renewal here happens at t~=0 rather than
-// part-way through the lease.
+// TestOpenBao_DeadTokenDoesNotStormRenewals pins the RenewBehavior fix. Under the
+// default IgnoreErrors a failing renew-self neither ends the watch nor sleeps (the
+// library leaves sleepDuration at zero), so the watcher busy-loops until the grace
+// window near the end of the lease — minutes of unthrottled load per replica at a
+// production token_ttl, aimed at an already-struggling OpenBao. ErrorOnErrors ends
+// the watch on the first failure. That failure lands at t~=0: the watcher issues
+// its first renew-self immediately on Start, with no initial sleep.
 func TestOpenBao_DeadTokenDoesNotStormRenewals(t *testing.T) {
 	srv := newMockBaoServer(t)
 	const leaseSec = 6
@@ -260,16 +236,11 @@ func TestOpenBao_DeadTokenDoesNotStormRenewals(t *testing.T) {
 }
 
 // TestOpenBao_RenewIncapableRoleDoesNotStormLogins is the regression test for the
-// storm that RenewBehaviorErrorOnErrors introduces if the loop re-logs-in
-// unconditionally.
-//
-// The role can log in but cannot renew-self — the shape produced by
-// token_no_default_policy with only auth/token/lookup-self granted, which is what
-// docs/KMS_COMPATIBILITY.md tells operators to configure. Every watcher therefore
-// dies on its first renewal, and an unguarded loop answers each death with a
-// fresh login: measured at 21,741 logins in 3s before the fix. Each of those is
-// real server state, so the KMS lease table grows until storage does — strictly
-// worse than the renew-self spin ErrorOnErrors exists to prevent.
+// storm ErrorOnErrors introduces if the loop re-logs-in unconditionally. The role
+// can log in but not renew-self (token_no_default_policy granting only
+// lookup-self, the shape docs/KMS_COMPATIBILITY.md used to produce), so every
+// watcher dies on its first renewal: 21,741 logins in 3s before the fix, each one
+// real server state — strictly worse than the spin ErrorOnErrors prevents.
 func TestOpenBao_RenewIncapableRoleDoesNotStormLogins(t *testing.T) {
 	srv := newMockBaoServer(t)
 	srv.setLease(3600)
@@ -288,11 +259,9 @@ func TestOpenBao_RenewIncapableRoleDoesNotStormLogins(t *testing.T) {
 
 	loginsBefore := srv.getLoginCount()
 
-	// The window is long enough to discriminate the two guards, not just the
-	// cheaper one. The per-attempt floor alone would allow ~1 login/second — over
-	// a day that is still ~86k tokens in the KMS lease table. The renewal loop's
-	// exponential backoff (1s, 2s, 4s, 8s...) is what turns that into a handful,
-	// so the budget below is set under what the floor alone would produce.
+	// Long enough to discriminate both guards, not just the cheaper one: the
+	// attempt floor alone allows ~1 login/s, so the budget is set below what that
+	// would produce and only the loop's exponential backoff can meet it.
 	const window = 12 * time.Second
 	time.Sleep(window)
 
@@ -306,16 +275,11 @@ func TestOpenBao_RenewIncapableRoleDoesNotStormLogins(t *testing.T) {
 	}
 }
 
-// TestOpenBao_TokenDyingMidLeaseIsRecovered covers the SCHEDULED renewal path,
-// which the other tests miss: the LifetimeWatcher issues its first renew-self
-// immediately on Start, so a token killed before construction is always caught by
-// that t=0 renewal rather than by a scheduled one.
-//
-// Here the t=0 renewal succeeds and the token is killed afterwards, so the
-// failure is discovered by the next scheduled renewal (~2/3 of the lease in).
-// That is the "renewals worked, then stopped" case, which must be answered with a
-// prompt re-login rather than the backoff reserved for a lease that was never
-// renewable at all.
+// TestOpenBao_TokenDyingMidLeaseIsRecovered covers the SCHEDULED renewal path the
+// other tests miss: here the t=0 renewal succeeds and the token dies afterwards,
+// so the failure surfaces at the next scheduled renewal (~2/3 of the lease in).
+// That is the "renewals worked, then stopped" case, which must get a prompt
+// re-login rather than the backoff reserved for a never-renewable lease.
 func TestOpenBao_TokenDyingMidLeaseIsRecovered(t *testing.T) {
 	srv := newMockBaoServer(t)
 	srv.setLease(4)

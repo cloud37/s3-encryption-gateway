@@ -236,9 +236,8 @@ func openBaoAdminClient(addr string) (*bao.Client, error) {
 }
 
 // RevokeAppRoleTokens revokes every token the AppRole login endpoint has issued,
-// using the dev-server root token. The login endpoint stays open, so the only
-// way back for a client is a fresh login — which is exactly the condition a
-// re-authentication test needs to create.
+// using the dev-server root token. The endpoint stays open, so the only way back
+// for a client is a fresh login.
 func RevokeAppRoleTokens(ctx context.Context, addr string) error {
 	client, err := openBaoAdminClient(addr)
 	if err != nil {

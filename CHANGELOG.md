@@ -30,71 +30,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exercised rewind-on-retry.
 
 - **OpenBao/Vault adapter never recovered from a token that died early.** The
-  adapter delegated token lifetime to a `LifetimeWatcher` created without a
-  `RenewBehavior`. The zero value is `RenewBehaviorIgnoreErrors`, under which a
-  failing `renew-self` does **not** close `DoneCh` — the watcher keeps looping
-  until the *original* lease elapses. Since re-login was driven solely by
-  `DoneCh`, a token that died early (revoked, `max_ttl` reached, or a lease lost
-  while OpenBao was unreachable) left the adapter holding a dead credential and
-  answering every `WrapKey`/`UnwrapKey`/`HealthCheck` with `403 permission
-  denied` for up to a full lease period — one hour under a typical
-  `token_ttl=1h`. Because `classifyError` maps 401/403 to
-  `ErrProviderUnavailable`, and `RetryingKeyManager` treats that as permanent,
-  nothing else in the decorator chain retried either. In Kubernetes the gateway
-  stayed `Running` with a passing liveness probe and a failing readiness probe,
-  so it was removed from Service endpoints and never restarted — recovery
-  required manual operator intervention.
+  `LifetimeWatcher` was created without a `RenewBehavior`, and the zero value is
+  `RenewBehaviorIgnoreErrors`, under which a failed `renew-self` does not close
+  `DoneCh`. Since re-login was driven solely by `DoneCh`, a token revoked or
+  expired ahead of its lease left the adapter answering every
+  `WrapKey`/`UnwrapKey`/`HealthCheck` with `403 permission denied` for up to a
+  full lease period — an hour under a typical `token_ttl=1h`. Nothing else
+  retried either, because `classifyError` maps 403 to `ErrProviderUnavailable`,
+  which `RetryingKeyManager` treats as permanent. In Kubernetes the pod stayed
+  `Running` and unready, so recovery required a manual restart.
 
-  Fixed on both paths:
-
-  - The watcher is now created with `RenewBehavior: RenewBehaviorErrorOnErrors`,
-    so a failed renewal surfaces immediately and the renewal goroutine
-    re-logs-in instead of idling out the lease. This also stops a request storm:
-    on the error path the library leaves its computed sleep at zero, so under
-    `IgnoreErrors` the watcher busy-loops on `renew-self` until the grace window
-    near the end of the original lease. Measured at **44,097 requests in 7
-    seconds** (~6,300 req/s) against a 6-second lease; scaled to a production
-    `token_ttl=1h` that is minutes of unthrottled load per replica, aimed at an
-    OpenBao that by construction is already unhealthy. Now ≤25 requests.
-
-    Prompt failure reporting needs a matching guard, because the watcher issues
-    its first `renew-self` immediately on `Start` with no initial sleep: a lease
-    that can *never* be renewed comes straight back through `DoneCh`, and
-    answering each death with a fresh login is a far worse storm than the one
-    above — every iteration mints real server state. A role granted
-    `auth/token/lookup-self` but not `auth/token/renew-self` (a combination this
-    repo's own policy example produced) reached **21,741 logins in 3 seconds**
-    until the KMS lease table exhausted storage. The renewal loop now
-    distinguishes "renewals worked and have now stopped" from "this lease was
-    never renewable" and applies exponential backoff to the latter, and every
-    login attempt on every path is floored at one per second.
-  - Any request rejected with 401/403 now triggers an on-demand re-login and
-    one retry (`withAuthRetry`), so recovery no longer depends on the lease
-    clock. Concurrent callers are coalesced by an auth generation counter — a
-    burst of 403s produces exactly one re-login, not one per request — and the
-    login floor is keyed on ATTEMPTS rather than successes, so it still engages
-    when the login is itself what is failing (a revoked `secret_id`, a detached
-    policy); keying on successes leaves it disengaged exactly when a storm is
-    most likely and least useful. An inline re-login is capped at half the
-    caller's remaining deadline so the retry it exists to enable still has
-    budget to run, and the generation and floor are checked before the login
-    semaphore is taken so a request that will be throttled does not first stall
-    on a lock. Static (`token`) auth is exempt, since the operator owns that
-    credential's lifecycle.
+  The watcher now uses `RenewBehaviorErrorOnErrors`, so a failed renewal
+  re-logs-in instead of idling out the lease, and any request rejected with
+  401/403 triggers an on-demand re-login and one retry — recovery no longer
+  waits on the lease clock. Both paths are storm-bounded, which is load-bearing:
+  under `IgnoreErrors` the watcher busy-loops on `renew-self` (measured 44,097
+  requests in 7s), and answering every prompt failure with a login is worse
+  still because each one mints server state (21,741 logins in 3s from a role
+  granted `lookup-self` but not `renew-self`). Concurrent 403s coalesce into one
+  re-login, a lease that was never renewable backs off exponentially, and every
+  login attempt on every path is floored at one per second — keyed on attempts,
+  not successes, so it holds when the login itself is what is failing. `token`
+  auth is exempt; the operator owns that credential's lifecycle.
 
 ### Added
 
-- **`gateway_kms_reauth_total`** counter, labelled by provider, auth method, and
-  outcome. The entire token-recovery path was previously silent, so an operator
-  could only infer a dead token from a 403 in the readiness body. The first
-  authentication is the startup login; a sustained rate above that means tokens
-  are dying early.
+- **`gateway_kms_reauth_total`** counter, labelled by provider, auth method and
+  outcome. Token recovery was previously silent. The first sample is the startup
+  login; a sustained rate above that means tokens are dying early.
 
 - **KMS outage and token-revocation regression tests.** `mockBaoServer` now
-  models a whole-server outage (every path 5xxs, including login) and per-token
-  expiry, so the auth-recovery paths are testable. New cases cover recovery
-  after an outage, recovery from a revoked token while the server is healthy,
-  and re-login coalescing under concurrent load.
+  models a whole-server outage (every path 5xxs, login included) and per-token
+  expiry, covering recovery after an outage, recovery from a revoked token while
+  the server is healthy, and re-login coalescing under concurrent load.
 
 ## [0.11.10] — 2026-08-11
 

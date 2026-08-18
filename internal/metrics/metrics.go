@@ -130,9 +130,8 @@ type Metrics struct {
 	// Labels: provider, operation ∈ {wrap, unwrap}, outcome ∈ {success, failure}
 	kmsRetryAttemptsTotal *prometheus.CounterVec
 
-	// kmsReauthTotal counts KMS authentications. The first is startup login;
-	// every subsequent one is a re-auth after a token died.
-	// Labels: provider, method ∈ {token, approle, kubernetes}, outcome
+	// kmsReauthTotal counts KMS authentications: the first is the startup login,
+	// every later one a re-auth after a token died.
 	kmsReauthTotal *prometheus.CounterVec
 
 	// metadataEncryptionEnabled reports whether encrypted-object-metadata

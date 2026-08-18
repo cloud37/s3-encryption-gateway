@@ -183,14 +183,10 @@ func testOpenBaoKMSTokenRenewal(t *testing.T, inst provider.Instance) {
 }
 
 // testOpenBaoKMSTokenRevocation is the regression test for the incident where a
-// gateway held a dead OpenBao token and served 403s indefinitely.
-//
-// It revokes the adapter's token out-of-band against a real OpenBao — the
-// production trigger, whether by explicit revoke, max_ttl, or a lease lost while
-// OpenBao was unreachable — and requires the gateway to recover on its own. The
-// AppRole TTL is deliberately long so the renewal goroutine's next scheduled
-// renewal is far away: recovery must come from on-demand re-authentication, not
-// from the lease clock.
+// gateway held a dead OpenBao token and served 403s indefinitely. It revokes the
+// adapter's token out-of-band against a real OpenBao and requires the gateway to
+// recover on its own. The AppRole TTL is long on purpose, so recovery has to come
+// from on-demand re-authentication rather than the lease clock.
 func testOpenBaoKMSTokenRevocation(t *testing.T, inst provider.Instance) {
 	t.Helper()
 
@@ -224,9 +220,8 @@ func testOpenBaoKMSTokenRevocation(t *testing.T, inst provider.Instance) {
 		t.Fatalf("HealthCheck before revocation: %v", err)
 	}
 
-	// Revoke every token AppRole login has issued. This is a real revocation:
-	// the adapter's credential stops working immediately, while the login
-	// endpoint stays open so re-authentication is possible.
+	// A real revocation: the credential stops working immediately, while the
+	// login endpoint stays open so re-authentication is possible.
 	if err := provider.RevokeAppRoleTokens(ctx, baoInst.Address); err != nil {
 		t.Fatalf("revoke approle tokens: %v", err)
 	}

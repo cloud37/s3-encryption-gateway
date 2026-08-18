@@ -478,12 +478,9 @@ func main() {
 		))
 	}
 
-	// Wired BEFORE BuildKeyManager, unlike its siblings further down: the KMS
-	// adapter's startup login happens inside BuildKeyManager, and
-	// gateway_kms_reauth_total is documented as counting that login as its first
-	// sample. Registered later, the observer is still nil when it fires and every
-	// runbook that reads "increments beyond the initial startup login" is off by
-	// one.
+	// Wired before BuildKeyManager, unlike its siblings below: the KMS startup
+	// login happens inside it, and gateway_kms_reauth_total counts that login as
+	// its first sample. Registered later, the observer is nil when it fires.
 	crypto.SetKMSReauthObserver(m.RecordKMSReauth)
 
 	if cfg.Encryption.KeyManager.Enabled {
