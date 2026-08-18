@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Encrypted multipart uploads now immutably claim the first content submitted
+  for each part number. Identical retries remain safe and return the original
+  ETag; changed replacements return HTTP 409 and require aborting the upload.
+  Completed-object manifest and ciphertext formats remain compatible.
+
 ### Security
 
 - **V1.0-SEC-37 authenticated chunked completeness:** New chunked v2 objects

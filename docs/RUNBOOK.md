@@ -463,6 +463,24 @@ being refused.
 - `ListObjects` **degrades, not fails**: listings return `200 OK` with ciphertext sizes, so sync clients (rclone, restic, s5cmd) will re-transfer encrypted objects until Valkey recovers and the size cache re-warms. No data loss; see [ListObjects Plaintext Size Cache](#listobjects-plaintext-size-cache-v10-s3-3).
 - After Valkey recovers, in-flight uploads with active TTLs will be readable again, and the size cache re-warms through normal write traffic.
 
+### Encrypted MPU nonce-safety rollout
+
+Before deploying a binary containing MPU state version 2:
+
+1. Inventory `mpu:*` keys and identify uploads without `state_version=2`.
+2. Drain or abort encrypted uploads before the rollout. Legacy encrypted
+   uploads are abort-only after the new binary is enabled.
+3. Roll all gateway replicas together. Do not run old and new MPU writers at
+   the same time because old writers can bypass immutable claims.
+4. Keep MPU write readiness disabled until every replica reports the version-2
+   writer capability. Confirm `gateway_mpu_legacy_inflight` is zero or has an
+   owner-approved abort plan.
+5. Monitor `gateway_mpu_part_claims_total` by result. A rise in `mismatch` or
+   `legacy_rejected` indicates client replacement attempts or incomplete drain.
+
+Rollback requires draining or aborting all version-2 encrypted uploads first;
+never point a version-1 binary at version-2 state.
+
 ---
 
 ### valkey-insecure

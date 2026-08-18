@@ -615,6 +615,15 @@ cannot validate it against an ETag that does not exist.
 
 ## Security Considerations
 
+Encrypted multipart uploads use state version 2. The first plaintext claim for
+each `(upload ID, part number)` is an HMAC-SHA256 commitment keyed by the
+upload DEK and is reserved before destination encryption. A different
+replacement is rejected with `OperationAborted` (HTTP 409); identical retries
+return the committed ETag without re-encryption. Clients must abort and create
+a new upload when content must change. Complete validates the selected,
+ordered parts against committed state, while completed manifest version 1 and
+the ciphertext framing remain unchanged.
+
 ### Threat Model Expansion
 
 ADR 0002's threat model covers the backend-as-adversary for the

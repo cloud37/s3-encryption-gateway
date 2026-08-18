@@ -146,6 +146,11 @@ func TestConformance(t *testing.T) {
 				{"EncryptedMPU_AtRest", provider.CapEncryptedMPU, testEncryptedMPU_AtRest},
 				{"EncryptedMPU_AbortCleansState", provider.CapEncryptedMPU, testEncryptedMPUAbortCleansState},
 				{"EncryptedMPU_LargeObject", provider.CapEncryptedMPU, testEncryptedMPU_LargeObject},
+				{"SEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag},
+				{"SEC38_EncryptedMPU_ChangedPartReplacementRejected", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_ChangedPartReplacementRejected},
+				{"SEC38_EncryptedMPU_CompleteSelectedSubset", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_CompleteSelectedSubset},
+				{"SEC38_EncryptedMPU_UploadPartCopyReplacementRejected", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyReplacementRejected},
+				{"SEC38_EncryptedMPU_UploadPartCopyIdenticalRetry", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry},
 
 				// V1.0-CONFIG-1 — Per-bucket encryption bypass + ENV policy configuration.
 				{"BypassEncryption_RoundTrip", 0, testBypassEncryption_RoundTrip},
@@ -309,7 +314,7 @@ func TestConformance(t *testing.T) {
 			for _, tc := range cases {
 				tc := tc
 				t.Run(tc.name, func(t *testing.T) {
-					if tc.cap != 0 && p.Capabilities()&tc.cap == 0 {
+					if tc.cap != 0 && p.Capabilities()&tc.cap != tc.cap {
 						t.Skipf("%s does not advertise capability %s",
 							p.Name(), tc.cap)
 					}

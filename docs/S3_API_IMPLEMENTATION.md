@@ -404,6 +404,15 @@ func (e *EncryptionEngine) DecryptStream(reader io.Reader) io.Reader {
 
 ## Multipart Upload Handling
 
+Encrypted multipart uploads use immutable first-content claims for each part
+number. A byte-identical retry returns the committed ETag without rewriting the
+backend part. A different replacement is rejected with `OperationAborted`
+(HTTP 409); clients must abort the upload and create a new one. `Complete`
+requires strictly ascending selected parts with committed, matching ETags and
+returns `InvalidPart` or `InvalidPartOrder` before manifest/backend I/O when
+validation fails. `UploadPartCopy` applies the same rules after source
+plaintext acquisition and before destination encryption or mutation.
+
 ### Strategy
 - Encrypt each part individually
 - Maintain part boundaries and sizes

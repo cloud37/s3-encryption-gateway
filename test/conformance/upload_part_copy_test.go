@@ -4,6 +4,7 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -54,6 +55,52 @@ func doUploadPartCopy(t *testing.T, gw *harness.Gateway, destBucket, destKey, up
 		t.Fatalf("UploadPartCopy: empty ETag in response body: %s", string(body))
 	}
 	return result.ETag
+}
+
+func testSEC38_EncryptedMPU_UploadPartCopyReplacementRejected(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	firstData := bytes.Repeat([]byte("copy-one"), 32*1024)
+	secondData := bytes.Repeat([]byte("copy-two"), 32*1024)
+	put(t, gw, inst.Bucket, srcKey, firstData)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, dstKey)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID) })
+	first := doUploadPartCopy(t, gw, inst.Bucket, dstKey, uploadID, 1, inst.Bucket, srcKey, "")
+	// The gateway source is encrypted and its bytes are immutable for this
+	// test; use a second source object to exercise a changed copy claim.
+	secondSrcKey := uniqueKey(t)
+	put(t, gw, inst.Bucket, secondSrcKey, secondData)
+	u := fmt.Sprintf("%s/%s/%s?partNumber=1&uploadId=%s", gw.URL, inst.Bucket, dstKey, uploadID)
+	req, _ := http.NewRequest(http.MethodPut, u, nil)
+	req.Header.Set("x-amz-copy-source", fmt.Sprintf("/%s/%s", inst.Bucket, secondSrcKey))
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("changed copied part: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte("OperationAborted")) {
+		t.Fatalf("changed copied part: status=%d body=%s", resp.StatusCode, body)
+	}
+	completeMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID, []mpuPart{{1, first}})
+}
+
+func testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	srcKey, dstKey := uniqueKey(t), uniqueKey(t)
+	data := bytes.Repeat([]byte("copy-retry"), 32*1024)
+	put(t, gw, inst.Bucket, srcKey, data)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, dstKey)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID) })
+	first := doUploadPartCopy(t, gw, inst.Bucket, dstKey, uploadID, 1, inst.Bucket, srcKey, "")
+	second := doUploadPartCopy(t, gw, inst.Bucket, dstKey, uploadID, 1, inst.Bucket, srcKey, "")
+	if first != second {
+		t.Fatalf("identical copied retry ETag %q differs from %q", second, first)
+	}
 }
 
 // testUPC_Full copies a full chunked-encrypted source object via UploadPartCopy

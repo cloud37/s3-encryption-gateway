@@ -79,6 +79,24 @@ func uploadPart(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string,
 	return resp.Header.Get("ETag")
 }
 
+func uploadPartStatus(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, partNum int, data []byte) (int, string) {
+	t.Helper()
+	u := fmt.Sprintf("%s/%s/%s?partNumber=%d&uploadId=%s", gw.URL, bucket, key, partNum, uploadID)
+	ctx, cancel := conformanceMPUContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("UploadPart #%d: create request: %v", partNum, err)
+	}
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("UploadPart #%d: %v", partNum, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
 // mpuPart holds part number and ETag for CompleteMultipartUpload.
 type mpuPart struct {
 	Number int

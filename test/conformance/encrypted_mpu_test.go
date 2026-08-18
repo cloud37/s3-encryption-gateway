@@ -18,6 +18,54 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
+func testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	key := uniqueKey(t)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+	data := bytes.Repeat([]byte("retry"), 1024)
+	first := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, data)
+	second := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, data)
+	if first != second {
+		t.Fatalf("identical retry ETag %q differs from first %q", second, first)
+	}
+}
+
+func testSEC38_EncryptedMPU_ChangedPartReplacementRejected(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	key := uniqueKey(t)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+	firstData := bytes.Repeat([]byte("first"), 1024)
+	first := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, firstData)
+	status, body := uploadPartStatus(t, gw, inst.Bucket, key, uploadID, 1, bytes.Repeat([]byte("second"), 1024))
+	if status != http.StatusConflict || !bytes.Contains([]byte(body), []byte("OperationAborted")) {
+		t.Fatalf("changed replacement: status=%d body=%s", status, body)
+	}
+	completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{{1, first}})
+}
+
+func testSEC38_EncryptedMPU_CompleteSelectedSubset(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	key := uniqueKey(t)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+	data1 := bytes.Repeat([]byte("selected-one"), 32*1024)
+	data2 := bytes.Repeat([]byte("unselected-two"), 32*1024)
+	etag1 := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, data1)
+	_ = uploadPart(t, gw, inst.Bucket, key, uploadID, 2, data2)
+	completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{{1, etag1}})
+	if got := get(t, gw, inst.Bucket, key); !bytes.Equal(got, data1) {
+		t.Fatalf("selected subset returned %q, want %q", got, data1)
+	}
+}
+
 // testEncryptedMPURoundTrip verifies that the encrypted multipart upload path
 // (ADR-0009 / V0.6-SEC-3) produces a correctly decryptable object.
 //
