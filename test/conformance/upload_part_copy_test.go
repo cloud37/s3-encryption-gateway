@@ -401,8 +401,22 @@ func testSEC37_UploadPartCopy_TruncatedChunkedV2Rejected(t *testing.T, inst prov
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("UploadPartCopy succeeded for truncated v2 source")
 	}
-	abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID)
-
+	listURL := fmt.Sprintf("%s/%s/%s?uploadId=%s", gw.URL, inst.Bucket, dstKey, uploadID)
+	listResp, err := gw.HTTPClient().Get(listURL)
+	if err != nil {
+		t.Fatalf("ListParts: %v", err)
+	}
+	listBody, _ := io.ReadAll(listResp.Body)
+	listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK && listResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("ListParts status=%d body=%s", listResp.StatusCode, listBody)
+	}
+	if bytes.Contains(listBody, []byte("<Part>")) {
+		t.Fatalf("corrupt source created a destination part: %s", listBody)
+	}
+	if completionStatus := completeMultipartUploadStatus(t, gw, inst.Bucket, dstKey, uploadID, []mpuPart{{1, "\"corrupt-source-part\""}}); completionStatus == http.StatusOK {
+		t.Fatal("corrupt upload completed successfully")
+	}
 	check, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, dstKey))
 	if err != nil {
 		t.Fatalf("destination GET: %v", err)
@@ -412,4 +426,5 @@ func testSEC37_UploadPartCopy_TruncatedChunkedV2Rejected(t *testing.T, inst prov
 	if check.StatusCode != http.StatusNotFound {
 		t.Errorf("destination status=%d, want 404", check.StatusCode)
 	}
+	abortMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID)
 }

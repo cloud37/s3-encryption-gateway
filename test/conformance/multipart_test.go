@@ -133,6 +133,31 @@ func completeMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key, upl
 	}
 }
 
+func completeMultipartUploadStatus(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, parts []mpuPart) int {
+	t.Helper()
+	var xmlParts strings.Builder
+	xmlParts.WriteString("<CompleteMultipartUpload>")
+	for _, p := range parts {
+		fmt.Fprintf(&xmlParts, "<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>", p.Number, p.ETag)
+	}
+	xmlParts.WriteString("</CompleteMultipartUpload>")
+	u := fmt.Sprintf("%s/%s/%s?uploadId=%s", gw.URL, bucket, key, uploadID)
+	ctx, cancel := conformanceMPUContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(xmlParts.String()))
+	if err != nil {
+		t.Fatalf("completion request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("completion: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode
+}
+
 // abortMultipartUpload aborts a multipart upload.
 func abortMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string) {
 	t.Helper()

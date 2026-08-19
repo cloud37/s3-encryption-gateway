@@ -4,13 +4,71 @@ package conformance
 
 import (
 	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"io"
 	"net/http"
 	"testing"
 
+	"golang.org/x/crypto/hkdf"
+	"golang.org/x/crypto/pbkdf2"
+
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
+
+func putSEC37V1Fixture(t *testing.T, client s3.Client, bucket, key string) {
+	t.Helper()
+	const password = "test-encryption-password-123456"
+	plaintext := []byte("frozen-sec37-v1")
+	salt := bytes.Repeat([]byte{0x17}, 32)
+	baseIV := bytes.Repeat([]byte{0x27}, 12)
+	keyBytes := pbkdf2.Key([]byte(password), salt, crypto.DefaultPBKDF2Iterations, 32, sha256.New)
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := make([]byte, 12)
+	copy(info, "chunk-iv")
+	binary.BigEndian.PutUint32(info[8:], 0)
+	nonce := make([]byte, 12)
+	_, _ = io.ReadFull(hkdf.Expand(sha256.New, baseIV, info), nonce)
+	ciphertext := aead.Seal(nil, nonce, plaintext, nil)
+	manifest, err := json.Marshal(struct {
+		Version int    `json:"v"`
+		Size    int    `json:"cs"`
+		Count   int    `json:"cc"`
+		IV      string `json:"iv"`
+		Deriv   string `json:"ivd"`
+	}{1, 16 * 1024, 1, base64.StdEncoding.EncodeToString(baseIV), "hkdf-sha256"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]string{
+		crypto.MetaEncrypted:     "true",
+		crypto.MetaChunkedFormat: "true",
+		crypto.MetaAlgorithm:     crypto.AlgorithmAES256GCM,
+		crypto.MetaKeySalt:       base64.StdEncoding.EncodeToString(salt),
+		crypto.MetaIV:            base64.StdEncoding.EncodeToString(baseIV),
+		crypto.MetaChunkSize:     "16384",
+		crypto.MetaManifest:      base64.StdEncoding.EncodeToString(manifest),
+		crypto.MetaKDFParams:     "pbkdf2-sha256:600000",
+	}
+	if _, err := client.PutObject(context.Background(), bucket, key, bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put v1 fixture: %v", err)
+	}
+}
 
 // testChunkedRoundTrip verifies a full PUT/GET round-trip of a chunked-AEAD
 // encrypted object. The gateway uses chunked mode by default; this test
@@ -143,6 +201,29 @@ func testSEC37_ChunkedV2_TruncatedSuffix_FullGetRangeHEADFailClosed(t *testing.T
 			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
 				t.Errorf("%s succeeded for truncated v2 object: status=%d body=%d bytes", tc.name, resp.StatusCode, len(body))
 			}
+			if tc.name != "head" && bytes.Contains(body, []byte("truncate")) {
+				t.Errorf("%s returned plaintext from truncated source", tc.name)
+			}
+			if tc.name == "head" && len(body) != 0 {
+				t.Errorf("HEAD returned %d body bytes", len(body))
+			}
 		})
+	}
+}
+
+// testSEC37_ChunkedV1_ReadCompatibility verifies a frozen legacy object remains readable.
+func testSEC37_ChunkedV1_ReadCompatibility(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	gw := harness.StartGateway(t, inst,
+		harness.WithChunking(true),
+		harness.WithEncryptionPassword("test-encryption-password-123456"),
+		harness.WithPBKDF2Iterations(crypto.DefaultPBKDF2Iterations),
+	)
+	backend := newS3Client(t, inst)
+	key := uniqueKey(t)
+	putSEC37V1Fixture(t, backend, inst.Bucket, key)
+	want := []byte("frozen-sec37-v1")
+	if got := get(t, gw, inst.Bucket, key); !bytes.Equal(got, want) {
+		t.Fatalf("v1 compatibility mismatch: got %q, want %q", got, want)
 	}
 }
