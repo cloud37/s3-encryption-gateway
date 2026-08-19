@@ -226,6 +226,13 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	// authorisation gate.
 	sourceClass, err := h.classifyCopySource(ctx, s3Client, srcBucket, srcKey, srcVersionID)
 	if err != nil {
+		if errors.Is(err, crypto.ErrChunkedObjectIncomplete) || errors.Is(err, crypto.ErrUnsupportedChunkedVersion) || strings.Contains(err.Error(), "chunked manifest") {
+			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "chunked_completeness_failed")
+			s3Err := &S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
+			s3Err.WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			return
+		}
 		s3Err := TranslateError(err, srcBucket, srcKey)
 		s3Err.WriteXML(w)
 		h.logger.WithError(err).WithFields(logrus.Fields{
@@ -470,12 +477,16 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		// object. Must not be treated as plaintext or legacy ciphertext.
 		sourceClass.Class = SourceClassMPUEncrypted
 		sourceClass.IsEncrypted = true
-	} else if metadata[crypto.MetaChunkedFormat] == "true" {
-		sourceClass.Class = SourceClassChunked
-		sourceClass.IsChunked = true
-		sourceClass.IsEncrypted = true
-		if metadata[crypto.MetaManifest] != "" {
-			info, err := h.preflightChunkedCompleteness(ctx, s3Client, bucket, key, versionID, metadata)
+	} else {
+		expandedMetadata, expandErr := h.expandMetadataForAPI(bucket, metadata)
+		if expandErr != nil {
+			return nil, expandErr
+		}
+		if crypto.IsChunkedFormat(expandedMetadata) {
+			sourceClass.Class = SourceClassChunked
+			sourceClass.IsChunked = true
+			sourceClass.IsEncrypted = true
+			info, err := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
 			if err != nil {
 				return nil, err
 			}
@@ -483,15 +494,15 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 			if info.Authenticated && info.PlaintextSize <= uint64(^uint64(0)>>1) {
 				sourceClass.Size = int64(info.PlaintextSize)
 			}
+		} else if expandedMetadata[crypto.MetaEncrypted] == "true" {
+			sourceClass.Class = SourceClassLegacy
+			sourceClass.IsEncrypted = true
 		}
-	} else if metadata[crypto.MetaEncrypted] == "true" {
-		sourceClass.Class = SourceClassLegacy
-		sourceClass.IsEncrypted = true
 	}
 
 	// Object size is available from Content-Length or OriginalSize (chunked)
 	// depending on the source format.
-	if sizeStr, ok := metadata["Content-Length"]; ok && !(sourceClass.IsChunked && sourceClass.ChunkedInfo.Authenticated) {
+	if sizeStr, ok := metadata["Content-Length"]; ok && (!sourceClass.IsChunked || !sourceClass.ChunkedInfo.Authenticated) {
 		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
 			sourceClass.Size = size
 		}

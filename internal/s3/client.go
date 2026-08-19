@@ -343,7 +343,7 @@ func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (C
 	}
 
 	// Use path-style addressing if configured or if UseSSL is false (common for local/MinIO)
-	if f.baseConfig.UsePathStyle || f.baseConfig.UseSSL == false {
+	if f.baseConfig.UsePathStyle || !f.baseConfig.UseSSL {
 		s3Options = append(s3Options, func(o *s3.Options) {
 			o.UsePathStyle = true
 		})

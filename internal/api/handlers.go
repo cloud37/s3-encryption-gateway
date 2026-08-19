@@ -49,6 +49,10 @@ type Handler struct {
 	engineCache      *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
 	mpuStateStore    mpu.StateStore  // nil when encrypted MPU is not configured
 	sizeCache        sizecache.SizeCache
+	// Test seams for API metadata classification failures. Nil uses production
+	// implementations; keeping these private avoids changing the public API.
+	apiMetadataExpander    func(map[string]string) (map[string]string, error)
+	encryptionEngineLoader func(string) (crypto.EncryptionEngine, error)
 }
 
 // NewHandler creates a new API handler (backward compatibility).
@@ -717,6 +721,9 @@ func (h *Handler) getS3Client(r *http.Request) (s3.Client, error) {
 // It checks if a specific policy exists for the bucket and returns a configured engine,
 // otherwise returns the default global engine.
 func (h *Handler) getEncryptionEngine(bucket string) (crypto.EncryptionEngine, error) {
+	if h.encryptionEngineLoader != nil {
+		return h.encryptionEngineLoader(bucket)
+	}
 	if h.policyManager == nil {
 		return h.encryptionEngine, nil
 	}
@@ -913,6 +920,28 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// Check cache first if enabled and no range request
 	if h.cache != nil && rangeHeader == nil && versionID == nil {
 		if cachedEntry, ok := h.cache.Get(ctx, bucket, key); ok {
+			// Cached plaintext is only reusable after the current backend object
+			// has passed v2 completeness preflight. Do not let stale cache state
+			// bypass the integrity boundary.
+			s3Client, clientErr := h.getS3Client(r)
+			if clientErr != nil {
+				h.writeChunkedCompletenessError(w, r, bucket, clientErr, start)
+				return
+			}
+			meta, headErr := s3Client.HeadObject(ctx, bucket, key, nil)
+			if headErr != nil {
+				h.writeChunkedCompletenessError(w, r, bucket, headErr, start)
+				return
+			}
+			if expandedMeta, expandErr := h.expandMetadataForAPI(bucket, meta); expandErr != nil {
+				h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
+				return
+			} else if crypto.IsChunkedFormat(expandedMeta) {
+				if _, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, nil, meta); preflightErr != nil {
+					h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+					return
+				}
+			}
 			// Serve from cache
 			for k, v := range cachedEntry.Metadata {
 				w.Header().Set(k, v)
@@ -982,171 +1011,188 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		// otherwise the plaintext-space range is sent to the backend as a
 		// ciphertext-space range, fetching the wrong bytes.
 		headMeta, headErr := s3Client.HeadObject(ctx, bucket, key, versionID)
+		rawHeadMeta := headMeta
 		if headErr == nil && headMeta[crypto.MetaMPUEncrypted] == "true" {
 			// MPU-encrypted ranged GET: serve via a dedicated path that maps
 			// the plaintext range to backend ciphertext offsets from the
 			// manifest and fetches only those bytes.
 			h.serveMPURangedGet(w, r, ctx, bucket, key, versionID, headMeta, *rangeHeader, s3Client, start)
 			return
-		} else if headErr == nil && engine.IsEncrypted(headMeta) {
-			// Single-PUT chunked or legacy encrypted object.
-			if crypto.IsChunkedFormat(headMeta) {
-				missingOriginalSize := headMeta[crypto.MetaOriginalSize] == "" || headMeta[crypto.MetaChunkCount] == ""
-				forceFullFetch = missingOriginalSize
-				if forceFullFetch {
-					backendRange = nil
-					useRangeOptimization = false
+		} else if headErr == nil && !crypto.IsEncryptedMetadata(headMeta) {
+			backendRange = rangeHeader
+			if size, sizeErr := strconv.ParseInt(rawHeadMeta["Content-Length"], 10, 64); sizeErr == nil && size > 0 {
+				if rangeStart, rangeEnd, rangeErr := crypto.ParseHTTPRangeHeader(*rangeHeader, size); rangeErr == nil {
+					passthroughRange = true
+					passthroughRangeStart, passthroughRangeEnd = rangeStart, rangeEnd
+					passthroughObjectSize = size
 				}
-				chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, headMeta)
-				if preflightErr != nil {
-					h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
-					return
-				}
-				if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) && chunkedInfo.PlaintextSize > 0 {
-					headMeta[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
-					derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
-				}
-				// Get plaintext size for range parsing
-				plaintextSize, err := crypto.GetPlaintextSizeFromMetadata(headMeta)
-				if exactSize, ok := chunkedPlaintextSizeFromCiphertext(headMeta); ok {
-					plaintextSize = exactSize
-					err = nil
-					// The backend ciphertext length is authoritative. Replace
-					// stale original-size metadata, but keep optimized ranges
-					// enabled when the stored value already agrees.
-					storedSize, parseErr := strconv.ParseInt(headMeta[crypto.MetaOriginalSize], 10, 64)
-					headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", exactSize)
-					if parseErr != nil || storedSize != exactSize {
+			}
+		} else if headErr == nil {
+			headMeta, expandErr := h.expandMetadataForAPI(bucket, headMeta)
+			if expandErr != nil {
+				h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
+				return
+			}
+			if engine.IsEncrypted(headMeta) {
+				// Single-PUT chunked or legacy encrypted object.
+				if crypto.IsChunkedFormat(headMeta) {
+					missingOriginalSize := headMeta[crypto.MetaOriginalSize] == "" || headMeta[crypto.MetaChunkCount] == ""
+					forceFullFetch = missingOriginalSize
+					if forceFullFetch {
+						useRangeOptimization = false
+					}
+					chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, rawHeadMeta)
+					if preflightErr != nil {
+						h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+						return
+					}
+					if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) && chunkedInfo.PlaintextSize > 0 {
+						headMeta[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
 						derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
 					}
-				}
-				if err == nil {
-					// Parse range header to get plaintext byte range
-					start, end, err := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
-					if err == nil {
-						plaintextStart, plaintextEnd = start, end
-						// A range covering the complete plaintext object does not
-						// benefit from ciphertext range optimisation. Fetch and
-						// decrypt the complete object instead; this avoids making
-						// Harbor's common `bytes=0-` request depend on range-reader
-						// chunk-boundary bookkeeping.
-						if start == 0 && end == plaintextSize-1 {
-							backendRange = nil
-							useRangeOptimization = false
-						} else {
-							// Calculate encrypted byte range for needed chunks
-							encryptedStart, encryptedEnd, err := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, start, end)
-							if err == nil {
-								encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, headMeta["Content-Length"])
-							}
-							if err == nil {
-								encryptedRange := fmt.Sprintf("bytes=%d-%d", encryptedStart, encryptedEnd)
-								backendRange = &encryptedRange
-								useRangeOptimization = true
-								h.logger.WithFields(logrus.Fields{
-									"bucket":          bucket,
-									"key":             key,
-									"plaintext_range": fmt.Sprintf("%d-%d", start, end),
-									"encrypted_range": encryptedRange,
-								}).Debug("Using optimized range request for chunked encryption")
-							} else {
-								h.logger.WithError(err).Warn("Failed to calculate encrypted range, falling back to full fetch")
-								backendRange = nil
-							}
+					// Get plaintext size for range parsing
+					plaintextSize, err := crypto.GetPlaintextSizeFromMetadata(headMeta)
+					if exactSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(headMeta); sizeErr == nil {
+						plaintextSize = exactSize
+						err = nil
+						// The backend ciphertext length is authoritative. Replace
+						// stale original-size metadata, but keep optimized ranges
+						// enabled when the stored value already agrees.
+						storedSize, parseErr := strconv.ParseInt(headMeta[crypto.MetaOriginalSize], 10, 64)
+						headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", exactSize)
+						if parseErr != nil || storedSize != exactSize {
+							derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
 						}
-					} else {
-						h.logger.WithError(err).Warn("Failed to parse range header, falling back to full fetch")
-						backendRange = nil
 					}
-				} else {
-					// GetPlaintextSizeFromMetadata failed (no MetaOriginalSize or
-					// MetaChunkCount). Derive exact plaintext size from ciphertext
-					// Content-Length + MetaChunkSize so range optimization still works.
-					// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16))*16
-					h.logger.WithFields(logrus.Fields{
-						"bucket":               bucket,
-						"key":                  key,
-						"headmeta_content_len": headMeta["Content-Length"],
-						"headmeta_chunk_size":  headMeta[crypto.MetaChunkSize],
-					}).Debug("chunked object missing MetaOriginalSize — deriving from ciphertext size")
-					if ctStr, ok2 := headMeta["Content-Length"]; ok2 {
-						if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
-							chunkSize := int64(crypto.DefaultChunkSize)
-							if csStr, ok3 := headMeta[crypto.MetaChunkSize]; ok3 {
-								if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
-									chunkSize = cs
+					if err == nil {
+						// Parse range header to get plaintext byte range
+						start, end, err := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
+						if err == nil {
+							plaintextStart, plaintextEnd = start, end
+							// A range covering the complete plaintext object does not
+							// benefit from ciphertext range optimisation. Fetch and
+							// decrypt the complete object instead; this avoids making
+							// Harbor's common `bytes=0-` request depend on range-reader
+							// chunk-boundary bookkeeping.
+							if start == 0 && end == plaintextSize-1 {
+								backendRange = nil
+								useRangeOptimization = false
+							} else {
+								// Calculate encrypted byte range for needed chunks
+								encryptedStart, encryptedEnd, err := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, start, end)
+								if err == nil {
+									encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, headMeta["Content-Length"])
+								}
+								if err == nil {
+									encryptedRange := fmt.Sprintf("bytes=%d-%d", encryptedStart, encryptedEnd)
+									backendRange = &encryptedRange
+									useRangeOptimization = true
+									h.logger.WithFields(logrus.Fields{
+										"bucket":          bucket,
+										"key":             key,
+										"plaintext_range": fmt.Sprintf("%d-%d", start, end),
+										"encrypted_range": encryptedRange,
+									}).Debug("Using optimized range request for chunked encryption")
+								} else {
+									h.logger.WithError(err).Warn("Failed to calculate encrypted range, falling back to full fetch")
+									backendRange = nil
 								}
 							}
-							const aeadTag = int64(16)
-							numChunks := (ct + chunkSize + aeadTag - 1) / (chunkSize + aeadTag)
-							if numChunks < 1 {
-								numChunks = 1
-							}
-							if ps := ct - numChunks*aeadTag; ps > 0 {
-								plaintextSize = ps
-								err = nil
-								// Inject derived size into headMeta so that
-								// CalculateEncryptedRangeForPlaintextRange and
-								// DecryptRangeOptimized can also use it.
-								headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", ps)
-								// Also record for propagation into GetObject metadata.
-								derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
+						} else {
+							h.logger.WithError(err).Warn("Failed to parse range header, falling back to full fetch")
+							backendRange = nil
+						}
+					} else {
+						// GetPlaintextSizeFromMetadata failed (no MetaOriginalSize or
+						// MetaChunkCount). Derive exact plaintext size from ciphertext
+						// Content-Length + MetaChunkSize so range optimization still works.
+						// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16))*16
+						h.logger.WithFields(logrus.Fields{
+							"bucket":               bucket,
+							"key":                  key,
+							"headmeta_content_len": headMeta["Content-Length"],
+							"headmeta_chunk_size":  headMeta[crypto.MetaChunkSize],
+						}).Debug("chunked object missing MetaOriginalSize — deriving from ciphertext size")
+						if ctStr, ok2 := headMeta["Content-Length"]; ok2 {
+							if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
+								chunkSize := int64(crypto.DefaultChunkSize)
+								if csStr, ok3 := headMeta[crypto.MetaChunkSize]; ok3 {
+									if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
+										chunkSize = cs
+									}
+								}
+								version, versionErr := chunkedFormatVersion(headMeta)
+								if versionErr != nil {
+									err = versionErr
+								}
+								if err == nil {
+									if ps, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), version); sizeErr == nil && ps > 0 {
+										plaintextSize = ps
+										err = nil
+										// Inject derived size into headMeta so that
+										// CalculateEncryptedRangeForPlaintextRange and
+										// DecryptRangeOptimized can also use it.
+										headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", ps)
+										// Also record for propagation into GetObject metadata.
+										derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
+									}
+								}
 							}
 						}
-					}
-					if err != nil {
-						h.logger.WithError(err).Warn("Failed to get plaintext size, falling back to full fetch")
-						backendRange = nil
-					} else {
-						// Retry range parsing with derived plaintext size.
-						parsedStart, parsedEnd, parseErr := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
-						if parseErr == nil {
-							plaintextStart, plaintextEnd = parsedStart, parsedEnd
-							encStart, encEnd, encErr := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, parsedStart, parsedEnd)
-							if encErr == nil {
-								encEnd, encErr = clampEncryptedRangeEnd(encStart, encEnd, headMeta["Content-Length"])
-							}
-							if encErr == nil {
-								encRange := fmt.Sprintf("bytes=%d-%d", encStart, encEnd)
-								backendRange = &encRange
-								useRangeOptimization = true
-								h.logger.WithFields(logrus.Fields{
-									"bucket":          bucket,
-									"key":             key,
-									"client_range":    *rangeHeader,
-									"plaintext_size":  plaintextSize,
-									"plaintext_range": fmt.Sprintf("%d-%d", parsedStart, parsedEnd),
-									"encrypted_range": encRange,
-									"decrypted_size":  parsedEnd - parsedStart + 1,
-								}).Debug("range-optimized GET: derived ranges")
+						if err != nil {
+							h.logger.WithError(err).Warn("Failed to get plaintext size, falling back to full fetch")
+							backendRange = nil
+						} else {
+							// Retry range parsing with derived plaintext size.
+							parsedStart, parsedEnd, parseErr := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
+							if parseErr == nil {
+								plaintextStart, plaintextEnd = parsedStart, parsedEnd
+								encStart, encEnd, encErr := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, parsedStart, parsedEnd)
+								if encErr == nil {
+									encEnd, encErr = clampEncryptedRangeEnd(encStart, encEnd, headMeta["Content-Length"])
+								}
+								if encErr == nil {
+									encRange := fmt.Sprintf("bytes=%d-%d", encStart, encEnd)
+									backendRange = &encRange
+									useRangeOptimization = true
+									h.logger.WithFields(logrus.Fields{
+										"bucket":          bucket,
+										"key":             key,
+										"client_range":    *rangeHeader,
+										"plaintext_size":  plaintextSize,
+										"plaintext_range": fmt.Sprintf("%d-%d", parsedStart, parsedEnd),
+										"encrypted_range": encRange,
+										"decrypted_size":  parsedEnd - parsedStart + 1,
+									}).Debug("range-optimized GET: derived ranges")
+								} else {
+									backendRange = nil
+								}
 							} else {
 								backendRange = nil
 							}
-						} else {
-							backendRange = nil
 						}
 					}
-				}
-				// v1 has no authenticated terminal and older objects may not have
-				// persisted original-size metadata. Do not issue a trailer/data
-				// range for that format; the full ciphertext is required for the
-				// established decrypt-and-slice path. Explicit v2 objects retain
-				// the optimized range path and its preflight above.
-				if missingOriginalSize {
+					// v1 has no authenticated terminal and older objects may not have
+					// persisted original-size metadata. Do not issue a trailer/data
+					// range for that format; the full ciphertext is required for the
+					// established decrypt-and-slice path. Explicit v2 objects retain
+					// the optimized range path and its preflight above.
+					if missingOriginalSize {
+						backendRange = nil
+						useRangeOptimization = false
+					}
+				} else {
+					// Legacy format: must fetch full object, decrypt, then apply range.
 					backendRange = nil
-					useRangeOptimization = false
 				}
-			} else {
-				// Legacy format: must fetch full object, decrypt, then apply range.
-				backendRange = nil
 			}
 		} else {
 			// Not encrypted or HEAD failed: forward range to backend as-is.
 			backendRange = rangeHeader
-			if headErr == nil {
+			if _, encryptedMarker := rawHeadMeta[crypto.MetaEncrypted]; !encryptedMarker && rawHeadMeta[crypto.MetaMPUEncrypted] != "true" {
 				// The backend will apply this range. Do not apply it again to
 				// the already-sliced response below.
-				if size, sizeErr := strconv.ParseInt(headMeta["Content-Length"], 10, 64); sizeErr == nil && size > 0 {
+				if size, sizeErr := strconv.ParseInt(rawHeadMeta["Content-Length"], 10, 64); sizeErr == nil && size > 0 {
 					if rangeStart, rangeEnd, rangeErr := crypto.ParseHTTPRangeHeader(*rangeHeader, size); rangeErr == nil {
 						passthroughRange = true
 						passthroughRangeStart = rangeStart
@@ -1190,7 +1236,10 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 	// Authenticate the v2 terminal before any success headers or plaintext are
 	// exposed. Ranged GETs already performed this check during HEAD planning.
-	if crypto.IsChunkedFormat(metadata) && (rangeHeader == nil || !useRangeOptimization) && !forceFullFetch {
+	if expandedMetadata, expandErr := h.expandMetadataForAPI(bucket, metadata); expandErr != nil {
+		h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
+		return
+	} else if crypto.IsChunkedFormat(expandedMetadata) && (rangeHeader == nil || !useRangeOptimization) && !forceFullFetch {
 		chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
 		if preflightErr != nil {
 			h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
@@ -1422,7 +1471,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rangeHeader == nil {
-		if plaintextSize, ok := plaintextSizeFromCiphertextMetadata(metadata); ok {
+		if plaintextSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata); sizeErr == nil {
 			decMetadata["Content-Length"] = strconv.FormatInt(plaintextSize, 10)
 		}
 	}
@@ -1954,11 +2003,14 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 				chunkSize = cs
 			}
 		}
-		// V2 adds one fixed authenticated terminal after the per-chunk tags.
-		const aeadTagSize = 16
-		chunkCount := (originalBytes + int64(chunkSize) - 1) / int64(chunkSize)
-		encLen := originalBytes + chunkCount*int64(aeadTagSize) + crypto.ChunkedTerminalSize
-		contentLengthPtr = &encLen
+		version, versionErr := chunkedFormatVersion(encMetadata)
+		if versionErr != nil {
+			return
+		}
+		encLen, sizeErr := crypto.ChunkedCiphertextSize(originalBytes, chunkSize, version)
+		if sizeErr == nil {
+			contentLengthPtr = &encLen
+		}
 	}
 
 	// Extract lock headers
@@ -2050,26 +2102,14 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 				chunkSize = cs
 			}
 		}
-		const aeadTagSize = int64(16)
 		ct := ciphertextCounter.n
-		// V2 appends a fixed authenticated terminal record after the data
-		// chunks. Exclude it before solving the v1 data-size equation.
-		if encMetadata[crypto.MetaManifest] != "" {
-			ct -= crypto.ChunkedTerminalSize
-		}
-		if ct <= 0 {
+		version, versionErr := chunkedFormatVersion(encMetadata)
+		if versionErr != nil {
 			return
 		}
-		// Solve: find plaintext p such that p + ceil(p/chunkSize)*16 == ct.
-		// Iterate from the upper bound downward until we find a consistent p.
-		maxChunks := (ct + chunkSize) / (chunkSize + aeadTagSize)
-		var plainSize int64
-		for n := maxChunks; n >= 1; n-- {
-			p := ct - n*aeadTagSize
-			if p > 0 && (p+chunkSize-1)/chunkSize == n {
-				plainSize = p
-				break
-			}
+		plainSize, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), version)
+		if sizeErr != nil || plainSize <= 0 {
+			return
 		}
 		if plainSize > 0 {
 			updatedMeta := make(map[string]string, len(s3Metadata)+1)
@@ -2354,16 +2394,22 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
-	if crypto.IsChunkedFormat(metadata) {
+	expandedMetadata, expandErr := h.expandMetadataForAPI(bucket, metadata)
+	if expandErr != nil {
+		h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
+		return
+	}
+	if crypto.IsChunkedFormat(expandedMetadata) {
 		chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
 		if preflightErr != nil {
 			h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
 			return
 		}
 		if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
-			metadata[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
+			expandedMetadata[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
 		}
 	}
+	metadata = expandedMetadata
 	// A self-contained envelope stores the original standard headers in the
 	// gateway encryption metadata. The backend Content-Type is only the generic
 	// ciphertext type and must not win during response restoration.
@@ -2405,34 +2451,8 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	// The gateway then returns wrong data for those ranges, causing digest mismatches
 	// and "unexpected EOF" on pull.
 	if metadata[crypto.MetaChunkedFormat] == "true" {
-		if original, parseErr := strconv.ParseInt(metadata[crypto.MetaOriginalSize], 10, 64); parseErr == nil && original >= 0 {
-			filteredMetadata["Content-Length"] = strconv.FormatInt(original, 10)
-		} else {
-			// Chunked single-PUT objects without MetaOriginalSize (e.g. stored before
-			// the size-recording fix, or via streaming PUT without Content-Length).
-			// Derive the exact plaintext size from the ciphertext Content-Length and
-			// chunk size: each chunk adds exactly 16 bytes (AES-GCM/ChaCha20 AEAD tag).
-			// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16)) * 16
-			if ctStr, ok := metadata["Content-Length"]; ok {
-				if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
-					chunkSize := int64(crypto.DefaultChunkSize)
-					if csStr, ok2 := metadata[crypto.MetaChunkSize]; ok2 {
-						if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
-							chunkSize = cs
-						}
-					}
-					const aeadTagSize = int64(16)
-					// Number of chunks = ceil(ciphertext / (chunkSize + tagSize))
-					numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
-					if numChunks < 1 {
-						numChunks = 1
-					}
-					plainSize := ct - numChunks*aeadTagSize
-					if plainSize > 0 {
-						filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
-					}
-				}
-			}
+		if plainSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata); sizeErr == nil {
+			filteredMetadata["Content-Length"] = strconv.FormatInt(plainSize, 10)
 		}
 	} else if originalSize, ok := metadata["x-amz-meta-encryption-original-size"]; ok {
 		filteredMetadata["Content-Length"] = originalSize
@@ -2850,7 +2870,7 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 	}
 
 	if metadata[crypto.MetaChunkedFormat] == "true" {
-		if plainSize, ok := plaintextSizeFromCiphertextMetadata(metadata); ok {
+		if plainSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata); sizeErr == nil {
 			return plainSize, true, nil
 		}
 		return 0, false, nil
@@ -2867,68 +2887,14 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 	return 0, false, nil
 }
 
-// chunkedPlaintextSizeFromCiphertext returns the exact plaintext size for a
-// chunked object when the backend reports its ciphertext Content-Length.
-// Unlike chunkCount*chunkSize, this handles a short final chunk correctly.
-func chunkedPlaintextSizeFromCiphertext(metadata map[string]string) (int64, bool) {
-	if metadata == nil || metadata[crypto.MetaChunkedFormat] != "true" {
-		return 0, false
-	}
-	ct, err := strconv.ParseInt(metadata["Content-Length"], 10, 64)
-	if err != nil || ct <= 0 {
-		return 0, false
-	}
-	chunkSize := int64(crypto.DefaultChunkSize)
-	if cs, err := strconv.ParseInt(metadata[crypto.MetaChunkSize], 10, 64); err == nil && cs > 0 {
-		chunkSize = cs
-	}
-	version := crypto.ChunkedFormatV1
-	if parsed, versionErr := crypto.ChunkedFormatVersion(metadata); versionErr == nil {
-		version = parsed
-	}
-	// A persisted manifest identifies the modern format even when a backend
-	// drops or cannot decode the compact version field. The terminal is part of
-	// v2's wire size and must not be treated as another data tag.
-	if metadata[crypto.MetaManifest] != "" && version == crypto.ChunkedFormatV1 {
-		if plain, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), crypto.ChunkedFormatV2); sizeErr == nil {
-			return plain, plain > 0
-		}
-	}
-	if version == crypto.ChunkedFormatV1 {
-		if original, parseErr := strconv.ParseInt(metadata[crypto.MetaOriginalSize], 10, 64); parseErr == nil && original >= 0 {
-			return original, true
-		}
-	}
-	if plain, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), version); sizeErr == nil {
-		return plain, plain > 0
-	}
-	const aeadTagSize = int64(16)
-	numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
-	plainSize := ct - numChunks*aeadTagSize
-	return plainSize, plainSize > 0
-}
-
 // chunkedFormatVersion treats chunked metadata without a manifest as legacy
 // v1. A decodable manifest is authoritative, including v2 so its terminal
 // preflight is not accidentally bypassed.
-func chunkedFormatVersion(metadata map[string]string) uint8 {
-	if version, err := crypto.ChunkedFormatVersion(metadata); err == nil {
-		return version
+func chunkedFormatVersion(metadata map[string]string) (uint8, error) {
+	if metadata[crypto.MetaManifest] == "" {
+		return crypto.ChunkedFormatV1, nil
 	}
-	return crypto.ChunkedFormatV1
-}
-
-func plaintextSizeFromCiphertextMetadata(metadata map[string]string) (int64, bool) {
-	if metadata == nil {
-		return 0, false
-	}
-	if metadata[crypto.MetaMPUEncrypted] == "true" {
-		return 0, false
-	}
-	if metadata[crypto.MetaChunkedFormat] == "true" {
-		return chunkedPlaintextSizeFromCiphertext(metadata)
-	}
-	return 0, false
+	return crypto.ChunkedFormatVersion(metadata)
 }
 
 // clampEncryptedRangeEnd limits an optimised ciphertext range to the actual
@@ -4124,7 +4090,12 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	// so the client retries (which idempotently overwrites the backend part) or
 	// aborts the upload. Returning 200 here would be a silent data-loss path.
 	if encMPUState != nil && contentLengthPtr != nil {
-		chunkCount := int32((encMPUPlainLen + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)) // #nosec G115 — max ~82k for 5 GiB parts, well within int32
+		chunkCount64, countErr := crypto.ChunkedDataChunkCount(encMPUPlainLen, crypto.DefaultChunkSize)
+		if countErr != nil || chunkCount64 > uint64(^uint32(0)>>1) {
+			(&S3Error{Code: "InternalError", Message: "Invalid encrypted multipart part size", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
+			return
+		}
+		chunkCount := int32(chunkCount64)
 		pr := mpu.PartRecord{
 			PartNumber: int32(partNumber),
 			ETag:       etag,
@@ -5345,7 +5316,10 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
-	if crypto.IsChunkedFormat(sourceHead) && sourceHead[crypto.MetaMPUEncrypted] != "true" {
+	if expandedSourceHead, expandErr := h.expandMetadataForAPI(srcBucket, sourceHead); expandErr != nil {
+		h.writeChunkedCompletenessError(w, r, srcBucket, expandErr, start)
+		return
+	} else if crypto.IsChunkedFormat(expandedSourceHead) && expandedSourceHead[crypto.MetaMPUEncrypted] != "true" {
 		if _, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
 			h.writeChunkedCompletenessError(w, r, srcBucket, preflightErr, start)
 			return
@@ -5612,11 +5586,17 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 // without consuming the object body used by the subsequent operation. v1 is
 // deliberately accepted with an inferred size and no backend suffix request.
 func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
-	version, err := crypto.ChunkedFormatVersion(metadata)
+	// API handlers classify the stable compact aliases, but the raw metadata
+	// must reach the engine so it can decrypt protected metadata itself.
+	expandedMetadata, err := h.expandMetadataForAPI(bucket, metadata)
+	if err != nil {
+		return crypto.ChunkedObjectInfo{}, err
+	}
+	version, err := crypto.ChunkedFormatVersion(expandedMetadata)
 	if err != nil {
 		// Older chunked objects may not have a persisted manifest. Preserve
 		// their established v1 read behavior; v2 always carries a manifest.
-		if metadata[crypto.MetaManifest] == "" {
+		if expandedMetadata[crypto.MetaManifest] == "" {
 			version = crypto.ChunkedFormatV1
 		} else {
 			return crypto.ChunkedObjectInfo{}, err
@@ -5635,19 +5615,19 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 		return crypto.ChunkedObjectInfo{}, nil
 	}
 	if version == crypto.ChunkedFormatV1 {
-		if metadata["Content-Length"] == "" {
-			plain, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata)
+		if expandedMetadata["Content-Length"] == "" {
+			plain, sizeErr := crypto.GetPlaintextSizeFromMetadata(expandedMetadata)
 			if sizeErr != nil {
 				return crypto.ChunkedObjectInfo{Version: version}, nil
 			}
 			return crypto.ChunkedObjectInfo{Version: version, PlaintextSize: uint64(plain)}, nil
 		}
-		ciphertextSize, parseErr := strconv.ParseInt(metadata["Content-Length"], 10, 64)
+		ciphertextSize, parseErr := strconv.ParseInt(expandedMetadata["Content-Length"], 10, 64)
 		if parseErr != nil || ciphertextSize < 0 {
 			return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: invalid ciphertext size", crypto.ErrChunkedObjectIncomplete)
 		}
 		chunkSize := int64(crypto.DefaultChunkSize)
-		if value, parseErr := strconv.ParseInt(metadata[crypto.MetaChunkSize], 10, 64); parseErr == nil && value > 0 {
+		if value, parseErr := strconv.ParseInt(expandedMetadata[crypto.MetaChunkSize], 10, 64); parseErr == nil && value > 0 {
 			chunkSize = value
 		}
 		plain, count, sizeErr := crypto.ChunkedPlaintextSize(ciphertextSize, int(chunkSize), version)
@@ -5656,36 +5636,19 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 		}
 		return crypto.ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil
 	}
-	ciphertextSize, err := strconv.ParseInt(metadata["Content-Length"], 10, 64)
+	// The caller's HeadObject metadata is authoritative. Do not issue a second
+	// HEAD here: preflight must be exactly one 32-byte suffix GET and all reads
+	// must retain the caller-selected version.
+	ciphertextSize, err := strconv.ParseInt(expandedMetadata["Content-Length"], 10, 64)
 	if err != nil || ciphertextSize < 0 {
 		return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: invalid ciphertext size", crypto.ErrChunkedObjectIncomplete)
 	}
 	if ciphertextSize < crypto.ChunkedTerminalSize {
 		return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: short ciphertext", crypto.ErrChunkedObjectIncomplete)
 	}
-	var trailer io.ReadCloser
-	if metadata[crypto.MetaOriginalSize] == "" {
-		// Legacy-compatible metadata lacks the size needed to safely issue a
-		// suffix request. Fetch the complete object and authenticate its terminal
-		// from the buffered tail instead of turning the preflight into a range GET.
-		full, _, fullErr := s3Client.GetObject(ctx, bucket, key, versionID, nil)
-		if fullErr != nil {
-			return crypto.ChunkedObjectInfo{}, fullErr
-		}
-		data, readErr := io.ReadAll(full)
-		_ = full.Close()
-		if readErr != nil {
-			return crypto.ChunkedObjectInfo{}, readErr
-		}
-		trailer = io.NopCloser(bytes.NewReader(data[len(data)-crypto.ChunkedTerminalSize:]))
-	} else {
-		first := ciphertextSize - crypto.ChunkedTerminalSize
-		rangeHeader := fmt.Sprintf("bytes=%d-%d", first, ciphertextSize-1)
-		trailer, _, err = s3Client.GetObject(ctx, bucket, key, versionID, &rangeHeader)
-		if err != nil {
-			return crypto.ChunkedObjectInfo{}, err
-		}
-	}
+	first := ciphertextSize - crypto.ChunkedTerminalSize
+	rangeHeader := fmt.Sprintf("bytes=%d-%d", first, ciphertextSize-1)
+	trailer, _, err := s3Client.GetObject(ctx, bucket, key, versionID, &rangeHeader)
 	if err != nil {
 		return crypto.ChunkedObjectInfo{}, err
 	}
@@ -5693,18 +5656,45 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 	return engine.AuthenticateChunkedTrailer(ctx, trailer, metadata, ciphertextSize)
 }
 
+func (h *Handler) expandMetadataForAPI(bucket string, metadata map[string]string) (map[string]string, error) {
+	expand := crypto.ExpandMetadataForAPI
+	if h.apiMetadataExpander != nil {
+		expand = h.apiMetadataExpander
+	}
+	expanded, err := expand(metadata)
+	if err != nil {
+		return nil, err
+	}
+	engine, err := h.getEncryptionEngine(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if expander, ok := engine.(interface {
+		APIExpandedMetadata(map[string]string) (map[string]string, error)
+	}); ok {
+		return expander.APIExpandedMetadata(metadata)
+	}
+	return expanded, nil
+}
+
 // preflightChunkedCompletenessIfV2 preserves the established v1 read path.
 // An explicitly present but unsupported manifest is still sent through the
 // strict helper so it fails closed rather than being treated as v1.
 func (h *Handler) preflightChunkedCompletenessIfV2(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
-	if metadata[crypto.MetaManifest] == "" {
+	expandedMetadata, err := h.expandMetadataForAPI(bucket, metadata)
+	if err != nil {
+		return crypto.ChunkedObjectInfo{}, err
+	}
+	manifest, present := expandedMetadata[crypto.MetaManifest]
+	if !present {
 		return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, nil
 	}
-	version, err := crypto.ChunkedFormatVersion(metadata)
+	if manifest == "" {
+		return crypto.ChunkedObjectInfo{}, fmt.Errorf("chunked manifest is present but empty")
+	}
+	version, err := crypto.ChunkedFormatVersion(expandedMetadata)
 	if err != nil {
-		// Test doubles and older persisted v1 objects may advertise chunked
-		// encryption without a decodable manifest. Keep their v1 behavior.
-		return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, nil
+		return crypto.ChunkedObjectInfo{}, fmt.Errorf("invalid chunked manifest: %w", err)
 	}
 	if version == crypto.ChunkedFormatV1 {
 		return crypto.ChunkedObjectInfo{Version: version}, nil
@@ -5716,6 +5706,11 @@ func (h *Handler) writeChunkedCompletenessError(w http.ResponseWriter, r *http.R
 	h.metrics.RecordEncryptionError(r.Context(), "decrypt", "chunked_completeness_failed")
 	h.logger.WithError(err).WithField("bucket", bucket).Error("Chunked object completeness check failed")
 	s3Err := &S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusInternalServerError)
+		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		return
+	}
 	s3Err.WriteXML(w)
 	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 }
