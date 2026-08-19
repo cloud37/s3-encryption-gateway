@@ -57,7 +57,7 @@ type ChunkedObjectInfo struct {
 type ChunkManifest struct {
 	Version      int      `json:"v"`             // Format version (currently 1)
 	ChunkSize    int      `json:"cs"`            // Size of each chunk in bytes
-	ChunkCount   int      `json:"cc"`            // Number of chunks
+	ChunkCount   uint64   `json:"cc"`            // Number of chunks
 	BaseIV       string   `json:"iv"`            // Base64-encoded base IV (for IV derivation)
 	IVs          []string `json:"ivs,omitempty"` // Optional: explicit IVs per chunk (if baseIV not used)
 	IVDerivation string   `json:"ivd,omitempty"` // IV derivation method: "hkdf-sha256" or "" (legacy XOR)
@@ -77,28 +77,47 @@ type chunkedEncryptReader struct {
 	index        uint64
 	plainSize    uint64
 	pending      []byte
-	terminal     []byte
 	done         bool
 	err          error
 }
 
 // newChunkedEncryptReader creates a legacy-compatible v1 reader.
 func newChunkedEncryptReader(source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool) (*chunkedEncryptReader, *ChunkManifest) {
-	return newChunkedEncryptReaderWithContext(context.Background(), source, aead, baseIV, chunkSize, bufferPool)
+	return newChunkedEncryptReaderV1(context.Background(), source, aead, baseIV, chunkSize, bufferPool)
 }
 
-// newChunkedEncryptReaderWithContext accepts an optional version for old internal callers.
-func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, versions ...interface{}) (*chunkedEncryptReader, *ChunkManifest) {
-	version := ChunkedFormatV1
-	var terminal cipher.AEAD
-	for _, option := range versions {
-		switch value := option.(type) {
-		case uint8:
-			version = value
-		case cipher.AEAD:
-			terminal = value
-		}
+func newChunkedEncryptReaderV1(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool) (*chunkedEncryptReader, *ChunkManifest) {
+	return newChunkedEncryptReaderForVersion(ctx, source, aead, baseIV, chunkSize, bufferPool, ChunkedFormatV1, nil)
+}
+
+func newChunkedEncryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, version uint8, terminalAEAD cipher.AEAD) (*chunkedEncryptReader, *ChunkManifest, error) {
+	if version != ChunkedFormatV2 {
+		return nil, nil, fmt.Errorf("unsupported v2 chunked writer version: %d", version)
 	}
+	if terminalAEAD == nil {
+		return nil, nil, fmt.Errorf("v2 chunked writer requires terminal AEAD")
+	}
+	reader, manifest := newChunkedEncryptReaderForVersion(ctx, source, aead, baseIV, chunkSize, bufferPool, version, terminalAEAD)
+	return reader, manifest, nil
+}
+
+// newChunkedEncryptReaderWithContext is the plan-specified versioned entry
+// point. The typed constructors remain the implementation-specific helpers.
+func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, terminalAEAD cipher.AEAD, baseIV []byte, chunkSize int, version uint8, bufferPool *BufferPool) (*chunkedEncryptReader, *ChunkManifest, error) {
+	if version == ChunkedFormatV2 {
+		if aead == nil {
+			return nil, nil, fmt.Errorf("v2 chunked writer requires data AEAD")
+		}
+		return newChunkedEncryptReaderV2(ctx, source, aead, baseIV, chunkSize, bufferPool, version, terminalAEAD)
+	}
+	if version != ChunkedFormatV1 {
+		return nil, nil, fmt.Errorf("unsupported chunked format version: %d", version)
+	}
+	reader, manifest := newChunkedEncryptReaderForVersion(ctx, source, aead, baseIV, chunkSize, bufferPool, version, nil)
+	return reader, manifest, nil
+}
+
+func newChunkedEncryptReaderForVersion(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, version uint8, terminalAEAD cipher.AEAD) (*chunkedEncryptReader, *ChunkManifest) {
 	if chunkSize < MinChunkSize {
 		chunkSize = MinChunkSize
 	}
@@ -106,34 +125,41 @@ func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, a
 		chunkSize = MaxChunkSize
 	}
 	manifest := &ChunkManifest{Version: int(version), ChunkSize: chunkSize, BaseIV: encodeBase64(baseIV), IVDerivation: "hkdf-sha256"}
-	return &chunkedEncryptReader{source: source, aead: aead, terminalAEAD: terminal, baseIV: baseIV, chunkSize: chunkSize, manifest: manifest, bufferPool: bufferPool, ctx: ctx, version: version}, manifest
+	return &chunkedEncryptReader{source: source, aead: aead, terminalAEAD: terminalAEAD, baseIV: baseIV, chunkSize: chunkSize, manifest: manifest, bufferPool: bufferPool, ctx: ctx, version: version}, manifest
 }
 
 // deriveChunkIVHKDF preserves the v1 wire format for legacy reads.
 func deriveChunkIVHKDF(baseIV []byte, chunkIndex int) []byte {
-	info := make([]byte, 12)
-	copy(info, "chunk-iv")
-	binary.BigEndian.PutUint32(info[8:], uint32(chunkIndex)) // #nosec G115 -- legacy index encoding
-	r := hkdf.Expand(sha256.New, baseIV, info)
-	iv := make([]byte, len(baseIV))
-	_, _ = io.ReadFull(r, iv)
+	iv, _ := deriveChunkIVHKDFIndex(baseIV, uint64(chunkIndex))
 	return iv
 }
 
-func deriveLegacyChunkIV(baseIV []byte, chunkIndex int) []byte {
+func deriveChunkIVHKDFIndex(baseIV []byte, chunkIndex uint64) ([]byte, error) {
+	if chunkIndex > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("chunk index %d exceeds v1 wire limit", chunkIndex)
+	}
+	info := make([]byte, 12)
+	copy(info, "chunk-iv")
+	binary.BigEndian.PutUint32(info[8:], uint32(chunkIndex))
+	r := hkdf.Expand(sha256.New, baseIV, info)
+	iv := make([]byte, len(baseIV))
+	if _, err := io.ReadFull(r, iv); err != nil {
+		return nil, err
+	}
+	return iv, nil
+}
+
+func deriveLegacyChunkIVIndex(baseIV []byte, chunkIndex uint64) ([]byte, error) {
+	if chunkIndex > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("chunk index %d exceeds v1 wire limit", chunkIndex)
+	}
 	iv := append([]byte(nil), baseIV...)
 	var index [4]byte
-	binary.BigEndian.PutUint32(index[:], uint32(chunkIndex)) // #nosec G115 -- legacy index encoding
+	binary.BigEndian.PutUint32(index[:], uint32(chunkIndex))
 	for i := 0; i < 4 && i < len(iv); i++ {
 		iv[len(iv)-1-i] ^= index[3-i]
 	}
-	return iv
-}
-
-func readHKDFNonceWithSize(baseIV, info []byte, size int) ([]byte, error) {
-	result := make([]byte, size)
-	_, err := io.ReadFull(hkdf.New(sha256.New, baseIV, nil, info), result)
-	return result, err
+	return iv, nil
 }
 
 func (r *chunkedEncryptReader) Read(p []byte) (int, error) {
@@ -170,7 +196,7 @@ func (r *chunkedEncryptReader) Read(p []byte) (int, error) {
 				nonce, r.err = deriveChunkNonceHKDF(r.baseIV, r.version, r.index)
 				aad = buildChunkAAD(r.version, r.index)
 			} else {
-				nonce = deriveChunkIVHKDF(r.baseIV, int(r.index))
+				nonce, r.err = deriveChunkIVHKDFIndex(r.baseIV, r.index)
 				aad = nil
 			}
 			if r.err != nil {
@@ -182,8 +208,12 @@ func (r *chunkedEncryptReader) Read(p []byte) (int, error) {
 				return written, r.err
 			}
 			r.plainSize += uint64(n)
+			if r.index == ^uint64(0) {
+				r.err = fmt.Errorf("chunk count overflow")
+				return written, r.err
+			}
 			r.index++
-			r.manifest.ChunkCount = int(r.index)
+			r.manifest.ChunkCount = r.index
 			continue
 		}
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
@@ -238,10 +268,36 @@ type chunkedDecryptReader struct {
 }
 
 func newChunkedDecryptReader(source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
-	return newChunkedDecryptReaderWithContext(context.Background(), source, aead, manifest, bufferPool)
+	return newChunkedDecryptReaderV1(context.Background(), source, aead, manifest, bufferPool)
 }
 
-func newChunkedDecryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminal ...cipher.AEAD) (*chunkedDecryptReader, error) {
+func newChunkedDecryptReaderV1(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
+	return newChunkedDecryptReaderForVersion(ctx, source, aead, manifest, bufferPool, nil)
+}
+
+func newChunkedDecryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminalAEAD cipher.AEAD) (*chunkedDecryptReader, error) {
+	if manifest == nil || uint8(manifest.Version) != ChunkedFormatV2 {
+		return nil, fmt.Errorf("v2 chunked reader requires version 2 manifest")
+	}
+	if terminalAEAD == nil {
+		return nil, fmt.Errorf("v2 chunked reader requires terminal AEAD")
+	}
+	return newChunkedDecryptReaderForVersion(ctx, source, aead, manifest, bufferPool, terminalAEAD)
+}
+
+// newChunkedDecryptReaderWithContext is the plan-specified versioned entry
+// point for callers that already selected the terminal AEAD when needed.
+func newChunkedDecryptReaderWithContext(ctx context.Context, source io.Reader, dataAEAD cipher.AEAD, terminalAEAD cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
+	if manifest != nil && manifest.Version == int(ChunkedFormatV2) {
+		return newChunkedDecryptReaderV2(ctx, source, dataAEAD, manifest, bufferPool, terminalAEAD)
+	}
+	return newChunkedDecryptReaderV1(ctx, source, dataAEAD, manifest, bufferPool)
+}
+
+func newChunkedDecryptReaderForVersion(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminalAEAD cipher.AEAD) (*chunkedDecryptReader, error) {
+	if manifest == nil {
+		return nil, fmt.Errorf("missing chunk manifest")
+	}
 	if err := validateChunkedVersion(uint8(manifest.Version)); err != nil {
 		return nil, err
 	}
@@ -249,11 +305,10 @@ func newChunkedDecryptReaderWithContext(ctx context.Context, source io.Reader, a
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base IV: %w", err)
 	}
-	var term cipher.AEAD
-	if len(terminal) > 0 {
-		term = terminal[0]
+	if uint8(manifest.Version) == ChunkedFormatV2 && terminalAEAD == nil {
+		return nil, fmt.Errorf("v2 chunked reader requires terminal AEAD")
 	}
-	return &chunkedDecryptReader{source: source, aead: aead, terminalAEAD: term, manifest: manifest, baseIV: baseIV, chunkSize: manifest.ChunkSize, bufferPool: bufferPool, ctx: ctx, version: uint8(manifest.Version)}, nil
+	return &chunkedDecryptReader{source: source, aead: aead, terminalAEAD: terminalAEAD, manifest: manifest, baseIV: baseIV, chunkSize: manifest.ChunkSize, bufferPool: bufferPool, ctx: ctx, version: uint8(manifest.Version)}, nil
 }
 
 func (r *chunkedDecryptReader) Read(p []byte) (int, error) {
@@ -290,7 +345,7 @@ func (r *chunkedDecryptReader) Read(p []byte) (int, error) {
 			for len(r.lookbehind) > ChunkedTerminalSize+r.chunkSize+tagSize {
 				if err := r.decryptData(r.lookbehind[:r.chunkSize+tagSize]); err != nil {
 					r.err = fmt.Errorf("%w: invalid data record: %v", ErrChunkedObjectIncomplete, err)
-					return written, err
+					return written, r.err
 				}
 				r.lookbehind = r.lookbehind[r.chunkSize+tagSize:]
 			}
@@ -370,9 +425,9 @@ func (r *chunkedDecryptReader) decryptData(ciphertext []byte) error {
 		aad = buildChunkAAD(r.version, r.index)
 	} else {
 		if r.manifest.IVDerivation == "hkdf-sha256" {
-			nonce = deriveChunkIVHKDF(r.baseIV, int(r.index))
+			nonce, err = deriveChunkIVHKDFIndex(r.baseIV, r.index)
 		} else {
-			nonce = deriveLegacyChunkIV(r.baseIV, int(r.index))
+			nonce, err = deriveLegacyChunkIVIndex(r.baseIV, r.index)
 		}
 	}
 	if err != nil {

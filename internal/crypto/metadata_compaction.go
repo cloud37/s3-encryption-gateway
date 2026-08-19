@@ -11,6 +11,26 @@ type MetadataCompactor struct {
 	profile *ProviderProfile
 }
 
+// ExpandMetadataForAPI expands the compact aliases that may be returned by a
+// backend before an API handler classifies an encrypted object. API callers do
+// not own an engine/profile, but the aliases are protocol-stable.
+func ExpandMetadataForAPI(metadata map[string]string) (map[string]string, error) {
+	compactKeys := []string{"x-amz-meta-e", "x-amz-meta-a", "x-amz-meta-s", "x-amz-meta-i", "x-amz-meta-c", "x-amz-meta-cs", "x-amz-meta-cc", "x-amz-meta-m", "x-amz-meta-kdf", MetaEncryptedMetadataCompact}
+	found := false
+	for _, key := range compactKeys {
+		if _, ok := metadata[key]; ok {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return metadata, nil
+	}
+	// API classification must understand aliases emitted by provider profiles;
+	// use the canonical short-key profile rather than the non-compacting default.
+	return NewMetadataCompactor(ProviderAWS).ExpandMetadata(metadata)
+}
+
 // NewMetadataCompactor creates a new compactor for the given provider
 func NewMetadataCompactor(profile *ProviderProfile) *MetadataCompactor {
 	return &MetadataCompactor{profile: profile}

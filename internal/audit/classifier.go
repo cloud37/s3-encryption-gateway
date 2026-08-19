@@ -118,10 +118,10 @@ func ClassifyObject(meta map[string]string) ObjectClass {
 	// Class E distinguishes legacy chunked v1 from modern chunked v2. Keep
 	// this after higher-priority legacy classifications above.
 	if isChunked {
-		// Older metadata may predate persisted manifests; retain its existing
-		// modern classification. A present manifest must be parseable.
+		// A chunked object without a manifest cannot establish its wire version.
+		// It is not safe to classify such metadata as modern.
 		if meta[crypto.MetaManifest] == "" {
-			return ClassModern
+			return ClassUnknown
 		}
 		version, err := crypto.ChunkedFormatVersion(meta)
 		if err == nil && version == crypto.ChunkedFormatV1 {

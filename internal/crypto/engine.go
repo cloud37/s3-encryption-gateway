@@ -97,6 +97,25 @@ type EncryptionEngine interface {
 	PreferredAlgorithm() string
 }
 
+// APIExpandedMetadata returns the metadata view needed for API classification.
+// It expands aliases and, when configured, decrypts the protected metadata blob.
+func (e *engine) APIExpandedMetadata(metadata map[string]string) (map[string]string, error) {
+	expanded, err := e.compactor.ExpandMetadata(metadata)
+	if err != nil {
+		return nil, err
+	}
+	if blob := expanded[MetaEncryptedMetadata]; blob != "" && e.metadataKey != nil {
+		protected, err := e.decryptMetadata(blob)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt metadata: %w", err)
+		}
+		for key, value := range protected {
+			expanded[key] = value
+		}
+	}
+	return expanded, nil
+}
+
 // engine implements the EncryptionEngine interface.
 // Argon2idConfig holds operator-tunable argon2id KDF parameters.
 //
@@ -126,6 +145,9 @@ type engine struct {
 	// Provider and compaction settings
 	providerProfile *ProviderProfile
 	compactor       *MetadataCompactor
+	// metadataExpansionOverride is test-only plumbing for deterministic
+	// malformed metadata coverage; nil always uses the configured compactor.
+	metadataExpansionOverride func(map[string]string) (map[string]string, error)
 	// Buffer pool for reducing allocations
 	bufferPool *BufferPool
 	// Tracing
@@ -146,6 +168,13 @@ type engine struct {
 	// objects without the MetaLegacyNoAAD marker. Default false (fail-closed).
 	// Used for controlled recovery windows. See V1.0-CLI-2 Phase D.
 	allowUnmarkedNoAAD bool
+}
+
+func (e *engine) expandMetadataForCrypto(metadata map[string]string) (map[string]string, error) {
+	if e.metadataExpansionOverride != nil {
+		return e.metadataExpansionOverride(metadata)
+	}
+	return e.compactor.ExpandMetadata(metadata)
 }
 
 // NewEngine creates a new encryption engine with the given password.
@@ -1069,7 +1098,10 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", err)
 	}
-	chunkedReader, manifest := newChunkedEncryptReaderWithContext(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
+	chunkedReader, manifest, err := newChunkedEncryptReaderV2(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Encode manifest for storage
 	manifestEncoded, err := encodeManifest(manifest)
@@ -1209,7 +1241,10 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", err)
 	}
-	chunkedReader, manifest := newChunkedEncryptReaderWithContext(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
+	chunkedReader, manifest, err := newChunkedEncryptReaderV2(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Encode manifest
 	manifestEncoded, err := encodeManifest(manifest)
@@ -1379,6 +1414,7 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 			Ciphertext: wrapped,
 		}
 		key, err = e.kmsManager.UnwrapKey(ctx, env, metadata)
+		defer zeroBytes(key)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to unwrap data key: %w", err)
 		}
@@ -1403,7 +1439,9 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 			return nil, nil, fmt.Errorf("internal: PBKDF2 returned unexpected key size %d (want %d)", len(key), keySize)
 		}
 	}
-	defer zeroBytes(key)
+	if e.kmsManager == nil || metadata[MetaWrappedKeyCiphertext] == "" {
+		defer zeroBytes(key)
+	}
 
 	// Create cipher using algorithm from metadata
 	aeadCipher, err := createAEADCipher(algorithm, key)
@@ -1424,7 +1462,12 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 			return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", terminalErr)
 		}
 	}
-	chunkedReader, err := newChunkedDecryptReaderWithContext(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD)
+	var chunkedReader *chunkedDecryptReader
+	if uint8(manifest.Version) == ChunkedFormatV2 {
+		chunkedReader, err = newChunkedDecryptReaderV2(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD)
+	} else {
+		chunkedReader, err = newChunkedDecryptReaderV1(ctx, reader, aead, manifest, e.bufferPool)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create chunked decrypt reader: %w", err)
 	}
@@ -1477,10 +1520,8 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 			if chunkSize <= 0 {
 				chunkSize = int64(DefaultChunkSize)
 			}
-			const aeadTagSize = int64(16)
-			numChunks := (ct + chunkSize + aeadTagSize - 1) / (chunkSize + aeadTagSize)
-			plainSize := ct - numChunks*aeadTagSize
-			if plainSize > 0 {
+			version := uint8(manifest.Version)
+			if plainSize, _, sizeErr := ChunkedPlaintextSize(ct, int(chunkSize), version); sizeErr == nil && plainSize > 0 {
 				decMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
 			}
 		}
@@ -1488,17 +1529,6 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 	if _, ok := decMetadata["Content-Length"]; !ok {
 		if originalSize, ok := metadata[MetaOriginalSize]; ok {
 			decMetadata["Content-Length"] = originalSize
-		} else if chunkCount, ok := metadata[MetaChunkCount]; ok {
-			if chunkSize, ok2 := metadata[MetaChunkSize]; ok2 {
-				count, err1 := strconv.Atoi(chunkCount)
-				size, err2 := strconv.Atoi(chunkSize)
-				if err1 == nil && err2 == nil && count > 0 && size > 0 {
-					// This is only a last-resort upper bound when the backend did
-					// not provide a ciphertext length.
-					approxSize := int64(count * size)
-					decMetadata["Content-Length"] = fmt.Sprintf("%d", approxSize)
-				}
-			}
 		}
 	}
 
@@ -1521,9 +1551,18 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, trailer io.Read
 	if err := ctx.Err(); err != nil {
 		return ChunkedObjectInfo{}, err
 	}
-	expanded, err := e.compactor.ExpandMetadata(metadata)
+	expanded, err := e.expandMetadataForCrypto(metadata)
 	if err != nil {
 		return ChunkedObjectInfo{}, err
+	}
+	if blob := expanded[MetaEncryptedMetadata]; blob != "" {
+		protected, decryptErr := e.decryptMetadata(blob)
+		if decryptErr != nil {
+			return ChunkedObjectInfo{}, fmt.Errorf("decrypt metadata: %w", decryptErr)
+		}
+		for key, value := range protected {
+			expanded[key] = value
+		}
 	}
 	version, err := ChunkedFormatVersion(expanded)
 	if err != nil {
@@ -1569,10 +1608,13 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, trailer io.Read
 		}
 		key, err = e.deriveKeyWithParams(salt, params)
 	}
+	// KeyManager implementations may return key material alongside an error.
+	// Install cleanup before interpreting the result so failed unwraps cannot
+	// extend the DEK lifetime.
+	defer zeroBytes(key)
 	if err != nil {
 		return ChunkedObjectInfo{}, err
 	}
-	defer zeroBytes(key)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return ChunkedObjectInfo{}, err
@@ -1653,7 +1695,7 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	}
 
 	// Expand compacted metadata first
-	expandedMetadata, err := e.compactor.ExpandMetadata(metadata)
+	expandedMetadata, err := e.expandMetadataForCrypto(metadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to expand metadata: %w", err)
 	}
@@ -1690,6 +1732,13 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	// Get plaintext size for validation. Prefer the caller's original size when
 	// the stored content length is absent or is a legacy/non-canonical fixture.
 	plaintextSize, err := GetPlaintextSizeFromMetadata(expandedMetadata)
+	// For optimized v2 reads, the full-object Content-Length-derived size is
+	// authoritative. MetaOriginalSize may be stale and must not widen a range.
+	if !isOptimizedSource {
+		if original, parseErr := strconv.ParseInt(expandedMetadata[MetaOriginalSize], 10, 64); parseErr == nil && original >= 0 {
+			plaintextSize, err = original, nil
+		}
+	}
 	if err != nil && expandedMetadata[MetaOriginalSize] != "" {
 		plaintextSize, err = strconv.ParseInt(expandedMetadata[MetaOriginalSize], 10, 64)
 	}
@@ -1718,7 +1767,11 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	// object; for DecryptRange we need the count up-front. Derive it from
 	// the original plaintext size and chunk size (both always in metadata).
 	if manifest.ChunkCount == 0 && manifest.ChunkSize > 0 && plaintextSize > 0 {
-		manifest.ChunkCount = int((plaintextSize + int64(manifest.ChunkSize) - 1) / int64(manifest.ChunkSize))
+		chunkCount, countErr := ChunkedDataChunkCount(plaintextSize, manifest.ChunkSize)
+		if countErr != nil {
+			return nil, nil, fmt.Errorf("invalid chunk count: %w", countErr)
+		}
+		manifest.ChunkCount = chunkCount
 	}
 
 	// Extract encryption parameters
@@ -1764,6 +1817,7 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 			Ciphertext: wrapped,
 		}
 		key, err = e.kmsManager.UnwrapKey(ctx, env, expandedMetadata)
+		defer zeroBytes(key)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to unwrap data key: %w", err)
 		}
@@ -1788,7 +1842,9 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 			return nil, nil, fmt.Errorf("internal: PBKDF2 returned unexpected key size %d (want %d)", len(key), keySize)
 		}
 	}
-	defer zeroBytes(key)
+	if e.kmsManager == nil || expandedMetadata[MetaWrappedKeyCiphertext] == "" {
+		defer zeroBytes(key)
+	}
 
 	// Create cipher
 	aeadCipher, err := createAEADCipher(algorithm, key)
@@ -1798,7 +1854,7 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	aead := aeadCipher.(cipher.AEAD)
 
 	// Create range-aware decrypt reader
-	rangeReader, err := newRangeDecryptReader(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool, isOptimizedSource)
+	rangeReader, err := newRangeDecryptReader(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool, isOptimizedSource, plaintextSize)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create range reader: %w", err)
 	}
