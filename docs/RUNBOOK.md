@@ -360,10 +360,14 @@ a follow-up in the plan but is not yet implemented.
 **Symptom:** KMS health check has been failing for more than 2 minutes.
 
 **Diagnosis:**
-1. Check KMS provider endpoint from the gateway pod: `kubectl exec POD -- curl -v http://kms-endpoint:port/`.
-2. Verify network policies allow egress to the KMS endpoint.
-3. Check TLS certificates if the KMS uses mTLS.
-4. Inspect KMS server logs (external system).
+1. Read the readiness body: `curl -s http://POD_IP:8438/ready`. A connection
+   error (refused, timeout, DNS) means the KMS is **unreachable**; `401`/`403`
+   means it is reachable and rejected the gateway's **credential** — see
+   [kms-auth-token-expired](#kms-auth-token-expired).
+2. Check KMS provider endpoint from the gateway pod: `kubectl exec POD -- curl -v http://kms-endpoint:port/`.
+3. Verify network policies allow egress to the KMS endpoint.
+4. Check TLS certificates if the KMS uses mTLS.
+5. Inspect KMS server logs (external system).
 
 **Mitigation:**
 - Restart the KMS service if self-hosted (Cosmian, Vault).
@@ -393,12 +397,48 @@ a follow-up in the plan but is not yet implemented.
 1. When the KMS recovers, the circuit breaker Half-Open probe succeeds and the
    breaker closes automatically.
 2. The health-check goroutine updates `gateway_kms_healthy` to 1.
-3. No gateway restart is required.
+3. If the auth token did not survive the outage, the adapter re-authenticates on
+   its own — see [kms-auth-token-expired](#kms-auth-token-expired).
+4. No gateway restart is required.
 
 **Fail-closed guarantee:** Write operations (new object encryption) always
 require a successful `WrapKey` call; the DEK cache covers only reads. A
 gateway running with a downed KMS will accept GET requests for cached objects
 but reject PUT/POST operations. This is the correct degraded-mode posture.
+
+---
+
+### kms-auth-token-expired
+
+**Scenario:** the KMS is reachable but rejects the gateway's credential —
+`403 permission denied` on every wrap/unwrap and in the readiness body. For
+OpenBao/Vault the token was revoked, hit its `max_ttl`, or lost its lease while
+the server was unreachable (a raft quorum loss will do it).
+
+**Behaviour:** self-healing. The renewal goroutine re-logs-in as soon as a
+renewal fails, and any request rejected with 401/403 triggers a re-login and one
+retry, so recovery does not wait for the lease clock. It is bounded by the login
+floor rather than instant — expect failures for up to a second — and concurrent
+requests coalesce into a single re-login. This assumes the credential is
+recoverable; if the login itself is refused, requests fail until an operator
+fixes the role.
+
+**Diagnosis:**
+1. `gateway_kms_reauth_total{outcome="success"}` above the startup login means
+   tokens are dying early and being recovered — look at `token_ttl`/`max_ttl` or
+   KMS stability, not at the gateway. A slow steady rate with no user-visible
+   errors usually means the role can log in but not renew: it is missing
+   `auth/token/renew-self` (see `docs/KMS_COMPATIBILITY.md`). Harmless, but it
+   churns the KMS lease table.
+2. `{outcome="failure"}` climbing while the KMS is reachable means
+   re-authentication itself is broken — the role, its policy, or the credential
+   source, not an expiring token. A restart will NOT help.
+3. For Kubernetes auth, confirm the ServiceAccount token is still projected and
+   the role's bound SA name/namespace still match.
+
+**Mitigation:** nothing, normally. If `outcome="failure"` dominates, fix the
+role/policy; restarting the pod will not help, because the credential itself is
+being refused.
 
 ---
 

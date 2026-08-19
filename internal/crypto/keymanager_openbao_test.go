@@ -37,15 +37,25 @@ type mockBaoServer struct {
 
 	// behaviour toggles
 	renewNonRenewable bool // if true, renew-self returns a non-renewable token
+	renewStatus       int  // if non-zero, auth/token/renew-self returns this status
+	downStatus        int  // if non-zero, EVERY endpoint returns this status
+	leaseSeconds      int  // lease_duration issued by login/renew. Default 2.
+
+	// token lifecycle. Tokens handed out by the login endpoints are recorded so a
+	// test can expire them mid-flight; an expired token then 403s on every
+	// authenticated path while the login endpoints stay open.
+	issuedTokens []string
+	expired      map[string]bool
 
 	// observability
-	renewCount int
-	loginCount int
+	renewCount   int
+	loginCount   int
+	requestCount int // every HTTP request, whatever the outcome
 }
 
 func newMockBaoServer(t *testing.T) *mockBaoServer {
 	t.Helper()
-	m := &mockBaoServer{transitPath: "transit", keyName: "test-key", latestVersion: 1}
+	m := &mockBaoServer{transitPath: "transit", keyName: "test-key", latestVersion: 1, expired: map[string]bool{}, leaseSeconds: 2}
 	m.Server = httptest.NewServer(http.HandlerFunc(m.handle))
 	t.Cleanup(m.Server.Close)
 	return m
@@ -65,7 +75,24 @@ func (m *mockBaoServer) handle(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.requestCount++
+
 	path := strings.TrimPrefix(r.URL.Path, "/v1/")
+
+	// Whole-server outage: models OpenBao with no raft leader, which 5xxs every
+	// path including the login endpoints.
+	if m.downStatus != 0 {
+		m.writeErr(w, m.downStatus, "local node not active but active cluster node not found")
+		return
+	}
+
+	// An expired token is rejected on every authenticated path. The login
+	// endpoints are unauthenticated and stay reachable.
+	if !strings.HasSuffix(path, "/login") && m.expired[r.Header.Get("X-Vault-Token")] {
+		m.writeErr(w, http.StatusForbidden, "permission denied")
+		return
+	}
+
 	body := map[string]any{}
 	if r.Body != nil {
 		if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
@@ -130,7 +157,13 @@ func (m *mockBaoServer) handle(w http.ResponseWriter, r *http.Request) {
 
 	case "auth/token/renew-self":
 		m.renewCount++
-		renewable, lease := true, 2
+		if m.renewStatus != 0 {
+			// Models a role WITHOUT renew-self capability (token_no_default_policy
+			// with only lookup-self granted): login works, renewal never will.
+			m.writeErr(w, m.renewStatus, "permission denied")
+			return
+		}
+		renewable, lease := true, m.leaseSeconds
 		if m.renewNonRenewable {
 			// Token can no longer be renewed -> LifetimeWatcher fires DoneCh ->
 			// adapter must re-login.
@@ -142,8 +175,10 @@ func (m *mockBaoServer) handle(w http.ResponseWriter, r *http.Request) {
 
 	case "auth/approle/login", "auth/kubernetes/login":
 		m.loginCount++
+		tok := fmt.Sprintf("logged-in-token-%d", m.loginCount)
+		m.issuedTokens = append(m.issuedTokens, tok)
 		m.writeJSON(w, http.StatusOK, map[string]any{
-			"auth": map[string]any{"client_token": "logged-in-token", "lease_duration": 2, "renewable": true},
+			"auth": map[string]any{"client_token": tok, "lease_duration": m.leaseSeconds, "renewable": true},
 		})
 
 	default:
@@ -159,7 +194,26 @@ func (m *mockBaoServer) setRenewNonRenewable(b bool) {
 	m.renewNonRenewable = b
 	m.mu.Unlock()
 }
+func (m *mockBaoServer) setRenewStatus(s int) { m.mu.Lock(); m.renewStatus = s; m.mu.Unlock() }
+func (m *mockBaoServer) setDown(s int)        { m.mu.Lock(); m.downStatus = s; m.mu.Unlock() }
+func (m *mockBaoServer) setLease(sec int)     { m.mu.Lock(); m.leaseSeconds = sec; m.mu.Unlock() }
+
+// expireIssuedTokens invalidates every token handed out so far, so only a fresh
+// login can restore service (max_ttl, revocation, or a lease lost in an outage).
+func (m *mockBaoServer) expireIssuedTokens() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, tok := range m.issuedTokens {
+		m.expired[tok] = true
+	}
+}
+
 func (m *mockBaoServer) getLoginCount() int { m.mu.Lock(); defer m.mu.Unlock(); return m.loginCount }
+func (m *mockBaoServer) getRequestCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requestCount
+}
 func (m *mockBaoServer) getLatestVersion() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -398,7 +452,9 @@ func TestOpenBao_Auth_AppRole(t *testing.T) {
 		t.Errorf("WrapKey after approle login: %v", err)
 	}
 	m := km.(*openBaoTransitManager)
-	if m.client.Token() != "logged-in-token" {
+	// The mock issues a distinct token per login so tests can expire them
+	// individually; the first login is therefore "logged-in-token-1".
+	if m.client.Token() != "logged-in-token-1" {
 		t.Errorf("token not set from login, got %q", m.client.Token())
 	}
 }
@@ -423,7 +479,7 @@ func TestOpenBao_Auth_Kubernetes(t *testing.T) {
 	defer func() { _ = km.Close(context.Background()) }()
 
 	m := km.(*openBaoTransitManager)
-	if m.client.Token() != "logged-in-token" {
+	if m.client.Token() != "logged-in-token-1" {
 		t.Errorf("token not set from k8s login, got %q", m.client.Token())
 	}
 }
@@ -763,9 +819,9 @@ func TestNextBackoff(t *testing.T) {
 	cases := []struct {
 		cur, max, want time.Duration
 	}{
-		{time.Second, 5 * time.Minute, 2 * time.Second},           // normal double
-		{3 * time.Minute, 5 * time.Minute, 5 * time.Minute},       // capped
-		{5 * time.Minute, 5 * time.Minute, 5 * time.Minute},       // already at cap
+		{time.Second, 5 * time.Minute, 2 * time.Second},               // normal double
+		{3 * time.Minute, 5 * time.Minute, 5 * time.Minute},           // capped
+		{5 * time.Minute, 5 * time.Minute, 5 * time.Minute},           // already at cap
 		{100 * time.Millisecond, time.Second, 200 * time.Millisecond}, // sub-second
 	}
 	for _, tc := range cases {
@@ -842,9 +898,9 @@ func TestClassifyError_NilAndPassthrough(t *testing.T) {
 // TestToInt_AllBranches exercises every type case in toInt.
 func TestToInt_AllBranches(t *testing.T) {
 	cases := []struct {
-		in      any
-		want    int
-		wantOK  bool
+		in     any
+		want   int
+		wantOK bool
 	}{
 		{json.Number("42"), 42, true},
 		{json.Number("bad"), 0, false},

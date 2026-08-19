@@ -29,6 +29,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tests all ran with chunking disabled, which yields a seekable body and never
   exercised rewind-on-retry.
 
+- **OpenBao/Vault adapter never recovered from a token that died early.** The
+  `LifetimeWatcher` was created without a `RenewBehavior`, and the zero value is
+  `RenewBehaviorIgnoreErrors`, under which a failed `renew-self` does not close
+  `DoneCh`. Since re-login was driven solely by `DoneCh`, a token revoked or
+  expired ahead of its lease left the adapter answering every
+  `WrapKey`/`UnwrapKey`/`HealthCheck` with `403 permission denied` for up to a
+  full lease period — an hour under a typical `token_ttl=1h`. Nothing else
+  retried either, because `classifyError` maps 403 to `ErrProviderUnavailable`,
+  which `RetryingKeyManager` treats as permanent. In Kubernetes the pod stayed
+  `Running` and unready, so recovery required a manual restart.
+
+  The watcher now uses `RenewBehaviorErrorOnErrors`, so a failed renewal
+  re-logs-in instead of idling out the lease, and any request rejected with
+  401/403 triggers an on-demand re-login and one retry — recovery no longer
+  waits on the lease clock. Both paths are storm-bounded, which is load-bearing:
+  under `IgnoreErrors` the watcher busy-loops on `renew-self` (measured 44,097
+  requests in 7s), and answering every prompt failure with a login is worse
+  still because each one mints server state (21,741 logins in 3s from a role
+  granted `lookup-self` but not `renew-self`). Concurrent 403s coalesce into one
+  re-login, a lease that was never renewable backs off exponentially, and every
+  login attempt on every path is floored at one per second — keyed on attempts,
+  not successes, so it holds when the login itself is what is failing. `token`
+  auth is exempt; the operator owns that credential's lifecycle.
+
+### Added
+
+- **`gateway_kms_reauth_total`** counter, labelled by provider, auth method and
+  outcome. Token recovery was previously silent. The first sample is the startup
+  login; a sustained rate above that means tokens are dying early.
+
+- **KMS outage and token-revocation regression tests.** `mockBaoServer` now
+  models a whole-server outage (every path 5xxs, login included) and per-token
+  expiry, covering recovery after an outage, recovery from a revoked token while
+  the server is healthy, and re-login coalescing under concurrent load.
+
 ## [0.11.10] — 2026-08-11
 
 ### Added

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bao "github.com/openbao/openbao/api/v2"
@@ -41,8 +42,10 @@ import (
 //   - The active version is owned by the server (latest_version) and read live,
 //     not held in an in-memory slice.
 //   - Transit issues no dynamic leases; the only lifecycle object is the auth
-//     token, which the adapter renews in a background goroutine (see renew.go
-//     section below) and re-logs-in when renewal can no longer extend it.
+//     token, kept alive on two paths: a background LifetimeWatcher that
+//     re-logs-in when renewal fails, and withAuthRetry, which re-logs-in on any
+//     401/403. Both are needed — the watcher only notices a dead token at its
+//     next renewal attempt, up to ~2/3 of the lease away.
 
 const (
 	defaultOpenBaoProvider    = "openbao-transit"
@@ -58,6 +61,12 @@ const (
 	openBaoAuthToken      = "token"
 	openBaoAuthAppRole    = "approle"
 	openBaoAuthKubernetes = "kubernetes"
+
+	// minLoginInterval floors the interval between login ATTEMPTS on every path.
+	// A token is server state, so an unthrottled re-login loop grows the KMS
+	// lease table until storage runs out. One second: the floor only has to make
+	// a storm harmless, and the renewal loop layers backoff on top.
+	minLoginInterval = time.Second
 )
 
 // OpenBaoAuthConfig selects the OpenBao authentication method and its parameters.
@@ -130,6 +139,32 @@ type openBaoTransitManager struct {
 	renewing  bool
 	stopRenew chan struct{}
 	renewDone chan struct{}
+
+	// authGen increments on every successful login. A caller captures it before a
+	// request and passes it back when asking for a refresh, so N concurrent 403s
+	// collapse into ONE re-login. Atomic, not guarded by authSem: that semaphore
+	// is held across the login round-trip, so reading under it would park the
+	// data plane behind the login it is waiting for.
+	authGen atomic.Uint64
+
+	// authSem serialises logins: depth-1, so send == acquire, receive == release.
+	// A channel rather than a Mutex because acquiring must be cancellable.
+	authSem chan struct{}
+	// lastLoginAttempt floors login ATTEMPTS, not successes: keying on successes
+	// disengages the throttle exactly when login is failing, which is when a
+	// storm is most likely. Written only under authSem.
+	lastLoginAttempt time.Time
+	// freshSecret hands a data-path login to the renewal goroutine so it watches
+	// the new lease. Buffered depth 1, so publishing never blocks.
+	freshSecret chan leaseUpdate
+}
+
+// leaseUpdate carries a lease plus the auth generation it belongs to: the
+// renewal goroutine may log in itself while an update sits in the buffer, and a
+// queued lease for a superseded token must be discarded rather than watched.
+type leaseUpdate struct {
+	gen    uint64
+	secret *bao.Secret
 }
 
 // Compile-time assertions.
@@ -194,11 +229,17 @@ func NewOpenBaoTransitManager(opts OpenBaoTransitOptions) (KeyManager, error) {
 		provider:    provider,
 		timeout:     timeout,
 		auth:        opts.Auth,
+		freshSecret: make(chan leaseUpdate, 1),
+		authSem:     make(chan struct{}, 1),
 	}
 
 	loginCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	loginSecret, err := m.login(loginCtx)
+	// Through the same path every later login takes, so generation bookkeeping
+	// and the reauth metric live in one place. Uncontended: m is not shared yet.
+	m.authSem <- struct{}{}
+	loginSecret, err := m.loginLocked(loginCtx)
+	<-m.authSem
 	if err != nil {
 		return nil, fmt.Errorf("keymanager/openbao: initial login (method %q): %w", m.authMethod(), err)
 	}
@@ -230,15 +271,15 @@ func (m *openBaoTransitManager) WrapKey(ctx context.Context, plaintext []byte, _
 	if len(plaintext) == 0 {
 		return nil, errors.New("keymanager/openbao: plaintext DEK is empty")
 	}
-	client, err := m.activeClient()
-	if err != nil {
+	// Closed check only: doRead/doWrite re-resolve the client per attempt.
+	if _, err := m.activeClient(); err != nil {
 		return nil, err
 	}
 
 	rctx, cancel := m.withTimeout(ctx)
 	defer cancel()
 
-	secret, err := client.Logical().WriteWithContext(rctx, m.path("encrypt"), map[string]any{
+	secret, err := m.doWrite(rctx, m.path("encrypt"), map[string]any{
 		"plaintext": base64.StdEncoding.EncodeToString(plaintext),
 	})
 	if err != nil {
@@ -277,8 +318,7 @@ func (m *openBaoTransitManager) UnwrapKey(ctx context.Context, envelope *KeyEnve
 	}
 	// Closed check first: the interface requires every method to return
 	// ErrProviderUnavailable after Close, regardless of arguments.
-	client, err := m.activeClient()
-	if err != nil {
+	if _, err := m.activeClient(); err != nil {
 		return nil, err
 	}
 	if envelope == nil {
@@ -295,7 +335,7 @@ func (m *openBaoTransitManager) UnwrapKey(ctx context.Context, envelope *KeyEnve
 	rctx, cancel := m.withTimeout(ctx)
 	defer cancel()
 
-	secret, err := client.Logical().WriteWithContext(rctx, m.path("decrypt"), map[string]any{
+	secret, err := m.doWrite(rctx, m.path("decrypt"), map[string]any{
 		"ciphertext": ciphertext,
 	})
 	if err != nil {
@@ -317,14 +357,13 @@ func (m *openBaoTransitManager) UnwrapKey(ctx context.Context, envelope *KeyEnve
 
 // ActiveKeyVersion implements KeyManager: live read of transit latest_version.
 func (m *openBaoTransitManager) ActiveKeyVersion(ctx context.Context) (int, error) {
-	client, err := m.activeClient()
-	if err != nil {
+	if _, err := m.activeClient(); err != nil {
 		return 0, err
 	}
 	rctx, cancel := m.withTimeout(ctx)
 	defer cancel()
 
-	secret, err := client.Logical().ReadWithContext(rctx, m.keysPath())
+	secret, err := m.doRead(rctx, m.keysPath())
 	if err != nil {
 		return 0, fmt.Errorf("keymanager/openbao: read key metadata: %w", m.classifyError(rctx, err))
 	}
@@ -351,15 +390,14 @@ func (m *openBaoTransitManager) ActiveKeyVersion(ctx context.Context) (int, erro
 // On failure it returns ErrKeyNotFound (missing key) or ErrProviderUnavailable
 // (everything else) so the health gauge reflects the true data-plane state.
 func (m *openBaoTransitManager) HealthCheck(ctx context.Context) error {
-	client, err := m.activeClient()
-	if err != nil {
+	if _, err := m.activeClient(); err != nil {
 		return err
 	}
 	rctx, cancel := m.withTimeout(ctx)
 	defer cancel()
 
 	// 1. Token validity + reachability.
-	if _, err := client.Logical().ReadWithContext(rctx, "auth/token/lookup-self"); err != nil {
+	if _, err := m.doRead(rctx, "auth/token/lookup-self"); err != nil {
 		ce := m.classifyError(rctx, err)
 		if !errors.Is(ce, ErrProviderUnavailable) {
 			ce = fmt.Errorf("%w: %v", ErrProviderUnavailable, ce)
@@ -368,7 +406,7 @@ func (m *openBaoTransitManager) HealthCheck(ctx context.Context) error {
 	}
 
 	// 2. The configured Transit key exists and is readable.
-	secret, err := client.Logical().ReadWithContext(rctx, m.keysPath())
+	secret, err := m.doRead(rctx, m.keysPath())
 	if err != nil {
 		ce := m.classifyError(rctx, err)
 		if errors.Is(ce, ErrKeyNotFound) {
@@ -396,6 +434,9 @@ func (m *openBaoTransitManager) Close(_ context.Context) error {
 	stop := m.stopRenew
 	renewing := m.renewing
 	done := m.renewDone
+	// Cleared here, not just read: publishFreshLease gates on it to avoid
+	// sending into a buffer no goroutine will ever drain.
+	m.renewing = false
 	m.mu.Unlock()
 
 	if renewing && stop != nil {
@@ -432,8 +473,7 @@ func (m *openBaoTransitManager) PrepareRotation(ctx context.Context, target *int
 // gateway FOLLOWS the server's version; it does not own an in-memory active
 // version like the Cosmian adapter.
 func (m *openBaoTransitManager) PromoteActiveVersion(ctx context.Context, plan RotationPlan) error {
-	client, err := m.activeClient()
-	if err != nil {
+	if _, err := m.activeClient(); err != nil {
 		return err
 	}
 
@@ -447,7 +487,9 @@ func (m *openBaoTransitManager) PromoteActiveVersion(ctx context.Context, plan R
 
 	rctx, cancel := m.withTimeout(ctx)
 	defer cancel()
-	if _, err := client.Logical().WriteWithContext(rctx, m.keysPath()+"/rotate", nil); err != nil {
+	// Safe to re-authenticate and retry: a 403 means the rotate was rejected
+	// before it ran, so no version was minted.
+	if _, err := m.doWrite(rctx, m.keysPath()+"/rotate", nil); err != nil {
 		return fmt.Errorf("keymanager/openbao: rotate key %q: %w", m.keyName, m.classifyError(rctx, err))
 	}
 
@@ -495,8 +537,9 @@ func (m *openBaoTransitManager) withTimeout(ctx context.Context) (context.Contex
 
 // classifyError maps OpenBao API errors to the package's sentinel errors so the
 // decorator chain and callers can react. Note: the retry decorator treats ALL
-// sentinels (including ErrProviderUnavailable) as permanent, so a 403 from an
-// expired token is NOT retried — the renewal goroutine is the line of defence.
+// sentinels (including ErrProviderUnavailable) as permanent, so a 403 is never
+// retried by the chain. Recovering from a rejected credential is this adapter's
+// job — see withAuthRetry — not the decorator's.
 func (m *openBaoTransitManager) classifyError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -504,9 +547,8 @@ func (m *openBaoTransitManager) classifyError(ctx context.Context, err error) er
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
-	var respErr *bao.ResponseError
-	if errors.As(err, &respErr) {
-		switch respErr.StatusCode {
+	if code, ok := baoStatus(err); ok {
+		switch code {
 		case http.StatusForbidden, http.StatusUnauthorized:
 			return fmt.Errorf("%w: %v", ErrProviderUnavailable, err)
 		case http.StatusNotFound:
@@ -568,6 +610,204 @@ func toInt(v any) (int, bool) {
 }
 
 // ---- auth & token renewal --------------------------------------------------
+
+// baoStatus extracts the HTTP status from an OpenBao API error, so classifyError
+// and isOpenBaoAuthError share one place that unwraps *bao.ResponseError.
+func baoStatus(err error) (int, bool) {
+	var respErr *bao.ResponseError
+	if !errors.As(err, &respErr) {
+		return 0, false
+	}
+	return respErr.StatusCode, true
+}
+
+// isOpenBaoAuthError reports whether OpenBao rejected the credential itself
+// (401/403) — the only class of error a re-login can fix. 5xx, timeouts and
+// connection errors are the server's problem and must not trigger one.
+func isOpenBaoAuthError(err error) bool {
+	code, ok := baoStatus(err)
+	return ok && (code == http.StatusForbidden || code == http.StatusUnauthorized)
+}
+
+// authGeneration returns the current auth generation. Deliberately lock-free:
+// this is read on every request, and authSem is held across login round-trips.
+func (m *openBaoTransitManager) authGeneration() uint64 {
+	return m.authGen.Load()
+}
+
+// acquireAuth takes the login semaphore, giving up when ctx expires. Release
+// with releaseAuth. Cancellable because a login round-trip happens under it, and
+// a caller that cannot afford that wait must be able to walk away.
+func (m *openBaoTransitManager) acquireAuth(ctx context.Context) bool {
+	select {
+	case m.authSem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (m *openBaoTransitManager) releaseAuth() { <-m.authSem }
+
+// loginLocked logs in and bumps the auth generation. Callers must hold authSem.
+// It returns the login secret for the caller to publish; it does not publish.
+func (m *openBaoTransitManager) loginLocked(ctx context.Context) (*bao.Secret, error) {
+	// Floored here, not in the callers, so every login path is covered.
+	if wait := minLoginInterval - time.Since(m.lastLoginAttempt); wait > 0 {
+		if !sleepCtx(ctx, wait) {
+			return nil, ctx.Err()
+		}
+	}
+	m.lastLoginAttempt = time.Now()
+
+	secret, err := m.login(ctx)
+	if fn := getRecordKMSReauthFn(); fn != nil {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		fn(m.provider, m.authMethod(), outcome)
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.authGen.Add(1)
+	return secret, nil
+}
+
+// publishFreshLease hands a lease to the renewal goroutine so it stops watching
+// the dead one.
+func (m *openBaoTransitManager) publishFreshLease(gen uint64, secret *bao.Secret) {
+	if secret == nil {
+		return
+	}
+	m.mu.RLock()
+	live := m.renewing && !m.closed
+	m.mu.RUnlock()
+	if !live {
+		return // nothing would drain it; sending would pin the secret forever
+	}
+	select {
+	case m.freshSecret <- leaseUpdate{gen: gen, secret: secret}:
+	default: // a lease is already queued; the receiver discards stale ones by gen
+	}
+}
+
+// refreshAuth re-logs-in on demand, unless another caller already did so since
+// gen was captured. It runs inline in a request, so it borrows the caller's
+// deadline rather than a generous one of its own; the renewal goroutine's reauth
+// path is the one nobody is waiting on. The "token" method is exempt: there is
+// nothing to re-fetch, so a refresh would burn the floor on the same dead
+// string.
+func (m *openBaoTransitManager) refreshAuth(ctx context.Context, gen uint64) error {
+	if m.authMethod() == openBaoAuthToken {
+		return errors.New("keymanager/openbao: static token auth cannot be refreshed")
+	}
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		return ErrProviderUnavailable
+	}
+
+	// Checked BEFORE the semaphore: a caller with nothing to do must not first
+	// burn its deadline queueing behind someone else's login.
+	if m.authGeneration() != gen {
+		return nil // someone already re-logged-in; just retry
+	}
+
+	// Leave the retry some budget: a login handed the whole deadline can
+	// "succeed" into an already-expired context.
+	lctx, cancel := context.WithTimeout(ctx, m.reauthBudget(ctx))
+	defer cancel()
+
+	if !m.acquireAuth(lctx) {
+		// Whoever holds it is logging in now, so the next attempt likely works.
+		return errors.New("keymanager/openbao: timed out waiting to re-login")
+	}
+	defer m.releaseAuth()
+
+	// The holder we waited for may have logged in on our behalf.
+	if m.authGeneration() != gen {
+		return nil
+	}
+
+	secret, err := m.loginLocked(lctx)
+	if err != nil {
+		return err
+	}
+	m.publishFreshLease(m.authGeneration(), secret)
+	return nil
+}
+
+// reauthBudget gives an inline re-login at most half the caller's remaining
+// deadline, so the retry it exists to enable still has time to run.
+func (m *openBaoTransitManager) reauthBudget(ctx context.Context) time.Duration {
+	const fallback = 2 * time.Second
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fallback
+	}
+	half := time.Until(deadline) / 2
+	if half <= 0 {
+		return time.Millisecond // already out of budget; fail fast
+	}
+	return half
+}
+
+// sleepCtx sleeps for d unless ctx finishes first, reporting whether it slept.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// withAuthRetry runs op and, if the credential was rejected, re-logs-in once and
+// runs it again — the reactive half of token lifecycle management (see the file
+// header). It does not need data-plane traffic to fire: CircuitBreakerKeyManager
+// delegates HealthCheck through without consulting breaker state, so the 30s
+// health-check loop reaches it even with the breaker open.
+func (m *openBaoTransitManager) withAuthRetry(ctx context.Context, op func() (*bao.Secret, error)) (*bao.Secret, error) {
+	gen := m.authGeneration()
+	secret, err := op()
+	if err == nil || !isOpenBaoAuthError(err) {
+		return secret, err
+	}
+	if rerr := m.refreshAuth(ctx, gen); rerr != nil {
+		return secret, err // re-login impossible or throttled; the 403 is the better diagnosis
+	}
+	return op()
+}
+
+// doWrite issues a Logical().Write, re-authenticating once on a rejected
+// credential.
+func (m *openBaoTransitManager) doWrite(ctx context.Context, path string, data map[string]any) (*bao.Secret, error) {
+	return m.withAuthRetry(ctx, func() (*bao.Secret, error) {
+		// Re-resolved per attempt: Close may land during the login round-trip.
+		client, err := m.activeClient()
+		if err != nil {
+			return nil, err
+		}
+		return client.Logical().WriteWithContext(ctx, path, data)
+	})
+}
+
+// doRead issues a Logical().Read, re-authenticating once on a rejected
+// credential.
+func (m *openBaoTransitManager) doRead(ctx context.Context, path string) (*bao.Secret, error) {
+	return m.withAuthRetry(ctx, func() (*bao.Secret, error) {
+		client, err := m.activeClient()
+		if err != nil {
+			return nil, err
+		}
+		return client.Logical().ReadWithContext(ctx, path)
+	})
+}
 
 // login performs the configured authentication method and sets the resulting
 // token on the client. For the "token" method it sets the static token and
@@ -668,7 +908,9 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 	const maxBackoff = 5 * time.Minute
 
 	for {
-		// If we have no renewable secret, re-login before watching.
+		// If we have no renewable secret, re-login before watching. `backoff` is
+		// deliberately NOT reset on success: login-then-cannot-renew is the storm
+		// case below, and resetting would defeat its escalation.
 		if secret == nil || secret.Auth == nil || !secret.Auth.Renewable || secret.Auth.LeaseDuration == 0 {
 			ns, err := m.reauth(stop)
 			if err != nil {
@@ -679,10 +921,18 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 				continue
 			}
 			secret = ns
-			backoff = time.Second
 		}
 
-		watcher, err := m.client.NewLifetimeWatcher(&bao.LifetimeWatcherInput{Secret: secret})
+		// The zero RenewBehavior is IgnoreErrors, under which a failing renew-self
+		// does NOT close DoneCh: the watcher spins until the ORIGINAL lease
+		// elapses, so a token that died early goes unnoticed for up to a full
+		// lease period while every request 403s. ErrorOnErrors reports it at once.
+		// The cost is the storm handled below — the first renew-self is issued
+		// immediately on Start, so an unrenewable lease returns straight away.
+		watcher, err := m.client.NewLifetimeWatcher(&bao.LifetimeWatcherInput{
+			Secret:        secret,
+			RenewBehavior: bao.RenewBehaviorErrorOnErrors,
+		})
 		if err != nil {
 			secret = nil
 			if !sleepOrStop(stop, backoff) {
@@ -693,19 +943,48 @@ func (m *openBaoTransitManager) renewalLoop(secret *bao.Secret, stop <-chan stru
 		}
 		go watcher.Start()
 
-		relogin := false
-		for !relogin {
+		// renewed separates "worked for a while, now aged out" from "never
+		// renewable at all". Only the former deserves an immediate re-login.
+		renewed := false
+		restartWatch := false
+		for !restartWatch {
 			select {
 			case <-stop:
 				watcher.Stop()
 				return
+
 			case <-watcher.DoneCh():
-				// Can no longer renew; drop down to re-login.
 				watcher.Stop()
 				secret = nil
-				relogin = true
+				restartWatch = true
+				if renewed {
+					// Normal end of life: renewals worked, then stopped. Re-login
+					// promptly, and reset the escalation.
+					backoff = time.Second
+					break
+				}
+				// Never renewed once, so a re-login only mints another token that
+				// cannot be renewed either — an unbounded loop of real logins,
+				// reachable from a role with lookup-self but not renew-self.
+				if !sleepOrStop(stop, backoff) {
+					return
+				}
+				backoff = nextBackoff(backoff, maxBackoff)
+
+			case u := <-m.freshSecret:
+				// The data path re-authenticated. Adopt its lease only if still
+				// current: this goroutine may have logged in itself meanwhile, and
+				// adopting a superseded lease leaves the live token unrenewed.
+				if u.gen != m.authGeneration() {
+					continue // stale; keep watching what we have
+				}
+				watcher.Stop()
+				secret = u.secret
+				backoff = time.Second
+				restartWatch = true
+
 			case <-watcher.RenewCh():
-				// Renewal succeeded; keep watching.
+				renewed = true
 				backoff = time.Second
 			}
 		}
@@ -739,7 +1018,15 @@ func (m *openBaoTransitManager) reauth(stop <-chan struct{}) (*bao.Secret, error
 		case <-ctx.Done():
 		}
 	}()
-	return m.login(ctx)
+	// Shares authSem with the on-demand path, so the two never log in
+	// concurrently and a data-path caller retries instead of minting a token.
+	if !m.acquireAuth(ctx) {
+		return nil, ctx.Err()
+	}
+	defer m.releaseAuth()
+	// No publishFreshLease: this IS the renewal goroutine; loginLocked hands the
+	// secret straight back.
+	return m.loginLocked(ctx)
 }
 
 func sleepOrStop(stop <-chan struct{}, d time.Duration) bool {

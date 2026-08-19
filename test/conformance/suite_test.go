@@ -176,6 +176,7 @@ func TestConformance(t *testing.T) {
 				{"OpenBao_EnvelopeEncryption", provider.CapOpenBaoKMS, testOpenBaoKMSIntegration},
 				{"OpenBao_KeyRotation", provider.CapOpenBaoKMS, testOpenBaoKMSRotation},
 				{"OpenBao_TokenRenewal", provider.CapOpenBaoKMS, testOpenBaoKMSTokenRenewal},
+				{"OpenBao_TokenRevocation", provider.CapOpenBaoKMS, testOpenBaoKMSTokenRevocation},
 				{"SelfContained_AES_EnvelopeRoundTrip", 0, testSelfContained_AES_EnvelopeRoundTrip},
 				{"SelfContained_AES_StandardMetadataRoundTrip", 0, testSelfContained_AES_StandardMetadataRoundTrip},
 				{"SelfContained_AES_CopyObjectStandardMetadata", 0, testSelfContained_AES_CopyObjectStandardMetadata},

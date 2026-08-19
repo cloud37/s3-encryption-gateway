@@ -130,6 +130,10 @@ type Metrics struct {
 	// Labels: provider, operation ∈ {wrap, unwrap}, outcome ∈ {success, failure}
 	kmsRetryAttemptsTotal *prometheus.CounterVec
 
+	// kmsReauthTotal counts KMS authentications: the first is the startup login,
+	// every later one a re-auth after a token died.
+	kmsReauthTotal *prometheus.CounterVec
+
 	// metadataEncryptionEnabled reports whether encrypted-object-metadata
 	// (V1.0-CRYPTO-3) is active. Value: 1 = active, 0 = inactive.
 	metadataEncryptionEnabled prometheus.Gauge
@@ -565,6 +569,13 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 				Help: "Total KMS retry attempts, labelled by provider, operation (wrap/unwrap), and outcome (success/failure).",
 			},
 			[]string{"provider", "operation", "outcome"},
+		),
+		kmsReauthTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_kms_reauth_total",
+				Help: "Total KMS authentications, labelled by provider, auth method, and outcome (success/failure). The first is the startup login; a sustained rate above that means tokens are dying early.",
+			},
+			[]string{"provider", "method", "outcome"},
 		),
 
 		metadataEncryptionEnabled: factory.NewGauge(
@@ -1158,6 +1169,15 @@ func (m *Metrics) RecordKMSRetryAttempt(provider, operation, outcome string) {
 		return
 	}
 	m.kmsRetryAttemptsTotal.WithLabelValues(provider, operation, outcome).Inc()
+}
+
+// RecordKMSReauth increments the KMS authentication counter.
+// method ∈ {"token", "approle", "kubernetes"}, outcome ∈ {"success", "failure"}.
+func (m *Metrics) RecordKMSReauth(provider, method, outcome string) {
+	if m == nil || m.kmsReauthTotal == nil {
+		return
+	}
+	m.kmsReauthTotal.WithLabelValues(provider, method, outcome).Inc()
 }
 
 // SetMetadataEncryptionEnabled sets the metadata encryption enabled gauge.

@@ -478,6 +478,11 @@ func main() {
 		))
 	}
 
+	// Wired before BuildKeyManager, unlike its siblings below: the KMS startup
+	// login happens inside it, and gateway_kms_reauth_total counts that login as
+	// its first sample. Registered later, the observer is nil when it fires.
+	crypto.SetKMSReauthObserver(m.RecordKMSReauth)
+
 	if cfg.Encryption.KeyManager.Enabled {
 		keyManager, err = api.BuildKeyManager(&cfg.Encryption.KeyManager, logger)
 		if err != nil {
@@ -619,6 +624,7 @@ func main() {
 	crypto.SetKMSCircuitBreakerStateObserver(m.SetKMSCircuitBreakerState)
 	crypto.SetKMSRetryAttemptObserver(m.RecordKMSRetryAttempt)
 	crypto.SetKMSHealthyObserver(m.SetKMSHealthy)
+	// SetKMSReauthObserver is deliberately wired earlier, before BuildKeyManager.
 
 	// V1.0-CRYPTO-3: load metadata encryption key.
 	var metadataKey []byte

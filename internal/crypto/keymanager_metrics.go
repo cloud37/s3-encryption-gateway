@@ -23,6 +23,7 @@ var (
 	setKMSCircuitBreakerStateFn func(provider string, state int)
 	recordKMSRetryAttemptFn     func(provider, operation, outcome string)
 	setKMSHealthyFn             func(provider string, healthy bool)
+	recordKMSReauthFn           func(provider, method, outcome string)
 )
 
 func getRecordKMSDEKCacheHitFn() func(provider string) {
@@ -47,6 +48,12 @@ func getRecordKMSRetryAttemptFn() func(provider, operation, outcome string) {
 	metricsMu.RLock()
 	defer metricsMu.RUnlock()
 	return recordKMSRetryAttemptFn
+}
+
+func getRecordKMSReauthFn() func(provider, method, outcome string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
+	return recordKMSReauthFn
 }
 
 func getSetKMSHealthyFn() func(provider string, healthy bool) {
@@ -88,4 +95,13 @@ func SetKMSHealthyObserver(fn func(provider string, healthy bool)) {
 	metricsMu.Lock()
 	defer metricsMu.Unlock()
 	setKMSHealthyFn = fn
+}
+
+// SetKMSReauthObserver wires the KMS re-authentication counter callback. Every
+// login after the first one is a re-auth, so a rising rate is the signal that
+// tokens are dying early (revocation, a short max_ttl, or an unstable KMS).
+func SetKMSReauthObserver(fn func(provider, method, outcome string)) {
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
+	recordKMSReauthFn = fn
 }
