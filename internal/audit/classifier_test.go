@@ -86,6 +86,10 @@ func TestClassify_ClassE_ChunkedV1_LegacyKDFPrecedence(t *testing.T) {
 	}
 }
 
+func TestClassify_ChunkedV1_LegacyKDFPrecedence(t *testing.T) {
+	TestClassify_ClassE_ChunkedV1_LegacyKDFPrecedence(t)
+}
+
 func TestClassToString_ClassE(t *testing.T) {
 	if got := ClassToString(ClassE_ChunkedV1); got != "class_e_chunked_v1" {
 		t.Fatalf("ClassToString(ClassE_ChunkedV1) = %q", got)

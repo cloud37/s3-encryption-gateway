@@ -1195,7 +1195,7 @@ func TestHandleGetObject_PlainObject(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("handleGetObject plain: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if string(w.Body.Bytes()) != "plain content" {
+	if w.Body.String() != "plain content" {
 		t.Errorf("body = %q, want %q", w.Body.String(), "plain content")
 	}
 }

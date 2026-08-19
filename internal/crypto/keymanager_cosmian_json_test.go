@@ -441,9 +441,9 @@ func TestEndpointHasScheme(t *testing.T) {
 		{"https://kms.example.com", true},
 		{"http://localhost:9990", true},
 		{"", false},
-		{"kms.example.com:5696", false},      // no scheme
-		{"kmip://kms.example.com", true},      // kmip scheme
-		{"://broken", false},                   // broken URL
+		{"kms.example.com:5696", false},  // no scheme
+		{"kmip://kms.example.com", true}, // kmip scheme
+		{"://broken", false},             // broken URL
 	}
 	for _, tt := range tests {
 		got := endpointHasScheme(tt.endpoint)

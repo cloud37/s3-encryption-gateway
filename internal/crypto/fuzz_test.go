@@ -56,7 +56,7 @@ func FuzzMetadataCompaction(f *testing.F) {
 				if gotV, ok := expanded[k]; !ok || gotV != v {
 					// Special case: some keys might be normalized or dropped if empty
 					if v == "" {
-						continue 
+						continue
 					}
 					t.Errorf("metadata mismatch for key %s: got %q, want %q", k, gotV, v)
 				}
@@ -73,22 +73,22 @@ func FuzzRangeCalculation(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, start, end int64, chunkSize, totalChunks int) {
 		// Basic validation of inputs to match function expectations
-		// The internal function expects non-negative ranges. 
+		// The internal function expects non-negative ranges.
 		// DecryptRange validates this before calling.
 		if chunkSize <= 0 || totalChunks <= 0 || start < 0 || end < 0 {
 			return
 		}
 
 		// Call the function
-		startChunk, endChunk, startOffset, endOffset := calculateChunkRangeFromPlaintext(start, end, chunkSize, totalChunks)
+		startChunk, endChunk, startOffset, endOffset := calculateChunkRangeFromPlaintext(start, end, chunkSize, uint64(totalChunks))
 
 		// Invariants check
-		
+
 		// 1. Chunks should be within valid range [0, totalChunks-1]
-		if startChunk < 0 || startChunk >= totalChunks {
+		if startChunk >= uint64(totalChunks) {
 			t.Errorf("startChunk %d out of bounds [0, %d)", startChunk, totalChunks)
 		}
-		if endChunk < 0 || endChunk >= totalChunks {
+		if endChunk >= uint64(totalChunks) {
 			t.Errorf("endChunk %d out of bounds [0, %d)", endChunk, totalChunks)
 		}
 
@@ -105,9 +105,9 @@ func FuzzRangeCalculation(f *testing.F) {
 		if endOffset < 0 || endOffset >= chunkSize {
 			t.Errorf("endOffset %d out of bounds [0, %d)", endOffset, chunkSize)
 		}
-		
+
 		// 4. Calculate encrypted range should not panic
-		encStart, encEnd, err := calculateEncryptedByteRange(startChunk, endChunk, chunkSize)
+		encStart, encEnd, err := ChunkedEncryptedDataRange(startChunk, endChunk, chunkSize, ChunkedFormatV1)
 		if err != nil {
 			// Error is acceptable for invalid inputs (e.g., overflow conditions)
 			return

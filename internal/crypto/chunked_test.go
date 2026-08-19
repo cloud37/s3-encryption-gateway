@@ -762,7 +762,7 @@ func TestChunkedEngineDecrypt_LegacyObject(t *testing.T) {
 	manifest := &ChunkManifest{
 		Version:    1,
 		ChunkSize:  chunkSize,
-		ChunkCount: chunkCount,
+		ChunkCount: uint64(chunkCount),
 		BaseIV:     encodeBase64(baseIV),
 	}
 	manifestEncoded, err := encodeManifest(manifest)

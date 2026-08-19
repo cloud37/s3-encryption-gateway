@@ -38,7 +38,7 @@ func TestRangeDecryptReader_Basic(t *testing.T) {
 	// Update manifest in metadata
 	manifest, _ := loadManifestFromMetadata(metadata)
 	if manifest != nil {
-		manifest.ChunkCount = expectedChunkCount
+		manifest.ChunkCount = uint64(expectedChunkCount)
 		manifestEncoded, err := encodeManifest(manifest)
 		if err == nil {
 			metadata[MetaManifest] = manifestEncoded
@@ -110,7 +110,7 @@ func TestRangeDecryptReader_EdgeCases(t *testing.T) {
 	metadata[MetaChunkCount] = fmt.Sprintf("%d", expectedChunkCount)
 	manifest, _ := loadManifestFromMetadata(metadata)
 	if manifest != nil {
-		manifest.ChunkCount = expectedChunkCount
+		manifest.ChunkCount = uint64(expectedChunkCount)
 		manifestEncoded, _ := encodeManifest(manifest)
 		metadata[MetaManifest] = manifestEncoded
 	}

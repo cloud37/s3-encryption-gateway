@@ -78,7 +78,7 @@ func TestNewEngineWithOpts_ValidPassword(t *testing.T) {
 	}
 
 	// Verify the engine can be used (implements EncryptionEngine interface)
-	var _ EncryptionEngine = eng
+	var _ = eng
 }
 
 // TestWithPreferredAlgorithm verifies that WithPreferredAlgorithm sets and

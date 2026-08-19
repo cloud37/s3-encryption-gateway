@@ -691,7 +691,7 @@ func TestMPU_LargeObjectGoldenPath(t *testing.T) {
 	var partsXML strings.Builder
 	partsXML.WriteString(`<?xml version="1.0"?><CompleteMultipartUpload>`)
 	for i, etag := range etags {
-		partsXML.WriteString(fmt.Sprintf(`<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag))
+		fmt.Fprintf(&partsXML, `<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag)
 	}
 	partsXML.WriteString(`</CompleteMultipartUpload>`)
 	req = httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(partsXML.String()))
@@ -950,7 +950,7 @@ func makeByteRamp(n int, start byte) []byte {
 
 func isHex(s string) bool {
 	for _, c := range s {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}
@@ -1725,7 +1725,7 @@ func TestMPU_HeadObject_ReturnsPlaintextSize(t *testing.T) {
 	var partsXML strings.Builder
 	partsXML.WriteString(`<?xml version="1.0"?><CompleteMultipartUpload>`)
 	for i, etag := range etags {
-		partsXML.WriteString(fmt.Sprintf(`<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag))
+		fmt.Fprintf(&partsXML, `<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag)
 	}
 	partsXML.WriteString(`</CompleteMultipartUpload>`)
 	w = httptest.NewRecorder()
@@ -1871,7 +1871,7 @@ func TestMPU_ListObjects_CompletedReturnsPlaintextSize(t *testing.T) {
 	var partsXML strings.Builder
 	partsXML.WriteString(`<?xml version="1.0"?><CompleteMultipartUpload>`)
 	for i, etag := range etags {
-		partsXML.WriteString(fmt.Sprintf(`<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag))
+		fmt.Fprintf(&partsXML, `<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>`, i+1, etag)
 	}
 	partsXML.WriteString(`</CompleteMultipartUpload>`)
 	w = httptest.NewRecorder()

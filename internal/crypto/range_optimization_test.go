@@ -72,13 +72,13 @@ func TestCalculateChunkRangeFromPlaintext(t *testing.T) {
 				tt.plaintextStart,
 				tt.plaintextEnd,
 				tt.chunkSize,
-				tt.totalChunks,
+				uint64(tt.totalChunks),
 			)
 
-			if startChunk != tt.expectedStartChunk {
+			if startChunk != uint64(tt.expectedStartChunk) {
 				t.Errorf("startChunk = %d, expected %d", startChunk, tt.expectedStartChunk)
 			}
-			if endChunk != tt.expectedEndChunk {
+			if endChunk != uint64(tt.expectedEndChunk) {
 				t.Errorf("endChunk = %d, expected %d", endChunk, tt.expectedEndChunk)
 			}
 			if startOffset != tt.expectedStartOffset {
@@ -334,7 +334,7 @@ func TestGetPlaintextSizeFromMetadata(t *testing.T) {
 				MetaChunkCount: "10",
 				MetaChunkSize:  "65536",
 			},
-			expectedSize: 655360, // 10 * 65536
+			expectedSize: 655360,
 			expectedErr:  false,
 		},
 		{
@@ -372,6 +372,43 @@ func TestGetPlaintextSizeFromMetadata(t *testing.T) {
 
 			if size != tt.expectedSize {
 				t.Errorf("size = %d, expected %d", size, tt.expectedSize)
+			}
+		})
+	}
+}
+
+func TestGetPlaintextSizeFromMetadata_ExactPrecedenceAndMalformedManifest(t *testing.T) {
+	manifest := &ChunkManifest{Version: int(ChunkedFormatV1), ChunkSize: MinChunkSize, ChunkCount: 1, BaseIV: encodeBase64(make([]byte, nonceSize))}
+	encoded, err := encodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := ChunkedCiphertextSize(7, MinChunkSize, ChunkedFormatV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name     string
+		metadata map[string]string
+		want     int64
+		wantErr  bool
+	}{
+		{"exact content length overrides original", map[string]string{MetaManifest: encoded, "Content-Length": fmt.Sprint(canonical), MetaOriginalSize: "999"}, 7, false},
+		{"malformed content length falls back original", map[string]string{MetaManifest: encoded, "Content-Length": "bad", MetaOriginalSize: "8"}, 0, true},
+		{"invalid manifest version", map[string]string{MetaManifest: encodeBase64([]byte(`{"v":9,"cs":65536,"cc":1}`)), MetaOriginalSize: "8"}, 0, true},
+		{"malformed manifest content", map[string]string{MetaManifest: "%%%", MetaOriginalSize: "8"}, 0, true},
+		{"invalid original falls back count size", map[string]string{MetaOriginalSize: "bad", MetaChunkCount: "2", MetaChunkSize: "4"}, 8, false},
+		{"malformed count and size no fallback", map[string]string{MetaOriginalSize: "bad", MetaChunkCount: "bad", MetaChunkSize: "bad"}, 0, true},
+		{"nil metadata", nil, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, gotErr := GetPlaintextSizeFromMetadata(tc.metadata)
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("error=%v want=%v", gotErr, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Fatalf("size=%d want=%d", got, tc.want)
 			}
 		})
 	}
@@ -442,7 +479,7 @@ func TestRangeDecryptionEdgeCases(t *testing.T) {
 	metadata[MetaChunkCount] = fmt.Sprintf("%d", expectedChunkCount)
 	manifest, _ := loadManifestFromMetadata(metadata)
 	if manifest != nil {
-		manifest.ChunkCount = expectedChunkCount
+		manifest.ChunkCount = uint64(expectedChunkCount)
 		manifestEncoded, err := encodeManifest(manifest)
 		if err == nil {
 			metadata[MetaManifest] = manifestEncoded
@@ -690,13 +727,13 @@ func TestRangeDecryptionContentRangeMapping(t *testing.T) {
 				tc.plaintextStart,
 				tc.plaintextEnd,
 				chunkSize,
-				totalChunks,
+				uint64(totalChunks),
 			)
 
-			if startChunk != tc.expectedStartChunk {
+			if startChunk != uint64(tc.expectedStartChunk) {
 				t.Errorf("startChunk = %d, expected %d", startChunk, tc.expectedStartChunk)
 			}
-			if endChunk != tc.expectedEndChunk {
+			if endChunk != uint64(tc.expectedEndChunk) {
 				t.Errorf("endChunk = %d, expected %d", endChunk, tc.expectedEndChunk)
 			}
 			if startOffset != tc.expectedStartOffset {
@@ -707,7 +744,7 @@ func TestRangeDecryptionContentRangeMapping(t *testing.T) {
 			}
 
 			// Test encrypted range calculation
-			encryptedStart, encryptedEnd, err := calculateEncryptedByteRange(startChunk, endChunk, chunkSize)
+			encryptedStart, encryptedEnd, err := ChunkedEncryptedDataRange(startChunk, endChunk, chunkSize, ChunkedFormatV1)
 			if err != nil {
 				t.Fatalf("calculateEncryptedByteRange failed: %v", err)
 			}
@@ -759,7 +796,7 @@ func TestRangeDecryptionAuthenticationVerification(t *testing.T) {
 	// Update manifest in metadata
 	manifest, _ := loadManifestFromMetadata(metadata)
 	if manifest != nil {
-		manifest.ChunkCount = expectedChunkCount
+		manifest.ChunkCount = uint64(expectedChunkCount)
 		manifestEncoded, err := encodeManifest(manifest)
 		if err == nil {
 			metadata[MetaManifest] = manifestEncoded
@@ -857,7 +894,7 @@ func TestRangeDecryptionChunkAlignment(t *testing.T) {
 	// Update manifest in metadata
 	manifest, _ := loadManifestFromMetadata(metadata)
 	if manifest != nil {
-		manifest.ChunkCount = expectedChunkCount
+		manifest.ChunkCount = uint64(expectedChunkCount)
 		manifestEncoded, err := encodeManifest(manifest)
 		if err == nil {
 			metadata[MetaManifest] = manifestEncoded

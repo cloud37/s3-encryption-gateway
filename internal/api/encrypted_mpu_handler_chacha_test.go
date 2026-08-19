@@ -5,7 +5,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,10 +12,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -35,11 +34,11 @@ func TestMPU_InitAlgorithm_ThreadsPreferredAlgorithm(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 
 	policyDir := t.TempDir()
-	policyYAML := fmt.Sprintf(`id: test-mpu-chacha20
+	policyYAML := `id: test-mpu-chacha20
 buckets:
   - "chacha20-*"
 encrypt_multipart_uploads: true
-`)
+`
 	policyPath := policyDir + "/policy.yaml"
 	if err := os.WriteFile(policyPath, []byte(policyYAML), 0600); err != nil {
 		t.Fatalf("write policy: %v", err)
@@ -115,11 +114,11 @@ func TestMPU_ChaCha20Poly1305_EndToEnd(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 
 	policyDir := t.TempDir()
-	policyYAML := fmt.Sprintf(`id: test-mpu-chacha20
+	policyYAML := `id: test-mpu-chacha20
 buckets:
   - "chacha20e2e-*"
 encrypt_multipart_uploads: true
-`)
+`
 	policyPath := policyDir + "/policy.yaml"
 	if err := os.WriteFile(policyPath, []byte(policyYAML), 0600); err != nil {
 		t.Fatalf("write policy: %v", err)

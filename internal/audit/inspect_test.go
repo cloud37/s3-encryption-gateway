@@ -19,6 +19,7 @@ func TestInspect_ModernObject_ReportsAES256GCM(t *testing.T) {
 		crypto.MetaIVDerivation:  "hkdf-sha256",
 		crypto.MetaKeySalt:       "a1b2c3d4e5f60718293a4b5c6d7e8f90",
 		crypto.MetaIV:            "0102030405060708090a0b0c",
+		crypto.MetaManifest:      chunkedManifest(2),
 	}
 	mock.addObject("b/k", []byte("ciphertext-data-here"), meta)
 
@@ -100,13 +101,13 @@ func TestInspect_Plaintext_ReportsEncryptedFalse(t *testing.T) {
 func TestInspect_KMSWrapped_ReportsProviderKeyVersion(t *testing.T) {
 	mock := newMockAuditClient()
 	meta := map[string]string{
-		crypto.MetaEncrypted:        "true",
-		crypto.MetaAlgorithm:        crypto.AlgorithmAES256GCM,
-		crypto.MetaKMSProvider:      "cosmian",
-		crypto.MetaKMSKeyID:         "wrapping-key-1",
-		crypto.MetaKeyVersion:       "2",
+		crypto.MetaEncrypted:            "true",
+		crypto.MetaAlgorithm:            crypto.AlgorithmAES256GCM,
+		crypto.MetaKMSProvider:          "cosmian",
+		crypto.MetaKMSKeyID:             "wrapping-key-1",
+		crypto.MetaKeyVersion:           "2",
 		crypto.MetaWrappedKeyCiphertext: "abcdef1234567890",
-		crypto.MetaKDFParams:        "pbkdf2-sha256:600000",
+		crypto.MetaKDFParams:            "pbkdf2-sha256:600000",
 	}
 	mock.addObject("b/k", []byte("ciphertext"), meta)
 

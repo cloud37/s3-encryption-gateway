@@ -15,7 +15,7 @@ import (
 // It satisfies AuditClient using in-memory metadata and data maps.
 type mockAuditClient struct {
 	mu       sync.RWMutex
-	objects  map[string][]byte           // key -> ciphertext body
+	objects  map[string][]byte            // key -> ciphertext body
 	metadata map[string]map[string]string // key -> metadata
 	fail     map[string]error             // specific error injections
 }
@@ -111,7 +111,7 @@ func (m *mockAuditClient) ListObjects(_ context.Context, bucket, prefix string, 
 			continue
 		}
 		objKey := key[len(bucket)+1:]
-		if prefix != "" && !(len(objKey) >= len(prefix) && objKey[:len(prefix)] == prefix) {
+		if prefix != "" && (len(objKey) < len(prefix) || objKey[:len(prefix)] != prefix) {
 			continue
 		}
 		objects = append(objects, s3.ObjectInfo{Key: objKey})
