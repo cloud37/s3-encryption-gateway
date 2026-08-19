@@ -18,7 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record, and unknown manifest versions fail closed. V1 chunked objects remain
   readable for compatibility but are classified as `class_e_chunked_v1` and
   require GET-through-gateway -> PUT-through-gateway re-encryption; no external
-  discovery tooling is required.
+  discovery tooling is required. Deployments must drain v1-only readers before
+  enabling v2 writers; once v2 objects exist, rollback is allowed only to a
+  release that understands v2.
 
 ### Fixed
 
