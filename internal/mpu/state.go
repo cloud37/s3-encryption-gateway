@@ -153,8 +153,14 @@ type StateStore interface {
 	// the key does not exist or has expired.
 	Get(ctx context.Context, uploadID string) (*UploadState, error)
 
-	// AppendPart appends a PartRecord and refreshes the TTL.
-	AppendPart(ctx context.Context, uploadID string, part PartRecord) error
+	ReservePart(ctx context.Context, uploadID string, part PartClaim) (Reservation, error)
+	ReleasePart(ctx context.Context, uploadID string, partNumber int32, token string) error
+	CommitPart(ctx context.Context, uploadID string, part PartClaim) error
+	BeginComplete(ctx context.Context, uploadID string, selected []SelectedPart) (*UploadState, uint64, error)
+	Reopen(ctx context.Context, uploadID string, revision uint64) error
+	FinalizeComplete(ctx context.Context, uploadID string, revision uint64) error
+	BeginAbort(ctx context.Context, uploadID string) (uint64, error)
+	FinalizeAbort(ctx context.Context, uploadID string, revision uint64) error
 
 	// Delete removes the upload state. Safe to call on missing keys.
 	Delete(ctx context.Context, uploadID string) error
@@ -169,20 +175,8 @@ type StateStore interface {
 	Close() error
 }
 
-// ClaimStateStore is the nonce-safe protocol implemented by version-2 stores.
-// It is separate from StateStore during the rollout so administrative and
-// legacy test stores can remain read/delete capable without accepting writes.
-type ClaimStateStore interface {
-	StateStore
-	ReservePart(context.Context, string, PartClaim) (Reservation, error)
-	ReleasePart(context.Context, string, int32, string) error
-	CommitPart(context.Context, string, PartClaim) error
-	BeginComplete(context.Context, string, []SelectedPart) (*UploadState, uint64, error)
-	Reopen(context.Context, string, uint64) error
-	FinalizeComplete(context.Context, string, uint64) error
-	BeginAbort(context.Context, string) (uint64, error)
-	FinalizeAbort(context.Context, string, uint64) error
-}
+// ClaimStateStore is an alias retained for callers using the claim protocol.
+type ClaimStateStore = StateStore
 
 const reservePartScript = `
 local meta = redis.call('HGET', KEYS[1], 'meta')
@@ -209,7 +203,17 @@ redis.call('EXPIRE', KEYS[1], ARGV[5])
 return {6, revision}
 `
 
+var reservePartLua = redis.NewScript(reservePartScript)
+
+var runReservePart = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
+	return reservePartLua.Run(ctx, client, keys, args...).Result()
+}
+
 const commitPartScript = `
+local meta = redis.call('HGET', KEYS[1], 'meta')
+if not meta then return 0 end
+if redis.call('HGET', KEYS[1], 'state_version') ~= '2' then return 3 end
+if redis.call('HGET', KEYS[1], 'phase') ~= 'open' then return 4 end
 local field = 'part:' .. ARGV[1]
 local current = redis.call('HGET', KEYS[1], field)
 if not current then return 0 end
@@ -218,7 +222,10 @@ local claim = decoded.claim
 local token = decoded.token
 local status = decoded.status
 if claim ~= ARGV[2] or token ~= ARGV[3] then return 2 end
-if status == 'committed' then return 1 end
+if status == 'committed' then
+  if tonumber(decoded.plain_len) ~= tonumber(ARGV[4]) or decoded.etag ~= ARGV[5] or tonumber(decoded.enc_len) ~= tonumber(ARGV[6]) or tonumber(decoded.chunks) ~= tonumber(ARGV[7]) then return 2 end
+  return 1
+end
 if status ~= 'reserved' then return 2 end
 local value = cjson.encode({pn=tonumber(ARGV[1]), claim=ARGV[2], plain_len=tonumber(ARGV[4]), status='committed', token=ARGV[3], etag=ARGV[5], enc_len=tonumber(ARGV[6]), chunks=tonumber(ARGV[7])})
 local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or '1') + 1
@@ -226,6 +233,21 @@ redis.call('HSET', KEYS[1], field, value, 'revision', revision)
 redis.call('EXPIRE', KEYS[1], ARGV[8])
 return 1
 `
+
+var commitPartLua = redis.NewScript(commitPartScript)
+
+var runCommitPart = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
+	return commitPartLua.Run(ctx, client, keys, args...).Result()
+}
+
+const createStateScript = `
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+redis.call('HSET', KEYS[1], 'meta', ARGV[1], 'state_version', '2', 'phase', 'open', 'revision', '1')
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return 1
+`
+
+var createStateLua = redis.NewScript(createStateScript)
 
 const releasePartScript = `
 local field = 'part:' .. ARGV[1]
@@ -239,6 +261,76 @@ redis.call('HDEL', KEYS[1], field)
 return 1
 `
 
+var releasePartLua = redis.NewScript(releasePartScript)
+
+const atomicLifecycleScript = `
+local current = redis.call('HGET', KEYS[1], 'meta')
+if not current then return 0 end
+local version = redis.call('HGET', KEYS[1], 'state_version')
+if version ~= '2' and ARGV[5] ~= 'allow_legacy_abort' then return 1 end
+if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[1] then return 2 end
+if tonumber(redis.call('HGET', KEYS[1], 'revision') or '0') ~= tonumber(ARGV[2]) then return 3 end
+redis.call('HSET', KEYS[1], 'meta', ARGV[4], 'state_version', '2', 'phase', ARGV[3], 'revision', tonumber(ARGV[2]) + 1)
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return 4
+`
+
+var atomicLifecycleLua = redis.NewScript(atomicLifecycleScript)
+
+var runAtomicLifecycle = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
+	return atomicLifecycleLua.Run(ctx, client, keys, args...).Result()
+}
+
+const syncMetaScript = `
+if redis.call('HGET', KEYS[1], 'revision') ~= ARGV[2] then return 0 end
+redis.call('HSET', KEYS[1], 'meta', ARGV[1])
+return 1
+`
+
+var syncMetaLua = redis.NewScript(syncMetaScript)
+
+var runSyncMeta = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
+	return syncMetaLua.Run(ctx, client, keys, args...).Result()
+}
+
+// beginCompleteScript validates the selected part set while holding Valkey's
+// single-threaded Lua execution lock. Control fields are the authoritative
+// non-secret state; encrypted meta is immutable after Create and Get overlays
+// these fields after authenticated decryption.
+const beginCompleteScript = `
+local meta = redis.call('HGET', KEYS[1], 'meta')
+if not meta then return {0} end
+if redis.call('HGET', KEYS[1], 'state_version') ~= '2' then return {1} end
+if redis.call('HGET', KEYS[1], 'phase') ~= 'open' then return {2} end
+if tonumber(redis.call('HGET', KEYS[1], 'revision') or '0') ~= tonumber(ARGV[1]) then return {3} end
+local out = {4}
+local previous = 0
+for i = 2, #ARGV - 1, 2 do
+  local pn = tonumber(ARGV[i])
+  local wanted = ARGV[i + 1]
+  if not pn or pn < 1 or pn > 10000 or pn <= previous then return {5} end
+  local raw = redis.call('HGET', KEYS[1], 'part:' .. pn)
+  if not raw then return {5} end
+  local p = cjson.decode(raw)
+  if p.status ~= 'committed' then return {5} end
+  local etag = string.gsub(p.etag or '', '^"(.*)"$', '%1')
+  local want = string.gsub(wanted, '^"(.*)"$', '%1')
+  if etag ~= want then return {5} end
+  table.insert(out, raw)
+  previous = pn
+end
+local nextRevision = tonumber(ARGV[1]) + 1
+redis.call('HSET', KEYS[1], 'phase', 'completing', 'revision', nextRevision)
+redis.call('EXPIRE', KEYS[1], ARGV[#ARGV])
+return out
+`
+
+var beginCompleteLua = redis.NewScript(beginCompleteScript)
+
+var runBeginComplete = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
+	return beginCompleteLua.Run(ctx, client, keys, args...).Result()
+}
+
 // uploadKey returns the Valkey hash key for an upload: mpu:<hex(sha256(uploadID))>.
 func uploadKey(uploadID string) string {
 	h := sha256.Sum256([]byte(uploadID))
@@ -246,11 +338,12 @@ func uploadKey(uploadID string) string {
 }
 
 const (
-	fieldMeta         = "meta"
-	fieldPartPrefix   = "part:"
-	fieldStateVersion = "state_version"
-	fieldPhase        = "phase"
-	fieldRevision     = "revision"
+	fieldMeta           = "meta"
+	fieldPartPrefix     = "part:"
+	fieldStateVersion   = "state_version"
+	fieldPhase          = "phase"
+	fieldRevision       = "revision"
+	writerCapabilityKey = "mpu:writer-version"
 )
 
 // ValkeyStateStore implements StateStore backed by Valkey (via go-redis/v9).
@@ -267,7 +360,8 @@ type ValkeyStateStore struct {
 	allowLegacyPlaintext bool
 	legacyWarn           sync.Once
 	// metrics is optional; when non-nil, encryption counters are reported.
-	metrics *metrics.Metrics
+	metrics          *metrics.Metrics
+	writerCapability string
 }
 
 // NewValkeyStateStore constructs a ValkeyStateStore.
@@ -352,6 +446,7 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, keyManage
 		keyManager:           keyManager,
 		encryptState:         encryptState,
 		allowLegacyPlaintext: cfg.AllowLegacyPlaintextState,
+		writerCapability:     cfg.WriterCapability,
 	}
 
 	if s.allowLegacyPlaintext {
@@ -594,20 +689,16 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 		s.metrics.IncMPUStateEncryptedWrites("create")
 	}
 
-	hsetnx, err := s.client.HSetNX(ctx, key, fieldMeta, value).Result()
+	result, err := createStateLua.Run(ctx, s.client, []string{key}, value, int(s.ttl/time.Second)).Result()
 	if err != nil {
 		return wrapRedisErr(err)
 	}
-
-	// HSETNX returns false when the key already exists.
-	if !hsetnx {
+	created, ok := redisInt(result)
+	if !ok {
+		return fmt.Errorf("mpu: malformed create result")
+	}
+	if created != 1 {
 		return ErrUploadAlreadyExists
-	}
-	if err := s.client.HSet(ctx, key, fieldStateVersion, state.StateVersion, fieldPhase, string(state.Phase), fieldRevision, state.Revision).Err(); err != nil {
-		return wrapRedisErr(err)
-	}
-	if err := s.client.Expire(ctx, key, s.ttl).Err(); err != nil {
-		return wrapRedisErr(err)
 	}
 	// V1.0-OBS-1 G7: increment active MPU upload gauge on successful create.
 	s.metrics.IncMPUActiveUploads()
@@ -645,7 +736,7 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 	if part.PartNumber < 1 || part.PartNumber > 10000 || part.Claim == "" || part.Token == "" || part.PlainLen < 0 {
 		return Reservation{}, fmt.Errorf("mpu: invalid part claim")
 	}
-	result, err := s.client.Eval(ctx, reservePartScript, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.PlainLen, part.Token, int(s.ttl/time.Second)).Result()
+	result, err := runReservePart(ctx, s.client, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.PlainLen, part.Token, int(s.ttl/time.Second))
 	if err != nil {
 		return Reservation{}, wrapRedisErr(err)
 	}
@@ -682,6 +773,9 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 		if !ok {
 			return Reservation{}, fmt.Errorf("mpu: malformed reserve revision")
 		}
+		if err := s.syncControlMeta(ctx, uploadID, uint64(revision), UploadPhaseOpen); err != nil {
+			return Reservation{}, err
+		}
 		return Reservation{Token: part.Token, Revision: uint64(revision)}, nil
 	default:
 		return Reservation{}, fmt.Errorf("mpu: unknown reserve result %d", code)
@@ -689,10 +783,10 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 }
 
 func (s *ValkeyStateStore) CommitPart(ctx context.Context, uploadID string, part PartClaim) error {
-	if part.Token == "" || part.Claim == "" {
+	if part.PartNumber < 1 || part.PartNumber > 10000 || part.Token == "" || part.Claim == "" {
 		return fmt.Errorf("mpu: invalid commit claim")
 	}
-	result, err := s.client.Eval(ctx, commitPartScript, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.Token, part.PlainLen, part.ETag, part.EncLen, part.ChunkCount, int(s.ttl/time.Second)).Result()
+	result, err := runCommitPart(ctx, s.client, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.Token, part.PlainLen, part.ETag, part.EncLen, part.ChunkCount, int(s.ttl/time.Second))
 	if err != nil {
 		return wrapRedisErr(err)
 	}
@@ -704,19 +798,72 @@ func (s *ValkeyStateStore) CommitPart(ctx context.Context, uploadID string, part
 	case 0:
 		return ErrUploadNotFound
 	case 1:
-		return nil
+		return s.syncControlMeta(ctx, uploadID, 0, "")
 	case 2:
 		return ErrRevisionConflict
+	case 3, 4:
+		return ErrInvalidPhase
 	default:
 		return fmt.Errorf("mpu: unknown commit result %d", code)
 	}
+}
+
+// syncControlMeta mirrors the Lua-controlled revision/phase into authenticated
+// metadata. The control-field mutation remains atomic in Lua; this keeps the
+// authenticated readback consistent for subsequent operations.
+func (s *ValkeyStateStore) syncControlMeta(ctx context.Context, uploadID string, revision uint64, phase UploadPhase) error {
+	key := uploadKey(uploadID)
+	fields, err := s.client.HMGet(ctx, key, fieldMeta, fieldRevision, fieldPhase).Result()
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	if len(fields) < 3 || fields[0] == nil {
+		return ErrUploadNotFound
+	}
+	if revision == 0 {
+		revision, _ = strconv.ParseUint(fmt.Sprint(fields[1]), 10, 64)
+	}
+	if phase == "" {
+		phase = UploadPhase(fmt.Sprint(fields[2]))
+	}
+	metaBytes := []byte(fmt.Sprint(fields[0]))
+	if s.encryptState {
+		metaBytes, err = s.DecryptState(metaBytes)
+		if err != nil {
+			return err
+		}
+	}
+	var state UploadState
+	if err := json.Unmarshal(metaBytes, &state); err != nil {
+		return err
+	}
+	state.StateVersion = CurrentStateVersion
+	state.Phase, state.Revision = phase, revision
+	metaBytes, err = json.Marshal(&state)
+	if err != nil {
+		return err
+	}
+	if s.encryptState {
+		metaBytes, err = s.EncryptState(metaBytes)
+		if err != nil {
+			return err
+		}
+	}
+	result, err := runSyncMeta(ctx, s.client, []string{key}, metaBytes, revision)
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	if code, ok := redisInt(result); !ok || code != 1 {
+		return s.syncControlMeta(ctx, uploadID, 0, "")
+	}
+	return nil
 }
 
 func (s *ValkeyStateStore) ReleasePart(ctx context.Context, uploadID string, partNumber int32, token string) error {
 	if partNumber < 1 || token == "" {
 		return fmt.Errorf("mpu: invalid release claim")
 	}
-	result, err := s.client.Eval(ctx, releasePartScript, []string{uploadKey(uploadID)}, partNumber, token).Result()
+	result, err := releasePartLua.Run(ctx, s.client, []string{uploadKey(uploadID)}, partNumber, token).Result()
 	if err != nil {
 		return wrapRedisErr(err)
 	}
@@ -734,42 +881,63 @@ func (s *ValkeyStateStore) ReleasePart(ctx context.Context, uploadID string, par
 }
 
 func (s *ValkeyStateStore) BeginComplete(ctx context.Context, uploadID string, selected []SelectedPart) (*UploadState, uint64, error) {
+	if len(selected) == 0 {
+		return nil, 0, ErrCompleteMismatch
+	}
 	state, err := s.Get(ctx, uploadID)
 	if err != nil {
 		return nil, 0, err
 	}
-	if state.StateVersion != CurrentStateVersion {
+	args := []interface{}{state.Revision}
+	for _, p := range selected {
+		args = append(args, p.PartNumber, p.ETag)
+	}
+	args = append(args, int(s.ttl/time.Second))
+	result, err := runBeginComplete(ctx, s.client, []string{uploadKey(uploadID)}, args...)
+	if err != nil {
+		return nil, 0, wrapRedisErr(err)
+	}
+	values, ok := result.([]interface{})
+	if !ok || len(values) == 0 {
+		return nil, 0, fmt.Errorf("mpu: malformed complete result")
+	}
+	code, ok := redisInt(values[0])
+	if !ok {
+		return nil, 0, fmt.Errorf("mpu: malformed complete code")
+	}
+	switch code {
+	case 0:
+		return nil, 0, ErrUploadNotFound
+	case 1:
 		return nil, 0, ErrInvalidStateVersion
-	}
-	if state.Phase != UploadPhaseOpen {
+	case 2:
 		return nil, 0, ErrInvalidPhase
-	}
-	if len(selected) == 0 {
+	case 3:
+		return nil, 0, ErrRevisionConflict
+	case 5:
 		return nil, 0, ErrCompleteMismatch
+	case 4:
+	default:
+		return nil, 0, fmt.Errorf("mpu: unknown complete result %d", code)
 	}
-	parts := make([]PartRecord, 0, len(selected))
-	byNumber := make(map[int32]PartRecord, len(state.Parts))
-	for _, part := range state.Parts {
-		byNumber[part.PartNumber] = part
-	}
-	var previous int32
-	for i, requested := range selected {
-		if requested.PartNumber < 1 || requested.PartNumber > 10000 || (i > 0 && requested.PartNumber <= previous) {
-			return nil, 0, ErrCompleteMismatch
+	state.Phase, state.Revision = UploadPhaseCompleting, state.Revision+1
+	selectedParts := make([]PartRecord, 0, len(values)-1)
+	for _, raw := range values[1:] {
+		var p PartRecord
+		b, ok := raw.(string)
+		if !ok || json.Unmarshal([]byte(b), &p) != nil {
+			return nil, 0, fmt.Errorf("mpu: malformed selected part")
 		}
-		part, ok := byNumber[requested.PartNumber]
-		if !ok || (part.Status != "" && part.Status != PartStatusCommitted) || !sameETag(part.ETag, requested.ETag) {
-			return nil, 0, fmt.Errorf("%w: part=%d found=%t status=%q stored_etag=%q requested_etag=%q", ErrCompleteMismatch, requested.PartNumber, ok, part.Status, part.ETag, requested.ETag)
-		}
-		parts = append(parts, part)
-		previous = requested.PartNumber
+		selectedParts = append(selectedParts, p)
 	}
-	state.Parts = parts
-	state.Phase = UploadPhaseCompleting
-	state.Revision++
-	if err := s.persistControl(ctx, uploadID, state); err != nil {
+	state.Parts = selectedParts
+	// Keep authenticated metadata synchronized with the control-field mirror.
+	// Use the revision-guarded writer so a stale Complete request cannot
+	// overwrite metadata after a newer lifecycle transition.
+	if err := s.syncControlMeta(ctx, uploadID, state.Revision, state.Phase); err != nil {
 		return nil, 0, err
 	}
+	s.recordTransition("open", "completing", "success")
 	return state, state.Revision, nil
 }
 
@@ -783,12 +951,14 @@ func (s *ValkeyStateStore) Reopen(ctx context.Context, uploadID string, revision
 	if err != nil {
 		return err
 	}
-	if state.Revision != revision || state.Phase != UploadPhaseCompleting {
-		return ErrRevisionConflict
+	from := state.Phase
+	if from != UploadPhaseCompleting && from != UploadPhaseAborting {
+		return ErrInvalidPhase
 	}
-	state.Phase = UploadPhaseOpen
-	state.Revision++
-	return s.persistControl(ctx, uploadID, state)
+	state.Phase, state.Revision = UploadPhaseOpen, revision+1
+	err = s.atomicLifecycle(ctx, uploadID, from, revision, UploadPhaseOpen, state)
+	s.recordTransition(string(from), "open", transitionResult(err))
+	return err
 }
 
 func (s *ValkeyStateStore) FinalizeComplete(ctx context.Context, uploadID string, revision uint64) error {
@@ -796,11 +966,10 @@ func (s *ValkeyStateStore) FinalizeComplete(ctx context.Context, uploadID string
 	if err != nil {
 		return err
 	}
-	if state.Revision != revision || state.Phase != UploadPhaseCompleting {
-		return ErrRevisionConflict
-	}
-	state.Phase = UploadPhaseCompleted
-	return s.persistControl(ctx, uploadID, state)
+	state.Phase, state.Revision = UploadPhaseCompleted, revision+1
+	err = s.atomicLifecycle(ctx, uploadID, UploadPhaseCompleting, revision, UploadPhaseCompleted, state)
+	s.recordTransition("completing", "completed", transitionResult(err))
+	return err
 }
 
 func (s *ValkeyStateStore) BeginAbort(ctx context.Context, uploadID string) (uint64, error) {
@@ -808,17 +977,23 @@ func (s *ValkeyStateStore) BeginAbort(ctx context.Context, uploadID string) (uin
 	if err != nil {
 		return 0, err
 	}
-	if state.StateVersion != 0 && state.StateVersion != CurrentStateVersion {
+	if state.StateVersion != 0 && state.StateVersion != 1 && state.StateVersion != CurrentStateVersion {
 		return 0, ErrInvalidStateVersion
 	}
 	if state.Phase != "" && state.Phase != UploadPhaseOpen {
 		return 0, ErrInvalidPhase
 	}
-	state.Phase = UploadPhaseAborting
-	state.Revision++
-	if err := s.persistControl(ctx, uploadID, state); err != nil {
+	legacy := state.StateVersion != CurrentStateVersion
+	from := string(state.Phase)
+	if legacy && from == "" {
+		from = string(UploadPhaseOpen)
+	}
+	state.Phase, state.Revision = UploadPhaseAborting, state.Revision+1
+	if err := s.atomicLifecycle(ctx, uploadID, UploadPhase(from), state.Revision-1, UploadPhaseAborting, state); err != nil {
+		s.recordTransition(from, "aborting", "error")
 		return 0, err
 	}
+	s.recordTransition(from, "aborting", "success")
 	return state.Revision, nil
 }
 
@@ -827,11 +1002,71 @@ func (s *ValkeyStateStore) FinalizeAbort(ctx context.Context, uploadID string, r
 	if err != nil {
 		return err
 	}
-	if state.Revision != revision || state.Phase != UploadPhaseAborting {
-		return ErrRevisionConflict
+	state.Phase, state.Revision = UploadPhaseAborted, revision+1
+	err = s.atomicLifecycle(ctx, uploadID, UploadPhaseAborting, revision, UploadPhaseAborted, state)
+	s.recordTransition("aborting", "aborted", transitionResult(err))
+	return err
+}
+
+func (s *ValkeyStateStore) atomicLifecycle(ctx context.Context, uploadID string, from UploadPhase, revision uint64, to UploadPhase, state *UploadState) error {
+	metaState := *state
+	metaState.Parts = nil
+	legacyAbort := to == UploadPhaseAborting && state.StateVersion != CurrentStateVersion
+	if legacyAbort {
+		// The legacy marker is used only to authorize this abort. Persist the
+		// upgraded control/meta state atomically with the transition.
+		metaState.StateVersion = CurrentStateVersion
 	}
-	state.Phase = UploadPhaseAborted
-	return s.persistControl(ctx, uploadID, state)
+	meta, err := json.Marshal(&metaState)
+	if err != nil {
+		return err
+	}
+	if s.encryptState {
+		meta, err = s.EncryptState(meta)
+		if err != nil {
+			return err
+		}
+	}
+	allowLegacy := ""
+	if legacyAbort {
+		// Legacy aborts are upgraded only as part of the abort transition.
+		allowLegacy = "allow_legacy_abort"
+	}
+	result, err := runAtomicLifecycle(ctx, s.client, []string{uploadKey(uploadID)}, string(from), revision, string(to), meta, allowLegacy, int(s.ttl/time.Second))
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	code, ok := redisInt(result)
+	if !ok {
+		return fmt.Errorf("mpu: malformed atomic lifecycle result")
+	}
+	switch code {
+	case 0:
+		return ErrUploadNotFound
+	case 1:
+		return ErrInvalidStateVersion
+	case 2:
+		return ErrInvalidPhase
+	case 3:
+		return ErrRevisionConflict
+	case 4:
+		return nil
+	default:
+		return fmt.Errorf("mpu: unknown atomic lifecycle result %d", code)
+	}
+}
+
+func transitionResult(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
+}
+
+func (s *ValkeyStateStore) recordTransition(from, to, result string) {
+	if s.metrics != nil {
+		s.metrics.RecordMPUStateTransition(from, to, result)
+	}
 }
 
 func (s *ValkeyStateStore) persistControl(ctx context.Context, uploadID string, state *UploadState) error {
@@ -879,12 +1114,9 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	if len(fields) == 0 {
 		return nil, ErrUploadNotFound
 	}
-	if version, ok := fields[fieldStateVersion]; ok {
-		v, err := strconv.ParseUint(version, 10, 8)
-		if err != nil || uint8(v) != CurrentStateVersion {
-			return nil, ErrInvalidStateVersion
-		}
-	}
+	// Keep legacy records readable so request handlers can return the
+	// actionable abort-only OperationAborted response. Write operations still
+	// reject missing/version-1 state in their atomic scripts.
 
 	metaRaw, ok := fields[fieldMeta]
 	if !ok {
@@ -919,11 +1151,29 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	if err := json.Unmarshal(metaBytes, &state); err != nil {
 		return nil, fmt.Errorf("mpu: unmarshal state: %w", err)
 	}
-	if state.StateVersion != 0 && state.StateVersion != CurrentStateVersion {
-		return nil, ErrInvalidStateVersion
+	// Legacy state remains readable so handlers can return the abort-only
+	// OperationAborted contract. For authenticated non-legacy metadata, every
+	// mirrored control field must agree exactly; never overlay an unchecked
+	// mirror onto authenticated state.
+	if state.StateVersion != 0 {
+		mirrored, ok := fields[fieldStateVersion]
+		v, parseErr := strconv.ParseUint(mirrored, 10, 8)
+		if !ok || parseErr != nil || uint8(v) != state.StateVersion {
+			return nil, fmt.Errorf("mpu: state version mirror mismatch")
+		}
 	}
-	if mirrored, ok := fields[fieldPhase]; ok && state.Phase != "" && mirrored != string(state.Phase) {
-		return nil, fmt.Errorf("mpu: state phase mirror mismatch")
+	if state.Phase != "" {
+		mirrored, ok := fields[fieldPhase]
+		if !ok || UploadPhase(mirrored) != state.Phase {
+			return nil, fmt.Errorf("mpu: state phase mirror mismatch")
+		}
+	}
+	if state.Revision != 0 {
+		mirrored, ok := fields[fieldRevision]
+		v, parseErr := strconv.ParseUint(mirrored, 10, 64)
+		if !ok || parseErr != nil || v != state.Revision {
+			return nil, fmt.Errorf("mpu: state revision mirror mismatch")
+		}
 	}
 
 	// Reconstruct part records from individual hash fields.
@@ -939,37 +1189,6 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	}
 
 	return &state, nil
-}
-
-// AppendPart adds a PartRecord and refreshes the TTL.
-func (s *ValkeyStateStore) AppendPart(ctx context.Context, uploadID string, part PartRecord) error {
-	key := uploadKey(uploadID)
-	if part.Status == "" {
-		part.Status = PartStatusCommitted
-	}
-
-	// Verify key exists before appending.
-	exists, err := s.client.Exists(ctx, key).Result()
-	if err != nil {
-		return wrapRedisErr(err)
-	}
-	if exists == 0 {
-		return ErrUploadNotFound
-	}
-
-	partJSON, err := json.Marshal(part)
-	if err != nil {
-		return fmt.Errorf("mpu: marshal part record: %w", err)
-	}
-
-	fieldName := fmt.Sprintf("%s%d", fieldPartPrefix, part.PartNumber)
-	pipe := s.client.Pipeline()
-	pipe.HSet(ctx, key, fieldName, partJSON)
-	pipe.Expire(ctx, key, s.ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return wrapRedisErr(err)
-	}
-	return nil
 }
 
 // Delete removes the upload state.
@@ -989,6 +1208,9 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 	iter := s.client.Scan(ctx, 0, "mpu:*", 0).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
+		if key == writerCapabilityKey {
+			continue
+		}
 		// Skip the state DEK wrapper key — it is a plain string, not a hash.
 		if key == stateKeyWrappedKey {
 			continue
@@ -1031,6 +1253,15 @@ func (s *ValkeyStateStore) List(ctx context.Context) ([]UploadState, error) {
 	if err := iter.Err(); err != nil {
 		return nil, wrapRedisErr(err)
 	}
+	legacy := 0
+	for _, state := range states {
+		if state.StateVersion != CurrentStateVersion {
+			legacy++
+		}
+	}
+	if s.metrics != nil {
+		s.metrics.SetMPULegacyInflight(float64(legacy))
+	}
 	return states, nil
 }
 
@@ -1046,6 +1277,23 @@ func (s *ValkeyStateStore) HealthCheck(ctx context.Context) error {
 	defer cancel()
 	if err := s.client.Ping(hctx).Err(); err != nil {
 		return fmt.Errorf("%w: ping: %v", ErrStateUnavailable, err)
+	}
+	return nil
+}
+
+// WriterCapabilityReady verifies that the shared store advertises the
+// nonce-safe writer protocol. The key is deliberately separate from upload
+// state so readiness can fail closed before accepting MPU writes.
+func (s *ValkeyStateStore) WriterCapabilityReady(ctx context.Context) error {
+	if s.writerCapability == "" {
+		return fmt.Errorf("%w: MPU writer capability is not configured", ErrStateUnavailable)
+	}
+	version, err := s.client.Get(ctx, writerCapabilityKey).Result()
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	if version != s.writerCapability {
+		return fmt.Errorf("%w: configured=%q shared=%q", ErrInvalidStateVersion, s.writerCapability, version)
 	}
 	return nil
 }

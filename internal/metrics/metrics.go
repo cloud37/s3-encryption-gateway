@@ -1018,6 +1018,7 @@ func (m *Metrics) RecordMPUPartClaim(result string) {
 	m.mpuPartClaims.WithLabelValues(result).Inc()
 }
 
+// RecordMPUStateTransition records a bounded lifecycle transition outcome.
 func (m *Metrics) RecordMPUStateTransition(from, to, result string) {
 	if m == nil || m.mpuStateTransitions == nil {
 		return

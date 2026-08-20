@@ -53,6 +53,9 @@ type Handler struct {
 	// implementations; keeping these private avoids changing the public API.
 	apiMetadataExpander    func(map[string]string) (map[string]string, error)
 	encryptionEngineLoader func(string) (crypto.EncryptionEngine, error)
+	// Optional test seam for observing destination encryption construction.
+	destinationEncryptionConstructed func()
+	destinationEncryptionReader      func(io.Reader, int64) (io.Reader, int64, error)
 }
 
 // NewHandler creates a new API handler (backward compatibility).
@@ -840,6 +843,9 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 				return err
 			},
 		})
+		if capable, ok := h.mpuStateStore.(interface{ WriterCapabilityReady(context.Context) error }); ok {
+			checks = append(checks, metrics.ReadyCheck{Name: "mpu_writer", Check: capable.WriterCapabilityReady})
+		}
 	}
 
 	// Wrap w so we can read back the status code for the metric without
@@ -2767,6 +2773,11 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	if len(listResult.Objects) > 0 && maxKeys <= 10 {
 		for i := range listResult.Objects {
 			obj := &listResult.Objects[i]
+			if active, err := h.listActiveMPUPlainSizes(ctx, bucket); err == nil {
+				if _, ok := active[obj.Key]; ok {
+					continue
+				}
+			}
 			if ps, ok, translateErr := h.lookupListObjectPlaintextSize(ctx, bucket, obj.Key, obj.Size, s3Client); translateErr == nil && ok {
 				obj.Size = ps
 			}
@@ -3735,10 +3746,11 @@ func (h *Handler) validateCompleteMultipartUploadRequest(req *CompleteMultipartU
 
 		// Check if parts are in ascending order (AWS requires this)
 		if i > 0 && part.PartNumber < lastPartNumber {
-			h.logger.WithFields(logrus.Fields{
-				"part_number": part.PartNumber,
-				"last_part":   lastPartNumber,
-			}).Warn("Parts not in ascending order - AWS requires ascending part numbers")
+			return &S3Error{
+				Code:       "InvalidPartOrder",
+				Message:    "The list of parts is not in ascending order",
+				HTTPStatus: http.StatusBadRequest,
+			}
 		}
 		lastPartNumber = part.PartNumber
 	}
@@ -3774,12 +3786,97 @@ func isValidETag(etag string) bool {
 	// Basic validation: should contain only hex digits, dashes, and quotes
 	inner := etag[1 : len(etag)-1]
 	for _, r := range inner {
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') || r == '-') {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') && r != '-' {
 			return false
 		}
 	}
 
 	return len(inner) > 0
+}
+
+type encryptedMPUPartReservation struct {
+	store       mpu.StateStore
+	claim       mpu.PartClaim
+	reservation mpu.Reservation
+	plainBody   *s3.SeekableBody
+	plainLen    int64
+	reserved    bool
+}
+
+// reserveEncryptedMPUPart authenticates and reserves plaintext before any
+// destination encryption or backend mutation. Keeping this boundary separate
+// makes the nonce-safety ordering explicit without changing the HTTP handler's
+// transport and backend responsibilities.
+func (h *Handler) reserveEncryptedMPUPart(ctx context.Context, bucket, uploadID string, partNumber int32, inputReader io.Reader, state *mpu.UploadState) (encryptedMPUPartReservation, *S3Error) {
+	plainBody, err := s3.NewSeekableBody(inputReader, effectiveMaxPartBuffer(h.config))
+	if err != nil {
+		code, status, msg := "InternalError", http.StatusInternalServerError, "Failed to read multipart upload part"
+		if _, ok := err.(*s3.ErrPartTooLarge); ok {
+			code, status, msg = "EntityTooLarge", http.StatusRequestEntityTooLarge, err.Error()
+		}
+		return encryptedMPUPartReservation{}, &S3Error{Code: code, Message: msg, HTTPStatus: status}
+	}
+	store := h.mpuStateStore
+	if store == nil {
+		return encryptedMPUPartReservation{plainBody: plainBody, plainLen: plainBody.Len}, nil
+	}
+	dek, err := h.unwrapMPUDEK(ctx, state, bucket, uploadID)
+	if err != nil {
+		return encryptedMPUPartReservation{}, &S3Error{Code: "InternalError", Message: "Failed to prepare multipart upload part", HTTPStatus: http.StatusInternalServerError}
+	}
+	claimBytes, err := mpu.ComputePartClaim(dek, partNumber, plainBody.Len, plainBody)
+	zeroBytes(dek)
+	if err != nil {
+		return encryptedMPUPartReservation{}, &S3Error{Code: "InternalError", Message: "Failed to claim multipart upload part", HTTPStatus: http.StatusInternalServerError}
+	}
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return encryptedMPUPartReservation{}, &S3Error{Code: "InternalError", Message: "Failed to reserve multipart upload part", HTTPStatus: http.StatusInternalServerError}
+	}
+	claim := mpu.PartClaim{PartNumber: partNumber, Claim: base64.RawURLEncoding.EncodeToString(claimBytes[:]), PlainLen: plainBody.Len, Token: base64.RawURLEncoding.EncodeToString(tokenBytes)}
+	reservation, err := store.ReservePart(ctx, uploadID, claim)
+	if err != nil {
+		code, status, msg := "ServiceUnavailable", http.StatusServiceUnavailable, "Multipart encryption state store unavailable; retry the part upload"
+		switch {
+		case errors.Is(err, mpu.ErrPartContentMismatch):
+			code, status, msg = "OperationAborted", http.StatusConflict, "Encrypted multipart part content is immutable; abort this upload and create a new upload."
+		case errors.Is(err, mpu.ErrPartInProgress):
+			code, status, msg = "OperationAborted", http.StatusConflict, "A conflicting operation is in progress; retry the identical part request."
+		case errors.Is(err, mpu.ErrInvalidStateVersion):
+			code, status, msg = "OperationAborted", http.StatusConflict, "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload."
+		case errors.Is(err, mpu.ErrInvalidPhase):
+			code, status, msg = "OperationAborted", http.StatusConflict, "Multipart upload lifecycle transition is in progress."
+		}
+		claimResult := "mismatch"
+		if errors.Is(err, mpu.ErrPartInProgress) {
+			claimResult = "in_progress"
+		}
+		if errors.Is(err, mpu.ErrInvalidStateVersion) {
+			claimResult = "legacy_rejected"
+		}
+		h.metrics.RecordMPUPartClaim(claimResult)
+		return encryptedMPUPartReservation{}, &S3Error{Code: code, Message: msg, HTTPStatus: status}
+	}
+	if reservation.AlreadyDone {
+		h.metrics.RecordMPUPartClaim("identical")
+		return encryptedMPUPartReservation{store: store, reservation: reservation, plainBody: plainBody, plainLen: plainBody.Len}, nil
+	}
+	h.metrics.RecordMPUPartClaim("reserved")
+	if _, err := plainBody.Seek(0, io.SeekStart); err != nil {
+		return encryptedMPUPartReservation{}, &S3Error{Code: "InternalError", Message: "Failed to prepare multipart upload part", HTTPStatus: http.StatusInternalServerError}
+	}
+	return encryptedMPUPartReservation{store: store, claim: claim, reservation: reservation, plainBody: plainBody, plainLen: plainBody.Len, reserved: true}, nil
+}
+
+// beginEncryptedMPUComplete atomically validates the exact client selection
+// before a manifest is written or the backend Complete operation is issued.
+func (h *Handler) beginEncryptedMPUComplete(ctx context.Context, uploadID string, req *CompleteMultipartUpload) (*mpu.UploadState, error) {
+	selected := make([]mpu.SelectedPart, len(req.Parts))
+	for i, part := range req.Parts {
+		selected[i] = mpu.SelectedPart{PartNumber: part.PartNumber, ETag: part.ETag}
+	}
+	state, _, err := h.mpuStateStore.BeginComplete(ctx, uploadID, selected)
+	return state, err
 }
 
 // handleUploadPart handles uploading a part in a multipart upload.
@@ -3865,17 +3962,25 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 
 	// Default: no encryption layer added here (plaintext parts per ADR 0002, or
 	// encrypted per-upload DEK below when the upload has a Valkey state record).
-	var encryptedReader io.Reader = inputReader
+	var encryptedReader io.Reader
 	var contentLengthPtr *int64
 	// encMPUState is non-nil only for encrypted MPU parts; used after UploadPart
 	// to record the PartRecord without a second Valkey round-trip.
 	var encMPUState *mpu.UploadState
 	var encMPUPlainLen int64
 	var encMPUEncryptDuration time.Duration
-	var encMPUClaimStore mpu.ClaimStateStore
+	var encMPUClaimStore mpu.StateStore
 	var encMPUClaim mpu.PartClaim
 	var encMPUReservation mpu.Reservation
 	var encMPUReserved bool
+	preUploadReservationOwned := false
+	defer func() {
+		if preUploadReservationOwned && encMPUClaimStore != nil {
+			// Pre-upload failures have a deterministic outcome. Cleanup errors
+			// must not replace the original HTTP error.
+			_ = encMPUClaimStore.ReleasePart(ctx, uploadID, encMPUClaim.PartNumber, encMPUReservation.Token)
+		}
+	}()
 
 	if uploadState, isEnc, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil {
 		// Transient Valkey failure mid-upload — do NOT downgrade to plaintext.
@@ -3911,82 +4016,38 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	} else if isEnc {
 		// Encrypted multipart path — decision based on PolicySnapshot stored at
 		// CreateMultipartUpload, not live policy (ADR-0009 §Security Considerations).
-		// Determine the plaintext length for encryption metadata.
-		// Handle STREAMING-* (AWS chunked encoding) by checking x-amz-decoded-content-length.
+		// reserveEncryptedMPUPart buffers the plaintext and derives its exact
+		// length before encryption, including AWS chunked requests.
 		var plainLen int64
-		if decodedLen := r.Header.Get("x-amz-decoded-content-length"); decodedLen != "" {
-			if v, e := strconv.ParseInt(decodedLen, 10, 64); e == nil && v >= 0 {
-				plainLen = v
-			}
-		} else if r.ContentLength >= 0 {
-			plainLen = r.ContentLength
-		}
 
 		// Claim the exact plaintext before constructing the encryptor or touching
 		// the destination backend. Version-2 stores make replacement immutable.
-		plainMaxBuf := effectiveMaxPartBuffer(h.config)
-		plainBody, plainErr := s3.NewSeekableBody(inputReader, plainMaxBuf)
-		if plainErr != nil {
-			code, status, msg := "InternalError", http.StatusInternalServerError, "Failed to read multipart upload part"
-			if _, ok := plainErr.(*s3.ErrPartTooLarge); ok {
-				code, status, msg = "EntityTooLarge", http.StatusRequestEntityTooLarge, plainErr.Error()
-			}
-			(&S3Error{Code: code, Message: msg, Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+		reserved, reserveErr := h.reserveEncryptedMPUPart(ctx, bucket, uploadID, int32(partNumber), inputReader, uploadState)
+		if reserveErr != nil {
+			reserveErr.Resource = r.URL.Path
+			reserveErr.WriteXML(w)
 			return
 		}
-		if claimStore, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok {
-			dek, dekErr := h.unwrapMPUDEK(ctx, uploadState, bucket, uploadID)
-			if dekErr != nil {
-				(&S3Error{Code: "InternalError", Message: "Failed to prepare multipart upload part", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-				return
-			}
-			claimBytes, claimErr := mpu.ComputePartClaim(dek, int32(partNumber), plainBody.Len, plainBody)
-			zeroBytes(dek)
-			if claimErr != nil {
-				(&S3Error{Code: "InternalError", Message: "Failed to claim multipart upload part", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-				return
-			}
-			claim := base64.RawURLEncoding.EncodeToString(claimBytes[:])
-			tokenBytes := make([]byte, 16)
-			if _, tokenErr := rand.Read(tokenBytes); tokenErr != nil {
-				(&S3Error{Code: "InternalError", Message: "Failed to reserve multipart upload part", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-				return
-			}
-			reservation, reserveErr := claimStore.ReservePart(ctx, uploadID, mpu.PartClaim{PartNumber: int32(partNumber), Claim: claim, PlainLen: plainBody.Len, Token: base64.RawURLEncoding.EncodeToString(tokenBytes)})
-			if reserveErr != nil {
-				code, status, msg := "ServiceUnavailable", http.StatusServiceUnavailable, "Multipart encryption state store unavailable; retry the part upload"
-				switch {
-				case errors.Is(reserveErr, mpu.ErrPartContentMismatch):
-					code, status, msg = "OperationAborted", http.StatusConflict, "Encrypted multipart part content is immutable; abort this upload and create a new upload."
-				case errors.Is(reserveErr, mpu.ErrPartInProgress):
-					code, status, msg = "OperationAborted", http.StatusConflict, "A conflicting operation is in progress; retry the identical part request."
-				case errors.Is(reserveErr, mpu.ErrInvalidStateVersion):
-					code, status, msg = "OperationAborted", http.StatusConflict, "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload."
-				case errors.Is(reserveErr, mpu.ErrInvalidPhase):
-					code, status, msg = "OperationAborted", http.StatusConflict, "Multipart upload lifecycle transition is in progress."
-				}
-				(&S3Error{Code: code, Message: msg, Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
-				h.metrics.RecordMPUPartClaim("mismatch")
-				return
-			}
-			encMPUClaimStore, encMPUClaim, encMPUReservation = claimStore, mpu.PartClaim{PartNumber: int32(partNumber), Claim: claim, PlainLen: plainBody.Len, Token: reservation.Token}, reservation
-			encMPUReserved = !reservation.AlreadyDone
-			if reservation.AlreadyDone {
-				w.Header().Set("ETag", reservation.CommittedETag)
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			inputReader = plainBody
-			plainLen = plainBody.Len
-			if _, seekErr := plainBody.Seek(0, io.SeekStart); seekErr != nil {
-				(&S3Error{Code: "InternalError", Message: "Failed to prepare multipart upload part", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-				return
-			}
+		if reserved.reservation.AlreadyDone {
+			w.Header().Set("ETag", reserved.reservation.CommittedETag)
+			w.WriteHeader(http.StatusOK)
+			return
 		}
+		encMPUClaimStore, encMPUClaim, encMPUReservation = reserved.store, reserved.claim, reserved.reservation
+		encMPUReserved = reserved.reserved
+		preUploadReservationOwned = reserved.reserved
+		inputReader = reserved.plainBody
+		plainLen = reserved.plainLen
 
 		// Pass the pre-fetched state to avoid a second Valkey round-trip inside encryptMPUPart.
 		encryptStart := time.Now()
-		encReader, encLen, err := h.encryptMPUPartWithState(ctx, bucket, uploadID, int32(partNumber), inputReader, plainLen, uploadState)
+		var encReader io.Reader
+		var encLen int64
+		if h.destinationEncryptionReader != nil {
+			encReader, encLen, err = h.destinationEncryptionReader(inputReader, plainLen)
+		} else {
+			encReader, encLen, err = h.encryptMPUPartWithState(ctx, bucket, uploadID, int32(partNumber), inputReader, plainLen, uploadState)
+		}
 		encMPUEncryptDuration = time.Since(encryptStart)
 		if err != nil {
 			h.logger.WithError(err).WithFields(logrus.Fields{
@@ -4032,7 +4093,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		}
 		encryptedReader = sb
 		contentLengthPtr = &encLen
-		// Hoist state into outer scope so AppendPart can use it without a
+		// Hoist state into outer scope so CommitPart can use it without a
 		// second Valkey round-trip after UploadPart succeeds.
 		encMPUState = uploadState
 		encMPUPlainLen = plainLen
@@ -4063,10 +4124,10 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	etag, err := s3Client.UploadPart(ctx, bucket, key, uploadID, int32(partNumber), encryptedReader, contentLengthPtr)
+	// UploadPart has started, so its result is uncertain. Preserve the exact
+	// reservation for reconciliation instead of allowing nonce reuse.
+	preUploadReservationOwned = false
 	if err != nil {
-		if encMPUReserved && encMPUClaimStore != nil {
-			_ = encMPUClaimStore.ReleasePart(ctx, uploadID, encMPUClaim.PartNumber, encMPUReservation.Token)
-		}
 		s3Err := TranslateError(err, bucket, key)
 		s3Err.WriteXML(w)
 		h.logger.WithError(err).WithFields(logrus.Fields{
@@ -4096,70 +4157,17 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		chunkCount := int32(chunkCount64)
-		pr := mpu.PartRecord{
-			PartNumber: int32(partNumber),
-			ETag:       etag,
-			PlainLen:   encMPUPlainLen,
-			EncLen:     *contentLengthPtr,
-			ChunkCount: chunkCount,
-		}
 		if encMPUClaimStore != nil && encMPUReserved {
 			encMPUClaim.ETag, encMPUClaim.EncLen, encMPUClaim.ChunkCount = etag, *contentLengthPtr, chunkCount
 			if commitErr := encMPUClaimStore.CommitPart(ctx, uploadID, encMPUClaim); commitErr != nil {
-				_ = encMPUClaimStore.ReleasePart(ctx, uploadID, encMPUClaim.PartNumber, encMPUReservation.Token)
+				// Do not release a reservation after an uncertain commit. Releasing
+				// could permit a changed plaintext to reuse the deterministic nonce
+				// schedule; the upload must be aborted if ownership is ambiguous.
 				(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
 				return
 			}
-		} else {
-			opStart := time.Now()
-			appendErr := h.mpuStateStore.AppendPart(ctx, uploadID, pr)
-			if appendErr != nil {
-				h.metrics.RecordMPUStateStoreOp("AppendPart", "error", time.Since(opStart))
-				h.metrics.RecordMPUPart("failed")
-			} else {
-				h.metrics.RecordMPUStateStoreOp("AppendPart", "success", time.Since(opStart))
-				h.metrics.RecordMPUPart("success")
-				h.metrics.RecordEncryptionOperation(r.Context(), "encrypt", encMPUEncryptDuration, encMPUPlainLen)
-				if h.auditLogger != nil {
-					h.auditLogger.Log(&audit.AuditEvent{
-						EventType: audit.EventTypeMPUPart,
-						Timestamp: time.Now().UTC(),
-						Bucket:    bucket,
-						Key:       key,
-						Success:   true,
-						Metadata:  map[string]interface{}{"upload_id": uploadID},
-					})
-				}
-			}
-
-			if appendErr != nil {
-				h.logger.WithError(appendErr).WithFields(logrus.Fields{
-					"bucket":     bucket,
-					"key":        key,
-					"uploadID":   uploadID,
-					"partNumber": partNumber,
-				}).Error("mpu.append_part.failure: backend part written but state not recorded; returning 500 so client retries")
-				h.metrics.RecordS3Error(r.Context(), "AppendMPUPartState", bucket, "StateUnavailable")
-				if h.auditLogger != nil {
-					h.auditLogger.Log(&audit.AuditEvent{
-						EventType: audit.EventTypeMPUValkeyUnavail,
-						Timestamp: time.Now().UTC(),
-						Bucket:    bucket,
-						Key:       key,
-						Success:   false,
-						Metadata:  map[string]interface{}{"upload_id": uploadID},
-					})
-				}
-				s3Err := &S3Error{
-					Code:       "ServiceUnavailable",
-					Message:    "Multipart encryption state store unavailable; retry the part upload",
-					Resource:   r.URL.Path,
-					HTTPStatus: http.StatusServiceUnavailable,
-				}
-				s3Err.WriteXML(w)
-				h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-				return
-			}
+			h.metrics.RecordMPUPart("success")
+			h.metrics.RecordEncryptionOperation(r.Context(), "encrypt", encMPUEncryptDuration, encMPUPlainLen)
 		}
 	}
 
@@ -4281,37 +4289,20 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		return
 	}
 	if completeIsEnc {
-		// Legacy callers and test stores may still expose append-only records;
-		// enforce the claim transition only when records carry a claim.
-		if claimStore, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok {
-			claimReady := false
-			if completeState != nil {
-				for _, part := range completeState.Parts {
-					if part.Claim != "" {
-						claimReady = true
-						break
-					}
+		if claimStore := h.mpuStateStore; claimStore != nil {
+			var beginErr error
+			completeState, beginErr = h.beginEncryptedMPUComplete(ctx, uploadID, completeReq)
+			if beginErr != nil {
+				code, status := "InvalidPart", http.StatusBadRequest
+				if errors.Is(beginErr, mpu.ErrInvalidPhase) || errors.Is(beginErr, mpu.ErrInvalidStateVersion) {
+					code, status = "OperationAborted", http.StatusConflict
 				}
-			}
-			if claimReady {
-				selected := make([]mpu.SelectedPart, len(completeReq.Parts))
-				for i, part := range completeReq.Parts {
-					selected[i] = mpu.SelectedPart{PartNumber: part.PartNumber, ETag: part.ETag}
-				}
-				var beginErr error
-				completeState, _, beginErr = claimStore.BeginComplete(ctx, uploadID, selected)
-				if beginErr != nil {
-					code, status := "InvalidPart", http.StatusBadRequest
-					if errors.Is(beginErr, mpu.ErrInvalidPhase) || errors.Is(beginErr, mpu.ErrInvalidStateVersion) {
-						code, status = "OperationAborted", http.StatusConflict
-					}
-					(&S3Error{Code: code, Message: beginErr.Error(), Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
-					return
-				}
+				(&S3Error{Code: code, Message: "The selected parts do not match committed encrypted MPU state", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+				return
 			}
 		}
 		if manifestErr := h.writeMPUManifestObject(ctx, uploadID, bucket, key, s3Client, completeState); manifestErr != nil {
-			if claimStore, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok && completeState != nil {
+			if claimStore := h.mpuStateStore; claimStore != nil && completeState != nil {
 				_ = claimStore.Reopen(ctx, uploadID, completeState.Revision)
 			}
 			h.logger.WithError(manifestErr).WithFields(logrus.Fields{
@@ -4345,7 +4336,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	etag, err := s3Client.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts, lockInput)
 	if err != nil {
 		if completeIsEnc {
-			if claimStore, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok && completeState != nil {
+			if claimStore := h.mpuStateStore; claimStore != nil && completeState != nil {
 				_ = claimStore.Reopen(ctx, uploadID, completeState.Revision)
 			}
 		}
@@ -4363,7 +4354,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 
 	// Clean up Valkey state after successful completion.
 	if completeIsEnc {
-		if claimStore, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok && completeState != nil {
+		if claimStore := h.mpuStateStore; claimStore != nil && completeState != nil {
 			_ = claimStore.FinalizeComplete(ctx, uploadID, completeState.Revision)
 		}
 		if delErr := h.mpuStateStore.Delete(ctx, uploadID); delErr != nil {
@@ -4453,9 +4444,9 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 		h.writeS3ClientError(w, r, err, "DELETE", start)
 		return
 	}
-	var abortStore mpu.ClaimStateStore
+	var abortStore mpu.StateStore
 	var abortRevision uint64
-	if store, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok {
+	if store := h.mpuStateStore; store != nil {
 		if state, stateErr := h.mpuStateStore.Get(ctx, uploadID); stateErr == nil && state != nil && state.PolicySnapshot.EncryptMultipartUploads {
 			abortStore = store
 			abortRevision, err = store.BeginAbort(ctx, uploadID)
@@ -4468,6 +4459,17 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 
 	err = s3Client.AbortMultipartUpload(ctx, bucket, key, uploadID)
 	if err != nil {
+		if abortStore != nil {
+			if reopenErr := abortStore.Reopen(ctx, uploadID, abortRevision); reopenErr != nil && !errors.Is(reopenErr, mpu.ErrUploadNotFound) {
+				// Reopen is revision-guarded. A conflict means another lifecycle
+				// operation won; retain the original backend error for the client.
+				h.logger.WithError(reopenErr).WithFields(logrus.Fields{
+					"bucket":   bucket,
+					"key":      key,
+					"uploadID": uploadID,
+				}).Warn("mpu.abort: failed to reopen state after backend abort failure")
+			}
+		}
 		s3Err := TranslateError(err, bucket, key)
 		s3Err.WriteXML(w)
 		h.logger.WithError(err).WithFields(logrus.Fields{
@@ -4483,6 +4485,9 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 		if finalizeErr := abortStore.FinalizeAbort(ctx, uploadID, abortRevision); finalizeErr != nil && !errors.Is(finalizeErr, mpu.ErrUploadNotFound) {
 			h.logger.WithError(finalizeErr).Warn("mpu.abort: failed to finalize state transition")
 		}
+		if delErr := abortStore.Delete(ctx, uploadID); delErr != nil {
+			h.logger.WithError(delErr).Warn("mpu.abort.orphan: failed to delete MPU state after finalized abort")
+		}
 	}
 
 	// Delete Valkey state for encrypted MPU aborts using the PolicySnapshot so
@@ -4497,7 +4502,7 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 			"key":      key,
 			"uploadID": uploadID,
 		}).Warn("mpu.abort: state-store unavailable; backend abort succeeded, state will expire via TTL")
-	} else if abortIsEnc {
+	} else if abortIsEnc || abortStore != nil {
 		opStart := time.Now()
 		delErr := h.mpuStateStore.Delete(ctx, uploadID)
 		if delErr != nil {
@@ -4559,6 +4564,9 @@ func (h *Handler) encryptMPUPartWithState(ctx context.Context, bucket, uploadID 
 	defer zeroBytes(dek)
 
 	uploadIDHash := crypto.UploadIDHash(uploadID)
+	if h.destinationEncryptionConstructed != nil {
+		h.destinationEncryptionConstructed()
+	}
 	encReader, encLen, err := crypto.NewMPUPartEncryptReader(ctx, body, dek, uploadIDHash, ivPrefix, partNumber, state.ChunkSize, plainLen, state.Algorithm)
 	if err != nil {
 		return nil, 0, fmt.Errorf("encryptMPUPart: build encrypter: %w", err)

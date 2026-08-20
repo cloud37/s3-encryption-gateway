@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
@@ -318,8 +317,12 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	// When the destination is an encrypted MPU, the backend-native UploadPartCopy
 	// fast path is disabled. All source classes are decrypted and re-encrypted
 	// through the destination's per-upload DEK schedule (ADR 0009 §Consequences).
-	if h.bucketEncryptsMPU(bucket) {
-		if state, stateOK, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil || !stateOK || state == nil {
+	if state, stateOK, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil {
+		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+		return
+	} else if stateOK && state != nil {
+		if state.StateVersion != mpu.CurrentStateVersion {
+			h.metrics.RecordMPUPartClaim("legacy_rejected")
 			(&S3Error{Code: "OperationAborted", Message: "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
 			return
 		}
@@ -378,8 +381,10 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusServiceUnavailable,
 			}
-		} else if errors.Is(strategyErr, mpu.ErrPartContentMismatch) || errors.Is(strategyErr, mpu.ErrPartInProgress) {
-			s3Err = &S3Error{Code: "OperationAborted", Message: "Encrypted multipart part content is immutable; abort this upload and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}
+		} else if errors.Is(strategyErr, mpu.ErrPartContentMismatch) || errors.Is(strategyErr, mpu.ErrPartInProgress) || errors.Is(strategyErr, mpu.ErrInvalidPhase) {
+			code, status, message, claimResult := copyPartClaimError(strategyErr)
+			h.metrics.RecordMPUPartClaim(claimResult)
+			s3Err = &S3Error{Code: code, Message: message, Resource: r.URL.Path, HTTPStatus: status}
 		}
 		s3Err.WriteXML(w)
 		h.logger.WithError(strategyErr).WithFields(logrus.Fields{
@@ -451,6 +456,24 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	_ = xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
+}
+
+// copyPartClaimError preserves the UploadPart reservation error contract for
+// the copy path. Source acquisition may already have happened, but callers
+// must not construct destination encryption or mutate the destination.
+func copyPartClaimError(err error) (code string, status int, message string, result string) {
+	code, status, message, result = "ServiceUnavailable", http.StatusServiceUnavailable, "Multipart encryption state store unavailable; retry the part upload", "mismatch"
+	switch {
+	case errors.Is(err, mpu.ErrPartContentMismatch):
+		code, status, message = "OperationAborted", http.StatusConflict, "Encrypted multipart part content is immutable; abort this upload and create a new upload."
+	case errors.Is(err, mpu.ErrPartInProgress):
+		code, status, message, result = "OperationAborted", http.StatusConflict, "A conflicting operation is in progress; retry the identical part request.", "in_progress"
+	case errors.Is(err, mpu.ErrInvalidStateVersion):
+		code, status, message, result = "OperationAborted", http.StatusConflict, "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload.", "legacy_rejected"
+	case errors.Is(err, mpu.ErrInvalidPhase):
+		code, status, message = "OperationAborted", http.StatusConflict, "Multipart upload lifecycle transition is in progress."
+	}
+	return
 }
 
 // classifyCopySource determines the encryption class of the source object
@@ -894,13 +917,14 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	}
 
 	// Step 2: Re-encrypt via the destination MPU DEK schedule.
-	var claimStore mpu.ClaimStateStore
+	var claimStore mpu.StateStore
 	var claim mpu.PartClaim
 	var reservation mpu.Reservation
-	if store, ok := h.mpuStateStore.(mpu.ClaimStateStore); ok {
+	reservationOwned := false
+	if store := h.mpuStateStore; store != nil {
 		state, stateErr := h.mpuStateStore.Get(ctx, uploadID)
 		if stateErr != nil {
-			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get destination state: %w", stateErr)
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: re-encrypt destination part: get destination state: %w", stateErr)
 		}
 		dek, dekErr := h.unwrapMPUDEK(ctx, state, dstBucket, uploadID)
 		if dekErr != nil {
@@ -921,11 +945,27 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, err
 		}
 		if reservation.AlreadyDone {
+			h.metrics.RecordMPUPartClaim("identical")
 			return &s3.CopyPartResult{ETag: reservation.CommittedETag, LastModified: time.Now()}, int64(len(plaintextData)), nil
 		}
+		h.metrics.RecordMPUPartClaim("reserved")
 		claimStore = store
+		reservationOwned = true
 	}
-	encReader, encLen, err := h.encryptMPUPart(ctx, dstBucket, uploadID, partNumber, bytes.NewReader(plaintextData), int64(len(plaintextData)))
+	defer func() {
+		if reservationOwned && claimStore != nil {
+			// Deterministic pre-upload failures must release the exact token.
+			// Release errors never replace the original operation error.
+			_ = claimStore.ReleasePart(ctx, uploadID, partNumber, reservation.Token)
+		}
+	}()
+	var encReader io.Reader
+	var encLen int64
+	if h.destinationEncryptionReader != nil {
+		encReader, encLen, err = h.destinationEncryptionReader(bytes.NewReader(plaintextData), int64(len(plaintextData)))
+	} else {
+		encReader, encLen, err = h.encryptMPUPart(ctx, dstBucket, uploadID, partNumber, bytes.NewReader(plaintextData), int64(len(plaintextData)))
+	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: re-encrypt: %w", err)
 	}
@@ -943,50 +983,18 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	if int64(len(encBytes)) != encLen {
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: encrypted length mismatch: got %d, expected %d", len(encBytes), encLen)
 	}
+	// Once UploadPart starts, the backend result is uncertain. Preserve the
+	// reservation so a retry cannot race a potentially committed part.
+	reservationOwned = false
 	etag, err := s3Client.UploadPart(ctx, dstBucket, dstKey, uploadID, partNumber, bytes.NewReader(encBytes), &encLen)
 	if err != nil {
-		if claimStore != nil {
-			_ = claimStore.ReleasePart(ctx, uploadID, partNumber, reservation.Token)
-		}
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: upload re-encrypted part: %w", err)
 	}
 	if claimStore != nil {
 		claim.ETag, claim.EncLen = etag, encLen
 		claim.ChunkCount = int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize))
 		if err := claimStore.CommitPart(ctx, uploadID, claim); err != nil {
-			_ = claimStore.ReleasePart(ctx, uploadID, partNumber, reservation.Token)
-			return nil, 0, errMPUStateUnavailable
-		}
-	} else {
-		// Persist the part record for legacy append-only stores.
-		// Fail-closed: a state-store hiccup here must
-		// return 503 so the client retries, matching handlers.go:2730-2757.
-		chunkCount := int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)) // #nosec G115 — max ~82k for 5 GiB parts, fits int32
-		if appendErr := h.mpuStateStore.AppendPart(ctx, uploadID, mpu.PartRecord{
-			PartNumber: partNumber,
-			ETag:       etag,
-			PlainLen:   int64(len(plaintextData)),
-			EncLen:     encLen,
-			ChunkCount: chunkCount,
-		}); appendErr != nil {
-			h.logger.WithError(appendErr).WithFields(logrus.Fields{
-				"bucket":     dstBucket,
-				"key":        dstKey,
-				"uploadID":   uploadID,
-				"partNumber": partNumber,
-			}).Error("mpu.append_part.failure: backend part written but state not recorded; returning 503 so client retries")
-			h.metrics.RecordS3Error(ctx, "AppendMPUPartState", dstBucket, "StateUnavailable")
-			if h.auditLogger != nil {
-				h.auditLogger.Log(&audit.AuditEvent{
-					EventType: audit.EventTypeMPUValkeyUnavail,
-					Timestamp: time.Now().UTC(),
-					Bucket:    dstBucket,
-					Key:       dstKey,
-					Success:   false,
-					Metadata:  map[string]interface{}{"upload_id": uploadID},
-				})
-			}
-			return nil, 0, errMPUStateUnavailable
+			return nil, 0, fmt.Errorf("%w: %v", errMPUStateUnavailable, err)
 		}
 	}
 
@@ -1070,11 +1078,22 @@ func (h *Handler) readMPUPlaintextRange(
 	if err != nil {
 		return nil, err
 	}
+	return decodeMPUPlaintextRange(ciphertext, manifest, dek, uploadIDHash, ivPrefix, encRange, pStart, pEnd)
+}
+
+// decodeMPUPlaintextRange authenticates and decrypts the complete chunks needed
+// for one plaintext range, then trims the result to the requested bytes. The
+// caller owns source acquisition and key cleanup; this boundary is the
+// SEC-38-specific framing and authentication contract.
+func decodeMPUPlaintextRange(ciphertext []byte, manifest *crypto.MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, encRange crypto.MPURangeResult, pStart, pEnd int64) ([]byte, error) {
 	const encTagSize = 16
 	encChunkSize := manifest.ChunkSize + encTagSize
 	var plaintext []byte
 	consumed := 0
 	for pi := encRange.PartStartIdx; pi <= encRange.PartEndIdx; pi++ {
+		if pi < 0 || pi >= len(manifest.Parts) {
+			return nil, fmt.Errorf("manifest part index %d out of range", pi)
+		}
 		part := manifest.Parts[pi]
 		first := int32(0)
 		if pi == encRange.PartStartIdx {
@@ -1088,6 +1107,9 @@ func (h *Handler) readMPUPlaintextRange(
 		if pi != encRange.PartEndIdx || last != part.ChunkCount-1 {
 			partLen = int(last-first+1) * encChunkSize
 		}
+		if partLen < 0 || consumed > len(ciphertext) {
+			return nil, fmt.Errorf("invalid ciphertext span for part %d", part.PartNumber)
+		}
 		if consumed+partLen > len(ciphertext) {
 			partLen = len(ciphertext) - consumed
 		}
@@ -1100,6 +1122,9 @@ func (h *Handler) readMPUPlaintextRange(
 	}
 	base := int64(0)
 	for i := 0; i < encRange.PartStartIdx; i++ {
+		if i >= len(manifest.Parts) {
+			return nil, fmt.Errorf("manifest part index %d out of range", i)
+		}
 		base += manifest.Parts[i].PlainLen
 	}
 	base += int64(encRange.ChunkStart) * int64(manifest.ChunkSize)

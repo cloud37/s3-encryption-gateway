@@ -856,6 +856,10 @@ type ValkeyConfig struct {
 	// migration from a pre-encryption deployment. Defaults to false (fail-closed).
 	// V1.0-SEC-30.
 	AllowLegacyPlaintextState bool `yaml:"allow_legacy_plaintext_state" env:"VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE"`
+	// WriterCapability is the deployment-scoped value shared by all replicas
+	// during a coordinated MPU writer rollout. Empty disables MPU write
+	// readiness rather than allowing an unknown writer to become ready.
+	WriterCapability string `yaml:"writer_capability" env:"VALKEY_MPU_WRITER_CAPABILITY"`
 }
 
 // ValkeyTLSConfig holds TLS settings for the Valkey connection.
