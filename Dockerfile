@@ -1,5 +1,5 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 # STRIP_SYMBOLS controls binary symbol-table stripping.
 # Set to "false" to produce a symbolicated binary for pprof profiling.

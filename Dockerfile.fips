@@ -1,5 +1,5 @@
 # Build stage for FIPS 140-3 compliant binary
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 # STRIP_SYMBOLS controls binary symbol-table stripping.
 # Set to "false" to produce a symbolicated binary for pprof profiling.
