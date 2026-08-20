@@ -107,7 +107,11 @@ manifest** written at `CompleteMultipartUpload`. The scheme:
    compatible) key-value store. Each upload maps to a single
    hash keyed `mpu:<uploadIdHash>` holding the wrapped-DEK,
    iv_prefix, algorithm, chunk_size, bucket/key, created_at,
-   and per-part entries appended as `UploadPart` calls arrive.
+   and per-part entries managed by an immutable first-content claim. State
+   version 2 records lifecycle phases and a monotonic revision. A part is
+   reserved and committed atomically before it can be encrypted; a changed
+   replacement is rejected rather than reusing the deterministic nonce
+   schedule.
    Keys carry a TTL (default 7 days, extended on every
    `UploadPart` via `EXPIRE`) so orphan uploads are cleaned up
    natively by Valkey — no reaper daemon required. The wrapped
@@ -573,9 +577,16 @@ TLS1.3`); the gateway fails closed at startup if
 two concurrent `CreateMultipartUpload` calls on the same upload
 id from racing.
 
-**Atomic `AppendPart`.** `HSET mpu:<h> part:<N> <json>` +
-`EXPIRE mpu:<h> 604800` in a `MULTI`/`EXEC` pipeline (a
-two-command Lua script for older Valkey versions).
+**Atomic part reservation and commit.** For encrypted MPUs, the gateway
+buffers the plaintext, computes the keyed immutable claim for `(upload ID,
+part number)`, and atomically reserves that claim before constructing the
+encryptor or performing destination backend I/O. A successful destination
+`UploadPart` is followed by an atomic commit of the encrypted part metadata.
+The reservation token is released for deterministic failures before
+`UploadPart`; backend and commit outcomes are uncertain and therefore retain
+the reservation for reconciliation. Identical committed retries return the
+stored ETag without re-encryption, while a changed replacement is rejected
+with `OperationAborted` (HTTP 409).
 
 **`Complete` / `Abort`.** `DEL mpu:<h>` (single command, atomic).
 
@@ -595,23 +606,33 @@ metadata carries only the pointer.
 | Failure | Behaviour |
 |---|---|
 | Valkey unreachable at CreateMultipartUpload | Return 503 ServiceUnavailable; no backend multipart created yet → no orphan. Client retries. |
-| Valkey unreachable at UploadPart | Return 503 ServiceUnavailable; client retries. Backend part may or may not have been uploaded yet depending on order of operations (see note on write-order below). |
+| Valkey unreachable at UploadPart | Return 503 ServiceUnavailable; client retries. A deterministic failure before destination `UploadPart` releases the exact reservation token. If destination I/O has started, the reservation is retained because the backend outcome is uncertain. |
 | Valkey unreachable at CompleteMultipartUpload | Return 503 ServiceUnavailable; backend multipart remains in-flight; client retries or issues Abort. Re-issuing Complete after Valkey recovers is idempotent because the state record is still present. |
 | Valkey unreachable at AbortMultipartUpload | Return 503 ServiceUnavailable; backend multipart is also aborted in the same handler call, so either both succeed or neither. Orphaned Valkey state (backend aborted but Valkey delete failed) expires automatically via TTL. |
-| `HSET part:<N>` fails post-backend-PUT of part | Return 500 InternalError; client retries same part number; IV schedule is deterministic so ciphertext is byte-identical on retry; no nonce reuse. |
+| Part commit fails after destination `UploadPart` | Return 500/503 InternalError; retain the reservation because the backend part may exist. A retry cannot reuse the nonce schedule unsafely; reconciliation or abort is required. |
 | Valkey crash with AOF loss of ≤ 1 s of writes | State record may be missing the most recent part entries. Client's subsequent Complete fails validation (part list mismatch); client retries the missing parts. Byte-identical retries are safe. |
 | Gateway crashes between backend Complete and manifest metadata attach | Manifest is supplied as metadata *to* the Complete call, so the backend's Complete is atomic wrt manifest — there is no window. If the backend Complete itself fails, state remains in Valkey and the client retries. |
-| Client replays UploadPart with different body | Backend overwrites part; `HSET part:<N>` overwrites the entry with new `enc_len`/`chunks`. Not a security issue because only the final concatenation is decryptable and Complete validates the manifest against the ETag-of-ETags. |
+| Client replays UploadPart with different body | Reject with `OperationAborted` (HTTP 409) before encryption or destination mutation. The first immutable claim remains authoritative. |
+| Client retries an identical committed UploadPart | Return the stored ETag without re-encryption or destination mutation. |
+| UploadPartCopy source read/decryption fails | Return the original source error before destination encryption or mutation; release a newly owned destination reservation. Once destination `UploadPart` starts, retain the reservation because its outcome is uncertain. |
 | Orphaned state (client never calls Complete/Abort) | Valkey TTL expires the key after 7 days. No manual cleanup required. Prometheus counter `gateway_mpu_state_ttl_expired_total` increments so operators can observe the pattern. |
 
-**Write-order within `UploadPart`.** The handler performs
-`HSET part:<N>` **after** a successful backend `UploadPart`,
-then refreshes TTL. This ordering means a backend `PUT` without
-a recorded state row is possible on crash (the client retries,
-backend overwrites, state converges on next successful part).
-The reverse ordering would risk a state row without a backend
-part — a harder inconsistency to recover from because `Complete`
-cannot validate it against an ETag that does not exist.
+**Write-order within encrypted `UploadPart`.** The handler reserves the
+immutable plaintext claim before encryption and destination I/O, then commits
+the encrypted part metadata only after a successful destination
+`UploadPart`. This ordering prevents changed plaintext from reaching the
+encryptor and prevents nonce reuse. A crash or backend/commit failure after
+destination I/O leaves the reservation retained because the outcome cannot be
+known safely; the client must retry the identical claim or abort/reconcile.
+`UploadPartCopy` follows the same destination reservation boundary, except
+that source acquisition and decryption occur before destination encryption;
+ordinary source-read failures release only reservations owned by that request.
+
+**Legacy compatibility.** State versions before version 2 are not accepted
+for encrypted part reservations. The sole compatibility exception is
+`AbortMultipartUpload`, which may authorize and atomically upgrade a legacy
+state while transitioning it to the aborting phase. Legacy state is never a
+reason to bypass claim reservation for `UploadPart` or `UploadPartCopy`.
 
 ## Security Considerations
 

@@ -80,7 +80,13 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   </CopyPartResult>
   ```
   - ETag is the backend's raw UploadPart or UploadPartCopy ETag (not re-encrypted)
-  - LastModified reflects part write time
+   - LastModified reflects part write time
+- **Encrypted MPU replacement contract**: encrypted destinations claim the
+  first plaintext for each part number. An identical retry returns `200` and
+  the stored ETag without destination encryption or mutation. A concurrent
+  reservation or changed source returns `409 OperationAborted`; clients must
+  abort and create a new upload. Legacy encrypted in-flight state is also
+  abort-only and returns `409`.
 - **Error Codes**:
   - `400 InvalidArgument`: Malformed x-amz-copy-source or x-amz-copy-source-range
   - `400 InvalidRequest`: Source object > 5 GiB with no range; or multipart uploads disabled
@@ -88,7 +94,8 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   - `416 InvalidRange`: Range start ≥ object size
   - `501 NotImplemented`: Proxy mode without mediation support
 - **Security Considerations**:
-  - Destination parts remain plaintext (per ADR 0002)
+   - Destination parts remain plaintext only for non-encrypted MPUs (per ADR
+     0002); encrypted MPU destinations are re-encrypted after claim validation
   - Source-bucket read authorization is explicitly checked independent of destination write authorization
   - Cross-key-space (different source/destination buckets) is supported and tested
   - Config mismatch (plaintext source to encrypted-destination bucket) triggers hard refusal with audit event

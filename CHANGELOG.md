@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for each part number. Identical retries remain safe and return the original
   ETag; changed replacements return HTTP 409 and require aborting the upload.
   Completed-object manifest and ciphertext formats remain compatible.
+- Encrypted `UploadPartCopy` destinations apply the same immutable claim and
+  identical-retry behavior. Changed replacements and legacy in-flight state
+  return `409 OperationAborted`; operators must drain or abort encrypted MPUs
+  before coordinated rollout and before rollback to a version-1 writer.
 
 ### Security
 

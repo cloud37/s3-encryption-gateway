@@ -473,10 +473,21 @@ Before deploying a binary containing MPU state version 2:
 3. Roll all gateway replicas together. Do not run old and new MPU writers at
    the same time because old writers can bypass immutable claims.
 4. Keep MPU write readiness disabled until every replica reports the version-2
-   writer capability. Confirm `gateway_mpu_legacy_inflight` is zero or has an
-   owner-approved abort plan.
+   writer capability. Set `VALKEY_MPU_WRITER_CAPABILITY` to one deployment-scoped
+   value in every replica and publish that exact value at `mpu:writer-version`
+   before enabling readiness. Missing, changed, or mixed values keep
+   `mpu_writer` readiness false. Confirm `gateway_mpu_legacy_inflight` is zero
+   or has an owner-approved abort plan.
 5. Monitor `gateway_mpu_part_claims_total` by result. A rise in `mismatch` or
    `legacy_rejected` indicates client replacement attempts or incomplete drain.
+6. Alert on `gateway_mpu_legacy_inflight > 0` and page on sustained
+   `gateway_mpu_part_claims_total{result="mismatch"}`. Keep dashboards split by
+   `result`, and do not add bucket, key, upload ID, claim, token, or revision
+   labels.
+   Dashboards should graph claim results, transition results by bounded
+   `from`/`to`, and the legacy gauge. Alert on any non-zero legacy gauge,
+   repeated claim mismatches, transition errors, or a missing `mpu_writer`
+   readiness check during rollout.
 
 Rollback requires draining or aborting all version-2 encrypted uploads first;
 never point a version-1 binary at version-2 state.
