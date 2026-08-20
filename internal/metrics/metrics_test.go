@@ -12,6 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewMetrics(t *testing.T) {
@@ -497,6 +499,61 @@ func TestMetrics_MPUMethods(t *testing.T) {
 			t.Errorf("expected metric %q not found after recording", want)
 		}
 	}
+}
+
+func TestMetrics_MPUClaimResults(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+	for _, result := range []string{"reserved", "identical", "mismatch", "in_progress", "legacy_rejected"} {
+		m.RecordMPUPartClaim(result)
+	}
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_mpu_part_claims_total" {
+			require.Len(t, mf.GetMetric(), 5)
+			for _, metric := range mf.GetMetric() {
+				require.Len(t, metric.GetLabel(), 1)
+			}
+			return
+		}
+	}
+	t.Fatal("claim metric missing")
+}
+
+func TestMetrics_MPUStateTransitions(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+	m.RecordMPUStateTransition("open", "completing", "success")
+	m.RecordMPUStateTransition("completing", "open", "error")
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_mpu_state_transitions_total" {
+			require.Len(t, mf.GetMetric(), 2)
+			for _, metric := range mf.GetMetric() {
+				require.Len(t, metric.GetLabel(), 3)
+			}
+			return
+		}
+	}
+	t.Fatal("transition metric missing")
+}
+
+func TestMetrics_MPULegacyInflight(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+	m.SetMPULegacyInflight(7)
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "gateway_mpu_legacy_inflight" {
+			require.Len(t, mf.GetMetric(), 1)
+			assert.Equal(t, float64(7), mf.GetMetric()[0].GetGauge().GetValue())
+			return
+		}
+	}
+	t.Fatal("legacy gauge missing")
 }
 
 // TestMetrics_StartSystemMetricsCollector verifies the collector starts without panic.
