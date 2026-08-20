@@ -85,6 +85,9 @@ func testSEC38_EncryptedMPU_UploadPartCopyReplacementRejected(t *testing.T, inst
 		t.Fatalf("changed copied part: status=%d body=%s", resp.StatusCode, body)
 	}
 	completeMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID, []mpuPart{{1, first}})
+	if got := get(t, gw, inst.Bucket, dstKey); !bytes.Equal(got, firstData) {
+		t.Fatalf("changed copy did not preserve first plaintext")
+	}
 }
 
 func testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry(t *testing.T, inst provider.Instance) {
@@ -100,6 +103,10 @@ func testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry(t *testing.T, inst prov
 	second := doUploadPartCopy(t, gw, inst.Bucket, dstKey, uploadID, 1, inst.Bucket, srcKey, "")
 	if first != second {
 		t.Fatalf("identical copied retry ETag %q differs from %q", second, first)
+	}
+	completeMultipartUpload(t, gw, inst.Bucket, dstKey, uploadID, []mpuPart{{1, first}})
+	if got := get(t, gw, inst.Bucket, dstKey); !bytes.Equal(got, data) {
+		t.Fatalf("identical copied retry plaintext mismatch")
 	}
 }
 

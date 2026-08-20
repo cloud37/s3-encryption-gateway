@@ -31,6 +31,10 @@ func testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag(t *testing.T, in
 	if first != second {
 		t.Fatalf("identical retry ETag %q differs from first %q", second, first)
 	}
+	completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{{1, first}})
+	if got := get(t, gw, inst.Bucket, key); !bytes.Equal(got, data) {
+		t.Fatalf("identical retry plaintext mismatch")
+	}
 }
 
 func testSEC38_EncryptedMPU_ChangedPartReplacementRejected(t *testing.T, inst provider.Instance) {

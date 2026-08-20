@@ -80,6 +80,13 @@ func uploadPart(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string,
 }
 
 func uploadPartStatus(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, partNum int, data []byte) (int, string) {
+	status, body, _ := uploadPartNegative(t, gw, bucket, key, uploadID, partNum, data)
+	return status, body
+}
+
+// uploadPartNegative is a nonfatal negative-request helper. It returns the
+// status, XML body, and ETag without aborting the conformance test.
+func uploadPartNegative(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, partNum int, data []byte) (int, string, string) {
 	t.Helper()
 	u := fmt.Sprintf("%s/%s/%s?partNumber=%d&uploadId=%s", gw.URL, bucket, key, partNum, uploadID)
 	ctx, cancel := conformanceMPUContext()
@@ -94,7 +101,7 @@ func uploadPartStatus(t *testing.T, gw *harness.Gateway, bucket, key, uploadID s
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(body)
+	return resp.StatusCode, string(body), resp.Header.Get("ETag")
 }
 
 // mpuPart holds part number and ETag for CompleteMultipartUpload.
@@ -134,6 +141,11 @@ func completeMultipartUpload(t *testing.T, gw *harness.Gateway, bucket, key, upl
 }
 
 func completeMultipartUploadStatus(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, parts []mpuPart) int {
+	status, _, _ := completeMultipartUploadNegative(t, gw, bucket, key, uploadID, parts)
+	return status
+}
+
+func completeMultipartUploadNegative(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, parts []mpuPart) (int, string, string) {
 	t.Helper()
 	var xmlParts strings.Builder
 	xmlParts.WriteString("<CompleteMultipartUpload>")
@@ -154,8 +166,8 @@ func completeMultipartUploadStatus(t *testing.T, gw *harness.Gateway, bucket, ke
 		t.Fatalf("completion: %v", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.ReadAll(resp.Body)
-	return resp.StatusCode
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body), resp.Header.Get("ETag")
 }
 
 // abortMultipartUpload aborts a multipart upload.

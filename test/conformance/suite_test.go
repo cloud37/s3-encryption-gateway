@@ -150,6 +150,7 @@ func TestConformance(t *testing.T) {
 				{"SEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag},
 				{"SEC38_EncryptedMPU_ChangedPartReplacementRejected", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_ChangedPartReplacementRejected},
 				{"SEC38_EncryptedMPU_CompleteSelectedSubset", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_CompleteSelectedSubset},
+				{"SEC38_NonfatalMPUNegativeHelpers", provider.CapMultipartUpload, testSEC38_NonfatalMPUNegativeHelpers},
 				{"SEC38_EncryptedMPU_UploadPartCopyReplacementRejected", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyReplacementRejected},
 				{"SEC38_EncryptedMPU_UploadPartCopyIdenticalRetry", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry},
 
