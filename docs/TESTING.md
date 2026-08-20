@@ -52,8 +52,12 @@ go test -race ./...
 # FIPS build.
 GOFIPS140=v1.0.0 go test -race -tags=fips ./...
 
-# HSM stub build.
-go test -race -tags=hsm ./...
+# HSM validation is intentionally disabled. The current `hsm` provider is a
+# non-functional PKCS#11 skeleton/stub, so tagged builds do not validate a
+# supported deployment path. Do not run HSM tests, builds, or vet commands until
+# functional HSM support and its provider fixture are implemented. Re-enable
+# this command as part of that work:
+# go test -race -tags=hsm ./...
 ```
 
 ### Tier 2 — conformance tests

@@ -33,17 +33,11 @@ jobs:
       - name: Unit tests FIPS (-race)
         run: GOFIPS140=v1.0.0 go test -race -short -tags=fips ./...
 
-      - name: Unit tests HSM (-race)
-        run: go test -race -short -tags=hsm ./...
-
       - name: go vet
         run: go vet ./...
 
       - name: go vet FIPS
         run: go vet -tags=fips ./...
-
-      - name: go vet HSM
-        run: go vet -tags=hsm ./...
 
       - name: bench-lint (V0.6-QA-1 §5.4)
         run: bash scripts/bench-lint.sh
