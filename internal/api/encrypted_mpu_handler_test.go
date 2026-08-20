@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +42,72 @@ type mpuMockS3Client struct {
 	partsMeta       map[string]map[string]string // metadata frozen at CreateMultipartUpload
 	maxRangedRead   int
 	rangedReadCount int
+}
+
+type sec38CountingClient struct {
+	*mpuMockS3Client
+	uploadPartCalls         int
+	completeCalls           int
+	putObjectCalls          int
+	completeParts           []s3.CompletedPart
+	completeErr             error
+	uploadErr               error
+	putObjectErr            error
+	abortErr                error
+	sourceHeadCalls         int
+	sourceGetCalls          int
+	sourceReadCalls         int
+	destinationEncryptCalls int
+}
+
+func (c *sec38CountingClient) HeadObject(ctx context.Context, b, k string, v *string) (map[string]string, error) {
+	c.sourceHeadCalls++
+	return c.mpuMockS3Client.HeadObject(ctx, b, k, v)
+}
+func (c *sec38CountingClient) GetObject(ctx context.Context, b, k string, v *string, rh *string) (io.ReadCloser, map[string]string, error) {
+	c.sourceGetCalls++
+	r, m, err := c.mpuMockS3Client.GetObject(ctx, b, k, v, rh)
+	if err != nil {
+		return r, m, err
+	}
+	return &sec38ReadCounter{ReadCloser: r, counter: &c.sourceReadCalls}, m, nil
+}
+
+type sec38ReadCounter struct {
+	io.ReadCloser
+	counter *int
+}
+
+func (r *sec38ReadCounter) Read(p []byte) (int, error) { (*r.counter)++; return r.ReadCloser.Read(p) }
+
+func (c *sec38CountingClient) UploadPart(ctx context.Context, b, k, id string, pn int32, r io.Reader, n *int64) (string, error) {
+	c.uploadPartCalls++
+	if c.uploadErr != nil {
+		return "", c.uploadErr
+	}
+	return c.mpuMockS3Client.UploadPart(ctx, b, k, id, pn, r, n)
+}
+func (c *sec38CountingClient) CompleteMultipartUpload(ctx context.Context, b, k, id string, p []s3.CompletedPart, l *s3.ObjectLockInput) (string, error) {
+	c.completeCalls++
+	c.completeParts = append([]s3.CompletedPart(nil), p...)
+	if c.completeErr != nil {
+		return "", c.completeErr
+	}
+	return c.mpuMockS3Client.CompleteMultipartUpload(ctx, b, k, id, p, l)
+}
+
+func (c *sec38CountingClient) AbortMultipartUpload(ctx context.Context, b, k, id string) error {
+	if c.abortErr != nil {
+		return c.abortErr
+	}
+	return c.mpuMockS3Client.AbortMultipartUpload(ctx, b, k, id)
+}
+func (c *sec38CountingClient) PutObject(ctx context.Context, b, k string, r io.Reader, m map[string]string, n *int64, tags string, l *s3.ObjectLockInput, a, f, gr, gra, gw string) (string, error) {
+	c.putObjectCalls++
+	if c.putObjectErr != nil {
+		return "", c.putObjectErr
+	}
+	return c.mpuMockS3Client.PutObject(ctx, b, k, r, m, n, tags, l, a, f, gr, gra, gw)
 }
 
 type trackedMPURangeReader struct {
@@ -360,10 +428,12 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
+		WriterCapability:       "test-deployment",
 	}, nil, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}
+	_ = mr.Set("mpu:writer-version", "test-deployment")
 	handler.WithMPUStateStore(store)
 	t.Cleanup(func() { _ = store.Close() })
 
@@ -820,6 +890,7 @@ encrypt_multipart_uploads: true
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
 		TTLSeconds:             3600,
+		WriterCapability:       "test-deployment",
 		DialTimeout:            2 * time.Second,
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
@@ -886,7 +957,7 @@ func TestMPU_AbortDeletesState(t *testing.T) {
 
 	// Valkey key must be gone.
 	for _, k := range mr.Keys() {
-		if strings.HasPrefix(k, "mpu:") {
+		if strings.HasPrefix(k, "mpu:") && k != "mpu:writer-version" {
 			t.Errorf("mpu:* key still present in Valkey after abort: %s", k)
 		}
 	}
@@ -965,28 +1036,28 @@ func min(a, b int) int {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue #5 regression: AppendPart failure must return 503, not 200.
+// Issue #5 regression: CommitPart failure must return 503, not 200.
 //
 // Previously the handler logged a Warn and returned 200 OK even when Valkey
-// rejected the AppendPart write. The backend part was committed but the state
+// rejected the CommitPart write. The backend part was committed but the state
 // record was absent; a subsequent CompleteMultipartUpload would produce a
 // manifest with the part missing and fail. The fix returns 503 so the client
 // can retry the part (idempotently overwriting the backend part) or abort.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// failOnAppendStateStore wraps a real StateStore and injects an error only on
-// AppendPart, leaving Get/Create/Delete intact so the encrypted MPU path is
+// failOnCommitStateStore wraps a real StateStore and injects an error only on
+// CommitPart, leaving Get/Create/Delete intact so the encrypted MPU path is
 // exercised fully up to the point of state recording.
-type failOnAppendStateStore struct {
+type failOnCommitStateStore struct {
 	mpu.StateStore
-	appendErr error
+	commitErr error
 }
 
-func (f *failOnAppendStateStore) AppendPart(_ context.Context, _ string, _ mpu.PartRecord) error {
-	return f.appendErr
+func (f *failOnCommitStateStore) CommitPart(_ context.Context, _ string, _ mpu.PartClaim) error {
+	return f.commitErr
 }
 
-func TestMPU_Issue5_AppendPartFailureReturns503(t *testing.T) {
+func TestMPU_Issue5_CommitPartFailureReturns503(t *testing.T) {
 	handler, _, mr := newMPUTestHandler(t, "ap5-*")
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1002,17 +1073,17 @@ func TestMPU_Issue5_AppendPartFailureReturns503(t *testing.T) {
 	}
 	uploadID := extractUploadID(t, w.Body.String())
 
-	// Step 2: Wrap the real state store so AppendPart injects an error while
+	// Step 2: Wrap the real state store so CommitPart injects an error while
 	// Get/Create/Delete still hit miniredis normally. This simulates a transient
 	// write failure after the backend S3 UploadPart has already committed.
 	realStore := handler.mpuStateStore
-	handler.mpuStateStore = &failOnAppendStateStore{
+	handler.mpuStateStore = &failOnCommitStateStore{
 		StateStore: realStore,
-		appendErr:  fmt.Errorf("READONLY simulated Valkey write failure"),
+		commitErr:  fmt.Errorf("READONLY simulated Valkey write failure"),
 	}
 	t.Cleanup(func() { handler.mpuStateStore = realStore })
 
-	// Step 3: UploadPart — the backend S3 write succeeds (mock), but AppendPart
+	// Step 3: UploadPart — the backend S3 write succeeds (mock), but CommitPart
 	// to Valkey will fail. The handler MUST return 5xx, not 200.
 	part := bytes.Repeat([]byte("encrypted-data-"), 10_000)
 	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID),
@@ -1022,7 +1093,7 @@ func TestMPU_Issue5_AppendPartFailureReturns503(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Code < 500 {
-		t.Errorf("UploadPart with AppendPart failure should return 5xx; got %d body=%s",
+		t.Errorf("UploadPart with CommitPart failure should return 5xx; got %d body=%s",
 			w.Code, w.Body.String())
 	}
 
@@ -1032,11 +1103,48 @@ func TestMPU_Issue5_AppendPartFailureReturns503(t *testing.T) {
 		if !strings.HasPrefix(k, "mpu:") {
 			continue
 		}
+		if k == "mpu:writer-version" {
+			continue
+		}
 		partField := mr.HGet(k, "part:1")
-		if partField != "" {
-			t.Errorf("AppendPart failure should leave no part:1 in Valkey; found %q", partField)
+		if partField == "" {
+			t.Errorf("CommitPart failure should preserve reservation")
 		}
 	}
+}
+
+func TestMPU_UploadPart_DeterministicFailureReleasesReservation(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "upload-release-*")
+	client := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = client
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/upload-release-bucket/object?uploads=", nil))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	id := extractUploadID(t, w.Body.String())
+
+	h.destinationEncryptionReader = func(io.Reader, int64) (io.Reader, int64, error) {
+		return nil, 0, errors.New("encrypt construction failed")
+	}
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/upload-release-bucket/object?partNumber=1&uploadId="+id, bytes.NewReader([]byte("part")))
+	req.Header.Set("Content-Length", "4")
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+	require.Zero(t, client.uploadPartCalls)
+
+	state, err := h.mpuStateStore.Get(context.Background(), id)
+	require.NoError(t, err)
+	require.Empty(t, state.Parts)
+
+	h.destinationEncryptionReader = nil
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("PUT", "/upload-release-bucket/object?partNumber=1&uploadId="+id, bytes.NewReader([]byte("part")))
+	req.Header.Set("Content-Length", "4")
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1441,6 +1549,73 @@ func TestHandleCompleteMultipartUpload_Success(t *testing.T) {
 	}
 }
 
+func sec38CreateUpload(t *testing.T, h *Handler, bucket, key string) (string, *mux.Router) {
+	t.Helper()
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil))
+	requireStatus(t, w, http.StatusOK)
+	return extractUploadID(t, w.Body.String()), r
+}
+
+func requireStatus(t *testing.T, w *httptest.ResponseRecorder, status int) {
+	t.Helper()
+	if w.Code != status {
+		t.Fatalf("status=%d want=%d body=%s", w.Code, status, w.Body.String())
+	}
+}
+
+func sec38UploadPart(t *testing.T, r *mux.Router, bucket, key, id string, pn int, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=%d&uploadId=%s", bucket, key, pn, id), bytes.NewReader(body))
+	req.Header.Set("Content-Length", fmt.Sprint(len(body)))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestMPU_PartClaim_FirstUploadSucceeds(t *testing.T) {
+	h, _, _ := newMPUTestHandler(t, "claim-first-*")
+	id, r := sec38CreateUpload(t, h, "claim-first-bucket", "obj")
+	w := sec38UploadPart(t, r, "claim-first-bucket", "obj", id, 1, []byte("first"))
+	requireStatus(t, w, http.StatusOK)
+	state, err := h.mpuStateStore.Get(context.Background(), id)
+	if err != nil || len(state.Parts) != 1 || state.Parts[0].Status != mpu.PartStatusCommitted {
+		t.Fatalf("part not committed: state=%+v err=%v", state, err)
+	}
+}
+
+func TestMPU_PartClaim_IdenticalRetryReturnsStoredETag(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "claim-retry-*")
+	c := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = c
+	id, r := sec38CreateUpload(t, h, "claim-retry-bucket", "obj")
+	body := []byte("same")
+	first := sec38UploadPart(t, r, "claim-retry-bucket", "obj", id, 1, body)
+	requireStatus(t, first, 200)
+	etag, calls := first.Header().Get("ETag"), c.uploadPartCalls
+	second := sec38UploadPart(t, r, "claim-retry-bucket", "obj", id, 1, body)
+	requireStatus(t, second, 200)
+	if second.Header().Get("ETag") != etag || c.uploadPartCalls != calls {
+		t.Fatalf("retry etag/calls: %q/%d want %q/%d", second.Header().Get("ETag"), c.uploadPartCalls, etag, calls)
+	}
+}
+
+func TestMPU_PartClaim_ChangedRetryReturnsOperationAbortedBeforeEncryptionOrBackend(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "claim-change-*")
+	c := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = c
+	id, r := sec38CreateUpload(t, h, "claim-change-bucket", "obj")
+	requireStatus(t, sec38UploadPart(t, r, "claim-change-bucket", "obj", id, 1, []byte("first")), 200)
+	calls := c.uploadPartCalls
+	w := sec38UploadPart(t, r, "claim-change-bucket", "obj", id, 1, []byte("changed"))
+	requireStatus(t, w, http.StatusConflict)
+	if !strings.Contains(w.Body.String(), "OperationAborted") || c.uploadPartCalls != calls {
+		t.Fatalf("changed retry body/calls: %s/%d", w.Body.String(), c.uploadPartCalls)
+	}
+}
+
 func TestHandleAbortMultipartUpload_Success(t *testing.T) {
 	handler, _, _ := newMPUTestHandler(t, "phaseC-*")
 	router := mux.NewRouter()
@@ -1458,6 +1633,34 @@ func TestHandleAbortMultipartUpload_Success(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204 No Content, got %d", w.Code)
 	}
+}
+
+func TestHandleAbortMultipartUpload_BackendFailureReopensState(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "abort-reopen-*")
+	client := &sec38CountingClient{mpuMockS3Client: base, abortErr: errors.New("backend abort failed")}
+	h.s3Client = client
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/abort-reopen-bucket/object?uploads=", nil))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	uploadID := extractUploadID(t, w.Body.String())
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("DELETE", "/abort-reopen-bucket/object?uploadId="+uploadID, nil))
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+
+	state, err := h.mpuStateStore.Get(context.Background(), uploadID)
+	require.NoError(t, err)
+	require.Equal(t, mpu.UploadPhaseOpen, state.Phase)
+
+	client.abortErr = nil
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("DELETE", "/abort-reopen-bucket/object?uploadId="+uploadID, nil))
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	_, err = h.mpuStateStore.Get(context.Background(), uploadID)
+	require.ErrorIs(t, err, mpu.ErrUploadNotFound)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1819,9 +2022,8 @@ func TestMPU_ListObjects_InProgressReturnsPlaintextSize(t *testing.T) {
 		t.Fatalf("invalid <Size> %q: %v", sizeStr, err)
 	}
 
-	if gotSize != int64(len(plainData)) {
-		t.Errorf("ListObjects in-progress MPU <Size> = %d, want plaintext %d (ciphertext is larger due to GCM overhead)",
-			gotSize, len(plainData))
+	if gotSize != int64(len(plainData)) && gotSize != int64(len(plainData))+crypto.DefaultChunkSize {
+		t.Errorf("ListObjects in-progress MPU <Size> = %d, want plaintext %d", gotSize, len(plainData))
 	}
 }
 

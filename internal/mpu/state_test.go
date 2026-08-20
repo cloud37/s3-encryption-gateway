@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -34,6 +35,281 @@ func TestComputePartClaim_IdenticalInputStable(t *testing.T) {
 	b, err := ComputePartClaim(dek, 1, 3, bytes.NewReader([]byte("abc")))
 	require.NoError(t, err)
 	assert.Equal(t, a, b)
+}
+
+func TestComputePartClaim_PartLengthOrContentDiffers(t *testing.T) {
+	dek := bytes.Repeat([]byte{0x42}, 32)
+	a, err := ComputePartClaim(dek, 1, 3, bytes.NewReader([]byte("abc")))
+	require.NoError(t, err)
+	b, err := ComputePartClaim(dek, 1, 4, bytes.NewReader([]byte("abcd")))
+	require.NoError(t, err)
+	c, err := ComputePartClaim(dek, 1, 3, bytes.NewReader([]byte("abd")))
+	require.NoError(t, err)
+	assert.NotEqual(t, a, b)
+	assert.NotEqual(t, a, c)
+}
+
+func TestStateStore_CommitPart_LegacyNoMutation(t *testing.T) {
+	s, mr := newTestStore(t)
+	st := sampleState("legacy-commit")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	mr.HSet(uploadKey(st.UploadID), fieldStateVersion, "1")
+	err := s.CommitPart(context.Background(), st.UploadID, p)
+	assert.ErrorIs(t, err, ErrInvalidPhase)
+	raw := mr.HGet(uploadKey(st.UploadID), "part:1")
+	assert.Contains(t, raw, "reserved")
+}
+
+func FuzzReservePartScriptResult(f *testing.F) {
+	f.Add("bad", int64(1))
+	f.Fuzz(func(t *testing.T, value string, n int64) {
+		if n < 0 {
+			return
+		}
+		_, _ = redisInt(value)
+	})
+}
+
+func FuzzComputePartClaim(f *testing.F) {
+	f.Add([]byte("seed"), int32(1))
+	f.Fuzz(func(t *testing.T, data []byte, part int32) {
+		if part < 1 || part > 10000 {
+			return
+		}
+		_, _ = ComputePartClaim(bytes.Repeat([]byte{1}, 32), part, int64(len(data)), bytes.NewReader(data))
+	})
+}
+
+func TestValkeyStateStore_WriterCapabilityReady(t *testing.T) {
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+	if err := s.WriterCapabilityReady(ctx); err == nil {
+		t.Fatal("missing capability must fail closed")
+	}
+	s.writerCapability = "deploy-a"
+	if err := s.WriterCapabilityReady(ctx); err == nil {
+		t.Fatal("absent capability must fail closed")
+	}
+	_ = mr.Set("mpu:writer-version", "deploy-b")
+	if err := s.WriterCapabilityReady(ctx); err == nil {
+		t.Fatal("mismatched capability must fail")
+	}
+	_ = mr.Set("mpu:writer-version", "deploy-a")
+	if err := s.WriterCapabilityReady(ctx); err != nil {
+		t.Fatalf("matching capability: %v", err)
+	}
+}
+
+func TestStateStore_LifecycleMirrorIntegrity(t *testing.T) {
+	s, mr := newTestStore(t)
+	st := sampleState("mirror-integrity")
+	require.NoError(t, s.Create(context.Background(), st))
+	key := uploadKey(st.UploadID)
+	mr.HSet(key, fieldPhase, "completing")
+	_, err := s.Get(context.Background(), st.UploadID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "phase mirror mismatch")
+	assert.Equal(t, "completing", mr.HGet(key, fieldPhase))
+}
+
+func TestStateStore_ReopenAndFinalizeComplete(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("reopen-finalize")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "a")
+	commitTestPart(t, s, st.UploadID, p, `"a"`)
+	_, rev, err := s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{1, `"a"`}})
+	require.NoError(t, err)
+	require.NoError(t, s.Reopen(context.Background(), st.UploadID, rev))
+	_, rev, err = s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{1, `"a"`}})
+	require.NoError(t, err)
+	require.NoError(t, s.FinalizeComplete(context.Background(), st.UploadID, rev))
+}
+
+func TestStateStore_FinalizeAbort(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("finalize-abort")
+	require.NoError(t, s.Create(context.Background(), st))
+	rev, err := s.BeginAbort(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	require.NoError(t, s.FinalizeAbort(context.Background(), st.UploadID, rev))
+	got, err := s.Get(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	assert.Equal(t, UploadPhaseAborted, got.Phase)
+}
+
+func reserveTestPart(t *testing.T, s *ValkeyStateStore, id string, pn int32, claim, token string) PartClaim {
+	t.Helper()
+	p := PartClaim{PartNumber: pn, Claim: claim, PlainLen: 3, Token: token}
+	_, err := s.ReservePart(context.Background(), id, p)
+	require.NoError(t, err)
+	return p
+}
+
+func commitTestPart(t *testing.T, s *ValkeyStateStore, id string, p PartClaim, etag string) {
+	t.Helper()
+	p.ETag, p.EncLen, p.ChunkCount = etag, 19, 1
+	require.NoError(t, s.CommitPart(context.Background(), id, p))
+}
+
+func TestStateStore_ReservePart_FirstClaimWins(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("first-claim")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	got, err := s.Get(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	require.Len(t, got.Parts, 1)
+	assert.Equal(t, "a", got.Parts[0].Claim)
+}
+
+func TestStateStore_ReservePart_IdenticalCommittedRetry(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("identical-retry")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	commitTestPart(t, s, st.UploadID, p, `"etag"`)
+	r, err := s.ReservePart(context.Background(), st.UploadID, p)
+	require.NoError(t, err)
+	assert.True(t, r.AlreadyDone)
+	assert.Equal(t, `"etag"`, r.CommittedETag)
+}
+
+func TestStateStore_ReservePart_ChangedContentRejected(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("changed-retry")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "b", PlainLen: 3, Token: "tb"})
+	assert.ErrorIs(t, err, ErrPartContentMismatch)
+}
+
+func TestStateStore_ReservePart_InProgress(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("in-progress")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "a", PlainLen: 3, Token: "tb"})
+	assert.ErrorIs(t, err, ErrPartInProgress)
+}
+
+func TestStateStore_ReservePart_ConcurrentDifferentContent(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("concurrent-content")
+	require.NoError(t, s.Create(context.Background(), st))
+	errs := make(chan error, 2)
+	for _, claim := range []string{"a", "b"} {
+		go func(c string) {
+			_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: c, PlainLen: 3, Token: c})
+			errs <- err
+		}(claim)
+	}
+	var success, mismatch int
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err == nil {
+			success++
+		} else if errors.Is(err, ErrPartContentMismatch) {
+			mismatch++
+		}
+	}
+	assert.Equal(t, 1, success)
+	assert.Equal(t, 1, mismatch)
+}
+
+func TestStateStore_CommitPart_StaleTokenRejected(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("stale-token")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	p.Token = "wrong"
+	assert.ErrorIs(t, s.CommitPart(context.Background(), st.UploadID, p), ErrRevisionConflict)
+}
+
+func TestStateStore_CommitPart_MatchingRetryAndChangedFieldsRejected(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("commit-fields")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	p.ETag, p.EncLen, p.ChunkCount = `"etag"`, 19, 1
+	require.NoError(t, s.CommitPart(context.Background(), st.UploadID, p))
+	require.NoError(t, s.CommitPart(context.Background(), st.UploadID, p))
+
+	for name, mutate := range map[string]func(*PartClaim){
+		"etag":             func(v *PartClaim) { v.ETag = `"other"` },
+		"plain length":     func(v *PartClaim) { v.PlainLen++ },
+		"encrypted length": func(v *PartClaim) { v.EncLen++ },
+		"chunk count":      func(v *PartClaim) { v.ChunkCount++ },
+		"token":            func(v *PartClaim) { v.Token = "other-token" },
+		"claim":            func(v *PartClaim) { v.Claim = "other-claim" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := p
+			mutate(&changed)
+			assert.ErrorIs(t, s.CommitPart(context.Background(), st.UploadID, changed), ErrRevisionConflict)
+		})
+	}
+	got, err := s.Get(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	require.Len(t, got.Parts, 1)
+	assert.Equal(t, p.ETag, got.Parts[0].ETag)
+	assert.Equal(t, p.PlainLen, got.Parts[0].PlainLen)
+	assert.Equal(t, p.EncLen, got.Parts[0].EncLen)
+	assert.Equal(t, p.ChunkCount, got.Parts[0].ChunkCount)
+}
+
+func TestStateStore_Lifecycle_StaleRevisionRejected(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("stale-revision")
+	require.NoError(t, s.Create(context.Background(), st))
+	rev, err := s.BeginAbort(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	assert.ErrorIs(t, s.FinalizeAbort(context.Background(), st.UploadID, rev-1), ErrRevisionConflict)
+}
+
+func TestStateStore_BeginComplete_ExactSelectedParts(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("selected-parts")
+	require.NoError(t, s.Create(context.Background(), st))
+	p1 := reserveTestPart(t, s, st.UploadID, 1, "a", "a")
+	commitTestPart(t, s, st.UploadID, p1, `"a"`)
+	p2 := reserveTestPart(t, s, st.UploadID, 2, "b", "b")
+	commitTestPart(t, s, st.UploadID, p2, `"b"`)
+	got, _, err := s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{PartNumber: 2, ETag: `"b"`}})
+	require.NoError(t, err)
+	require.Len(t, got.Parts, 1)
+	assert.Equal(t, int32(2), got.Parts[0].PartNumber)
+}
+
+func TestStateStore_BeginComplete_ETagMismatch(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("etag-mismatch")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "a")
+	commitTestPart(t, s, st.UploadID, p, `"a"`)
+	_, _, err := s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{1, `"wrong"`}})
+	assert.ErrorIs(t, err, ErrCompleteMismatch)
+}
+
+func TestStateStore_BeginComplete_UncommittedPart(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("uncommitted")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "a", "a")
+	_, _, err := s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{1, `"a"`}})
+	assert.ErrorIs(t, err, ErrCompleteMismatch)
+}
+
+func TestStateStore_CompleteAndAbortMutuallyExclusive(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("exclusive")
+	require.NoError(t, s.Create(context.Background(), st))
+	_, _, err := s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{1, `"a"`}})
+	assert.ErrorIs(t, err, ErrCompleteMismatch)
+	_, err = s.BeginAbort(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	_, _, err = s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{1, `"a"`}})
+	assert.ErrorIs(t, err, ErrInvalidPhase)
 }
 
 // newTestStore starts a miniredis server and returns a ValkeyStateStore backed by it.
@@ -67,7 +343,7 @@ func sampleState(uploadID string) *UploadState {
 	}
 }
 
-// TestStateStore_RoundTrip exercises Create → AppendPart × 3 → Get → Delete.
+// TestStateStore_RoundTrip exercises Create → ReservePart/CommitPart × 3 → Get → Delete.
 func TestStateStore_RoundTrip(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
@@ -76,13 +352,11 @@ func TestStateStore_RoundTrip(t *testing.T) {
 	require.NoError(t, s.Create(ctx, state))
 
 	for i := 1; i <= 3; i++ {
-		require.NoError(t, s.AppendPart(ctx, state.UploadID, PartRecord{
-			PartNumber: int32(i),
-			ETag:       "\"etag\"",
-			PlainLen:   8 * 1024 * 1024,
-			EncLen:     8*1024*1024 + 2080,
-			ChunkCount: 128,
-		}))
+		claim := PartClaim{PartNumber: int32(i), Claim: fmt.Sprintf("claim-%d", i), PlainLen: 8 * 1024 * 1024, Token: fmt.Sprintf("token-%d", i)}
+		_, err := s.ReservePart(ctx, state.UploadID, claim)
+		require.NoError(t, err)
+		claim.ETag, claim.EncLen, claim.ChunkCount = "\"etag\"", 8*1024*1024+2080, 128
+		require.NoError(t, s.CommitPart(ctx, state.UploadID, claim))
 	}
 
 	got, err := s.Get(ctx, state.UploadID)
@@ -98,7 +372,7 @@ func TestStateStore_RoundTrip(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUploadNotFound)
 }
 
-// TestStateStore_TTLRefresh verifies that AppendPart refreshes the expiry.
+// TestStateStore_TTLRefresh verifies that ReservePart refreshes the expiry.
 func TestStateStore_TTLRefresh(t *testing.T) {
 	s, mr := newTestStore(t)
 	s.ttl = 10 * time.Second
@@ -109,7 +383,8 @@ func TestStateStore_TTLRefresh(t *testing.T) {
 
 	// Fast-forward 5 seconds — key should still exist.
 	mr.FastForward(5 * time.Second)
-	require.NoError(t, s.AppendPart(ctx, state.UploadID, PartRecord{PartNumber: 1}))
+	_, err := s.ReservePart(ctx, state.UploadID, PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
+	require.NoError(t, err)
 
 	// Fast-forward another 8 seconds (total 13 s). Without the TTL refresh the
 	// key would have expired at 10 s; after the refresh it lives another 10 s.
@@ -158,14 +433,52 @@ func TestStateStore_Get_Missing(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUploadNotFound)
 }
 
-// TestStateStore_AppendPart_Missing verifies ErrUploadNotFound when the upload
+// TestStateStore_ReservePart_Missing verifies ErrUploadNotFound when the upload
 // does not exist in Valkey.
-func TestStateStore_AppendPart_Missing(t *testing.T) {
+func TestStateStore_ReservePart_Missing(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
-	err := s.AppendPart(ctx, "nonexistent-upload", PartRecord{PartNumber: 1})
+	_, err := s.ReservePart(ctx, "nonexistent-upload", PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
 	assert.ErrorIs(t, err, ErrUploadNotFound)
+}
+
+func TestStateStore_ReservePart_InvalidAndLegacyPaths(t *testing.T) {
+	s, mr := newTestStore(t)
+	st := sampleState("reserve-errors")
+	require.NoError(t, s.Create(context.Background(), st))
+	_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 0, Claim: "x", PlainLen: 1, Token: "x"})
+	require.Error(t, err)
+	mr.HSet(uploadKey(st.UploadID), fieldStateVersion, "1")
+	_, err = s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "x", PlainLen: 1, Token: "x"})
+	assert.ErrorIs(t, err, ErrInvalidStateVersion)
+}
+
+func TestStateStore_ReleasePart_Outcomes(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("release-outcomes")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	require.NoError(t, s.ReleasePart(context.Background(), st.UploadID, p.PartNumber, p.Token))
+	_, err := s.Get(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	assert.Error(t, s.ReleasePart(context.Background(), st.UploadID, 1, "wrong"))
+}
+
+func TestStateStore_BeginAbort_NonOpenRejected(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("abort-nonopen")
+	require.NoError(t, s.Create(context.Background(), st))
+	rev, err := s.BeginAbort(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	require.NoError(t, s.FinalizeAbort(context.Background(), st.UploadID, rev))
+	_, err = s.BeginAbort(context.Background(), st.UploadID)
+	assert.ErrorIs(t, err, ErrInvalidPhase)
+}
+
+func TestStateStore_CommitPart_InvalidAndMissing(t *testing.T) {
+	s, _ := newTestStore(t)
+	require.Error(t, s.CommitPart(context.Background(), "missing", PartClaim{PartNumber: 0}))
 }
 
 // TestStateStore_Delete_Missing verifies that deleting a non-existent key is a no-op.
@@ -175,9 +488,9 @@ func TestStateStore_Delete_Missing(t *testing.T) {
 	assert.NoError(t, s.Delete(ctx, "no-such-upload"))
 }
 
-// TestStateStore_Concurrent_AppendPart verifies that concurrent appends for
+// TestStateStore_Concurrent_ReservePart verifies that concurrent reservations for
 // distinct part numbers all survive and appear in the final Get.
-func TestStateStore_Concurrent_AppendPart(t *testing.T) {
+func TestStateStore_Concurrent_ReservePart(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
@@ -188,10 +501,8 @@ func TestStateStore_Concurrent_AppendPart(t *testing.T) {
 	errs := make(chan error, numParts)
 	for i := 1; i <= numParts; i++ {
 		go func(pn int) {
-			errs <- s.AppendPart(ctx, state.UploadID, PartRecord{
-				PartNumber: int32(pn),
-				ETag:       "\"etag\"",
-			})
+			_, err := s.ReservePart(ctx, state.UploadID, PartClaim{PartNumber: int32(pn), Claim: fmt.Sprintf("claim-%d", pn), PlainLen: 1, Token: fmt.Sprintf("token-%d", pn)})
+			errs <- err
 		}(i)
 	}
 

@@ -589,12 +589,12 @@ func TestUploadPartCopy_SourceRangeExceeds5GiB(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "InvalidRequest")
 }
 
-// TestUploadPartCopy_MPU_AppendPartFailure_Returns503 verifies that when the
+// TestUploadPartCopy_MPU_CommitPartFailure_Returns503 verifies that when the
 // encrypted-MPU re-encrypt path writes the backend part successfully but
-// AppendPart on the Valkey state store fails, the handler returns 503
+// CommitPart on the Valkey state store fails, the handler returns 503
 // ServiceUnavailable instead of a silent 200 OK. This closes the latent
 // silent-data-loss bug described in V0.6-S3-3 plan §1.2 gap 3.
-func TestUploadPartCopy_MPU_AppendPartFailure_Returns503(t *testing.T) {
+func TestUploadPartCopy_MPU_CommitPartFailure_Returns503(t *testing.T) {
 	handler, mockClient, _ := newMPUTestHandler(t, "dst-*")
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -616,10 +616,10 @@ func TestUploadPartCopy_MPU_AppendPartFailure_Returns503(t *testing.T) {
 		router.ServeHTTP(httptest.NewRecorder(), req)
 	})
 
-	// Replace the state store with one that fails AppendPart.
-	handler.WithMPUStateStore(&failOnAppendStateStore{
+	// Replace the state store with one that fails CommitPart.
+	handler.WithMPUStateStore(&failOnCommitStateStore{
 		StateStore: handler.mpuStateStore,
-		appendErr:  errors.New("valkey: connection refused"),
+		commitErr:  errors.New("valkey: connection refused"),
 	})
 
 	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID), nil)

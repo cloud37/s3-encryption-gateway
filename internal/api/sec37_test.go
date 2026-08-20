@@ -197,12 +197,6 @@ func (c *sec37CountingMPUClient) UploadPart(ctx context.Context, bucket, key, up
 
 type sec37CountingStateStore struct {
 	mpu.StateStore
-	appendPartCalls int
-}
-
-func (s *sec37CountingStateStore) AppendPart(ctx context.Context, uploadID string, part mpu.PartRecord) error {
-	s.appendPartCalls++
-	return s.StateStore.AppendPart(ctx, uploadID, part)
 }
 
 func unknownSEC37Manifest(t *testing.T, metadata map[string]string) {
@@ -489,8 +483,8 @@ func TestSEC37_CompactedV2Truncated_EncryptedMPUDestination(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	router.ServeHTTP(w, req)
-	if w.Code != http.StatusInternalServerError || counting.uploadPartCalls != 0 || stateStore.appendPartCalls != 0 {
-		t.Fatalf("status=%d upload=%d append=%d", w.Code, counting.uploadPartCalls, stateStore.appendPartCalls)
+	if w.Code != http.StatusInternalServerError || counting.uploadPartCalls != 0 {
+		t.Fatalf("status=%d upload=%d", w.Code, counting.uploadPartCalls)
 	}
 }
 
@@ -738,8 +732,8 @@ func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsInvalidTrailerBeforeUploadPart
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	router.ServeHTTP(w, req)
-	if w.Code != http.StatusInternalServerError || clientCounter.uploadPartCalls != 0 || stateStore.appendPartCalls != 0 {
-		t.Fatalf("preflight returned %d, UploadPart=%d AppendPart=%d", w.Code, clientCounter.uploadPartCalls, stateStore.appendPartCalls)
+	if w.Code != http.StatusInternalServerError || clientCounter.uploadPartCalls != 0 {
+		t.Fatalf("preflight returned %d, UploadPart=%d", w.Code, clientCounter.uploadPartCalls)
 	}
 }
 

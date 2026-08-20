@@ -356,14 +356,11 @@ func TestStateStore_CreateGetList_WithEncryption(t *testing.T) {
 	assert.True(t, found[state1.UploadID], "state1 should appear in list")
 	assert.True(t, found[state2.UploadID], "state2 should appear in list")
 
-	// --- AppendPart ---
-	require.NoError(t, s.AppendPart(ctx, state1.UploadID, PartRecord{
-		PartNumber: 1,
-		ETag:       `"etag1"`,
-		PlainLen:   1024,
-		EncLen:     1040,
-		ChunkCount: 1,
-	}))
+	// --- ReservePart / CommitPart ---
+	claim := PartClaim{PartNumber: 1, Claim: "claim1", PlainLen: 1024, Token: "token1", ETag: `"etag1"`, EncLen: 1040, ChunkCount: 1}
+	_, err = s.ReservePart(ctx, state1.UploadID, claim)
+	require.NoError(t, err)
+	require.NoError(t, s.CommitPart(ctx, state1.UploadID, claim))
 
 	got2, err := s.Get(ctx, state1.UploadID)
 	require.NoError(t, err)

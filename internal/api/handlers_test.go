@@ -1664,7 +1664,7 @@ func TestValidateCompleteMultipartUploadRequest(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "parts not in ascending order (should warn but not error)",
+			name: "parts not in ascending order",
 			req: &CompleteMultipartUpload{
 				Parts: []struct {
 					XMLName    xml.Name `xml:"Part"`
@@ -1675,7 +1675,8 @@ func TestValidateCompleteMultipartUploadRequest(t *testing.T) {
 					{PartNumber: 1, ETag: `"def456"`},
 				},
 			},
-			expectError: false, // AWS allows this but logs a warning
+			expectError: true,
+			errorCode:   "InvalidPartOrder",
 		},
 	}
 

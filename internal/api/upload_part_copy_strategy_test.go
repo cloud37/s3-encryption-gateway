@@ -40,6 +40,7 @@ type strategyClaimStore struct {
 	reserveErr error
 	commitErr  error
 	state      *mpu.UploadState
+	releases   int
 }
 
 func (s *strategyClaimStore) Get(ctx context.Context, id string) (*mpu.UploadState, error) {
@@ -61,6 +62,11 @@ func (s *strategyClaimStore) ReservePart(context.Context, string, mpu.PartClaim)
 
 func (s *strategyClaimStore) CommitPart(context.Context, string, mpu.PartClaim) error {
 	return s.commitErr
+}
+
+func (s *strategyClaimStore) ReleasePart(ctx context.Context, id string, pn int32, token string) error {
+	s.releases++
+	return s.ClaimStateStore.ReleasePart(ctx, id, pn, token)
 }
 
 func (c *strategyClient) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, r io.Reader, n *int64) (string, error) {
@@ -298,9 +304,13 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_ClaimBranches(t *testing.T) {
 	require.ErrorContains(t, err, "upload re-encrypted part")
 	state, stateErr := h.mpuStateStore.Get(context.Background(), uploadID)
 	require.NoError(t, stateErr)
+	var reservedPart *mpu.PartRecord
 	for _, part := range state.Parts {
-		require.NotEqual(t, int32(5), part.PartNumber)
+		if part.PartNumber == 5 {
+			reservedPart = &part
+		}
 	}
+	require.NotNil(t, reservedPart, "uncertain backend outcome must retain reservation")
 
 	client.uploadErr = nil
 	result, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 6, "src", "plain", nil, nil, source, 1024, 1024)
@@ -312,20 +322,128 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_ClaimBranches(t *testing.T) {
 	require.Equal(t, calls, client.uploads)
 }
 
+func TestSEC38_Copy_ReleasesReservationBeforeUploadOnEncryptionFailure(t *testing.T) {
+	h, client, uploadID := setupStrategyMPU(t)
+	client.objects["src/plain"] = []byte("claim source")
+	client.metadata["src/plain"] = map[string]string{}
+	store := &strategyClaimStore{ClaimStateStore: h.mpuStateStore}
+	h.mpuStateStore = store
+	h.destinationEncryptionReader = func(io.Reader, int64) (io.Reader, int64, error) {
+		return nil, 0, errors.New("encrypt construction failed")
+	}
+	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 9, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.ErrorContains(t, err, "re-encrypt")
+	require.Equal(t, 1, store.releases)
+	require.Len(t, client.parts, 0)
+	h.destinationEncryptionReader = nil
+	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 9, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.NoError(t, err)
+}
+
+func TestSEC38_Copy_ReleasesReservationOnEncryptedReadFailure(t *testing.T) {
+	h, client, uploadID := setupStrategyMPU(t)
+	client.objects["src/plain"] = []byte("claim source")
+	client.metadata["src/plain"] = map[string]string{}
+	store := &strategyClaimStore{ClaimStateStore: h.mpuStateStore}
+	h.mpuStateStore = store
+	h.destinationEncryptionReader = func(io.Reader, int64) (io.Reader, int64, error) {
+		return strategyErrorReader{}, 42, nil
+	}
+	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 10, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.ErrorContains(t, err, "read re-encrypted part")
+	require.Equal(t, 1, store.releases)
+	require.Len(t, client.parts, 0)
+	h.destinationEncryptionReader = nil
+	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 10, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.NoError(t, err)
+}
+
 func TestSEC37_Copy_Strategy_ReencryptMPU_LegacyStateBranches(t *testing.T) {
 	h, client, uploadID := setupStrategyMPU(t)
 	client.objects["src/plain"] = []byte("legacy state source")
 	client.metadata["src/plain"] = map[string]string{}
 	realStore := h.mpuStateStore
-	legacyStore := &failOnAppendStateStore{StateStore: realStore, appendErr: errors.New("append failed")}
+	legacyStore := &failOnCommitStateStore{StateStore: realStore, commitErr: errors.New("commit failed")}
 	h.mpuStateStore = legacyStore
 	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 7, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
 	require.ErrorIs(t, err, errMPUStateUnavailable)
 
-	h.mpuStateStore = &countingAppendStateStore{StateStore: realStore}
+	h.mpuStateStore = &countingCommitStateStore{StateStore: realStore}
 	result, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 8, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
 	require.NoError(t, err)
 	require.NotNil(t, result)
+}
+
+func TestUploadPartCopy_EncryptedMPU_IdenticalRetry(t *testing.T) {
+	h, base, uploadID := setupStrategyMPU(t)
+	base.objects["src/plain"], base.metadata["src/plain"] = []byte("same source"), map[string]string{}
+	client := &countingMPUClient{mpuMockS3Client: base}
+	first, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.NoError(t, err)
+	calls := client.uploads
+	second, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.NoError(t, err)
+	require.Equal(t, first.ETag, second.ETag)
+	require.Equal(t, calls, client.uploads)
+}
+
+func TestUploadPartCopy_EncryptedMPU_ChangedSourceRejected(t *testing.T) {
+	h, base, uploadID := setupStrategyMPU(t)
+	base.objects["src/plain"], base.metadata["src/plain"] = []byte("first source"), map[string]string{}
+	client := &countingMPUClient{mpuMockS3Client: base}
+	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.NoError(t, err)
+	calls := client.uploads
+	base.objects["src/plain"] = []byte("changed source")
+	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.ErrorIs(t, err, mpu.ErrPartContentMismatch)
+	require.Equal(t, calls, client.uploads)
+}
+
+func TestUploadPartCopy_EncryptedMPU_ConcurrentReservation(t *testing.T) {
+	h, base, uploadID := setupStrategyMPU(t)
+	base.objects["src/plain"], base.metadata["src/plain"] = []byte("source"), map[string]string{}
+	client := &countingMPUClient{mpuMockS3Client: base}
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+			errs <- err
+		}()
+	}
+	var success int
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err == nil {
+			success++
+		}
+	}
+	require.Equal(t, 1, success)
+}
+
+func TestUploadPartCopy_EncryptedMPU_LegacyStateRejected(t *testing.T) {
+	h, base, uploadID := setupStrategyMPU(t)
+	base.objects["src/plain"], base.metadata["src/plain"] = []byte("source"), map[string]string{}
+	legacy := &failOnCommitStateStore{StateStore: h.mpuStateStore, commitErr: errors.New("legacy state")}
+	h.mpuStateStore = legacy
+	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), base, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
+	require.ErrorIs(t, err, errMPUStateUnavailable)
+}
+
+func TestUploadPartCopy_EncryptedMPU_DestinationUploadFailureReleases(t *testing.T) {
+	h, base, uploadID := setupStrategyMPU(t)
+	base.objects["src/plain"], base.metadata["src/plain"] = []byte("source"), map[string]string{}
+	client := &countingMPUClient{mpuMockS3Client: base, uploadErr: errors.New("destination unavailable")}
+	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 100, 100)
+	require.Error(t, err)
+	state, getErr := h.mpuStateStore.Get(context.Background(), uploadID)
+	require.NoError(t, getErr)
+	var reserved *mpu.PartRecord
+	for _, p := range state.Parts {
+		if p.PartNumber == 1 {
+			reserved = &p
+		}
+	}
+	require.NotNil(t, reserved, "uncertain backend outcome must retain reservation")
 }
 
 func TestSEC37_Copy_Strategy_ReencryptMPU_Bounds(t *testing.T) {
@@ -397,7 +515,7 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_ClaimErrors(t *testing.T) {
 	h, client, uploadID := setupStrategyMPU(t)
 	client.objects["src/plain"] = []byte("claim source")
 	client.metadata["src/plain"] = map[string]string{}
-	realStore := h.mpuStateStore.(mpu.ClaimStateStore)
+	realStore := h.mpuStateStore
 	for _, tc := range []struct {
 		name  string
 		store *strategyClaimStore
@@ -416,12 +534,12 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_ClaimErrors(t *testing.T) {
 	}
 }
 
-type countingAppendStateStore struct {
+type countingCommitStateStore struct {
 	mpu.StateStore
-	appends int
+	commits int
 }
 
-func (s *countingAppendStateStore) AppendPart(ctx context.Context, id string, part mpu.PartRecord) error {
-	s.appends++
-	return s.StateStore.AppendPart(ctx, id, part)
+func (s *countingCommitStateStore) CommitPart(ctx context.Context, id string, part mpu.PartClaim) error {
+	s.commits++
+	return s.StateStore.CommitPart(ctx, id, part)
 }
