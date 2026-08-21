@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -56,18 +57,65 @@ func TestStateStore_CommitPart_LegacyNoMutation(t *testing.T) {
 	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
 	mr.HSet(uploadKey(st.UploadID), fieldStateVersion, "1")
 	err := s.CommitPart(context.Background(), st.UploadID, p)
-	assert.ErrorIs(t, err, ErrInvalidPhase)
+	assert.ErrorIs(t, err, ErrInvalidStateVersion)
 	raw := mr.HGet(uploadKey(st.UploadID), "part:1")
 	assert.Contains(t, raw, "reserved")
 }
 
+func TestStateStore_CreateOverridesLifecycleControls(t *testing.T) {
+	s, mr := newTestStore(t)
+	st := sampleState("create-controls")
+	st.StateVersion = 1
+	st.Phase = UploadPhaseAborting
+	st.Revision = 99
+	require.NoError(t, s.Create(context.Background(), st))
+	key := uploadKey(st.UploadID)
+	assert.Equal(t, "2", mr.HGet(key, fieldStateVersion))
+	assert.Equal(t, "open", mr.HGet(key, fieldPhase))
+	assert.Equal(t, "1", mr.HGet(key, fieldRevision))
+}
+
 func FuzzReservePartScriptResult(f *testing.F) {
-	f.Add("bad", int64(1))
-	f.Fuzz(func(t *testing.T, value string, n int64) {
-		if n < 0 {
-			return
+	f.Add("bad", "", true)
+	f.Add("0", "", false)
+	f.Add("5", `"stored-etag"`, false)
+	f.Add("6", "2", false)
+	f.Fuzz(func(t *testing.T, value, revision string, injectedError bool) {
+		s, _ := newTestStore(t)
+		st := sampleState("fuzz-reserve-" + value)
+		require.NoError(t, s.Create(context.Background(), st))
+		before, err := s.Get(context.Background(), st.UploadID)
+		require.NoError(t, err)
+		original := runReservePart
+		t.Cleanup(func() { runReservePart = original })
+		runReservePart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+			if injectedError {
+				return nil, errors.New(value)
+			}
+			if value == "5" || value == "6" {
+				return []interface{}{value, revision}, nil
+			}
+			return []interface{}{value}, nil
 		}
-		_, _ = redisInt(value)
+		reservation, reserveErr := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
+		after, getErr := s.Get(context.Background(), st.UploadID)
+		require.NoError(t, getErr)
+		if value == "5" && revision == `"stored-etag"` && !injectedError {
+			require.NoError(t, reserveErr)
+			require.True(t, reservation.AlreadyDone)
+			require.Equal(t, `"stored-etag"`, reservation.CommittedETag)
+			require.Equal(t, before.Revision, after.Revision)
+			require.Empty(t, after.Parts)
+		} else if value == "6" && revision == "2" && !injectedError {
+			require.NoError(t, reserveErr)
+			require.Equal(t, uint64(2), reservation.Revision)
+			require.Equal(t, before.Revision, after.Revision)
+			require.Empty(t, after.Parts)
+		} else {
+			require.Error(t, reserveErr)
+			require.Equal(t, before.Revision, after.Revision)
+			require.Empty(t, after.Parts)
+		}
 	})
 }
 
@@ -79,6 +127,45 @@ func FuzzComputePartClaim(f *testing.F) {
 		}
 		_, _ = ComputePartClaim(bytes.Repeat([]byte{1}, 32), part, int64(len(data)), bytes.NewReader(data))
 	})
+}
+
+func TestStateStore_WriterCapabilityFleetAndLegacyReadiness(t *testing.T) {
+	s, mr := newTestStore(t)
+	reg := prometheus.NewRegistry()
+	s.metrics = metricsmod.NewMetricsWithRegistry(reg)
+	assertLegacyGauge := func(want float64) {
+		mfs, err := reg.Gather()
+		require.NoError(t, err)
+		for _, mf := range mfs {
+			if mf.GetName() == "gateway_mpu_legacy_inflight" {
+				require.Equal(t, want, mf.GetMetric()[0].GetGauge().GetValue())
+				return
+			}
+		}
+		t.Fatalf("gateway_mpu_legacy_inflight metric not found")
+	}
+	s.writerCapability = "deploy-a"
+	require.NoError(t, mr.Set(writerCapabilityKey, "deploy-a"))
+	require.NoError(t, s.WriterCapabilityReady(context.Background()))
+	require.NoError(t, mr.Set("mpu:writer:incompatible", "deploy-b"))
+	mr.SetTTL("mpu:writer:incompatible", writerPresenceTTL)
+	require.ErrorIs(t, s.WriterCapabilityReady(context.Background()), ErrInvalidStateVersion)
+	mr.FastForward(writerPresenceTTL + time.Second)
+	require.NoError(t, s.WriterCapabilityReady(context.Background()))
+	assertLegacyGauge(0)
+
+	legacy := sampleState("legacy-readiness")
+	legacy.StateVersion = 1
+	legacy.Phase = ""
+	legacy.Revision = 0
+	data, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	mr.HSet(uploadKey(legacy.UploadID), fieldMeta, string(data))
+	require.Error(t, s.WriterCapabilityReady(context.Background()))
+	assertLegacyGauge(1)
+	mr.Del(uploadKey(legacy.UploadID))
+	require.NoError(t, s.WriterCapabilityReady(context.Background()))
+	assertLegacyGauge(0)
 }
 
 func TestValkeyStateStore_WriterCapabilityReady(t *testing.T) {
@@ -99,6 +186,130 @@ func TestValkeyStateStore_WriterCapabilityReady(t *testing.T) {
 	if err := s.WriterCapabilityReady(ctx); err != nil {
 		t.Fatalf("matching capability: %v", err)
 	}
+}
+
+func TestValkeyStateStore_LegacyWriterDrainGate(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.writerCapability = "deploy-a"
+	// Legacy binaries never publish writer-presence keys; activation is explicit.
+	require.NoError(t, mr.Set(writerCapabilityKey, "legacy-writers-active"))
+	require.ErrorIs(t, s.WriterCapabilityReady(context.Background()), ErrInvalidStateVersion)
+	require.NoError(t, mr.Set(writerCapabilityKey, "deploy-a"))
+	require.NoError(t, s.WriterCapabilityReady(context.Background()))
+}
+
+func TestValkeyStateStore_WriterCapabilityBackendFailure(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.writerCapability = "deploy-a"
+	require.NoError(t, mr.Set(writerCapabilityKey, "deploy-a"))
+	require.NoError(t, s.client.Close())
+	require.ErrorIs(t, s.WriterCapabilityReady(context.Background()), ErrStateUnavailable)
+}
+
+func TestValkeyStateStore_LegacyInflightInventoryBranches(t *testing.T) {
+	assertGauge := func(t *testing.T, s *ValkeyStateStore, reg *prometheus.Registry, want float64) {
+		t.Helper()
+		mfs, err := reg.Gather()
+		require.NoError(t, err)
+		for _, mf := range mfs {
+			if mf.GetName() == "gateway_mpu_legacy_inflight" {
+				require.Equal(t, want, mf.GetMetric()[0].GetGauge().GetValue())
+				return
+			}
+		}
+		t.Fatalf("gateway_mpu_legacy_inflight metric not found")
+	}
+
+	newInventoryStore := func(t *testing.T) (*ValkeyStateStore, *miniredis.Miniredis, *prometheus.Registry) {
+		t.Helper()
+		s, mr := newTestStore(t)
+		reg := prometheus.NewRegistry()
+		s.metrics = metricsmod.NewMetricsWithRegistry(reg)
+		return s, mr, reg
+	}
+
+	t.Run("missing meta", func(t *testing.T) {
+		s, mr, _ := newInventoryStore(t)
+		mr.HSet("mpu:missing-meta", "phase", "open")
+		_, err := s.legacyInflightCount(context.Background())
+		require.Error(t, err)
+	})
+	t.Run("bad encrypted metadata", func(t *testing.T) {
+		s, mr, _ := newInventoryStore(t)
+		s.encryptState = true
+		s.stateDEK = bytes.Repeat([]byte{1}, 32)
+		mr.HSet("mpu:bad-encrypted", fieldMeta, "not-ciphertext")
+		_, err := s.legacyInflightCount(context.Background())
+		require.ErrorIs(t, err, ErrStateUnavailable)
+	})
+	t.Run("allowed plaintext and malformed json", func(t *testing.T) {
+		s, mr, _ := newInventoryStore(t)
+		s.encryptState = true
+		s.allowLegacyPlaintext = true
+		s.stateDEK = bytes.Repeat([]byte{1}, 32)
+		mr.HSet("mpu:malformed", fieldMeta, "{")
+		_, err := s.legacyInflightCount(context.Background())
+		require.Error(t, err)
+	})
+	t.Run("allowed plaintext counted and non-encrypted ignored", func(t *testing.T) {
+		s, mr, reg := newInventoryStore(t)
+		s.encryptState = true
+		s.allowLegacyPlaintext = true
+		s.stateDEK = bytes.Repeat([]byte{1}, 32)
+		legacy := sampleState("inventory-plaintext")
+		legacy.StateVersion = 1
+		plaintext, err := json.Marshal(legacy)
+		require.NoError(t, err)
+		mr.HSet(uploadKey(legacy.UploadID), fieldMeta, string(plaintext))
+		mr.HSet("mpu:non-encrypted", fieldMeta, string(plaintext))
+		count, err := s.legacyInflightCount(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, 2, count)
+		assertGauge(t, s, reg, 2)
+	})
+	t.Run("non-encrypted current state ignored", func(t *testing.T) {
+		s, mr, reg := newInventoryStore(t)
+		current := sampleState("inventory-current-plain")
+		current.StateVersion = CurrentStateVersion
+		plaintext, err := json.Marshal(current)
+		require.NoError(t, err)
+		mr.HSet(uploadKey(current.UploadID), fieldMeta, string(plaintext))
+		count, err := s.legacyInflightCount(context.Background())
+		require.NoError(t, err)
+		require.Zero(t, count)
+		assertGauge(t, s, reg, 0)
+	})
+	t.Run("historical encrypted and current ignored", func(t *testing.T) {
+		s, mr, reg := newInventoryStore(t)
+		s.encryptState = true
+		s.stateDEK = bytes.Repeat([]byte{1}, 32)
+		legacy := sampleState("inventory-legacy")
+		legacy.StateVersion = 1
+		current := sampleState("inventory-current")
+		current.StateVersion = CurrentStateVersion
+		for _, state := range []*UploadState{legacy, current} {
+			plaintext, err := json.Marshal(state)
+			require.NoError(t, err)
+			meta, err := s.EncryptState(plaintext)
+			require.NoError(t, err)
+			mr.HSet(uploadKey(state.UploadID), fieldMeta, string(meta))
+		}
+		count, err := s.legacyInflightCount(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, 1, count)
+		assertGauge(t, s, reg, 1)
+		mr.Del(uploadKey(legacy.UploadID))
+		count, err = s.legacyInflightCount(context.Background())
+		require.NoError(t, err)
+		require.Zero(t, count)
+		assertGauge(t, s, reg, 0)
+	})
+	t.Run("scan failure", func(t *testing.T) {
+		s, _, _ := newInventoryStore(t)
+		require.NoError(t, s.client.Close())
+		_, err := s.legacyInflightCount(context.Background())
+		require.ErrorIs(t, err, ErrStateUnavailable)
+	})
 }
 
 func TestStateStore_LifecycleMirrorIntegrity(t *testing.T) {

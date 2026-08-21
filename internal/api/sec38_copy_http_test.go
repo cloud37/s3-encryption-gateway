@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
@@ -42,22 +41,23 @@ func TestUploadPartCopy_EncryptedMPU_HTTP_ChangedSourceRejected(t *testing.T) {
 	require.Equal(t, firstEncryptionCalls, encryptionCalls)
 }
 
-func TestUploadPartCopy_EncryptedMPU_HTTP_LegacyStateRejected(t *testing.T) {
+func TestUploadPartCopy_EncryptedMPU_LegacyStateRejected(t *testing.T) {
 	h, base, mr := newMPUTestHandler(t, "copy-legacy-http-*")
+	c := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = c
+	encryptionCalls := 0
+	h.destinationEncryptionConstructed = func() { encryptionCalls++ }
 	r := mux.NewRouter()
 	h.RegisterRoutes(r)
 	base.objects["source/plain"] = []byte("first")
 	base.metadata["source/plain"] = map[string]string{}
 	id, _ := sec38CreateUpload(t, h, "copy-legacy-http-bucket", "dest")
+	makeSEC38HistoricalEncryptedState(t, h, id, mr)
 	for _, key := range mr.Keys() {
 		if strings.HasPrefix(key, "mpu:") && key != "mpu:writer-version" {
-			mr.HSet(key, "state_version", "1")
-			mr.HSet(key, "phase", "open")
-			var meta map[string]interface{}
-			_ = json.Unmarshal([]byte(mr.HGet(key, "meta")), &meta)
-			meta["state_version"] = float64(1)
-			encoded, _ := json.Marshal(meta)
-			mr.HSet(key, "meta", string(encoded))
+			mr.HDel(key, "state_version")
+			mr.HDel(key, "phase")
+			mr.HDel(key, "revision")
 		}
 	}
 	req := httptest.NewRequest("PUT", fmt.Sprintf("/copy-legacy-http-bucket/dest?partNumber=1&uploadId=%s", id), nil)
@@ -66,7 +66,10 @@ func TestUploadPartCopy_EncryptedMPU_HTTP_LegacyStateRejected(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusConflict, w.Code)
 	require.Contains(t, w.Body.String(), "OperationAborted")
+	require.Equal(t, 0, c.uploadPartCalls)
+	require.Equal(t, 0, encryptionCalls)
 	aw := httptest.NewRecorder()
 	r.ServeHTTP(aw, httptest.NewRequest("DELETE", fmt.Sprintf("/copy-legacy-http-bucket/dest?uploadId=%s", id), nil))
 	require.Equal(t, http.StatusNoContent, aw.Code)
+	require.Equal(t, 1, c.abortCalls)
 }

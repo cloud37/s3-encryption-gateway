@@ -54,6 +54,7 @@ type sec38CountingClient struct {
 	uploadErr               error
 	putObjectErr            error
 	abortErr                error
+	abortCalls              int
 	sourceHeadCalls         int
 	sourceGetCalls          int
 	sourceReadCalls         int
@@ -97,6 +98,7 @@ func (c *sec38CountingClient) CompleteMultipartUpload(ctx context.Context, b, k,
 }
 
 func (c *sec38CountingClient) AbortMultipartUpload(ctx context.Context, b, k, id string) error {
+	c.abortCalls++
 	if c.abortErr != nil {
 		return c.abortErr
 	}

@@ -33,18 +33,19 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   - `POST /{bucket}/{key}?uploads` - Initiate multipart upload
   - `PUT /{bucket}/{key}?partNumber=X&uploadId=Y` - Upload part
   - `POST /{bucket}/{key}?uploadId=Y` - Complete multipart upload
-- **Encryption**: NOT applied (parts stored unencrypted)
+- **Encryption**: Conditional per bucket policy. Encrypted MPUs use a per-upload
+  DEK, chunked ciphertext, and a finalization manifest.
 - **Implementation**:
-  - Parts are forwarded to backend without encryption to avoid concatenation issues
+  - Plaintext MPUs are forwarded unchanged; encrypted parts are claimed before encryption.
   - Preserve ordering and part ETags
   - Complete uploads by passing part list to backend
-  - Multipart uploads bypass encryption for S3 provider compatibility
+  - Identical encrypted retries return the stored ETag without rewriting the part.
 - **Security Considerations**:
-  - **Multipart uploads are not encrypted** due to fundamental architectural limitations
-  - Each part cannot be encrypted individually because S3 concatenates parts server-side
-  - Encrypting parts separately creates multiple invalid encrypted streams when combined
-  - For encrypted multipart uploads, use client-side encryption before sending to the gateway
-- **Security Features (V0.4)**:
+   - Encrypted MPU parts are encrypted by the gateway with a per-upload DEK and authenticated chunk framing before they are sent to the backend.
+   - Each part is reserved by an authenticated content claim before encryption. Identical retries return the stored ETag without rewriting; changed content returns `409 OperationAborted`.
+   - Complete validates the exact ordered selected part set against durable committed state and writes the corresponding manifest before backend completion.
+   - Legacy records are accepted only for the abort migration path. New uploads always use the current state schema; legacy uploads must be aborted and recreated before writing parts or completing.
+- **Security Features**:
   - Robust XML parsing with 10MB size limits to prevent DoS
   - Comprehensive validation of part numbers (1-10000 range)
   - ETag format validation with proper quoting requirements

@@ -4294,7 +4294,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 			completeState, beginErr = h.beginEncryptedMPUComplete(ctx, uploadID, completeReq)
 			if beginErr != nil {
 				code, status := "InvalidPart", http.StatusBadRequest
-				if errors.Is(beginErr, mpu.ErrInvalidPhase) || errors.Is(beginErr, mpu.ErrInvalidStateVersion) {
+				if errors.Is(beginErr, mpu.ErrInvalidPhase) || errors.Is(beginErr, mpu.ErrInvalidStateVersion) || errors.Is(beginErr, mpu.ErrRevisionConflict) {
 					code, status = "OperationAborted", http.StatusConflict
 				}
 				(&S3Error{Code: code, Message: "The selected parts do not match committed encrypted MPU state", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
@@ -4355,7 +4355,14 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	// Clean up Valkey state after successful completion.
 	if completeIsEnc {
 		if claimStore := h.mpuStateStore; claimStore != nil && completeState != nil {
-			_ = claimStore.FinalizeComplete(ctx, uploadID, completeState.Revision)
+			if finalizeErr := claimStore.FinalizeComplete(ctx, uploadID, completeState.Revision); finalizeErr != nil {
+				code, status := "ServiceUnavailable", http.StatusServiceUnavailable
+				if errors.Is(finalizeErr, mpu.ErrRevisionConflict) {
+					code, status = "OperationAborted", http.StatusConflict
+				}
+				(&S3Error{Code: code, Message: "Multipart upload lifecycle finalization failed.", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+				return
+			}
 		}
 		if delErr := h.mpuStateStore.Delete(ctx, uploadID); delErr != nil {
 			h.logger.WithError(delErr).WithField("uploadID", uploadID).
@@ -4447,10 +4454,19 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 	var abortStore mpu.StateStore
 	var abortRevision uint64
 	if store := h.mpuStateStore; store != nil {
-		if state, stateErr := h.mpuStateStore.Get(ctx, uploadID); stateErr == nil && state != nil && state.PolicySnapshot.EncryptMultipartUploads {
+		state, stateErr := store.Get(ctx, uploadID)
+		if stateErr != nil && !errors.Is(stateErr, mpu.ErrUploadNotFound) {
+			(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the abort.", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+			return
+		}
+		if state != nil && state.PolicySnapshot.EncryptMultipartUploads {
 			abortStore = store
 			abortRevision, err = store.BeginAbort(ctx, uploadID)
-			if err != nil && !errors.Is(err, mpu.ErrInvalidStateVersion) {
+			if err != nil {
+				if errors.Is(err, mpu.ErrRevisionConflict) || errors.Is(err, mpu.ErrInvalidPhase) || errors.Is(err, mpu.ErrInvalidStateVersion) {
+					(&S3Error{Code: "OperationAborted", Message: "Multipart upload lifecycle transition is in progress.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
+					return
+				}
 				(&S3Error{Code: "OperationAborted", Message: "Multipart upload lifecycle transition is in progress.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
 				return
 			}
@@ -4484,47 +4500,15 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 	if abortStore != nil {
 		if finalizeErr := abortStore.FinalizeAbort(ctx, uploadID, abortRevision); finalizeErr != nil && !errors.Is(finalizeErr, mpu.ErrUploadNotFound) {
 			h.logger.WithError(finalizeErr).Warn("mpu.abort: failed to finalize state transition")
+			code, status := "ServiceUnavailable", http.StatusServiceUnavailable
+			if errors.Is(finalizeErr, mpu.ErrRevisionConflict) {
+				code, status = "OperationAborted", http.StatusConflict
+			}
+			(&S3Error{Code: code, Message: "Multipart upload lifecycle finalization failed.", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+			return
 		}
 		if delErr := abortStore.Delete(ctx, uploadID); delErr != nil {
 			h.logger.WithError(delErr).Warn("mpu.abort.orphan: failed to delete MPU state after finalized abort")
-		}
-	}
-
-	// Delete Valkey state for encrypted MPU aborts using the PolicySnapshot so
-	// a mid-upload policy flip cannot cause the state to be left orphaned.
-	// On transient state-store failure we log and rely on TTL expiry to clean
-	// up the orphan — backend abort has already succeeded so returning success
-	// to the client is correct.
-	_, abortIsEnc, abortStateErr := h.uploadStateEncrypted(ctx, uploadID)
-	if abortStateErr != nil {
-		h.logger.WithError(abortStateErr).WithFields(logrus.Fields{
-			"bucket":   bucket,
-			"key":      key,
-			"uploadID": uploadID,
-		}).Warn("mpu.abort: state-store unavailable; backend abort succeeded, state will expire via TTL")
-	} else if abortIsEnc || abortStore != nil {
-		opStart := time.Now()
-		delErr := h.mpuStateStore.Delete(ctx, uploadID)
-		if delErr != nil {
-			h.metrics.RecordMPUStateStoreOp("Delete", "error", time.Since(opStart))
-			h.logger.WithError(delErr).WithFields(logrus.Fields{
-				"bucket":   bucket,
-				"key":      key,
-				"uploadID": uploadID,
-			}).Warn("mpu.abort.orphan: failed to delete MPU state after abort")
-		} else {
-			h.metrics.RecordMPUStateStoreOp("Delete", "success", time.Since(opStart))
-		}
-
-		if h.auditLogger != nil {
-			h.auditLogger.Log(&audit.AuditEvent{
-				EventType: audit.EventTypeMPUAbort,
-				Timestamp: time.Now().UTC(),
-				Bucket:    bucket,
-				Key:       key,
-				Success:   true,
-				Metadata:  map[string]interface{}{"upload_id": uploadID},
-			})
 		}
 	}
 

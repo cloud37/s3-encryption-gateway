@@ -472,12 +472,16 @@ Before deploying a binary containing MPU state version 2:
    uploads are abort-only after the new binary is enabled.
 3. Roll all gateway replicas together. Do not run old and new MPU writers at
    the same time because old writers can bypass immutable claims.
-4. Keep MPU write readiness disabled until every replica reports the version-2
-   writer capability. Set `VALKEY_MPU_WRITER_CAPABILITY` to one deployment-scoped
-   value in every replica and publish that exact value at `mpu:writer-version`
-   before enabling readiness. Missing, changed, or mixed values keep
-   `mpu_writer` readiness false. Confirm `gateway_mpu_legacy_inflight` is zero
-   or has an owner-approved abort plan.
+ 4. Keep MPU write readiness disabled until every old writer has been drained.
+    Legacy binaries do not publish the new writer-presence keys and therefore
+    cannot be discovered automatically. Treat `mpu:writer-version` as an
+    operator-controlled activation gate: set `VALKEY_MPU_WRITER_CAPABILITY` to
+    one deployment-scoped value in every new replica, then publish that exact
+    value at `mpu:writer-version` only after the old fleet is stopped or
+    isolated. Missing, changed, or incompatible values keep `mpu_writer`
+    readiness false. The new-replica heartbeats are supplementary checks, not
+    proof that legacy writers are absent. Confirm
+    `gateway_mpu_legacy_inflight` is zero or has an owner-approved abort plan.
 5. Monitor `gateway_mpu_part_claims_total` by result. A rise in `mismatch` or
    `legacy_rejected` indicates client replacement attempts or incomplete drain.
 6. Alert on `gateway_mpu_legacy_inflight > 0` and page on sustained

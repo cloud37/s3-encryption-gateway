@@ -261,13 +261,21 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Encrypted MPU routing is based on durable upload state, not live policy.
+	// This check must precede policy-drift handling below.
+	destinationState, destinationEncrypted, destinationStateErr := h.uploadStateEncrypted(ctx, uploadID)
+	if destinationStateErr != nil {
+		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+		return
+	}
+
 	// Destination-policy / source-mode mismatch hard-refusal:
 	// if the destination bucket policy mandates encryption but the source
 	// is classified as plaintext, refuse. The plaintext fast path would
 	// otherwise silently upload unencrypted bytes into a bucket policy says
 	// must be encrypted. Per ADR 0006 §"Config Mismatch Detection" and
 	// Real-World Cryptography (Wong, 2021) Ch. 16.
-	if sourceClass.Class == SourceClassPlaintext && h.policyManager != nil && h.policyManager.BucketRequiresEncryption(bucket) {
+	if !destinationEncrypted && sourceClass.Class == SourceClassPlaintext && h.policyManager != nil && h.policyManager.BucketRequiresEncryption(bucket) {
 		msg := "Destination bucket requires encryption but copy source is plaintext"
 		h.logger.WithFields(logrus.Fields{
 			"src_bucket": srcBucket,
@@ -317,17 +325,15 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	// When the destination is an encrypted MPU, the backend-native UploadPartCopy
 	// fast path is disabled. All source classes are decrypted and re-encrypted
 	// through the destination's per-upload DEK schedule (ADR 0009 §Consequences).
-	if state, stateOK, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil {
-		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
-		return
-	} else if stateOK && state != nil {
+	if destinationEncrypted && destinationState != nil {
+		state := destinationState
 		if state.StateVersion != mpu.CurrentStateVersion {
 			h.metrics.RecordMPUPartClaim("legacy_rejected")
 			(&S3Error{Code: "OperationAborted", Message: "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
 			return
 		}
 		copyResult, bytesCopied, strategyErr = h.uploadPartCopyReencryptMPU(ctx, s3Client, bucket, key, uploadID,
-			int32(partNumber), srcBucket, srcKey, srcVersionID, srcRange, sourceClass, maxLegacyCap, maxCopyPartRangeBytes)
+			int32(partNumber), srcBucket, srcKey, srcVersionID, srcRange, sourceClass, maxLegacyCap, maxCopyPartRangeBytes, state)
 	} else {
 		switch sourceClass.Class {
 		case SourceClassPlaintext:
@@ -728,10 +734,6 @@ func isLegacySourceTooLarge(err error) bool {
 	return err != nil && errors.Is(err, errLegacySourceTooLarge)
 }
 
-func isMPUStateUnavailable(err error) bool {
-	return err != nil && errors.Is(err, errMPUStateUnavailable)
-}
-
 func isRangeNotSatisfiable(err error) bool {
 	if err == nil {
 		return false
@@ -799,6 +801,7 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	sourceClass *CopySourceMetadata,
 	maxLegacyCap int64,
 	maxChunkedCap int64,
+	destinationStates ...*mpu.UploadState,
 ) (*s3.CopyPartResult, int64, error) {
 	// Step 1: Obtain the plaintext bytes from the source using the per-class decrypt strategy.
 	var plaintextData []byte
@@ -922,9 +925,19 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	var reservation mpu.Reservation
 	reservationOwned := false
 	if store := h.mpuStateStore; store != nil {
-		state, stateErr := h.mpuStateStore.Get(ctx, uploadID)
-		if stateErr != nil {
-			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: re-encrypt destination part: get destination state: %w", stateErr)
+		var state *mpu.UploadState
+		if len(destinationStates) > 0 {
+			state = destinationStates[0]
+		}
+		if state == nil {
+			var stateErr error
+			state, stateErr = h.mpuStateStore.Get(ctx, uploadID)
+			if stateErr != nil {
+				return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: re-encrypt destination part: get destination state: %w", stateErr)
+			}
+		}
+		if state == nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: missing destination state")
 		}
 		dek, dekErr := h.unwrapMPUDEK(ctx, state, dstBucket, uploadID)
 		if dekErr != nil {

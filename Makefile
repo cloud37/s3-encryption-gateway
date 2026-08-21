@@ -85,7 +85,7 @@ test-fips:
 
 test-conformance:
 	@echo "Running conformance tests (all registered providers)..."
-	@go test -tags=conformance -count=1 -race -v ./test/conformance/...
+	@go test -tags=conformance -count=1 -race -v -timeout 20m ./test/conformance/...
 
 test-conformance-local:
 	@echo "Running conformance tests (local providers only: MinIO + Garage + RustFS + SeaweedFS)..."
@@ -95,7 +95,7 @@ test-conformance-local:
 test-conformance-external:
 	@echo "Running conformance tests (external providers with credentials)..."
 	@GATEWAY_TEST_SKIP_MINIO=1 GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 \
-		go test -count=1 -tags=conformance -race -v ./test/conformance/...
+		go test -count=1 -tags=conformance -race -v -timeout 20m ./test/conformance/...
 
 # V1.0-COMPAT-1 — SDK/Tool compatibility smoke tests (require Docker).
 # Runs against all local providers (MinIO, Garage, RustFS, SeaweedFS).

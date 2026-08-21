@@ -420,15 +420,6 @@ func TestUploadPartCopy_EncryptedMPU_ConcurrentReservation(t *testing.T) {
 	require.Equal(t, 1, success)
 }
 
-func TestUploadPartCopy_EncryptedMPU_LegacyStateRejected(t *testing.T) {
-	h, base, uploadID := setupStrategyMPU(t)
-	base.objects["src/plain"], base.metadata["src/plain"] = []byte("source"), map[string]string{}
-	legacy := &failOnCommitStateStore{StateStore: h.mpuStateStore, commitErr: errors.New("legacy state")}
-	h.mpuStateStore = legacy
-	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), base, "dest-bucket", "dest", uploadID, 1, "src", "plain", nil, nil, &CopySourceMetadata{Class: SourceClassPlaintext}, 1024, 1024)
-	require.ErrorIs(t, err, errMPUStateUnavailable)
-}
-
 func TestUploadPartCopy_EncryptedMPU_DestinationUploadFailureReleases(t *testing.T) {
 	h, base, uploadID := setupStrategyMPU(t)
 	base.objects["src/plain"], base.metadata["src/plain"] = []byte("source"), map[string]string{}

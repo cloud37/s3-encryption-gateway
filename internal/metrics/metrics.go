@@ -1015,6 +1015,11 @@ func (m *Metrics) RecordMPUPartClaim(result string) {
 	if m == nil || m.mpuPartClaims == nil {
 		return
 	}
+	switch result {
+	case "reserved", "identical", "mismatch", "in_progress", "legacy_rejected":
+	default:
+		return
+	}
 	m.mpuPartClaims.WithLabelValues(result).Inc()
 }
 
@@ -1023,7 +1028,23 @@ func (m *Metrics) RecordMPUStateTransition(from, to, result string) {
 	if m == nil || m.mpuStateTransitions == nil {
 		return
 	}
+	if !validMPUPhaseLabel(from) || !validMPUPhaseLabel(to) || !validMPUTransitionResult(result) {
+		return
+	}
 	m.mpuStateTransitions.WithLabelValues(from, to, result).Inc()
+}
+
+func validMPUPhaseLabel(value string) bool {
+	switch value {
+	case "open", "completing", "completed", "aborting", "aborted":
+		return true
+	default:
+		return false
+	}
+}
+
+func validMPUTransitionResult(value string) bool {
+	return value == "success" || value == "error"
 }
 
 func (m *Metrics) SetMPULegacyInflight(value float64) {

@@ -166,8 +166,10 @@ manifest** written at `CompleteMultipartUpload`. The scheme:
    chunk_index_within_part)` and reconstructs the exact IV via the
    HKDF schedule above. No change to the existing ranged-GET callers
    in `handleGetObject`; the manifest type is polymorphic.
-7. **`AbortMultipartUpload` cleans up state.** Abort issues a
-   `DEL mpu:<uploadIdHash>` to Valkey and emits an audit event.
+7. **`AbortMultipartUpload` uses the lifecycle state machine.** Abort reserves the
+    aborting transition before backend mutation, conditionally finalizes it, and
+    deletes terminal state only after successful finalization. Legacy records with
+    historical metadata but no v2 controls are abort-only.
    Orphan cleanup requires no daemon — Valkey expires stale keys
    automatically via the per-key TTL set at Create time.
 8. **`UploadPartCopy` into an encrypted MPU re-encrypts under the
@@ -313,6 +315,16 @@ already has the `RotatableKeyManager` hooks needed to manage
 in-flight uploads during rollout transitions.
 
 ## Consequences
+
+### Mixed-version writer gate
+
+Legacy binaries cannot be detected through version-2 writer-presence records
+because they never emit those records. Consequently, `mpu:writer-version` is
+an operator-controlled activation gate, not automatic fleet inventory. Operators
+must drain or isolate all legacy MPU writers before publishing the configured
+version-2 capability at that key. Readiness remains false while the gate is
+absent or mismatched; current-writer heartbeats and persisted legacy-state
+inventory provide supplementary fail-closed checks after activation.
 
 ### Positive
 
@@ -588,7 +600,10 @@ the reservation for reconciliation. Identical committed retries return the
 stored ETag without re-encryption, while a changed replacement is rejected
 with `OperationAborted` (HTTP 409).
 
-**`Complete` / `Abort`.** `DEL mpu:<h>` (single command, atomic).
+**`Complete` / `Abort`.** Both use revision-guarded Lua lifecycle transitions.
+Complete validates the selected committed snapshot before manifest/backend I/O;
+Abort transitions to aborting before backend Abort and deletes terminal state only
+after successful finalization. Legacy metadata-only records are abort-only.
 
 ### Manifest Size Budget
 

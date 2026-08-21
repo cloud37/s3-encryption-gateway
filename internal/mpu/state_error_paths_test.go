@@ -8,6 +8,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,6 +139,176 @@ func TestStateStore_ReleasePart_WrongTokenPreservesReservation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Parts, 1)
 	assert.Equal(t, PartStatusReserved, got.Parts[0].Status)
+}
+
+func TestStateStore_ReleasePart_RejectsLegacyAndNonOpen(t *testing.T) {
+	s, mr := newTestStore(t)
+	st := sampleState("release-guards")
+	require.NoError(t, s.Create(context.Background(), st))
+	mr.HSet(uploadKey(st.UploadID), fieldStateVersion, "1")
+	assert.ErrorIs(t, s.ReleasePart(context.Background(), st.UploadID, 1, "token"), ErrInvalidStateVersion)
+
+	st = sampleState("release-phase")
+	require.NoError(t, s.Create(context.Background(), st))
+	rev, err := s.BeginAbort(context.Background(), st.UploadID)
+	require.NoError(t, err)
+	assert.NotZero(t, rev)
+	assert.ErrorIs(t, s.ReleasePart(context.Background(), st.UploadID, 1, "token"), ErrInvalidPhase)
+}
+
+func TestStateStore_ReservePart_BoundedRevisionConflicts(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("reserve-perpetual-conflict")
+	require.NoError(t, s.Create(context.Background(), st))
+	original := runReservePart
+	t.Cleanup(func() { runReservePart = original })
+	calls := 0
+	runReservePart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+		calls++
+		return []interface{}{int64(7)}, nil
+	}
+	_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
+	assert.ErrorIs(t, err, ErrRevisionConflict)
+	assert.Equal(t, 16, calls)
+}
+
+func TestStateStore_CommitPart_BoundedRevisionConflicts(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("commit-perpetual-conflict")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	original := runCommitPart
+	t.Cleanup(func() { runCommitPart = original })
+	calls := 0
+	runCommitPart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+		calls++
+		return int64(5), nil
+	}
+	assert.ErrorIs(t, s.CommitPart(context.Background(), st.UploadID, p), ErrRevisionConflict)
+	assert.Equal(t, 16, calls)
+}
+
+func TestStateStore_CommitPart_ResultCodes(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("commit-result-codes")
+	require.NoError(t, s.Create(context.Background(), st))
+	part := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	original := runCommitPart
+	t.Cleanup(func() { runCommitPart = original })
+	for name, result := range map[string]interface{}{
+		"missing": int64(0), "success": int64(1), "revision": int64(2),
+		"version": int64(3), "phase": int64(4),
+	} {
+		t.Run(name, func(t *testing.T) {
+			runCommitPart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+				return result, nil
+			}
+			err := s.CommitPart(context.Background(), st.UploadID, part)
+			if name == "success" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestStateStore_ReleasePart_ResultGuards(t *testing.T) {
+	for name := range map[string]struct{}{
+		"missing": {}, "legacy": {}, "phase": {}, "wrong token": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, mr := newTestStore(t)
+			st := sampleState("release-result-guards-" + name)
+			require.NoError(t, s.Create(context.Background(), st))
+			part := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+			if name == "wrong token" {
+				require.ErrorIs(t, s.ReleasePart(context.Background(), st.UploadID, part.PartNumber, "wrong"), ErrRevisionConflict)
+				return
+			}
+			switch name {
+			case "missing":
+				mr.Del(uploadKey(st.UploadID))
+			case "legacy":
+				mr.HSet(uploadKey(st.UploadID), fieldStateVersion, "1")
+			case "phase":
+				_, _ = s.BeginAbort(context.Background(), st.UploadID)
+			}
+			require.Error(t, s.ReleasePart(context.Background(), st.UploadID, part.PartNumber, part.Token))
+		})
+	}
+}
+
+func TestStateStore_ReleasePart_ResultCodes(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("release-result-codes")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	original := runReleasePart
+	t.Cleanup(func() { runReleasePart = original })
+	for name, result := range map[string]interface{}{
+		"missing": int64(0), "wrong token": int64(2), "success": int64(1),
+		"legacy": int64(3), "phase": int64(4), "revision": int64(5), "unknown": int64(99),
+	} {
+		t.Run(name, func(t *testing.T) {
+			runReleasePart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+				return result, nil
+			}
+			err := s.ReleasePart(context.Background(), st.UploadID, p.PartNumber, p.Token)
+			if name == "success" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestStateStore_CASRetryHonorsCancellation(t *testing.T) {
+	s, _ := newTestStore(t)
+	st := sampleState("cas-cancel")
+	require.NoError(t, s.Create(context.Background(), st))
+	ctx, cancel := context.WithCancel(context.Background())
+	original := runReservePart
+	t.Cleanup(func() { runReservePart = original; cancel() })
+	runReservePart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+		cancel()
+		return []interface{}{int64(7)}, nil
+	}
+	_, err := s.ReservePart(ctx, st.UploadID, PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestStateStore_ClaimTransitionsKeepControlMetaReadable(t *testing.T) {
+	s, mr := newTestStore(t)
+	st := sampleState("claim-meta")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	assertReadableControlMeta(t, s, mr, st.UploadID, UploadPhaseOpen, 2)
+	commitTestPart(t, s, st.UploadID, p, `"etag"`)
+	assertReadableControlMeta(t, s, mr, st.UploadID, UploadPhaseOpen, 3)
+	_, completeRevision, err := s.BeginComplete(context.Background(), st.UploadID, []SelectedPart{{PartNumber: 1, ETag: `"etag"`}})
+	require.NoError(t, err)
+	assertReadableControlMeta(t, s, mr, st.UploadID, UploadPhaseCompleting, completeRevision)
+
+	st = sampleState("claim-meta-release")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	require.NoError(t, s.ReleasePart(context.Background(), st.UploadID, 1, "token"))
+	assertReadableControlMeta(t, s, mr, st.UploadID, UploadPhaseOpen, 3)
+}
+
+func assertReadableControlMeta(t *testing.T, s *ValkeyStateStore, mr *miniredis.Miniredis, id string, phase UploadPhase, revision uint64) {
+	t.Helper()
+	got, err := s.Get(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, phase, got.Phase)
+	assert.Equal(t, revision, got.Revision)
+	var meta UploadState
+	require.NoError(t, json.Unmarshal([]byte(mr.HGet(uploadKey(id), fieldMeta)), &meta))
+	assert.Equal(t, uint8(CurrentStateVersion), meta.StateVersion)
+	assert.Equal(t, phase, meta.Phase)
+	assert.Equal(t, revision, meta.Revision)
 }
 
 func TestStateStore_CompleteLifecycle_SuccessfulReopenAndFinalize(t *testing.T) {
@@ -434,14 +605,14 @@ func TestStateStore_LegacyAbortUpgradesAndCleansUp(t *testing.T) {
 	st := sampleState("legacy-abort-upgrade")
 	require.NoError(t, s.Create(context.Background(), st))
 	key := uploadKey(st.UploadID)
-	meta := mr.HGet(key, fieldMeta)
-	var legacy UploadState
-	require.NoError(t, json.Unmarshal([]byte(meta), &legacy))
-	legacy.StateVersion = 1
-	legacy.Phase = UploadPhaseOpen
-	updated, err := json.Marshal(&legacy)
+	// A historical record has only authenticated metadata. It has no control
+	// fields; the abort transition is responsible for upgrading it atomically.
+	meta, err := json.Marshal(&UploadState{UploadID: st.UploadID, Bucket: st.Bucket, Key: st.Key})
 	require.NoError(t, err)
-	mr.HSet(key, fieldMeta, string(updated), fieldStateVersion, "1", fieldPhase, "open")
+	mr.HSet(key, fieldMeta, string(meta))
+	mr.HDel(key, fieldStateVersion)
+	mr.HDel(key, fieldPhase)
+	mr.HDel(key, fieldRevision)
 
 	rev, err := s.BeginAbort(context.Background(), st.UploadID)
 	require.NoError(t, err)
@@ -472,39 +643,4 @@ func TestStateStore_AtomicLifecycle_EncryptedFailure(t *testing.T) {
 	err := s.atomicLifecycle(context.Background(), st.UploadID, UploadPhaseOpen, st.Revision, UploadPhaseAborting, st)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid key size")
-}
-
-func TestStateStore_SyncControlMeta_RetryAndBackendFailure(t *testing.T) {
-	t.Run("revision retry", func(t *testing.T) {
-		s, _ := newTestStore(t)
-		st := sampleState("sync-meta-retry")
-		require.NoError(t, s.Create(context.Background(), st))
-		original := runSyncMeta
-		t.Cleanup(func() { runSyncMeta = original })
-		calls := 0
-		runSyncMeta = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
-			calls++
-			if calls == 1 {
-				return int64(0), nil
-			}
-			return int64(1), nil
-		}
-		_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
-		require.NoError(t, err)
-		assert.Equal(t, 2, calls)
-	})
-
-	t.Run("backend error", func(t *testing.T) {
-		s, _ := newTestStore(t)
-		st := sampleState("sync-meta-backend-error")
-		require.NoError(t, s.Create(context.Background(), st))
-		original := runSyncMeta
-		t.Cleanup(func() { runSyncMeta = original })
-		runSyncMeta = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
-			return nil, errors.New("sync metadata unavailable")
-		}
-		_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "claim", PlainLen: 1, Token: "token"})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrStateUnavailable)
-	})
 }

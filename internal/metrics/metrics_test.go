@@ -521,6 +521,44 @@ func TestMetrics_MPUClaimResults(t *testing.T) {
 	t.Fatal("claim metric missing")
 }
 
+func TestMetrics_MPUExactLabelsAndInvalidValues(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetricsWithRegistry(reg, Config{})
+	m.RecordMPUPartClaim("reserved")
+	m.RecordMPUPartClaim("invalid")
+	m.RecordMPUStateTransition("open", "completing", "success")
+	m.RecordMPUStateTransition("bad", "completing", "success")
+
+	claims, err := testutil.GatherAndCount(reg, "gateway_mpu_part_claims_total")
+	require.NoError(t, err)
+	assert.Equal(t, 1, claims)
+	transitions, err := testutil.GatherAndCount(reg, "gateway_mpu_state_transitions_total")
+	require.NoError(t, err)
+	assert.Equal(t, 1, transitions)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "gateway_mpu_part_claims_total":
+			require.Len(t, mf.GetMetric(), 1)
+			assert.Equal(t, "reserved", mf.GetMetric()[0].GetLabel()[0].GetValue())
+			assert.Equal(t, float64(1), mf.GetMetric()[0].GetCounter().GetValue())
+		case "gateway_mpu_state_transitions_total":
+			require.Len(t, mf.GetMetric(), 1)
+			labels := mf.GetMetric()[0].GetLabel()
+			values := map[string]string{}
+			for _, label := range labels {
+				values[label.GetName()] = label.GetValue()
+			}
+			assert.Equal(t, "open", values["from"])
+			assert.Equal(t, "completing", values["to"])
+			assert.Equal(t, "success", values["result"])
+			assert.Equal(t, float64(1), mf.GetMetric()[0].GetCounter().GetValue())
+		}
+	}
+}
+
 func TestMetrics_MPUStateTransitions(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := newMetricsWithRegistry(reg, Config{})
