@@ -5,7 +5,9 @@ package conformance
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -20,6 +22,50 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
+
+func testSEC40_Auth_SigV2PresignedGET_RedactsAccessLog(t *testing.T, inst provider.Instance) {
+	var logs bytes.Buffer
+	gateway := harness.StartGateway(t, inst,
+		harness.WithAuth(config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey, Label: "test-user"}),
+		harness.WithLogLevel("info"), harness.WithAccessLogCapture(&logs),
+		harness.WithConfigMutator(func(cfg *config.Config) { cfg.Auth.AllowLegacySignatureV2 = true }),
+	)
+	key := uniqueKey(t)
+	data := []byte("sec40-sigv2-data")
+	putSigned(t, gateway, inst.Bucket, key, data, testAccessKey, testSecretKey)
+
+	// Expires is required by the SigV2 query contract. The response-content-type
+	// parameter is a standard, provider-neutral benign query field.
+	q := url.Values{
+		"AWSAccessKeyId":        {testAccessKey},
+		"Expires":               {fmt.Sprint(time.Now().Add(time.Hour).Unix())},
+		"response-content-type": {"text/plain"},
+	}
+	req, err := http.NewRequest("GET", objectURL(gateway, inst.Bucket, key)+"?"+q.Encode(), nil)
+	if err != nil {
+		t.Fatalf("create SigV2 request: %v", err)
+	}
+	req.Host = req.URL.Host
+	stringToSign := fmt.Sprintf("GET\n\n\n%s\n%s", q.Get("Expires"), req.URL.Path)
+	h := hmac.New(sha1.New, []byte(testSecretKey))
+	_, _ = h.Write([]byte(stringToSign))
+	q.Set("Signature", base64.StdEncoding.EncodeToString(h.Sum(nil)))
+	resp, err := gateway.HTTPClient().Get(objectURL(gateway, inst.Bucket, key) + "?" + q.Encode())
+	if err != nil {
+		t.Fatalf("SigV2 GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, data) {
+		t.Fatalf("SigV2 GET: status %d body %q", resp.StatusCode, body)
+	}
+	if strings.Contains(logs.String(), q.Get("Signature")) {
+		t.Fatal("SigV2 signature leaked into access log")
+	}
+	if !strings.Contains(logs.String(), "response-content-type=text%2Fplain") {
+		t.Fatal("benign response-content-type query value missing from access log")
+	}
+}
 
 const (
 	testAccessKey = "AKIAIOSFODNN7EXAMPLE"

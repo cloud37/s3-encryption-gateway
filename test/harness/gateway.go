@@ -132,6 +132,9 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 
 	// Logger.
 	logger := logrus.New()
+	if o.accessLogOutput != nil {
+		logger.SetOutput(o.accessLogOutput)
+	}
 	if lvl, err := logrus.ParseLevel(o.logLevel); err == nil {
 		logger.SetLevel(lvl)
 	} else {

@@ -4,6 +4,7 @@
 package harness
 
 import (
+	"io"
 	"net/http"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
@@ -28,6 +29,7 @@ type options struct {
 	encryptedMPUBucket string
 	headObjectOverride func(bucket, key string) *int64
 	logLevel           string
+	accessLogOutput    io.Writer
 	extraConfig        func(*config.Config)
 	// pbkdf2Iterations overrides the default PBKDF2 iteration count (600k).
 	// Values below the minimum (100k) are ignored and the default is used.
@@ -61,6 +63,11 @@ type options struct {
 	// blobs (V1.0-CRYPTO-3). When set, the gateway engine will encrypt
 	// encryption/compression metadata values in S3 object headers.
 	metadataEncryptionKey []byte
+}
+
+// WithAccessLogCapture directs gateway access logs to a test-owned writer.
+func WithAccessLogCapture(w io.Writer) Option {
+	return func(o *options) { o.accessLogOutput = w }
 }
 
 // Option is a functional option for StartGateway.

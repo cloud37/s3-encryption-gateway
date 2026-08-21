@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/sirupsen/logrus"
 )
 
 func TestLoggingMiddleware(t *testing.T) {
@@ -36,6 +36,67 @@ func TestLoggingMiddleware(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestLoggingMiddleware_RedactsPresignedSignatures_AllFormats(t *testing.T) {
+	for _, format := range []string{"default", "json", "clf"} {
+		t.Run(format, func(t *testing.T) {
+			var output string
+			logger := logrus.New()
+			logger.SetOutput(&testWriter{output: &output})
+			logger.SetLevel(logrus.InfoLevel)
+			logger.SetFormatter(&logrus.JSONFormatter{})
+			wrapped := LoggingMiddleware(logger, &config.LoggingConfig{AccessLogFormat: format})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest("GET", "/bucket/object?Signature=sigv2-canary&X-Amz-Signature=sigv4-canary&versionId=benign", nil)
+			wrapped.ServeHTTP(httptest.NewRecorder(), req)
+			if strings.Contains(output, "sigv2-canary") || strings.Contains(output, "sigv4-canary") {
+				t.Fatalf("secret leaked: %s", output)
+			}
+			if !strings.Contains(output, "Signature=%5BREDACTED%5D") {
+				t.Fatalf("missing SigV2 redaction marker: %s", output)
+			}
+			if !strings.Contains(output, "X-Amz-Signature=%5BREDACTED%5D") {
+				t.Fatalf("missing SigV4 redaction marker: %s", output)
+			}
+			if !strings.Contains(output, "%5BREDACTED%5D") && !strings.Contains(output, "[REDACTED]") {
+				t.Fatalf("missing redaction or benign value: %s", output)
+			}
+			if !strings.Contains(output, "versionId=benign") {
+				t.Fatalf("benign query value missing: %s", output)
+			}
+		})
+	}
+}
+
+func TestLoggingMiddleware_MalformedQuery_FailsClosed_AllFormats(t *testing.T) {
+	for _, format := range []string{"default", "json", "clf"} {
+		t.Run(format, func(t *testing.T) {
+			var output string
+			logger := logrus.New()
+			logger.SetOutput(&testWriter{output: &output})
+			logger.SetLevel(logrus.InfoLevel)
+			logger.SetFormatter(&logrus.JSONFormatter{})
+			LoggingMiddleware(logger, &config.LoggingConfig{AccessLogFormat: format})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/bucket?prefix=visible&broken=%ZZ", nil))
+			if !strings.Contains(output, "[REDACTED]") || strings.Contains(output, "visible") {
+				t.Fatalf("malformed query was not fail-closed: %s", output)
+			}
+		})
+	}
+}
+
+func TestLoggingMiddleware_RedactionDoesNotMutateRequestQuery(t *testing.T) {
+	raw := "Signature=secret&versionId=benign"
+	var downstream string
+	wrapped := LoggingMiddleware(logrus.New(), &config.LoggingConfig{AccessLogFormat: "default"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downstream = r.URL.RawQuery
+	}))
+	req := httptest.NewRequest("GET", "/bucket?"+raw, nil)
+	wrapped.ServeHTTP(httptest.NewRecorder(), req)
+	if downstream != raw || req.URL.RawQuery != raw {
+		t.Fatalf("request query changed: downstream=%q caller=%q", downstream, req.URL.RawQuery)
 	}
 }
 
@@ -154,7 +215,7 @@ func TestShouldRedactHeader(t *testing.T) {
 		{"x-amz-security-token", []string{"authorization", "x-amz-security-token"}, true},
 		{"content-type", []string{"authorization", "x-amz-security-token"}, false},
 		{"AUTHORIZATION", []string{"authorization"}, true}, // case insensitive
-		{"user-agent", []string{}, false},                   // no redaction list
+		{"user-agent", []string{}, false},                  // no redaction list
 	}
 
 	for _, tt := range tests {
@@ -221,32 +282,6 @@ func TestCreateLogEntry(t *testing.T) {
 	}
 	if entry.Headers["content-type"] != "application/json" {
 		t.Errorf("expected content-type header to not be redacted, got %s", entry.Headers["content-type"])
-	}
-}
-
-// TestRedactQueryString verifies redactQueryString covers all branches.
-func TestRedactQueryString(t *testing.T) {
-	// Empty query string.
-	if got := redactQueryString(""); got != "" {
-		t.Errorf("empty: got %q, want \"\"", got)
-	}
-
-	// Query with non-sensitive params.
-	got := redactQueryString("prefix=foo&max-keys=10")
-	if !strings.Contains(got, "prefix") || !strings.Contains(got, "max-keys") {
-		t.Errorf("non-sensitive params should be preserved: %q", got)
-	}
-
-	// Query with sensitive param (x-amz-signature).
-	got = redactQueryString("X-Amz-Signature=abc123&prefix=foo")
-	if strings.Contains(got, "abc123") {
-		t.Errorf("signature should be redacted: %q", got)
-	}
-
-	// Unparseable query string (contains '%' without valid hex).
-	got = redactQueryString("a=%ZZ")
-	if got != "[REDACTED]" {
-		t.Errorf("unparseable query: got %q, want [REDACTED]", got)
 	}
 }
 

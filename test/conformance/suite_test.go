@@ -276,6 +276,7 @@ func TestConformance(t *testing.T) {
 				{"Auth_WrongSecret_Rejected", 0, testAuth_WrongSecret_Rejected},
 				{"Auth_PresignedURL_Valid", 0, testAuth_PresignedURL_Valid},
 				{"Auth_PresignedURL_Expired", 0, testAuth_PresignedURL_Expired},
+				{"SEC40_Auth_SigV2PresignedGET_RedactsAccessLog", 0, testSEC40_Auth_SigV2PresignedGET_RedactsAccessLog},
 				{"Auth_MultiCredential", 0, testAuth_MultiCredential},
 				{"Auth_ProxiedBucketFilter", 0, testAuth_ProxiedBucketFilter},
 				{"Auth_ProxiedBucketMetricsPrefixRejected", 0, testAuth_ProxiedBucketMetricsPrefixRejected},

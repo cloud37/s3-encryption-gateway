@@ -150,12 +150,50 @@ func TestTracingMiddleware_HTTPURL_NoRedaction_QueryVisible(t *testing.T) {
 	assert.Equal(t, "versionId=123", httpQuery)
 }
 
+func TestTracingMiddleware_QuerySignaturesRedacted_WhenBroadRedactionDisabled(t *testing.T) {
+	_, sr := setupTestTracer(t)
+	raw := "Signature=sigv2-canary&Signature=sigv2-duplicate&%58-Amz-Signature=sigv4-canary&sIgNaTuRe=sigv2-case&versionId=benign"
+	req := httptest.NewRequest("GET", "/bucket/object?"+raw, nil)
+	TracingMiddleware(false, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	query := findSpanAttribute(sr.Ended(), "http.query")
+	for _, secret := range []string{"sigv2-canary", "sigv2-duplicate", "sigv4-canary", "sigv2-case"} {
+		assert.NotContains(t, query, secret)
+	}
+	assert.Contains(t, query, "versionId=benign")
+	assert.GreaterOrEqual(t, strings.Count(query, "%5BREDACTED%5D"), 2)
+}
+
+func TestTracingMiddleware_QuerySignaturesRedacted_WhenBroadRedactionEnabled(t *testing.T) {
+	_, sr := setupTestTracer(t)
+	req := httptest.NewRequest("GET", "/bucket/object?Signature=sigv2&versionId=benign", nil)
+	TracingMiddleware(true, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "[REDACTED]", findSpanAttribute(sr.Ended(), "http.query"))
+}
+
+func TestTracingMiddleware_MalformedQuery_FailsClosed_WhenBroadRedactionDisabled(t *testing.T) {
+	_, sr := setupTestTracer(t)
+	req := httptest.NewRequest("GET", "/bucket/object?prefix=visible&broken=%ZZ", nil)
+	TracingMiddleware(false, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "[REDACTED]", findSpanAttribute(sr.Ended(), "http.query"))
+}
+
+func TestTracingMiddleware_QueryRedactionDoesNotMutateRequest(t *testing.T) {
+	_, sr := setupTestTracer(t)
+	raw := "Signature=secret&versionId=benign"
+	var downstream string
+	req := httptest.NewRequest("GET", "/bucket/object?"+raw, nil)
+	TracingMiddleware(false, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { downstream = r.URL.RawQuery })).ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, raw, downstream)
+	assert.Equal(t, raw, req.URL.RawQuery)
+	_ = sr
+}
+
 func TestExtractBucketAndKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		path     string
-		bucket   string
-		key      string
+		name   string
+		path   string
+		bucket string
+		key    string
 	}{
 		{
 			name:   "simple bucket and key",
