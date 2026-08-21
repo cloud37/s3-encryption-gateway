@@ -124,6 +124,9 @@ func TestConformance(t *testing.T) {
 
 				// Metadata round-trip (catches cipher: authentication failed bugs).
 				{"Metadata_RoundTrip", 0, testMetadataRoundTrip},
+				{"SEC39_ValidKDFModes_RoundTripWithinLimits", 0, testSEC39_ValidKDFModes_RoundTripWithinLimits},
+				{"SEC39_PBKDF2MetadataAboveLimit_FailsClosed", 0, testSEC39_PBKDF2MetadataAboveLimit_FailsClosed},
+				{"SEC39_Argon2idMetadataAboveLimit_FailsClosed", 0, testSEC39_Argon2idMetadataAboveLimit_FailsClosed},
 
 				// V1.0-CRYPTO-3 encrypted metadata conformance.
 				{"EncryptedMetadata_RoundTrip", 0, testEncryptedMetadata_RoundTrip},

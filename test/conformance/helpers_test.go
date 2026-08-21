@@ -173,6 +173,26 @@ func headMeta(t *testing.T, client s3.Client, bucket, key string) map[string]str
 	return meta
 }
 
+// replaceKDFMetadata preserves the backend ciphertext and all metadata except
+// the authoritative KDF parameter used by the gateway decrypt path.
+func replaceKDFMetadata(t *testing.T, client s3.Client, bucket, key, value string) {
+	t.Helper()
+	ctx := context.Background()
+	body, metadata, err := client.GetObject(ctx, bucket, key, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata[crypto.MetaKDFParams] = value
+	if _, err := client.PutObject(ctx, bucket, key, bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // truncateObject removes the authenticated terminal record from a chunked
 // object while preserving its provider-managed metadata. It uses only the
 // common S3 client contract, so it works across all conformance providers.

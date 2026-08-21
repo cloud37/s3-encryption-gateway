@@ -5,6 +5,7 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
@@ -15,6 +16,64 @@ import (
 // kdfTestPassword matches the default harness password so that objects written
 // directly to the backend can be read back via the gateway.
 var kdfTestPassword = []byte("test-encryption-password-123456")
+
+func testSEC39_ValidKDFModes_RoundTripWithinLimits(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	for _, alg := range []string{"pbkdf2-sha256", "argon2id"} {
+		key := uniqueKey(t)
+		var opts []harness.Option
+		if alg == "argon2id" {
+			opts = append(opts, harness.WithKDFAlgorithm(alg), harness.WithArgon2idParams(1, 1, 1))
+		}
+		gw := harness.StartGateway(t, inst, opts...)
+		put(t, gw, inst.Bucket, key, []byte("sec39"))
+		if got := get(t, gw, inst.Bucket, key); !bytes.Equal(got, []byte("sec39")) {
+			t.Fatalf("%s round trip failed", alg)
+		}
+	}
+}
+
+func testSEC39_PBKDF2MetadataAboveLimit_FailsClosed(t *testing.T, inst provider.Instance) {
+	client := newS3Client(t, inst)
+	key := uniqueKey(t)
+	eng := newEngine100k(t)
+	putEncryptedObject(t, client, eng, inst.Bucket, key, []byte("SEC39-PBKDF2-CIPHERTEXT-SENTINEL"), nil)
+	replaceKDFMetadata(t, client, inst.Bucket, key, "pbkdf2-sha256:100001")
+	gw := harness.StartGateway(t, inst, harness.WithPBKDF2Iterations(100000), harness.WithKDFDecryptLimits(crypto.KDFLimits{PBKDF2MaxIterations: 100000, Argon2idMaxTime: 10, Argon2idMaxMemory: 65536, Argon2idMaxThreads: 255}))
+	resp, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatalf("read fail-closed response: %v", readErr)
+	}
+	if resp.StatusCode != 500 || !bytes.Contains(body, []byte("<Code>InternalError</Code>")) || !bytes.Contains(body, []byte("We encountered an internal error. Please try again.")) || bytes.Contains(body, []byte("secret")) || bytes.Contains(body, []byte("100001")) || bytes.Contains(body, []byte("SEC39-PBKDF2-CIPHERTEXT-SENTINEL")) {
+		t.Fatalf("not fail closed: %d %s", resp.StatusCode, body)
+	}
+}
+
+func testSEC39_Argon2idMetadataAboveLimit_FailsClosed(t *testing.T, inst provider.Instance) {
+	client := newS3Client(t, inst)
+	key := uniqueKey(t)
+	eng := newEngine100k(t)
+	putEncryptedObject(t, client, eng, inst.Bucket, key, []byte("SEC39-ARGON-CIPHERTEXT-SENTINEL"), nil)
+	replaceKDFMetadata(t, client, inst.Bucket, key, "argon2id:1:2:1")
+	gw := harness.StartGateway(t, inst, harness.WithPBKDF2Iterations(100000), harness.WithKDFDecryptLimits(crypto.KDFLimits{PBKDF2MaxIterations: 100000, Argon2idMaxTime: 1, Argon2idMaxMemory: 1, Argon2idMaxThreads: 1}))
+	resp, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatalf("read fail-closed response: %v", readErr)
+	}
+	if resp.StatusCode != 500 || !bytes.Contains(body, []byte("<Code>InternalError</Code>")) || !bytes.Contains(body, []byte("We encountered an internal error. Please try again.")) || bytes.Contains(body, []byte("secret")) || bytes.Contains(body, []byte("argon2id")) || bytes.Contains(body, []byte("2:1")) || bytes.Contains(body, []byte("SEC39-ARGON-CIPHERTEXT-SENTINEL")) {
+		t.Fatalf("not fail closed: %d %s", resp.StatusCode, body)
+	}
+}
 
 // newEngine100k creates an engine using the legacy 100k PBKDF2 iteration count.
 func newEngine100k(t *testing.T) crypto.EncryptionEngine {
@@ -141,7 +200,6 @@ func testKDF_Chunked_LegacyRead(t *testing.T, inst provider.Instance) {
 		t.Errorf("chunked legacy read mismatch")
 	}
 }
-
 
 // newEngineArgon2id creates an engine using argon2id KDF with the test
 // password and default argon2id parameters.

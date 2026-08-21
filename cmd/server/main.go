@@ -466,6 +466,8 @@ func main() {
 	zeroBytes(encryptionPassword)
 
 	var pkmOpts []crypto.PasswordKMOption
+	kdfLimits := crypto.KDFLimits{PBKDF2MaxIterations: cfg.Encryption.KDF.DecryptLimits.PBKDF2.MaxIterations, Argon2idMaxTime: cfg.Encryption.KDF.DecryptLimits.Argon2id.MaxTime, Argon2idMaxMemory: cfg.Encryption.KDF.DecryptLimits.Argon2id.MaxMemory, Argon2idMaxThreads: cfg.Encryption.KDF.DecryptLimits.Argon2id.MaxThreads}
+	pkmOpts = append(pkmOpts, crypto.WithPasswordKMKDFLimits(kdfLimits))
 	if cfg.Encryption.KDF.Algorithm == string(crypto.KDFAlgArgon2id) {
 		pkmOpts = append(pkmOpts, crypto.WithPasswordKMArgon2id(
 			cfg.Encryption.KDF.Argon2id.Time,
@@ -591,6 +593,7 @@ func main() {
 		crypto.WithProvider("default"),
 		crypto.WithPBKDF2Iterations(cfg.Encryption.KDF.PBKDF2.Iterations),
 		crypto.WithKDFAlgorithm(cfg.Encryption.KDF.Algorithm),
+		crypto.WithKDFLimits(kdfLimits),
 		crypto.WithAllowUnmarkedNoAADFallback(cfg.Encryption.AllowUnmarkedNoAADFallback),
 	}
 	if cfg.Encryption.KDF.Algorithm == "argon2id" {

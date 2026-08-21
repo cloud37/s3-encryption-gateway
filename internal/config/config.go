@@ -262,7 +262,21 @@ type KDFConfig struct {
 	PBKDF2 PBKDF2Config `yaml:"pbkdf2"`
 
 	// Argon2id holds argon2id parameters (active when Algorithm == "argon2id").
-	Argon2id Argon2idConfig `yaml:"argon2id"`
+	Argon2id      Argon2idConfig         `yaml:"argon2id"`
+	DecryptLimits KDFDecryptLimitsConfig `yaml:"decrypt_limits"`
+}
+
+type KDFDecryptLimitsConfig struct {
+	PBKDF2   PBKDF2DecryptLimitsConfig   `yaml:"pbkdf2"`
+	Argon2id Argon2idDecryptLimitsConfig `yaml:"argon2id"`
+}
+type PBKDF2DecryptLimitsConfig struct {
+	MaxIterations int `yaml:"max_iterations" env:"ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS"`
+}
+type Argon2idDecryptLimitsConfig struct {
+	MaxTime    uint32 `yaml:"max_time" env:"ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME"`
+	MaxMemory  uint32 `yaml:"max_memory" env:"ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY"`
+	MaxThreads uint8  `yaml:"max_threads" env:"ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS"`
 }
 
 // Argon2idConfig holds operator-tunable argon2id parameters.
@@ -906,6 +920,7 @@ func LoadConfig(path string) (*Config, error) {
 					Memory:  19456,
 					Threads: 1,
 				},
+				DecryptLimits: KDFDecryptLimitsConfig{PBKDF2: PBKDF2DecryptLimitsConfig{MaxIterations: 2000000}, Argon2id: Argon2idDecryptLimitsConfig{MaxTime: 10, MaxMemory: 65536, MaxThreads: 255}},
 			},
 		},
 		Backend: BackendConfig{
@@ -1021,7 +1036,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	// Override with environment variables
-	loadFromEnv(config)
+	if err := loadFromEnv(config); err != nil {
+		return nil, err
+	}
 
 	// Set default hardware acceleration flags if not specified (default true)
 	// This logic is now handled by initialization values above, but we check env vars here
@@ -1043,7 +1060,7 @@ func isEnvSet(key string) bool {
 }
 
 // loadFromEnv loads configuration values from environment variables.
-func loadFromEnv(config *Config) {
+func loadFromEnv(config *Config) error {
 	if v := os.Getenv("LISTEN_ADDR"); v != "" {
 		config.ListenAddr = v
 	}
@@ -1131,27 +1148,65 @@ func loadFromEnv(config *Config) {
 		config.Encryption.Hardware.EnableARMv8AES = v == "true" || v == "1"
 	}
 	if v := os.Getenv("ENCRYPTION_KDF_PBKDF2_ITERATIONS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 100000 {
-			config.Encryption.KDF.PBKDF2.Iterations = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_PBKDF2_ITERATIONS: %w", err)
 		}
+		config.Encryption.KDF.PBKDF2.Iterations = n
 	}
 	if v := os.Getenv("ENCRYPTION_KDF_ALGORITHM"); v != "" {
 		config.Encryption.KDF.Algorithm = v
 	}
 	if v := os.Getenv("ENCRYPTION_KDF_ARGON2ID_TIME"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			config.Encryption.KDF.Argon2id.Time = uint32(n)
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_ARGON2ID_TIME: %w", err)
 		}
+		config.Encryption.KDF.Argon2id.Time = uint32(n)
 	}
 	if v := os.Getenv("ENCRYPTION_KDF_ARGON2ID_MEMORY"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			config.Encryption.KDF.Argon2id.Memory = uint32(n)
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_ARGON2ID_MEMORY: %w", err)
 		}
+		config.Encryption.KDF.Argon2id.Memory = uint32(n)
 	}
 	if v := os.Getenv("ENCRYPTION_KDF_ARGON2ID_THREADS"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 8); err == nil {
-			config.Encryption.KDF.Argon2id.Threads = uint8(n)
+		n, err := strconv.ParseUint(v, 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_ARGON2ID_THREADS: %w", err)
 		}
+		config.Encryption.KDF.Argon2id.Threads = uint8(n)
+	}
+	for name, dst := range map[string]*int{"ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS": &config.Encryption.KDF.DecryptLimits.PBKDF2.MaxIterations} {
+		if v := os.Getenv(name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("invalid %s: %w", name, err)
+			}
+			*dst = n
+		}
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME: %w", err)
+		}
+		config.Encryption.KDF.DecryptLimits.Argon2id.MaxTime = uint32(n)
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY: %w", err)
+		}
+		config.Encryption.KDF.DecryptLimits.Argon2id.MaxMemory = uint32(n)
+	}
+	if v := os.Getenv("ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS: %w", err)
+		}
+		config.Encryption.KDF.DecryptLimits.Argon2id.MaxThreads = uint8(n)
 	}
 	// V1.0-CRYPTO-3: metadata encryption key env vars
 	if v := os.Getenv("ENCRYPTION_METADATA_KEY_FILE"); v != "" {
@@ -1763,6 +1818,7 @@ func loadFromEnv(config *Config) {
 			config.ListSizeTranslate.FallbackHeadTimeout = d
 		}
 	}
+	return nil
 }
 
 func parseCosmianKeyRefs(value string) []CosmianKeyReference {
@@ -1948,6 +2004,34 @@ func (c *Config) Validate() error {
 
 	if c.Encryption.KDF.PBKDF2.Iterations < 100000 {
 		return fmt.Errorf("encryption.kdf.pbkdf2.iterations must be >= 100000 (got %d)", c.Encryption.KDF.PBKDF2.Iterations)
+	}
+	limits := c.Encryption.KDF.DecryptLimits
+	// Config values constructed directly by callers predate decrypt limits.
+	// Treat an entirely omitted block the same as LoadConfig's defaults.
+	if limits == (KDFDecryptLimitsConfig{}) {
+		limits = KDFDecryptLimitsConfig{
+			PBKDF2:   PBKDF2DecryptLimitsConfig{MaxIterations: 2000000},
+			Argon2id: Argon2idDecryptLimitsConfig{MaxTime: 10, MaxMemory: 65536, MaxThreads: 255},
+		}
+		c.Encryption.KDF.DecryptLimits = limits
+	}
+	if limits.PBKDF2.MaxIterations < 100000 || limits.PBKDF2.MaxIterations > 2000000 {
+		return fmt.Errorf("encryption.kdf.decrypt_limits.pbkdf2.max_iterations must be between 100000 and 2000000")
+	}
+	if limits.Argon2id.MaxTime < 1 || limits.Argon2id.MaxTime > 10 {
+		return fmt.Errorf("encryption.kdf.decrypt_limits.argon2id.max_time must be between 1 and 10")
+	}
+	if limits.Argon2id.MaxMemory < 1 || limits.Argon2id.MaxMemory > 1048576 {
+		return fmt.Errorf("encryption.kdf.decrypt_limits.argon2id.max_memory must be between 1 and 1048576")
+	}
+	if limits.Argon2id.MaxThreads < 1 || limits.Argon2id.MaxThreads > 255 {
+		return fmt.Errorf("encryption.kdf.decrypt_limits.argon2id.max_threads must be between 1 and 255")
+	}
+	if c.Encryption.KDF.PBKDF2.Iterations > limits.PBKDF2.MaxIterations {
+		return fmt.Errorf("encryption.kdf.pbkdf2.iterations exceeds decrypt limit")
+	}
+	if c.Encryption.KDF.Argon2id.Time > limits.Argon2id.MaxTime || c.Encryption.KDF.Argon2id.Memory > limits.Argon2id.MaxMemory || c.Encryption.KDF.Argon2id.Threads > limits.Argon2id.MaxThreads {
+		return fmt.Errorf("encryption.kdf argon2id write parameters exceed decrypt limits")
 	}
 	if c.Encryption.KDF.PBKDF2.Iterations < 600000 {
 		slog.Warn("encryption.kdf.pbkdf2.iterations is below NIST SP 800-132 (2023) recommendation of 600,000",

@@ -78,10 +78,9 @@ func (c *headObjectOverrideClient) HeadObject(ctx context.Context, bucket, key s
 func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway {
 	t.Helper()
 
-	o := &options{
-		encryptionPassword: "test-encryption-password-123456",
-		logLevel:           "error",
-	}
+	o := newOptions()
+	o.encryptionPassword = "test-encryption-password-123456"
+	o.logLevel = "error"
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -110,6 +109,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			},
 		},
 	}
+	cfg.Encryption.KDF.DecryptLimits = config.KDFDecryptLimitsConfig{PBKDF2: config.PBKDF2DecryptLimitsConfig{MaxIterations: o.kdfDecryptLimits.PBKDF2MaxIterations}, Argon2id: config.Argon2idDecryptLimitsConfig{MaxTime: o.kdfDecryptLimits.Argon2idMaxTime, MaxMemory: o.kdfDecryptLimits.Argon2idMaxMemory, MaxThreads: o.kdfDecryptLimits.Argon2idMaxThreads}}
 
 	// Apply WithAuth credentials before extraConfig so extraConfig can override.
 	if len(o.authCredentials) > 0 {
@@ -176,6 +176,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		crypto.WithChunking(o.chunkedMode),
 		crypto.WithKDFAlgorithm(o.kdfAlgorithm),
 		crypto.WithArgon2idParams(o.argon2idParams.Time, o.argon2idParams.Memory, o.argon2idParams.Threads),
+		crypto.WithKDFLimits(o.kdfDecryptLimits),
 	)
 	if err != nil {
 		listener.Close()
@@ -239,7 +240,11 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	// When encrypted MPU is active a KeyManager is required for DEK wrap/unwrap.
 	// Default to the password-derived KeyManager if none was supplied.
 	if o.mpuStore != nil && o.keyManager == nil {
-		km, kmErr := crypto.NewPasswordKeyManager([]byte(o.encryptionPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
+		km, kmErr := crypto.NewPasswordKeyManager(
+			[]byte(o.encryptionPassword),
+			crypto.WithPasswordKMPBKDF2(o.pbkdf2Iterations),
+			crypto.WithPasswordKMKDFLimits(o.kdfDecryptLimits),
+		)
 		if kmErr != nil {
 			listener.Close()
 			t.Fatalf("harness.StartGateway: create password KeyManager: %v", kmErr)

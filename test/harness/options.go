@@ -14,36 +14,37 @@ import (
 
 // options accumulates gateway configuration requested by Option functions.
 type options struct {
-	encryptionPassword  string
-	policyManager       *config.PolicyManager
-	keyManager          crypto.KeyManager
-	mpuStore            mpu.StateStore
-	auditLogger         audit.Logger
-	encryptedMPU        bool
-	valkeyAddr          string
+	encryptionPassword string
+	policyManager      *config.PolicyManager
+	keyManager         crypto.KeyManager
+	mpuStore           mpu.StateStore
+	auditLogger        audit.Logger
+	encryptedMPU       bool
+	valkeyAddr         string
 	// encryptedMPUBucket is a glob pattern for which encrypted MPU is enabled.
 	// When set the harness auto-creates a PolicyManager with
 	// EncryptMultipartUploads=true for that pattern (unless policyManager is
 	// already set by the caller).
-	encryptedMPUBucket  string
-	headObjectOverride  func(bucket, key string) *int64
-	logLevel            string
-	extraConfig         func(*config.Config)
+	encryptedMPUBucket string
+	headObjectOverride func(bucket, key string) *int64
+	logLevel           string
+	extraConfig        func(*config.Config)
 	// pbkdf2Iterations overrides the default PBKDF2 iteration count (600k).
 	// Values below the minimum (100k) are ignored and the default is used.
-	pbkdf2Iterations    int
+	pbkdf2Iterations int
 	// chunkedMode enables chunked/streaming encryption for the gateway engine.
-	chunkedMode         bool
+	chunkedMode bool
 	// kdfAlgorithm overrides the KDF algorithm for new objects.
 	// Empty string uses the default ("pbkdf2-sha256").
-	kdfAlgorithm        string
+	kdfAlgorithm string
 	// argon2idParams overrides the argon2id KDF parameters.
-	argon2idParams      config.Argon2idConfig
+	argon2idParams   config.Argon2idConfig
+	kdfDecryptLimits crypto.KDFLimits
 	// backendTransport, when non-nil, replaces the HTTP transport used by the
 	// gateway's S3 backend client.  Use this in chaos / retry tests to inject
 	// faults at the gateway→backend layer without an external proxy.
 	// See WithBackendTransport and FaultyRoundTripper.
-	backendTransport    http.RoundTripper
+	backendTransport http.RoundTripper
 	// authCredentials holds credentials configured via WithAuth.
 	authCredentials []config.GatewayCredential
 
@@ -64,6 +65,13 @@ type options struct {
 
 // Option is a functional option for StartGateway.
 type Option func(*options)
+
+func newOptions() *options {
+	return &options{
+		pbkdf2Iterations: crypto.DefaultPBKDF2Iterations,
+		kdfDecryptLimits: crypto.DefaultKDFLimits(),
+	}
+}
 
 // WithEncryptionPassword sets the gateway's encryption password.
 // Defaults to "test-encryption-password-123456" if not set.
@@ -153,6 +161,11 @@ func WithBackendTransport(rt http.RoundTripper) Option {
 // encryption engine and config.
 func WithPBKDF2Iterations(n int) Option {
 	return func(o *options) { o.pbkdf2Iterations = n }
+}
+
+// WithKDFDecryptLimits sets operational decrypt ceilings for SEC-39 tests.
+func WithKDFDecryptLimits(limits crypto.KDFLimits) Option {
+	return func(o *options) { o.kdfDecryptLimits = limits }
 }
 
 // WithChunking enables or disables chunked/streaming encryption mode for the

@@ -636,6 +636,14 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 		if err == nil {
 			decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), bytes.NewReader(bodyBytes), metadata)
 			if err != nil {
+				var invalidKDF *crypto.ErrInvalidKDFParams
+				var costlyKDF *crypto.ErrKDFCostTooHigh
+				if errors.As(err, &invalidKDF) || errors.As(err, &costlyKDF) {
+					s3Err := &S3Error{Code: "InternalError", Message: "We encountered an internal error. Please try again.", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
+					s3Err.WriteXML(w)
+					h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+					return
+				}
 				if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
 					h.logger.WithError(err).Warn("Encrypted object in bypass bucket (forwarded)")
 					s3Err := &S3Error{
@@ -1446,6 +1454,14 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 	decryptDuration := time.Since(decryptStart)
 	if err != nil {
+		var invalidKDF *crypto.ErrInvalidKDFParams
+		var costlyKDF *crypto.ErrKDFCostTooHigh
+		if errors.As(err, &invalidKDF) || errors.As(err, &costlyKDF) {
+			s3Err := &S3Error{Code: "InternalError", Message: "We encountered an internal error. Please try again.", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
+			s3Err.WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			return
+		}
 		if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
 			h.logger.WithError(err).WithFields(logrus.Fields{
 				"bucket": bucket,

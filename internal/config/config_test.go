@@ -2143,7 +2143,7 @@ auth:
 	}
 }
 
-func TestConfig_EnvOverride_BelowMin_Ignored(t *testing.T) {
+func TestConfig_EnvOverride_BelowMin_Fails(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	content := `
@@ -2163,13 +2163,90 @@ auth:
 
 	t.Setenv("ENCRYPTION_KDF_PBKDF2_ITERATIONS", "50000")
 
-	config, err := LoadConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
+	if _, err := LoadConfig(configPath); err == nil {
+		t.Fatal("expected below-hard-range env override to fail")
 	}
+}
 
-	if config.Encryption.KDF.PBKDF2.Iterations != 600000 {
-		t.Errorf("expected default PBKDF2 iterations 600000 when env override is below min, got %d", config.Encryption.KDF.PBKDF2.Iterations)
+func TestConfig_KDFDecryptLimits_Defaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `backend:
+  access_key: key
+  secret_key: secret
+encryption:
+  password: test-password
+auth:
+  credentials:
+    - access_key: gateway
+      secret_key: secret
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Encryption.KDF.DecryptLimits
+	if got.PBKDF2.MaxIterations != 2000000 || got.Argon2id.MaxTime != 10 || got.Argon2id.MaxMemory != 65536 || got.Argon2id.MaxThreads != 255 {
+		t.Fatalf("unexpected defaults: %+v", got)
+	}
+}
+
+func TestConfig_KDFDecryptLimits_YAMLAndEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `backend: {access_key: key, secret_key: secret}
+encryption:
+  password: test-password
+  kdf:
+    pbkdf2: {iterations: 100000}
+    argon2id: {time: 1, memory: 1, threads: 1}
+    decrypt_limits:
+      pbkdf2: {max_iterations: 150000}
+      argon2id: {max_time: 3, max_memory: 4096, max_threads: 2}
+auth: {credentials: [{access_key: gateway, secret_key: secret}]}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS", "160000")
+	t.Setenv("ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME", "4")
+	t.Setenv("ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY", "8192")
+	t.Setenv("ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS", "3")
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Encryption.KDF.DecryptLimits
+	if got.PBKDF2.MaxIterations != 160000 || got.Argon2id.MaxTime != 4 || got.Argon2id.MaxMemory != 8192 || got.Argon2id.MaxThreads != 3 {
+		t.Fatalf("unexpected limits: %+v", got)
+	}
+}
+
+func TestConfig_KDFDecryptLimits_InvalidEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("backend: {access_key: key, secret_key: secret}\nencryption: {password: test-password}\nauth: {credentials: [{access_key: gateway, secret_key: secret}]}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS", "ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME", "ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY", "ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS"} {
+		t.Setenv(name, "not-a-number")
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("%s accepted malformed value", name)
+		}
+		t.Setenv(name, "")
+	}
+}
+
+func TestConfig_KDFWriteExceedsDecryptSupport(t *testing.T) {
+	base := Config{Encryption: EncryptionConfig{Password: "password"}, ListenAddr: ":8080"}
+	base.Encryption.KDF.DecryptLimits = KDFDecryptLimitsConfig{PBKDF2: PBKDF2DecryptLimitsConfig{MaxIterations: 100000}, Argon2id: Argon2idDecryptLimitsConfig{MaxTime: 1, MaxMemory: 1, MaxThreads: 1}}
+	base.Encryption.KDF.PBKDF2.Iterations = 100001
+	if err := base.Validate(); err == nil {
+		t.Fatal("PBKDF2 write above limit accepted")
+	}
+	base.Encryption.KDF.PBKDF2.Iterations = 100000
+	base.Encryption.KDF.Argon2id.Time = 2
+	if err := base.Validate(); err == nil {
+		t.Fatal("Argon2 time above limit accepted")
 	}
 }
 
