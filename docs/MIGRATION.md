@@ -7,6 +7,22 @@
 
 ## Overview
 
+### SEC-39 KDF limit rollout
+
+Before lowering decrypt limits, inventory `x-amz-meta-encryption-kdf-params` with
+backend metadata and `s3eg-cli inspect`. Classify each object as
+`within-limit`, `above-operational-limit`, or `invalid-hard-limit`, recording
+bucket, key, algorithm, requested costs, and proposed maxima. MPU v2 costs are
+embedded in manifests and cannot be inventoried from object headers; retain the
+old limit until those uploads are read and rewritten.
+
+Migrate outliers with GET through readers using the old limit, then PUT through
+writers configured with supported costs and verify a subsequent GET and HEAD.
+Deploy readers covering the complete inventory first, rewrite and verify all
+outliers, then lower limits on every replica in one coordinated rollout. Do not
+send traffic to mixed-limit replicas. Data above a hard limit must be rewritten
+through the prior trusted release before upgrading.
+
 All re-encryption is now done by reading plaintext **through** the gateway and
 writing it back **through** the gateway. This ensures:
 

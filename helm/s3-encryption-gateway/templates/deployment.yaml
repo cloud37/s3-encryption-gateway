@@ -14,7 +14,7 @@ spec:
       annotations:
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
+         {{- end }}
       labels:
         {{- include "s3-encryption-gateway.selectorLabels" . | nindent 8 }}
     spec:
@@ -117,10 +117,14 @@ spec:
         {{- if .Values.config.encryption.kdf.argon2id.threads.value }}
         - name: ENCRYPTION_KDF_ARGON2ID_THREADS
           value: {{ .Values.config.encryption.kdf.argon2id.threads.value | quote }}
-        {{- else if .Values.config.encryption.kdf.argon2id.threads.valueFrom }}
-        - name: ENCRYPTION_KDF_ARGON2ID_THREADS
-          valueFrom: {{ toYaml .Values.config.encryption.kdf.argon2id.threads.valueFrom | nindent 12 }}
-        {{- end }}
+         {{- else if .Values.config.encryption.kdf.argon2id.threads.valueFrom }}
+         - name: ENCRYPTION_KDF_ARGON2ID_THREADS
+           valueFrom: {{ toYaml .Values.config.encryption.kdf.argon2id.threads.valueFrom | nindent 12 }}
+         {{- end }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS" "value" .Values.config.encryption.kdf.decryptLimits.pbkdf2.maxIterations.value "valueFrom" .Values.config.encryption.kdf.decryptLimits.pbkdf2.maxIterations.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME" "value" .Values.config.encryption.kdf.decryptLimits.argon2id.maxTime.value "valueFrom" .Values.config.encryption.kdf.decryptLimits.argon2id.maxTime.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY" "value" .Values.config.encryption.kdf.decryptLimits.argon2id.maxMemory.value "valueFrom" .Values.config.encryption.kdf.decryptLimits.argon2id.maxMemory.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS" "value" .Values.config.encryption.kdf.decryptLimits.argon2id.maxThreads.value "valueFrom" .Values.config.encryption.kdf.decryptLimits.argon2id.maxThreads.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "KEY_MANAGER_ENABLED" "value" .Values.config.encryption.keyManager.enabled.value "valueFrom" .Values.config.encryption.keyManager.enabled.valueFrom) | nindent 8 }}
         {{- if or (eq .Values.config.encryption.keyManager.enabled.value "true") (eq .Values.config.encryption.keyManager.enabled.value "1") }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "KEY_MANAGER_PROVIDER" "value" .Values.config.encryption.keyManager.provider.value "valueFrom" .Values.config.encryption.keyManager.provider.valueFrom) | nindent 8 }}
@@ -451,4 +455,3 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-

@@ -1,0 +1,44 @@
+templates:
+  - deployment.yaml
+release:
+  name: s3eg-sec39
+  namespace: default
+values:
+  - ../values.yaml
+tests:
+  - it: renders all SEC-39 decrypt limit environment variables
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS
+            value: "2000000"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME
+            value: "10"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY
+            value: "65536"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS
+            value: "255"
+  - it: renders valueFrom for PBKDF2 decrypt limit
+    set:
+      config.encryption.kdf.decryptLimits.pbkdf2.maxIterations.value: ""
+      config.encryption.kdf.decryptLimits.pbkdf2.maxIterations.valueFrom.secretKeyRef.name: sec39
+      config.encryption.kdf.decryptLimits.pbkdf2.maxIterations.valueFrom.secretKeyRef.key: max
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS
+            valueFrom:
+              secretKeyRef:
+                name: sec39
+                key: max

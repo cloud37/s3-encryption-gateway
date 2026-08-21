@@ -1104,18 +1104,20 @@
                     "threads": {
                       "allOf": [
                         { "$ref": "#/$defs/configValue" },
-                        {
-                          "properties": {
-                            "value": {
-                              "type": ["string", "integer", "null"],
-                              "description": "Argon2id parallelism/threads parameter. Default: 1, range: [1, 256]. Set via ENCRYPTION_KDF_ARGON2ID_THREADS."
-                            }
-                          }
-                        }
+                        { "properties": { "value": { "type": ["string", "integer", "null"], "description": "Argon2id parallelism/threads parameter. Default: 1, range: [1, 255]. Set via ENCRYPTION_KDF_ARGON2ID_THREADS." } } }
                       ]
-                    }
+                   }
                   }
-                }
+                },
+                "decryptLimits": {
+                   "type": "object",
+                   "description": "Operational decrypt ceilings; inclusive hard ranges are PBKDF2 [100000,2000000], Argon2id time [1,10], memory [1,1048576] KiB, threads [1,255].",
+                   "additionalProperties": false,
+                   "properties": {
+                     "pbkdf2": {"type":"object","additionalProperties":false,"properties":{"maxIterations":{"allOf":[{"$ref":"#/$defs/configValue"}],"description":"Maximum PBKDF2 decrypt iterations, 100000..2000000."}}},
+                     "argon2id": {"type":"object","additionalProperties":false,"properties":{"maxTime":{"allOf":[{"$ref":"#/$defs/configValue"}],"description":"Maximum Argon2id time, 1..10."},"maxMemory":{"allOf":[{"$ref":"#/$defs/configValue"}],"description":"Maximum Argon2id memory in KiB, 1..1048576."},"maxThreads":{"allOf":[{"$ref":"#/$defs/configValue"}],"description":"Maximum Argon2id threads, 1..255."}}}
+                   }
+                  }
               }
             },
             "allowUnmarkedNoAADFallback": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Permit no-AAD decryption fallback for objects lacking the marker. Default: false (fail-closed). Enable only during controlled recovery windows. Set via ENCRYPTION_ALLOW_UNMARKED_NO_AAD_FALLBACK." }
@@ -1516,6 +1518,5 @@
         }
       }
     }
-
   }
 }

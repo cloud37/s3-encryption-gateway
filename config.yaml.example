@@ -287,15 +287,34 @@ encryption:
   # kdf:
   #   algorithm: "pbkdf2-sha256"
   #
-  #   # Argon2id parameters (only used when algorithm: "argon2id"):
+   #   # PBKDF2 write parameter (default: 600000). Range: [100000, 2000000].
+   #   # pbkdf2:
+   #   #   iterations: 600000
+   #
+   #   # Argon2id parameters (only used when algorithm: "argon2id"):
   #   #   time:    Number of passes (default: 2). Range: [1, 10].
   #   #   memory:  Memory in KiB    (default: 19456). Range: [8192, 1048576].
-  #   #   threads: Parallelism     (default: 1).      Range: [1, 256].
+  #   #   threads: Parallelism     (default: 1).      Range: [1, 255].
   #   # The defaults target ~1 second on a modern server core.
   #   argon2id:
   #     time: 2
   #     memory: 19456
   #     threads: 1
+   #   decrypt_limits:
+   #     # Inclusive hard range: [100000, 2000000].
+   #     # Set via ENCRYPTION_KDF_DECRYPT_LIMITS_PBKDF2_MAX_ITERATIONS.
+   #     pbkdf2:
+   #       max_iterations: 2000000
+   #     argon2id:
+   #       # Inclusive hard ranges: time [1,10], memory [1,1048576] KiB,
+   #       # threads [1,255]. Set via ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_TIME,
+   #       # ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_MEMORY, and
+   #       # ENCRYPTION_KDF_DECRYPT_LIMITS_ARGON2ID_MAX_THREADS.
+   #       max_time: 10
+   #       max_memory: 65536 # KiB
+   #       max_threads: 255
+   #   # Each write-side KDF parameter must be less than or equal to its
+   #   # corresponding decrypt limit so newly written objects remain readable.
 
 # multipart_state:
 #   valkey:

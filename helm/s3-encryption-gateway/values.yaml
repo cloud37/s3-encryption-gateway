@@ -461,6 +461,22 @@ config:
           value: "1"
           valueFrom: {}
 
+      decryptLimits:
+        pbkdf2:
+          maxIterations:
+            value: "2000000"
+            valueFrom: {}
+        argon2id:
+          maxTime:
+            value: "10"
+            valueFrom: {}
+          maxMemory:
+            value: "65536"
+            valueFrom: {}
+          maxThreads:
+            value: "255"
+            valueFrom: {}
+
   # Server timeout configuration
   server:
     readTimeout:
