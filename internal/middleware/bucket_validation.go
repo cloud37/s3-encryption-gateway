@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/cloud37/s3-encryption-gateway/internal/api"
 	"github.com/sirupsen/logrus"
 )
 
@@ -37,23 +38,15 @@ func BucketValidationMiddleware(proxiedBucket string, logger *logrus.Logger) fun
 				bucket = pathParts[0]
 			}
 
-			// Validate bucket access - deny if bucket doesn't match proxied bucket
-			// If bucket is still empty after extraction, deny access in single bucket mode
-			if bucket == "" || bucket != proxiedBucket {
-				if bucket != "" {
-					logger.WithFields(logrus.Fields{
-						"requested_bucket": bucket,
-						"proxied_bucket":   proxiedBucket,
-						"path":             path,
-						"method":           r.Method,
-					}).Warn("Access denied: bucket does not match proxied bucket")
-				} else {
-					logger.WithFields(logrus.Fields{
-						"proxied_bucket": proxiedBucket,
-						"path":           path,
-						"method":         r.Method,
-					}).Warn("Access denied: no bucket specified in request")
-				}
+			// Validate bucket access - deny if bucket doesn't match proxied bucket.
+			// Allow empty bucket (root path, e.g. ListBuckets) to pass through.
+			if bucket != "" && bucket != proxiedBucket {
+				logger.WithFields(logrus.Fields{
+					"requested_bucket": bucket,
+					"proxied_bucket":   proxiedBucket,
+					"path":             path,
+					"method":           r.Method,
+				}).Warn("Access denied: bucket does not match proxied bucket")
 
 				// Return S3-compatible error response
 				writeBucketAccessDeniedError(w, bucket, path)
@@ -62,25 +55,25 @@ func BucketValidationMiddleware(proxiedBucket string, logger *logrus.Logger) fun
 
 			// Also validate copy source bucket if present
 			if copySource := r.Header.Get("x-amz-copy-source"); copySource != "" {
-				// Parse copy source: format is "bucket/key" or "/bucket/key"
-				sourceParts := strings.Split(strings.TrimPrefix(copySource, "/"), "/")
-				if len(sourceParts) > 0 {
-					sourceBucket := sourceParts[0]
-					// Remove version ID if present
-					if strings.Contains(sourceBucket, "?") {
-						sourceBucket = strings.Split(sourceBucket, "?")[0]
-					}
-					if sourceBucket != "" && sourceBucket != proxiedBucket {
-						logger.WithFields(logrus.Fields{
-							"source_bucket":  sourceBucket,
-							"proxied_bucket": proxiedBucket,
-							"path":           path,
-							"method":         r.Method,
-						}).Warn("Access denied: copy source bucket does not match proxied bucket")
+				srcBucket, _, _, err := api.ParseCopySource(copySource)
+				if err != nil {
+					logger.WithFields(logrus.Fields{
+						"copy_source": copySource,
+						"error":       err,
+					}).Warn("Access denied: malformed copy source")
+					writeBucketAccessDeniedError(w, "", path)
+					return
+				}
+				if srcBucket != "" && srcBucket != proxiedBucket {
+					logger.WithFields(logrus.Fields{
+						"source_bucket":  srcBucket,
+						"proxied_bucket": proxiedBucket,
+						"path":           path,
+						"method":         r.Method,
+					}).Warn("Access denied: copy source bucket does not match proxied bucket")
 
-						writeBucketAccessDeniedError(w, sourceBucket, path)
-						return
-					}
+					writeBucketAccessDeniedError(w, srcBucket, path)
+					return
 				}
 			}
 

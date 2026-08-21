@@ -127,13 +127,12 @@ S3-compatible backend storage configuration.
 |-------|------|---------|---------------------|-------------|
 | `endpoint` | string | - | `BACKEND_ENDPOINT` | S3-compatible API endpoint URL |
 | `region` | string | `us-east-1` | `BACKEND_REGION` | AWS region or provider-specific region |
-| `access_key` | string | - | `BACKEND_ACCESS_KEY` | Backend access key (required unless `use_client_credentials` is true) |
-| `secret_key` | string | - | `BACKEND_SECRET_KEY` | Backend secret key (required unless `use_client_credentials` is true) |
+| `access_key` | string | - | `BACKEND_ACCESS_KEY` | Backend access key (required) |
+| `secret_key` | string | - | `BACKEND_SECRET_KEY` | Backend secret key (required) |
 | `provider` | string | - | `BACKEND_PROVIDER` | Provider name for reference (aws, minio, wasabi, hetzner, etc.) |
 | `use_ssl` | bool | `true` | `BACKEND_USE_SSL` | Use HTTPS for backend connections |
 | `use_path_style` | bool | `false` | `BACKEND_USE_PATH_STYLE` | Use path-style URLs instead of virtual-hosted style |
 | `filter_metadata_keys` | []string | - | `BACKEND_FILTER_METADATA_KEYS` | Comma-separated list of metadata keys to filter out |
-| `use_client_credentials` | bool | `false` | `BACKEND_USE_CLIENT_CREDENTIALS` | Extract and use credentials from client requests. **Note**: Only query parameter authentication (`?AWSAccessKeyId=...&AWSSecretAccessKey=...`) is supported. AWS Signature V4 (Authorization header) is NOT supported when this is enabled. |
 
 **Provider Examples:**
 
@@ -412,7 +411,6 @@ backend:
   use_ssl: true
   use_path_style: false
   filter_metadata_keys: []
-  use_client_credentials: false
 
 encryption:
   password: ""  # Set via ENCRYPTION_PASSWORD
@@ -503,7 +501,7 @@ export TLS_KEY_FILE="/path/to/key.pem"
 
 The gateway validates configuration on startup and provides detailed error messages for invalid settings:
 
-- **Required fields**: `listen_addr`, encryption password or key file, backend credentials (unless using client credentials)
+- **Required fields**: `listen_addr`, encryption password or key file, backend credentials
 - **Valid ranges**: Log levels, algorithm names, chunk sizes (16KB-1MB), sampling ratios (0.0-1.0)
 - **Dependencies**: TLS requires certificate and key files, tracing exporters require endpoints
 - **Security**: Sensitive values are not logged in validation errors

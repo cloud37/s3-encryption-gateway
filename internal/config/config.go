@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,9 @@ func (c *Config) ResolvedCredentials() []GatewayCredential {
 	resolved := make([]GatewayCredential, len(c.Auth.Credentials))
 	for i, cred := range c.Auth.Credentials {
 		resolved[i] = cred
+		resolved[i].Buckets = cloneStrings(cred.Buckets)
+		resolved[i].BucketPermissions = cloneBucketPermissions(cred.BucketPermissions)
+		resolved[i].Permissions = cloneObjectPermission(cred.Permissions)
 		if cred.SecretKeyEnv != "" {
 			if v := os.Getenv(cred.SecretKeyEnv); v != "" {
 				resolved[i].SecretKey = v
@@ -57,6 +61,28 @@ func (c *Config) ResolvedCredentials() []GatewayCredential {
 		}
 	}
 	return resolved
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
+}
+
+func cloneObjectPermission(p *ObjectPermission) *ObjectPermission {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+func cloneBucketPermissions(values []BucketPermission) []BucketPermission {
+	if values == nil {
+		return nil
+	}
+	return append([]BucketPermission{}, values...)
 }
 
 // BackendConfig holds S3 backend configuration.
@@ -698,6 +724,23 @@ type LoggingConfig struct {
 	RedactHeaders   []string `yaml:"redact_headers" env:"LOGGING_REDACT_HEADERS"`       // Headers to redact in access logs (comma-separated)
 }
 
+// ObjectPermission controls object and bucket-subresource access.
+type ObjectPermission string
+
+const (
+	ObjectPermissionReadOnly  ObjectPermission = "ro"
+	ObjectPermissionReadWrite ObjectPermission = "rw"
+)
+
+// BucketPermission controls bucket lifecycle operations independently from
+// object permissions.
+type BucketPermission string
+
+const (
+	BucketPermissionCreate BucketPermission = "create"
+	BucketPermissionDelete BucketPermission = "delete"
+)
+
 // GatewayCredential is a single access-key/secret-key pair managed by the gateway.
 type GatewayCredential struct {
 	// AccessKey is the S3 access key identifier presented by clients.
@@ -709,6 +752,11 @@ type GatewayCredential struct {
 	SecretKeyEnv string `yaml:"secret_key_env"`
 	// Label is an optional human-readable name used in audit log entries.
 	Label string `yaml:"label"`
+	// Buckets is nil for unrestricted access and empty for an intentional deny-all.
+	Buckets []string `yaml:"buckets"`
+	// Permissions defaults to rw when omitted.
+	Permissions       *ObjectPermission  `yaml:"permissions"`
+	BucketPermissions []BucketPermission `yaml:"bucket_permissions"`
 }
 
 // AuthConfig holds authentication-related configuration for the S3 API.
@@ -732,6 +780,60 @@ type AuthConfig struct {
 	// Every inbound S3 request must present one of these access keys with a
 	// valid signature.
 	Credentials []GatewayCredential `yaml:"credentials"`
+}
+
+// ValidateGatewayCredentials applies the authorization policy grammar both to
+// parsed configuration and direct credential-store replacements. requireSecret
+// is false for configuration entries that defer secret resolution to an env var.
+func ValidateGatewayCredentials(credentials []GatewayCredential, requireSecret bool) error {
+	if len(credentials) == 0 {
+		return fmt.Errorf("auth.credentials must not be empty; at least one credential is required")
+	}
+	accessKeys := make(map[string]struct{}, len(credentials))
+	for i, credential := range credentials {
+		if credential.AccessKey == "" {
+			return fmt.Errorf("auth.credentials[%d]: access_key is required", i)
+		}
+		if credential.SecretKey == "" && (requireSecret || credential.SecretKeyEnv == "") {
+			return fmt.Errorf("auth.credentials[%d]: either secret_key or secret_key_env is required", i)
+		}
+		if _, exists := accessKeys[credential.AccessKey]; exists {
+			return fmt.Errorf("auth.credentials[%d]: duplicate access_key %q", i, credential.AccessKey)
+		}
+		accessKeys[credential.AccessKey] = struct{}{}
+		if credential.Permissions != nil {
+			if *credential.Permissions == "" {
+				return fmt.Errorf("auth.credentials[%d]: permissions cannot be empty", i)
+			}
+			if *credential.Permissions != ObjectPermissionReadOnly && *credential.Permissions != ObjectPermissionReadWrite {
+				return fmt.Errorf("auth.credentials[%d]: permissions must be ro or rw", i)
+			}
+		}
+		patterns := make(map[string]struct{}, len(credential.Buckets))
+		for _, bucket := range credential.Buckets {
+			// The grammar matches the Helm values.schema.json pattern
+			// ^[^*\s][^*\s]*(\*)?$: no whitespace anywhere, at most one
+			// trailing "*", never a bare "*".
+			if bucket == "" || strings.ContainsAny(bucket, " \t\r\n\v\f") || bucket == "*" || strings.Count(bucket, "*") > 1 || (strings.Contains(bucket, "*") && !strings.HasSuffix(bucket, "*")) {
+				return fmt.Errorf("auth.credentials[%d]: invalid bucket pattern %q", i, bucket)
+			}
+			if _, exists := patterns[bucket]; exists {
+				return fmt.Errorf("auth.credentials[%d]: duplicate bucket pattern %q", i, bucket)
+			}
+			patterns[bucket] = struct{}{}
+		}
+		grants := make(map[BucketPermission]struct{}, len(credential.BucketPermissions))
+		for _, grant := range credential.BucketPermissions {
+			if grant != BucketPermissionCreate && grant != BucketPermissionDelete {
+				return fmt.Errorf("auth.credentials[%d]: invalid bucket permission %q", i, grant)
+			}
+			if _, exists := grants[grant]; exists {
+				return fmt.Errorf("auth.credentials[%d]: duplicate bucket permission %q", i, grant)
+			}
+			grants[grant] = struct{}{}
+		}
+	}
+	return nil
 }
 
 // AdminConfig holds admin API configuration.
@@ -1016,8 +1118,13 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 
-	// Override with environment variables
+	// Override with environment variables. Credential files are loaded here so a
+	// missing or malformed file rejects the entire configuration rather than
+	// silently publishing a partial credential set during reload.
 	loadFromEnv(config)
+	if err := loadCredentialFile(config); err != nil {
+		return nil, err
+	}
 
 	// Set default hardware acceleration flags if not specified (default true)
 	// This logic is now handled by initialization values above, but we check env vars here
@@ -1602,11 +1709,49 @@ func loadFromEnv(config *Config) {
 		if ak == "" && sk == "" {
 			break
 		}
+		buckets, bucketsSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_BUCKETS", i))
+		permStr, permSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_PERMISSIONS", i))
+		var permissions *ObjectPermission
+		if permSet {
+			p := ObjectPermission(permStr)
+			permissions = &p
+		}
+		bucketPermissions := os.Getenv(fmt.Sprintf("GW_CRED_%d_BUCKET_PERMISSIONS", i))
+		label := os.Getenv(fmt.Sprintf("GW_CRED_%d_LABEL", i))
+		var bucketList []string
+		if bucketsSet {
+			if buckets == "" {
+				bucketList = []string{}
+			} else {
+				bucketList = strings.Split(buckets, ",")
+				for j := range bucketList {
+					bucketList[j] = strings.TrimSpace(bucketList[j])
+				}
+			}
+		}
+		var grantList []BucketPermission
+		if bucketPermissions != "" {
+			for _, grant := range strings.Split(bucketPermissions, ",") {
+				grantList = append(grantList, BucketPermission(strings.TrimSpace(grant)))
+			}
+		}
 		found := false
 		for j := range config.Auth.Credentials {
 			if config.Auth.Credentials[j].AccessKey == ak {
 				if sk != "" {
 					config.Auth.Credentials[j].SecretKey = sk
+				}
+				if bucketsSet {
+					config.Auth.Credentials[j].Buckets = bucketList
+				}
+			if permissions != nil {
+				config.Auth.Credentials[j].Permissions = permissions
+			}
+				if bucketPermissions != "" {
+					config.Auth.Credentials[j].BucketPermissions = grantList
+				}
+				if label != "" {
+					config.Auth.Credentials[j].Label = label
 				}
 				found = true
 				break
@@ -1614,23 +1759,15 @@ func loadFromEnv(config *Config) {
 		}
 		if !found {
 			config.Auth.Credentials = append(config.Auth.Credentials, GatewayCredential{
-				AccessKey: ak,
-				SecretKey: sk,
-				Label:     fmt.Sprintf("helm-cred-%d", i),
+				AccessKey:         ak,
+				SecretKey:         sk,
+				Label:             label,
+				Buckets:           bucketList,
+				Permissions:       permissions,
+				BucketPermissions: grantList,
 			})
-		}
-	}
-	// Load credentials from external file (AUTH_CREDENTIALS_FILE).
-	if path := os.Getenv("AUTH_CREDENTIALS_FILE"); path != "" {
-		data, err := os.ReadFile(path) // #nosec G703 — operator-configured path from env var
-		if err != nil {
-			slog.Error("failed to read AUTH_CREDENTIALS_FILE", "path", path, "error", err)
-		} else {
-			var fileCreds []GatewayCredential
-			if err := yaml.Unmarshal(data, &fileCreds); err != nil {
-				slog.Error("failed to parse AUTH_CREDENTIALS_FILE", "path", path, "error", err)
-			} else {
-				config.Auth.Credentials = append(config.Auth.Credentials, fileCreds...)
+			if label == "" {
+				config.Auth.Credentials[len(config.Auth.Credentials)-1].Label = fmt.Sprintf("helm-cred-%d", i)
 			}
 		}
 	}
@@ -1761,6 +1898,25 @@ func loadFromEnv(config *Config) {
 	}
 }
 
+func loadCredentialFile(config *Config) error {
+	path := os.Getenv("AUTH_CREDENTIALS_FILE")
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path) // #nosec G703 — operator-configured path from env var
+	if err != nil {
+		return fmt.Errorf("failed to read AUTH_CREDENTIALS_FILE: %w", err)
+	}
+	var credentials []GatewayCredential
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&credentials); err != nil {
+		return fmt.Errorf("failed to parse AUTH_CREDENTIALS_FILE: %w", err)
+	}
+	config.Auth.Credentials = append(config.Auth.Credentials, credentials...)
+	return nil
+}
+
 func parseCosmianKeyRefs(value string) []CosmianKeyReference {
 	parts := strings.Split(value, ",")
 	refs := make([]CosmianKeyReference, 0, len(parts))
@@ -1846,13 +2002,8 @@ func (c *Config) Validate() error {
 	if len(c.Auth.Credentials) == 0 {
 		return fmt.Errorf("auth.credentials must not be empty; at least one credential is required")
 	}
-	for i, cred := range c.Auth.Credentials {
-		if cred.AccessKey == "" {
-			return fmt.Errorf("auth.credentials[%d]: access_key is required", i)
-		}
-		if cred.SecretKey == "" && cred.SecretKeyEnv == "" {
-			return fmt.Errorf("auth.credentials[%d]: either secret_key or secret_key_env is required", i)
-		}
+	if err := ValidateGatewayCredentials(c.Auth.Credentials, false); err != nil {
+		return err
 	}
 
 	// Backend credentials are always required
@@ -2311,14 +2462,15 @@ func BoolPtr(v bool) *bool {
 
 // ConfigReloader handles hot-reloading of non-crypto configuration settings.
 type ConfigReloader struct {
-	currentConfig *Config
-	configPath    string
-	logger        *logrus.Logger
-	watcher       *fsnotify.Watcher
-	signalChan    chan os.Signal
-	stopChan      chan struct{}
-	mu            sync.RWMutex
-	onReload      func(*Config, *Config) error // callback for applying config changes
+	currentConfig   *Config
+	configPath      string
+	credentialsPath string
+	logger          *logrus.Logger
+	watcher         *fsnotify.Watcher
+	signalChan      chan os.Signal
+	stopChan        chan struct{}
+	mu              sync.RWMutex
+	onReload        func(*Config, *Config) error // callback for applying config changes
 }
 
 // NewConfigReloader creates a new configuration reloader that watches for file changes
@@ -2330,19 +2482,27 @@ func NewConfigReloader(configPath string, initialConfig *Config, logger *logrus.
 	}
 
 	if configPath != "" {
-		if err := watcher.Add(configPath); err != nil {
-			watcher.Close()
-			return nil, fmt.Errorf("failed to watch config file: %w", err)
+		if err := watcher.Add(filepath.Dir(configPath)); err != nil {
+			_ = watcher.Close()
+			return nil, fmt.Errorf("failed to watch config directory: %w", err)
+		}
+	}
+	credentialsPath := os.Getenv("AUTH_CREDENTIALS_FILE")
+	if credentialsPath != "" && filepath.Dir(credentialsPath) != filepath.Dir(configPath) {
+		if err := watcher.Add(filepath.Dir(credentialsPath)); err != nil {
+			_ = watcher.Close()
+			return nil, fmt.Errorf("failed to watch credentials directory: %w", err)
 		}
 	}
 
 	reloader := &ConfigReloader{
-		currentConfig: initialConfig,
-		configPath:    configPath,
-		logger:        logger,
-		watcher:       watcher,
-		signalChan:    make(chan os.Signal, 1),
-		stopChan:      make(chan struct{}),
+		currentConfig:   initialConfig,
+		configPath:      configPath,
+		credentialsPath: credentialsPath,
+		logger:          logger,
+		watcher:         watcher,
+		signalChan:      make(chan os.Signal, 1),
+		stopChan:        make(chan struct{}),
 	}
 
 	// Register for SIGHUP signal
@@ -2373,13 +2533,12 @@ func (r *ConfigReloader) Start() {
 			if !ok {
 				return
 			}
-			if event.Has(fsnotify.Write) && event.Name == r.configPath {
+			if (event.Name == r.configPath || event.Name == r.credentialsPath) && (event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename)) {
 				r.logger.Info("Configuration file changed, reloading...")
 				r.reloadConfig()
 
-			} else if event.Has(fsnotify.Remove) && event.Name == r.configPath {
-				r.logger.Warn("Configuration file removed, stopping file watch")
-				r.watcher.Remove(r.configPath)
+			} else if event.Has(fsnotify.Remove) && (event.Name == r.configPath || event.Name == r.credentialsPath) {
+				r.logger.Warn("Configuration file removed; retaining directory watch for atomic replacement")
 			}
 
 		case err, ok := <-r.watcher.Errors:
@@ -2400,7 +2559,7 @@ func (r *ConfigReloader) Start() {
 // Stop stops the configuration reloader.
 func (r *ConfigReloader) Stop() {
 	close(r.stopChan)
-	r.watcher.Close()
+	_ = r.watcher.Close()
 	signal.Stop(r.signalChan)
 }
 
