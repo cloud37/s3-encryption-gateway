@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Security: bound metadata and password-envelope KDF costs with configurable decrypt limits.
+- Security (V1.0-SEC-40): always redact SigV2 and SigV4 presigned signatures from access logs and traces.
 
 All notable changes to this project will be documented in this file.
 

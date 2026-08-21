@@ -373,6 +373,10 @@ tracing:
   sampling_ratio: 0.05  # 5% sampling
 ```
 
+Presigned SigV2 `Signature` and SigV4 `X-Amz-Signature` query values are always
+redacted in traces and access logs, independently of `tracing.redact_sensitive`.
+When broad tracing redaction is disabled, benign query values remain visible.
+
 ### Logging Configuration (`logging`)
 
 Access logging settings.
