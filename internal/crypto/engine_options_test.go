@@ -1,8 +1,35 @@
 package crypto
 
 import (
+	"errors"
 	"testing"
 )
+
+func TestNewEngineWithOpts_WriteCostExceedsDecryptLimit(t *testing.T) {
+	limits := DefaultKDFLimits()
+	limits.PBKDF2MaxIterations = 100000
+	_, err := NewEngineWithOpts([]byte("write-limit-engine-password"), WithKDFLimits(limits), WithPBKDF2Iterations(100001))
+	var cost *ErrKDFCostTooHigh
+	if !errors.As(err, &cost) {
+		t.Fatalf("expected typed cost error, got %v", err)
+	}
+}
+
+func TestEngineDeriveKeyWithParams_RejectsUnvalidatedCosts(t *testing.T) {
+	eng, err := NewEngineWithOpts([]byte("derive-limit-engine-password"), WithPBKDF2Iterations(100000), WithKDFLimits(KDFLimits{PBKDF2MaxIterations: 100000, Argon2idMaxTime: 1, Argon2idMaxMemory: 1, Argon2idMaxThreads: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := eng.(*engine)
+	for _, p := range []KDFParams{{Algorithm: KDFAlgPBKDF2SHA256, Iterations: 100001}, {Algorithm: KDFAlgArgon2id, Time: 2, Memory: 1, Threads: 1}, {Algorithm: KDFAlgPBKDF2SHA256, Iterations: MaxPBKDF2Iterations + 1}} {
+		_, err := e.deriveKeyWithParams(make([]byte, saltSize), p)
+		var invalid *ErrInvalidKDFParams
+		var cost *ErrKDFCostTooHigh
+		if !errors.As(err, &invalid) && !errors.As(err, &cost) {
+			t.Errorf("%+v: untyped error %v", p, err)
+		}
+	}
+}
 
 // TestWithKeyManager_SetsManager verifies that the WithKeyManager option sets
 // the kmsManager field on the engine when a non-nil KeyManager is provided.
@@ -271,6 +298,33 @@ func TestDeriveKeyWithParams_InvalidSaltSize(t *testing.T) {
 	_, err = e.deriveKeyWithParams([]byte("short"), params)
 	if err == nil {
 		t.Fatal("deriveKeyWithParams() expected error for invalid salt size, got nil")
+	}
+}
+
+func TestDeriveKeyWithParams_ValidPBKDF2(t *testing.T) {
+	eng, err := NewEngineWithOpts([]byte("test-derivekeyparams-valid-password"), WithPBKDF2Iterations(MinPBKDF2Iterations))
+	if err != nil {
+		t.Fatalf("NewEngineWithOpts() error: %v", err)
+	}
+	e := eng.(*engine)
+	key, err := e.deriveKeyWithParams(make([]byte, saltSize), KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: MinPBKDF2Iterations})
+	if err != nil || len(key) != aesKeySize {
+		t.Fatalf("valid PBKDF2 derivation failed: len=%d err=%v", len(key), err)
+	}
+}
+
+func TestDeriveKeyWithParams_ValidArgon2id(t *testing.T) {
+	if FIPSEnabled() {
+		t.Skip("Argon2id is unavailable in FIPS builds")
+	}
+	eng, err := NewEngineWithOpts([]byte("test-derivekeyparams-argon-password"), WithKDFAlgorithm(string(KDFAlgArgon2id)), WithArgon2idParams(1, 1, 1))
+	if err != nil {
+		t.Fatalf("NewEngineWithOpts() error: %v", err)
+	}
+	e := eng.(*engine)
+	key, err := e.deriveKeyWithParams(make([]byte, saltSize), KDFParams{Algorithm: KDFAlgArgon2id, Time: 1, Memory: 1, Threads: 1})
+	if err != nil || len(key) != aesKeySize {
+		t.Fatalf("valid Argon2id derivation failed: len=%d err=%v", len(key), err)
 	}
 }
 

@@ -4,7 +4,6 @@ package crypto
 
 import (
 	"errors"
-	"fmt"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -16,8 +15,8 @@ import (
 var ErrArgon2NotEnabled = errors.New("argon2id KDF is not enabled in this build")
 
 func deriveKeyArgon2id(password, salt []byte, params KDFParams) ([]byte, error) {
-	if params.Memory == 0 {
-		return nil, fmt.Errorf("argon2id: memory must be > 0")
+	if err := ValidateKDFParams(params, DefaultKDFLimits()); err != nil {
+		return nil, err
 	}
 	key := argon2.IDKey(password, salt, params.Time, params.Memory, params.Threads, aesKeySize)
 	return key, nil

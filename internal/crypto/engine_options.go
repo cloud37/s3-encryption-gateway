@@ -20,10 +20,16 @@ func WithKeyManager(km KeyManager) Option {
 // WithPBKDF2Iterations sets the PBKDF2 iteration count for the engine.
 func WithPBKDF2Iterations(n int) Option {
 	return func(e *engine) {
-		if n >= MinPBKDF2Iterations {
-			e.pbkdf2Iterations = n
+		if n < MinPBKDF2Iterations || n > MaxPBKDF2Iterations {
+			e.optionErr = invalidKDF(KDFAlgPBKDF2SHA256, "iterations", uint64(max(n, 0)), "outside hard bounds")
+			return
 		}
+		e.pbkdf2Iterations = n
 	}
+}
+
+func WithKDFLimits(limits KDFLimits) Option {
+	return func(e *engine) { e.kdfLimits = limits }
 }
 
 // WithKDFAlgorithm sets the KDF algorithm for new object encryption.
@@ -43,13 +49,20 @@ func WithKDFAlgorithm(alg string) Option {
 // (keeps engine defaults: t=2, m=19456, p=1).
 func WithArgon2idParams(time, memory uint32, threads uint8) Option {
 	return func(e *engine) {
-		if time > 0 && memory > 0 && threads > 0 {
-			e.argon2idParams = Argon2idConfig{
-				Time:    time,
-				Memory:  memory,
-				Threads: threads,
-			}
+		if time == 0 && memory == 0 && threads == 0 {
+			return
 		}
+		params := KDFParams{Algorithm: KDFAlgArgon2id, Time: time, Memory: memory, Threads: threads}
+		if err := ValidateKDFParams(params, DefaultKDFLimits()); err != nil {
+			e.optionErr = err
+			return
+		}
+		e.argon2idParams = Argon2idConfig{
+			Time:    time,
+			Memory:  memory,
+			Threads: threads,
+		}
+
 	}
 }
 
@@ -161,6 +174,15 @@ func NewEngineWithOpts(password []byte, opts ...Option) (EncryptionEngine, error
 	e := eng.(*engine)
 	for _, o := range opts {
 		o(e)
+	}
+	if e.optionErr != nil {
+		return nil, e.optionErr
+	}
+	if err := ValidateKDFParams(KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: e.pbkdf2Iterations}, e.kdfLimits); err != nil {
+		return nil, err
+	}
+	if err := ValidateKDFParams(KDFParams{Algorithm: KDFAlgArgon2id, Time: e.argon2idParams.Time, Memory: e.argon2idParams.Memory, Threads: e.argon2idParams.Threads}, e.kdfLimits); e.kdfAlgorithm == KDFAlgArgon2id && err != nil {
+		return nil, err
 	}
 	return e, nil
 }

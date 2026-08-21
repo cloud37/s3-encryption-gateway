@@ -62,6 +62,7 @@ type passwordKeyManager struct {
 	argon2idMemory   uint32
 	argon2idThreads  uint8
 	fipsErr          error
+	kdfLimits        KDFLimits
 	closed           bool
 }
 
@@ -90,6 +91,10 @@ func (m *passwordKeyManager) kdfParamsBytes() []byte {
 }
 
 func (m *passwordKeyManager) deriveWrappingKey(salt []byte) ([]byte, error) {
+	params := KDFParams{Algorithm: m.kdfAlgorithm, Iterations: m.pbkdf2Iterations, Time: m.argon2idTime, Memory: m.argon2idMemory, Threads: m.argon2idThreads}
+	if err := ValidateKDFParams(params, m.kdfLimits); err != nil {
+		return nil, err
+	}
 	switch m.kdfAlgorithm {
 	case KDFAlgArgon2id:
 		return deriveKeyArgon2id(m.password, salt, KDFParams{
@@ -108,6 +113,9 @@ func (m *passwordKeyManager) deriveWrappingKey(salt []byte) ([]byte, error) {
 }
 
 func (m *passwordKeyManager) deriveUnwrapKey(salt []byte, alg KDFAlgorithm, pbkdf2Iter int, argon2idTime, argon2idMem uint32, argon2idThr uint8) ([]byte, error) {
+	if err := ValidateKDFParams(KDFParams{Algorithm: alg, Iterations: pbkdf2Iter, Time: argon2idTime, Memory: argon2idMem, Threads: argon2idThr}, m.kdfLimits); err != nil {
+		return nil, err
+	}
 	switch alg {
 	case KDFAlgArgon2id:
 		return deriveKeyArgon2id(m.password, salt, KDFParams{
@@ -146,6 +154,7 @@ func NewPasswordKeyManager(password []byte, opts ...PasswordKMOption) (KeyManage
 		argon2idTime:     2,
 		argon2idMemory:   19456,
 		argon2idThreads:  1,
+		kdfLimits:        DefaultKDFLimits(),
 	}
 
 	for _, opt := range opts {
@@ -156,6 +165,10 @@ func NewPasswordKeyManager(password []byte, opts ...PasswordKMOption) (KeyManage
 		zeroBytes(pw)
 		m.password = nil
 		return nil, m.fipsErr
+	}
+	if err := ValidateKDFParams(KDFParams{Algorithm: m.kdfAlgorithm, Iterations: m.pbkdf2Iterations, Time: m.argon2idTime, Memory: m.argon2idMemory, Threads: m.argon2idThreads}, m.kdfLimits); err != nil {
+		zeroBytes(pw)
+		return nil, err
 	}
 
 	return m, nil
@@ -246,19 +259,22 @@ func (m *passwordKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelop
 		return nil, fmt.Errorf("%w: payload too short (%d bytes)", ErrInvalidEnvelope, len(payload))
 	}
 
-	var v2Err error
 	var v1Err error
 
 	// --- v2 format detection (marker == 1) ---
-	const minV2Payload = saltSize + nonceSize + tagSize + 5 // marker(4) + alg(1)
-	if len(payload) >= minV2Payload {
+	// The generic minimum-length check above guarantees the marker and algorithm
+	// byte are present. A recognized marker is authoritative even if the rest of
+	// the v2 envelope is truncated, so it must not fall through to legacy PBKDF2.
+	if len(payload) >= 5 {
 		marker := binary.BigEndian.Uint32(payload[:4])
 		if marker == envelopeVersionMarker {
 			plaintext, err := m.tryUnwrapV2(payload)
 			if err == nil {
 				return plaintext, nil
 			}
-			v2Err = err
+			// The v2 marker is authoritative. Never reinterpret a malformed,
+			// unsupported, or unauthenticated v2 envelope as an older format.
+			return nil, fmt.Errorf("%w: %w", ErrUnwrapFailed, err)
 		}
 	}
 
@@ -294,11 +310,8 @@ func (m *passwordKeyManager) UnwrapKey(ctx context.Context, envelope *KeyEnvelop
 	}
 
 	// Report the most specific error we have.
-	if v2Err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnwrapFailed, v2Err)
-	}
 	if v1Err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnwrapFailed, v1Err)
+		return nil, fmt.Errorf("%w: %w", ErrUnwrapFailed, v1Err)
 	}
 	return nil, fmt.Errorf("%w: %v", ErrUnwrapFailed, err)
 }
@@ -316,7 +329,7 @@ func (m *passwordKeyManager) tryUnwrapV2(payload []byte) ([]byte, error) {
 	case envelopeAlgPBKDF2:
 		alg = KDFAlgPBKDF2SHA256
 		if len(payload) < 5+4+saltSize+nonceSize+tagSize {
-			return nil, fmt.Errorf("password_keymanager: v2 PBKDF2 payload too short")
+			return nil, invalidKDF(alg, "format", uint64(len(payload)), "v2 PBKDF2 payload too short")
 		}
 		pbkdf2Iter = int(binary.BigEndian.Uint32(payload[5:9]))
 		paramsEnd = 9
@@ -324,7 +337,7 @@ func (m *passwordKeyManager) tryUnwrapV2(payload []byte) ([]byte, error) {
 	case envelopeAlgArgon2id:
 		alg = KDFAlgArgon2id
 		if len(payload) < 5+9+saltSize+nonceSize+tagSize {
-			return nil, fmt.Errorf("password_keymanager: v2 Argon2id payload too short")
+			return nil, invalidKDF(alg, "format", uint64(len(payload)), "v2 Argon2id payload too short")
 		}
 		arTime = binary.BigEndian.Uint32(payload[5:9])
 		arMem = binary.BigEndian.Uint32(payload[9:13])
@@ -332,7 +345,7 @@ func (m *passwordKeyManager) tryUnwrapV2(payload []byte) ([]byte, error) {
 		paramsEnd = 14
 
 	default:
-		return nil, fmt.Errorf("password_keymanager: unknown v2 algorithm byte 0x%02x", algByte)
+		return nil, invalidKDF("", "algorithm", uint64(algByte), "unsupported v2 algorithm")
 	}
 
 	salt := payload[paramsEnd : paramsEnd+saltSize]
@@ -362,21 +375,31 @@ func (m *passwordKeyManager) tryUnwrapV2(payload []byte) ([]byte, error) {
 // creation, or authentication).  The caller is responsible for trying a
 // different format/iteration count on failure.
 func (m *passwordKeyManager) tryUnwrap(salt, nonce, sealed []byte, iterations int) ([]byte, error) {
+	if err := ValidateKDFParams(KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: iterations}, m.kdfLimits); err != nil {
+		return nil, err
+	}
 	wk, err := pbkdf2.Key(sha256.New, string(m.password), salt, iterations, aesKeySize)
 	if err != nil {
 		return nil, err
 	}
 	defer zeroBytes(wk)
 
-	block, err := aes.NewCipher(wk)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
+	return openPasswordKMGCM(wk, nonce, sealed)
+}
 
+func newPasswordKMGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func openPasswordKMGCM(key, nonce, sealed []byte) ([]byte, error) {
+	gcm, err := newPasswordKMGCM(key)
+	if err != nil {
+		return nil, err
+	}
 	return gcm.Open(nil, nonce, sealed, nil)
 }
 
@@ -413,4 +436,3 @@ func IsPasswordKeyManager(km KeyManager) bool {
 	_, ok := km.(*passwordKeyManager)
 	return ok
 }
-

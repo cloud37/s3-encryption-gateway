@@ -15,11 +15,9 @@ func WithPasswordKMArgon2id(time, memory uint32, threads uint8) PasswordKMOption
 // iteration count. This is the only allowed option in FIPS builds.
 func WithPasswordKMPBKDF2(iterations int) PasswordKMOption {
 	return func(m *passwordKeyManager) {
-		if iterations < MinPBKDF2Iterations {
-			iterations = DefaultPBKDF2Iterations
-		}
-		if iterations > MaxPBKDF2Iterations {
-			iterations = MaxPBKDF2Iterations
+		if iterations < MinPBKDF2Iterations || iterations > MaxPBKDF2Iterations {
+			m.fipsErr = invalidKDF(KDFAlgPBKDF2SHA256, "iterations", uint64(max(iterations, 0)), "outside hard bounds")
+			return
 		}
 		m.kdfAlgorithm = KDFAlgPBKDF2SHA256
 		m.pbkdf2Iterations = iterations
@@ -27,4 +25,8 @@ func WithPasswordKMPBKDF2(iterations int) PasswordKMOption {
 		m.argon2idMemory = 0
 		m.argon2idThreads = 0
 	}
+}
+
+func WithPasswordKMKDFLimits(limits KDFLimits) PasswordKMOption {
+	return func(m *passwordKeyManager) { m.kdfLimits = limits }
 }

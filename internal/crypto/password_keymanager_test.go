@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -8,12 +9,24 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewPasswordKeyManager_WriteCostExceedsDecryptLimit(t *testing.T) {
+	limits := DefaultKDFLimits()
+	limits.PBKDF2MaxIterations = 100000
+	_, err := NewPasswordKeyManager([]byte("password-manager-write-limit"), WithPasswordKMKDFLimits(limits), WithPasswordKMPBKDF2(100001))
+	var cost *ErrKDFCostTooHigh
+	if !errors.As(err, &cost) {
+		t.Fatalf("expected typed cost error, got %v", err)
+	}
+}
 
 var testPassword = []byte("a-sufficiently-long-test-password")
 
@@ -158,7 +171,6 @@ func TestIsPasswordKeyManager(t *testing.T) {
 	assert.True(t, IsPasswordKeyManager(km))
 	assert.False(t, IsPasswordKeyManager(nil))
 }
-
 
 func TestPasswordKM_WrapUnwrap_100k(t *testing.T) {
 	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(100000))
@@ -307,4 +319,206 @@ func TestPasswordKM_WrongIterations_Fails(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnwrapFailed)
 }
 
+func sec39V2Payload(alg byte, params []byte) []byte {
+	p := make([]byte, 4+1+len(params)+saltSize+nonceSize+tagSize)
+	binary.BigEndian.PutUint32(p[:4], envelopeVersionMarker)
+	p[4] = alg
+	copy(p[5:], params)
+	return p
+}
 
+func TestPasswordKM_UnwrapKey_V2ValidationFailsClosed(t *testing.T) {
+	limits := DefaultKDFLimits()
+	limits.PBKDF2MaxIterations = 100000
+	limits.Argon2idMaxMemory = 1
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMKDFLimits(limits), WithPasswordKMPBKDF2(100000))
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name      string
+		data      []byte
+		kind      string
+		algorithm KDFAlgorithm
+		parameter string
+		requested uint64
+		maximum   uint64
+		value     uint64
+	}{
+		{"pbkdf2-cost", func() []byte {
+			p := make([]byte, 4)
+			binary.BigEndian.PutUint32(p, 100001)
+			return sec39V2Payload(envelopeAlgPBKDF2, p)
+		}(), "cost", KDFAlgPBKDF2SHA256, "iterations", 100001, 100000, 0},
+		{"pbkdf2-invalid", func() []byte {
+			p := make([]byte, 4)
+			binary.BigEndian.PutUint32(p, 1)
+			return sec39V2Payload(envelopeAlgPBKDF2, p)
+		}(), "invalid", KDFAlgPBKDF2SHA256, "iterations", 0, 0, 1},
+		{"argon-cost", func() []byte {
+			p := make([]byte, 9)
+			binary.BigEndian.PutUint32(p[0:4], 1)
+			binary.BigEndian.PutUint32(p[4:8], 2)
+			p[8] = 1
+			return sec39V2Payload(envelopeAlgArgon2id, p)
+		}(), "cost", KDFAlgArgon2id, "memory", 2, 1, 0},
+		{"argon-invalid", func() []byte {
+			p := make([]byte, 9)
+			binary.BigEndian.PutUint32(p[0:4], 0)
+			binary.BigEndian.PutUint32(p[4:8], 1)
+			p[8] = 1
+			return sec39V2Payload(envelopeAlgArgon2id, p)
+		}(), "invalid", KDFAlgArgon2id, "time", 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := km.UnwrapKey(context.Background(), &KeyEnvelope{Provider: passwordKMProvider, Ciphertext: tc.data}, nil)
+			switch tc.kind {
+			case "cost":
+				var cost *ErrKDFCostTooHigh
+				if !errors.As(err, &cost) {
+					t.Fatalf("expected ErrKDFCostTooHigh through UnwrapKey, got %v", err)
+				}
+				if cost.Algorithm != tc.algorithm || cost.Parameter != tc.parameter || cost.Requested != tc.requested || cost.Maximum != tc.maximum {
+					t.Fatalf("unexpected PBKDF2 cost details: %+v", cost)
+				}
+			case "invalid":
+				var invalid *ErrInvalidKDFParams
+				if !errors.As(err, &invalid) {
+					t.Fatalf("expected ErrInvalidKDFParams through UnwrapKey, got %v", err)
+				}
+				if invalid.Algorithm != tc.algorithm || invalid.Parameter != tc.parameter || invalid.Value != tc.value {
+					t.Fatalf("unexpected invalid details: %+v", invalid)
+				}
+			}
+		})
+	}
+}
+
+func TestPasswordKM_UnwrapKey_V2MarkerDoesNotFallback(t *testing.T) {
+	km, err := NewPasswordKeyManager(testPassword)
+	require.NoError(t, err)
+	payload := sec39V2Payload(envelopeAlgPBKDF2, []byte{0, 1, 0, 0})
+	_, err = km.UnwrapKey(context.Background(), &KeyEnvelope{Provider: passwordKMProvider, Ciphertext: payload}, nil)
+	var invalid *ErrInvalidKDFParams
+	if !errors.As(err, &invalid) {
+		t.Fatalf("recognized v2 marker fell through or lost typed error: %v", err)
+	}
+}
+
+func TestPasswordKM_UnwrapKey_UnknownV2AlgorithmFailsClosed(t *testing.T) {
+	km, err := NewPasswordKeyManager(testPassword)
+	require.NoError(t, err)
+	payload := sec39V2Payload(0xff, nil)
+	_, err = km.UnwrapKey(context.Background(), &KeyEnvelope{Provider: passwordKMProvider, Ciphertext: payload}, nil)
+	var invalid *ErrInvalidKDFParams
+	if !errors.As(err, &invalid) {
+		t.Fatalf("unknown v2 algorithm did not return ErrInvalidKDFParams: %v", err)
+	}
+	if invalid.Parameter != "algorithm" || invalid.Value != 0xff {
+		t.Fatalf("unexpected unknown-algorithm details: %+v", invalid)
+	}
+}
+
+func TestPasswordKM_UnwrapKey_TruncatedV2DoesNotFallback(t *testing.T) {
+	km, err := NewPasswordKeyManager(testPassword)
+	require.NoError(t, err)
+
+	for _, size := range []int{saltSize + nonceSize + tagSize, saltSize + nonceSize + tagSize + 4} {
+		t.Run(fmt.Sprintf("%d-bytes", size), func(t *testing.T) {
+			payload := make([]byte, size)
+			binary.BigEndian.PutUint32(payload[:4], envelopeVersionMarker)
+			payload[4] = envelopeAlgPBKDF2
+			_, err := km.UnwrapKey(context.Background(), &KeyEnvelope{Provider: passwordKMProvider, Ciphertext: payload}, nil)
+			var invalid *ErrInvalidKDFParams
+			if !errors.As(err, &invalid) {
+				t.Fatalf("truncated v2 envelope fell through or lost typed error: %v", err)
+			}
+			if invalid.Algorithm != KDFAlgPBKDF2SHA256 || invalid.Parameter != "format" {
+				t.Fatalf("unexpected truncated-v2 details: %+v", invalid)
+			}
+		})
+	}
+}
+
+func TestPasswordKM_UnwrapKey_V1AndLegacyCompatibility(t *testing.T) {
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(100000))
+	require.NoError(t, err)
+	dek := []byte("01234567890123456789012345678901")
+	for _, tc := range []struct {
+		name       string
+		iterations int
+		prefix     bool
+	}{
+		{name: "v1-maximum", iterations: MaxPBKDF2Iterations, prefix: true},
+		{name: "legacy", iterations: LegacyPBKDF2Iterations, prefix: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := sec39PBKDF2Envelope(t, testPassword, dek, tc.iterations, tc.prefix)
+			got, err := km.UnwrapKey(context.Background(), env, nil)
+			require.NoError(t, err)
+			assert.Equal(t, dek, got)
+		})
+	}
+}
+
+func sec39PBKDF2Envelope(t *testing.T, password, plaintext []byte, iterations int, v1 bool) *KeyEnvelope {
+	t.Helper()
+	salt := bytes.Repeat([]byte{0x31}, saltSize)
+	nonce := bytes.Repeat([]byte{0x42}, nonceSize)
+	wk, err := pbkdf2.Key(sha256.New, string(password), salt, iterations, aesKeySize)
+	require.NoError(t, err)
+	block, err := aes.NewCipher(wk)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+	sealed := gcm.Seal(nil, nonce, plaintext, nil)
+	payload := make([]byte, 0, 4+len(salt)+len(nonce)+len(sealed))
+	if v1 {
+		prefix := make([]byte, 4)
+		binary.BigEndian.PutUint32(prefix, uint32(iterations))
+		payload = append(payload, prefix...)
+	}
+	payload = append(payload, salt...)
+	payload = append(payload, nonce...)
+	payload = append(payload, sealed...)
+	return &KeyEnvelope{Provider: passwordKMProvider, Ciphertext: payload}
+}
+
+func TestPasswordKM_TryUnwrap_SuccessAndAuthenticationFailure(t *testing.T) {
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(100000))
+	require.NoError(t, err)
+	salt := bytes.Repeat([]byte{7}, saltSize)
+	nonce := bytes.Repeat([]byte{8}, nonceSize)
+	wk, err := pbkdf2.Key(sha256.New, string(testPassword), salt, 100000, aesKeySize)
+	require.NoError(t, err)
+	block, err := aes.NewCipher(wk)
+	require.NoError(t, err)
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+	sealed := gcm.Seal(nil, nonce, []byte("dek"), nil)
+	got, err := km.(*passwordKeyManager).tryUnwrap(salt, nonce, sealed, 100000)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("dek"), got)
+	sealed[0] ^= 1
+	_, err = km.(*passwordKeyManager).tryUnwrap(salt, nonce, sealed, 100000)
+	require.Error(t, err)
+}
+
+func TestOpenPasswordKMGCM_InvalidKey(t *testing.T) {
+	_, err := openPasswordKMGCM([]byte("short"), make([]byte, nonceSize), make([]byte, tagSize))
+	if err == nil {
+		t.Fatal("expected invalid AES key error")
+	}
+}
+
+func TestPasswordKM_UnwrapKey_V1AboveConfiguredLimit(t *testing.T) {
+	limits := DefaultKDFLimits()
+	limits.PBKDF2MaxIterations = 100000
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(100000), WithPasswordKMKDFLimits(limits))
+	require.NoError(t, err)
+	payload := make([]byte, 4+saltSize+nonceSize+tagSize)
+	binary.BigEndian.PutUint32(payload[:4], 100001)
+	_, err = km.UnwrapKey(context.Background(), &KeyEnvelope{Provider: passwordKMProvider, Ciphertext: payload}, nil)
+	var cost *ErrKDFCostTooHigh
+	if !errors.As(err, &cost) {
+		t.Fatalf("expected v1 operational limit error through dispatch, got %v", err)
+	}
+}

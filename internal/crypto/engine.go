@@ -168,6 +168,8 @@ type engine struct {
 	// objects without the MetaLegacyNoAAD marker. Default false (fail-closed).
 	// Used for controlled recovery windows. See V1.0-CLI-2 Phase D.
 	allowUnmarkedNoAAD bool
+	kdfLimits          KDFLimits
+	optionErr          error
 }
 
 func (e *engine) expandMetadataForCrypto(metadata map[string]string) (map[string]string, error) {
@@ -267,6 +269,7 @@ func NewEngineWithChunkingAndProvider(password []byte, preferredAlgorithm string
 		compactor:           compactor,
 		bufferPool:          GetGlobalBufferPool(),
 		tracer:              otel.Tracer("s3-encryption-gateway.crypto"),
+		kdfLimits:           DefaultKDFLimits(),
 	}
 	e.maybeWireObserver()
 	return e, nil
@@ -328,19 +331,18 @@ func (e *engine) deriveKeyWithParams(salt []byte, params KDFParams) ([]byte, err
 	if len(salt) != saltSize {
 		return nil, fmt.Errorf("invalid salt size: expected %d bytes, got %d", saltSize, len(salt))
 	}
-
-	switch params.Algorithm {
-	case KDFAlgPBKDF2SHA256:
-		key, err := pbkdf2.Key(sha256.New, string(e.password), salt, params.Iterations, aesKeySize)
-		if err != nil {
-			return nil, fmt.Errorf("failed to derive key with PBKDF2: %w", err)
-		}
-		return key, nil
-	case KDFAlgArgon2id:
-		return deriveKeyArgon2id(e.password, salt, params)
-	default:
-		return nil, fmt.Errorf("unsupported KDF algorithm: %s", params.Algorithm)
+	if err := ValidateKDFParams(params, e.kdfLimits); err != nil {
+		return nil, err
 	}
+
+	if params.Algorithm == KDFAlgArgon2id {
+		return deriveKeyArgon2id(e.password, salt, params)
+	}
+	key, err := pbkdf2.Key(sha256.New, string(e.password), salt, params.Iterations, aesKeySize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive key with PBKDF2: %w", err)
+	}
+	return key, nil
 }
 
 // deriveKey derives a key for new objects using the engine's configured algorithm.

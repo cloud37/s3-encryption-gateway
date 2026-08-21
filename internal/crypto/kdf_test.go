@@ -1,9 +1,81 @@
 package crypto
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
+
+func TestParseKDFParams_HardBounds(t *testing.T) {
+	cases := []struct {
+		raw string
+		ok  bool
+	}{
+		{"pbkdf2-sha256:100000", true}, {"pbkdf2-sha256:2000000", true}, {"pbkdf2-sha256:2000001", false},
+		{"argon2id:1:1:1", true}, {"argon2id:10:1048576:255", true}, {"argon2id:11:1:1", false}, {"argon2id:1:1048577:1", false}, {"argon2id:1:1:0", false},
+	}
+	for _, tc := range cases {
+		_, err := ParseKDFParams(tc.raw)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err=%v", tc.raw, err)
+		}
+		if err != nil {
+			var typed *ErrInvalidKDFParams
+			if !errors.As(err, &typed) {
+				t.Errorf("%s: not typed", tc.raw)
+			}
+		}
+	}
+}
+
+func TestValidateKDFParams_OperationalLimits(t *testing.T) {
+	limits := KDFLimits{PBKDF2MaxIterations: 100000, Argon2idMaxTime: 1, Argon2idMaxMemory: 1, Argon2idMaxThreads: 1}
+	cases := []KDFParams{{Algorithm: KDFAlgPBKDF2SHA256, Iterations: 100001}, {Algorithm: KDFAlgArgon2id, Time: 2, Memory: 1, Threads: 1}, {Algorithm: KDFAlgArgon2id, Time: 1, Memory: 2, Threads: 1}, {Algorithm: KDFAlgArgon2id, Time: 1, Memory: 1, Threads: 2}}
+	for _, p := range cases {
+		var e *ErrKDFCostTooHigh
+		if !errors.As(ValidateKDFParams(p, limits), &e) || e.Requested <= e.Maximum {
+			t.Errorf("expected typed cost error for %+v: %v", p, ValidateKDFParams(p, limits))
+		}
+	}
+}
+
+func TestKDFErrors_ErrorsAsThroughWrapping(t *testing.T) {
+	err := fmt.Errorf("outer: %w", &ErrKDFCostTooHigh{Algorithm: KDFAlgPBKDF2SHA256, Parameter: "iterations", Requested: 2, Maximum: 1})
+	var typed *ErrKDFCostTooHigh
+	if !errors.As(err, &typed) {
+		t.Fatal("errors.As failed")
+	}
+}
+
+func TestKDFLimits_ConcurrentDerivations(t *testing.T) {
+	limits := DefaultKDFLimits()
+	params := KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: MinPBKDF2Iterations}
+	results := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		go func() { results <- ValidateKDFParams(params, limits) }()
+	}
+	for i := 0; i < 16; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if limits != DefaultKDFLimits() {
+		t.Fatal("shared limits mutated")
+	}
+}
+
+func FuzzParseKDFParams_Bounded(f *testing.F) {
+	f.Add("pbkdf2-sha256:100000")
+	f.Add("argon2id:1:1:1")
+	f.Fuzz(func(t *testing.T, raw string) {
+		p, err := ParseKDFParams(raw)
+		if err == nil {
+			if err := ValidateKDFParams(p, DefaultKDFLimits()); err != nil {
+				t.Fatalf("successful parse failed validation: %v", err)
+			}
+		}
+	})
+}
 
 func TestFormatKDFParams_PBKDF2(t *testing.T) {
 	p := KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: 100000}
