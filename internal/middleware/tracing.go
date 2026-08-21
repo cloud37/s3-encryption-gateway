@@ -30,16 +30,16 @@ func TracingMiddleware(redactSensitive bool, extractor *util.IPExtractor) func(h
 			spanName := getSpanName(r.Method, bucket, key)
 			ctx, span := tracer.Start(ctx, spanName,
 				trace.WithSpanKind(trace.SpanKindServer),
-		trace.WithAttributes(
-			semconv.HTTPMethod(r.Method),
-			semconv.HTTPScheme(r.URL.Scheme),
-			semconv.HTTPTarget(r.URL.Path),
-			semconv.HTTPURL(sanitisedURL),
-			semconv.HTTPRoute(r.URL.Path),
-			attribute.String("http.host", r.Host),
-			attribute.String("http.user_agent", r.UserAgent()),
-			attribute.String("http.remote_addr", getRemoteAddr(r, extractor)),
-		),
+				trace.WithAttributes(
+					semconv.HTTPMethod(r.Method),
+					semconv.HTTPScheme(r.URL.Scheme),
+					semconv.HTTPTarget(r.URL.Path),
+					semconv.HTTPURL(sanitisedURL),
+					semconv.HTTPRoute(r.URL.Path),
+					attribute.String("http.host", r.Host),
+					attribute.String("http.user_agent", r.UserAgent()),
+					attribute.String("http.remote_addr", getRemoteAddr(r, extractor)),
+				),
 			)
 
 			// Add bucket and key attributes if available
@@ -55,7 +55,7 @@ func TracingMiddleware(redactSensitive bool, extractor *util.IPExtractor) func(h
 				if redactSensitive {
 					span.SetAttributes(attribute.String("http.query", "[REDACTED]"))
 				} else {
-					span.SetAttributes(attribute.String("http.query", r.URL.RawQuery))
+					span.SetAttributes(attribute.String("http.query", RedactSensitiveQuery(r.URL.RawQuery)))
 				}
 			}
 
@@ -65,7 +65,7 @@ func TracingMiddleware(redactSensitive bool, extractor *util.IPExtractor) func(h
 			// Wrap response writer to capture status code
 			rw := &tracingResponseWriter{
 				ResponseWriter: w,
-				span:          span,
+				span:           span,
 			}
 
 			// Update request context
@@ -176,7 +176,7 @@ func addHeadersToSpan(span trace.Span, headers http.Header, redactSensitive bool
 		"x-amz-tagging", // May contain PII, credentials, or business-sensitive metadata
 		"cookie",
 		"x-forwarded-for", // Already handled separately
-		"x-real-ip",      // Already handled separately
+		"x-real-ip",       // Already handled separately
 	}
 
 	for _, header := range safeHeaders {
