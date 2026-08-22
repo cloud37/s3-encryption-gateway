@@ -142,6 +142,11 @@ func TestConformance(t *testing.T) {
 				{"PERF1_CopyObject_LargeChunked", 0, testCopyObject_LargeChunked},
 				{"PERF1_ChunkedRangedRead_Large", 0, testChunkedRangedRead_Large},
 				{"PERF1_UploadPart_OversizeCap", provider.CapMultipartUpload, testUploadPart_OversizeCap},
+				{"SEC41_SigV4Streaming_PutObjectRoundTrip", 0, testSEC41_SigV4Streaming_PutObjectRoundTrip},
+				{"SEC41_SigV4Streaming_TamperedPutObjectRejectedWithoutObject", 0, testSEC41_SigV4Streaming_TamperedPutObjectRejectedWithoutObject},
+				{"SEC41_SigV4Streaming_UploadPartRoundTrip", provider.CapMultipartUpload, testSEC41_SigV4Streaming_UploadPartRoundTrip},
+				{"SEC41_SigV4Streaming_TamperedUploadPartRejected", provider.CapMultipartUpload, testSEC41_SigV4Streaming_TamperedUploadPartRejected},
+				{"SEC41_SigV4Streaming_SignedTrailerPutRoundTrip", 0, testSEC41_SigV4Streaming_SignedTrailerPutRoundTrip},
 
 				// Encrypted multipart uploads (ADR-0009 / V0.6-SEC-3).
 				// Requires Docker for a Valkey container (state store).

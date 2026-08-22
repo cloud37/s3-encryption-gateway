@@ -87,6 +87,7 @@ type mockS3Client struct {
 	lastMPUMetadata      map[string]string
 
 	headObjectCallCount int
+	putObjectCallCount  int
 }
 
 func newMockS3Client() *mockS3Client {
@@ -101,6 +102,7 @@ func newMockS3Client() *mockS3Client {
 }
 
 func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
+	m.putObjectCallCount++
 	if err := m.errors[bucket+"/"+key+"/put"]; err != nil {
 		return "", err
 	}
@@ -536,6 +538,130 @@ func TestHandler_HandlePutObject(t *testing.T) {
 				if err != nil {
 					t.Errorf("object should have been stored: %v", err)
 				}
+			}
+		})
+	}
+}
+
+func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	require.NoError(t, err)
+	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	data := [][]byte{[]byte("first"), []byte("middle"), []byte("final")}
+	for bad := range append(data, nil) {
+		name := []string{"invalid-first-signature", "invalid-middle-signature", "invalid-final-signature", "invalid-zero-signature"}[bad]
+		t.Run(name, func(t *testing.T) {
+			req := sec41AuthChunkedRequest(http.MethodPut, "/bucket/"+name, data, bad)
+			w := httptest.NewRecorder()
+			sec41AuthedRouter(router).ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "<Code>SignatureDoesNotMatch</Code>") {
+				t.Fatalf("status/body = %d/%s", w.Code, w.Body.String())
+			}
+			if client.putObjectCallCount != 0 {
+				t.Fatalf("PutObject called %d times", client.putObjectCallCount)
+			}
+			if _, ok := client.objects["bucket/"+name]; ok {
+				t.Fatalf("backend object committed for invalid %s", name)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, code, message  string
+		badChecksum, badHMAC bool
+	}{
+		{"signed trailer checksum mismatch", "InvalidRequest", "The AWS-chunked request body is invalid.", true, false},
+		{"signed trailer HMAC mismatch", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newMockS3Client()
+			engine, e := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+			require.NoError(t, e)
+			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+			router := mux.NewRouter()
+			h.RegisterRoutes(router)
+			r := sec41AuthSignedTrailerRequest(http.MethodPut, "/bucket/"+strings.ReplaceAll(tc.name, " ", "-"), []byte("trailer payload"), tc.badChecksum, tc.badHMAC)
+			w := httptest.NewRecorder()
+			sec41AuthedRouter(router).ServeHTTP(w, r)
+			body := w.Body.String()
+			if w.Code != map[string]int{"InvalidRequest": http.StatusBadRequest, "SignatureDoesNotMatch": http.StatusForbidden}[tc.code] ||
+				!strings.Contains(body, "<Code>"+tc.code+"</Code>") || !strings.Contains(body, "<Message>"+tc.message+"</Message>") {
+				t.Fatalf("status/body = %d/%s", w.Code, body)
+			}
+			if client.putObjectCallCount != 0 || len(client.objects) != 0 || len(client.metadata) != 0 {
+				t.Fatalf("invalid signed trailer mutated backend: calls=%d objects=%d metadata=%d", client.putObjectCallCount, len(client.objects), len(client.metadata))
+			}
+		})
+	}
+}
+
+func TestHandlePutObject_StreamingAtomicityMatrix(t *testing.T) {
+	data := [][]byte{[]byte("first"), []byte("middle"), []byte("final")}
+	valid := sec41AuthChunkedRequest(http.MethodPut, "/bucket/valid", data, -1)
+	_, err := io.ReadAll(valid.Body)
+	require.NoError(t, err)
+	cases := []struct {
+		name, body, mode string
+		decoded          int
+		code             int
+		errorCode        string
+		message          string
+	}{
+		{"malformed physical framing", "3\nabc\n0\r\n", "STREAMING-UNSIGNED-PAYLOAD-TRAILER", 3, 400, "InvalidRequest", "The AWS-chunked request body is invalid."},
+		{"decoded underflow", "", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD", 17, 400, "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header."},
+		{"decoded overflow", "", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD", 15, 400, "InvalidRequest", "The decoded content length does not match x-amz-decoded-content-length."},
+		{"physical trailing bytes", "3\r\nabc\r\n0\r\nextra", "STREAMING-UNSIGNED-PAYLOAD-TRAILER", 3, 400, "InvalidRequest", "The AWS-chunked request body is invalid."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newMockS3Client()
+			engine, e := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+			require.NoError(t, e)
+			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+			router := mux.NewRouter()
+			h.RegisterRoutes(router)
+			r := sec41AuthRequestBody(http.MethodPut, "/bucket/"+strings.ReplaceAll(tc.name, " ", "-"), tc.mode, tc.body, tc.decoded, "x-amz-checksum-sha256")
+			if tc.name == "decoded underflow" || tc.name == "decoded overflow" {
+				base := sec41AuthChunkedRequestWithLength(http.MethodPut, r.URL.String(), data, -1, tc.decoded)
+				wire, readErr := io.ReadAll(base.Body)
+				require.NoError(t, readErr)
+				r = base
+				r.Body = io.NopCloser(bytes.NewReader(wire))
+				r.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(tc.decoded))
+			}
+			if tc.name == "malformed physical framing" || tc.name == "physical trailing bytes" {
+				r = sec41AuthChunkedRequest(http.MethodPut, "/bucket/"+strings.ReplaceAll(tc.name, " ", "-"), data, -1)
+				r.Body = io.NopCloser(strings.NewReader(tc.body))
+			}
+			w := httptest.NewRecorder()
+			sec41AuthedRouter(router).ServeHTTP(w, r)
+			if w.Code != tc.code || !strings.Contains(w.Body.String(), "<Code>"+tc.errorCode+"</Code>") || !strings.Contains(w.Body.String(), "<Message>"+tc.message+"</Message>") {
+				t.Fatalf("status/body = %d/%s", w.Code, w.Body.String())
+			}
+			if client.putObjectCallCount != 0 || len(client.objects) != 0 {
+				t.Fatalf("backend committed invalid request")
+			}
+		})
+	}
+	// Signed chain mutations are intentionally made after authentication.
+	for bad := range append(data, nil) {
+		t.Run([]string{"first signature", "middle signature", "final signature", "zero signature"}[bad], func(t *testing.T) {
+			client := newMockS3Client()
+			engine, e := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+			require.NoError(t, e)
+			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+			router := mux.NewRouter()
+			h.RegisterRoutes(router)
+			r := sec41AuthChunkedRequest(http.MethodPut, "/bucket/mutation", data, bad)
+			w := httptest.NewRecorder()
+			sec41AuthedRouter(router).ServeHTTP(w, r)
+			if w.Code != 403 || !strings.Contains(w.Body.String(), "<Code>SignatureDoesNotMatch</Code>") || !strings.Contains(w.Body.String(), "<Message>The request signature we calculated does not match the signature you provided. Check your key and signing method.</Message>") {
+				t.Fatalf("status/body = %d/%s", w.Code, w.Body.String())
+			}
+			if client.putObjectCallCount != 0 || len(client.objects) != 0 {
+				t.Fatal("backend committed signed mutation")
 			}
 		})
 	}

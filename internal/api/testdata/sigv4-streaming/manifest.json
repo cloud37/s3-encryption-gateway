@@ -1,0 +1,28 @@
+{
+  "signed-payload.body": {
+    "mode": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+    "signing_key": "coverage-key",
+    "seed": "sha256(seed)",
+    "timestamp": "20130524T000000Z",
+    "scope": "20130524/us-east-1/s3/aws4_request",
+    "decoded_length": 3,
+    "declared_trailer": ""
+  },
+  "signed-trailer.body": {
+    "mode": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER",
+    "signing_key": "coverage-key",
+    "seed": "sha256(seed)",
+    "timestamp": "20130524T000000Z",
+    "scope": "20130524/us-east-1/s3/aws4_request",
+    "decoded_length": 3,
+    "declared_trailer": "x-amz-checksum-sha256"
+  },
+  "tampered-chunk.body": {"mode":"STREAMING-AWS4-HMAC-SHA256-PAYLOAD","signing_key":"coverage-key","seed":"sha256(seed)","timestamp":"20130524T000000Z","scope":"20130524/us-east-1/s3/aws4_request","decoded_length":3,"declared_trailer":"","tampering":"actual tampered chunk signature body"},
+  "tampered-zero.body": {"mode":"STREAMING-AWS4-HMAC-SHA256-PAYLOAD","signing_key":"coverage-key","seed":"sha256(seed)","timestamp":"20130524T000000Z","scope":"20130524/us-east-1/s3/aws4_request","decoded_length":3,"declared_trailer":"","tampering":"actual tampered zero chunk body"},
+  "tampered-trailer.body": {"mode":"STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER","signing_key":"coverage-key","seed":"sha256(seed)","timestamp":"20130524T000000Z","scope":"20130524/us-east-1/s3/aws4_request","decoded_length":3,"declared_trailer":"x-amz-checksum-sha256","tampering":"actual tampered trailer checksum/signature body"},
+  "unsigned-trailer.body": {"mode":"STREAMING-UNSIGNED-PAYLOAD-TRAILER","signing_key":"","seed":"","timestamp":"","scope":"","decoded_length":3,"declared_trailer":"x-amz-checksum-sha256","tampering":"none"},
+  "malformed-crlf.body": {"mode":"STREAMING-UNSIGNED-PAYLOAD-TRAILER","signing_key":"","seed":"","timestamp":"","scope":"","decoded_length":3,"declared_trailer":"x-amz-checksum-sha256","tampering":"malformed CRLF"},
+  "length-mismatch.body": {"mode":"STREAMING-UNSIGNED-PAYLOAD-TRAILER","signing_key":"","seed":"","timestamp":"","scope":"","decoded_length":4,"declared_trailer":"x-amz-checksum-sha256","tampering":"decoded length underflow"},
+  "trailing-bytes.body": {"mode":"STREAMING-UNSIGNED-PAYLOAD-TRAILER","signing_key":"","seed":"","timestamp":"","scope":"","decoded_length":3,"declared_trailer":"x-amz-checksum-sha256","tampering":"trailing physical bytes"},
+  "provenance": "Local protocol conformance fixtures, not AWS-provided vectors. Every body is a literal CRLF-delimited wire fixture; tampering states describe the mutation present in that file, and none are generated at test runtime."
+}

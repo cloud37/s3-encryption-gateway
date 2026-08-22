@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,9 +35,10 @@ func TestReproChunkedUploadIssue(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	// Construct AWS Chunked Body
-	chunk1 := "5;chunk-signature=sig1\r\nhello\r\n"
-	chunk2 := "6;chunk-signature=sig2\r\n world\r\n"
-	chunkEnd := "0;chunk-signature=final-signature\r\n"
+	chunk1 := "5\r\nhello\r\n"
+	chunk2 := "6\r\n world\r\n"
+	digest := sha256.Sum256([]byte("hello world"))
+	chunkEnd := "0\r\nx-amz-checksum-sha256:" + base64.StdEncoding.EncodeToString(digest[:]) + "\r\n\r\n"
 
 	body := chunk1 + chunk2 + chunkEnd
 	realDataSize := 11 // "hello world"
@@ -45,6 +48,8 @@ func TestReproChunkedUploadIssue(t *testing.T) {
 
 	// 1. Send STREAMING-UNSIGNED-PAYLOAD-TRAILER (Regression check 1)
 	req.Header.Set("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-trailer", "x-amz-checksum-sha256")
 
 	// 2. Set Content-Length to chunked size, but x-amz-decoded-content-length to real size
 	req.Header.Set("Content-Length", strconv.Itoa(chunkedSize))                // ~hundreds bytes

@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -1464,9 +1466,12 @@ func TestHandleUploadPart_AWSChunkedEncrypted(t *testing.T) {
 	uploadID := extractUploadID(t, w.Body.String())
 
 	plaintext := []byte("hello encrypted multipart chunked upload")
-	body := fmt.Sprintf("%x;chunk-signature=first\r\n%s\r\n0;chunk-signature=final\r\n", len(plaintext), plaintext)
+	digest := sha256.Sum256(plaintext)
+	body := fmt.Sprintf("%x\r\n%s\r\n0\r\nx-amz-checksum-sha256:%s\r\n\r\n", len(plaintext), plaintext, base64.StdEncoding.EncodeToString(digest[:]))
 	req = httptest.NewRequest("PUT", "/chunked-enc-bucket/test-key?partNumber=1&uploadId="+uploadID, strings.NewReader(body))
 	req.Header.Set("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-trailer", "x-amz-checksum-sha256")
 	req.Header.Set("x-amz-decoded-content-length", strconv.Itoa(len(plaintext)))
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1494,9 +1499,12 @@ func TestHandleUploadPart_AWSChunkedPlaintext(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	plaintext := []byte("hello plaintext multipart chunked upload")
-	body := fmt.Sprintf("%x\r\n%s\r\n0\r\n", len(plaintext), plaintext)
+	digest := sha256.Sum256(plaintext)
+	body := fmt.Sprintf("%x\r\n%s\r\n0\r\nx-amz-checksum-sha256:%s\r\n\r\n", len(plaintext), plaintext, base64.StdEncoding.EncodeToString(digest[:]))
 	req := httptest.NewRequest("PUT", "/chunked-plain-bucket/test-key?partNumber=1&uploadId=unregistered", strings.NewReader(body))
 	req.Header.Set("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-trailer", "x-amz-checksum-sha256")
 	req.Header.Set("x-amz-decoded-content-length", strconv.Itoa(len(plaintext)))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1523,6 +1531,107 @@ func TestHandleUploadPart_AWSChunkedMalformedBody(t *testing.T) {
 	if w.Code == http.StatusOK {
 		t.Fatal("malformed AWS chunked body must not be accepted")
 	}
+}
+
+func TestHandleUploadPart_InvalidStreamingBody_NoBackendOrStateCommit(t *testing.T) {
+	for _, encrypted := range []bool{true, false} {
+		t.Run(map[bool]string{true: "encrypted", false: "plaintext"}[encrypted], func(t *testing.T) {
+			data := [][]byte{[]byte("first"), []byte("middle"), []byte("final")}
+			cases := []struct {
+				name                   string
+				request                func(string, string) *http.Request
+				code, errCode, message string
+			}{
+				{"malformed physical framing", func(u, _ string) *http.Request {
+					r := sec41AuthChunkedRequest("PUT", u, data, -1)
+					r.Body = io.NopCloser(strings.NewReader("3\nabc\n0\r\n"))
+					return r
+				}, "400", "InvalidRequest", "The AWS-chunked request body is invalid."},
+				{"decoded length underflow", func(u, _ string) *http.Request {
+					return sec41AuthChunkedRequestWithLength("PUT", u, data, -1, len("firstmiddlefinal")+1)
+				}, "400", "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header."},
+				{"decoded length overflow", func(u, _ string) *http.Request {
+					return sec41AuthChunkedRequestWithLength("PUT", u, data, -1, len("firstmiddlefinal")-1)
+				}, "400", "InvalidRequest", "The decoded content length does not match x-amz-decoded-content-length."},
+				{"physical trailing byte", func(u, _ string) *http.Request {
+					r := sec41AuthChunkedRequest("PUT", u, data, -1)
+					r.Body = io.NopCloser(strings.NewReader("3\r\nabc\r\n0\r\nextra"))
+					return r
+				}, "400", "InvalidRequest", "The AWS-chunked request body is invalid."},
+				{"signed trailer checksum mismatch", func(u, _ string) *http.Request {
+					return sec41AuthSignedTrailerRequest("PUT", u, []byte("trailer payload"), true, false)
+				}, "400", "InvalidRequest", "The AWS-chunked request body is invalid."},
+				{"signed trailer HMAC mismatch", func(u, _ string) *http.Request {
+					return sec41AuthSignedTrailerRequest("PUT", u, []byte("trailer payload"), false, true)
+				}, "403", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method."},
+			}
+			for bad := range append(data, nil) {
+				name := []string{"invalid first payload signature", "invalid middle payload signature", "invalid final payload signature", "invalid terminal signature"}[bad]
+				cases = append(cases, struct {
+					name                   string
+					request                func(string, string) *http.Request
+					code, errCode, message string
+				}{name, func(u, _ string) *http.Request { return sec41AuthChunkedRequest("PUT", u, data, bad) }, "403", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method."})
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					bucket, pattern := "sec41-atomic-bucket", "sec41-atomic-*"
+					if !encrypted {
+						bucket, pattern = "sec41-plain-bucket", "sec41-never-matches-*"
+					}
+					handler, base, mr := newMPUTestHandler(t, pattern)
+					client := &sec38CountingClient{mpuMockS3Client: base}
+					handler.s3Client = client
+					router := mux.NewRouter()
+					handler.RegisterRoutes(router)
+					create := httptest.NewRecorder()
+					router.ServeHTTP(create, httptest.NewRequest("POST", "/"+bucket+"/key?uploads=", nil))
+					uploadID := extractUploadID(t, create.Body.String())
+					var beforeState *mpu.UploadState
+					if encrypted {
+						beforeState, _ = handler.mpuStateStore.Get(context.Background(), uploadID)
+					}
+					type redisEntry struct {
+						value string
+						ttl   time.Duration
+					}
+					snapshot := func() map[string]redisEntry {
+						out := map[string]redisEntry{}
+						for _, k := range mr.Keys() {
+							value, _ := mr.Get(k)
+							out[k] = redisEntry{value, mr.TTL(k)}
+						}
+						return out
+					}
+					beforeRedis, beforeParts, beforeCalls := snapshot(), len(base.parts), client.uploadPartCalls
+					u := fmt.Sprintf("/%s/key?partNumber=1&uploadId=%s", bucket, uploadID)
+					w := httptest.NewRecorder()
+					sec41AuthedRouter(router).ServeHTTP(w, tc.request(u, uploadID))
+					if w.Code != mustStatus(t, tc.code) || !strings.Contains(w.Body.String(), "<Code>"+tc.errCode+"</Code>") || !strings.Contains(w.Body.String(), "<Message>"+tc.message+"</Message>") {
+						t.Fatalf("status/body = %d/%s", w.Code, w.Body.String())
+					}
+					if client.uploadPartCalls != beforeCalls || len(base.parts) != beforeParts {
+						t.Fatalf("backend mutation: calls %d parts %d", client.uploadPartCalls, len(base.parts))
+					}
+					if after := snapshot(); fmt.Sprintf("%v", after) != fmt.Sprintf("%v", beforeRedis) {
+						t.Fatalf("cache mutation: before=%v after=%v", beforeRedis, after)
+					}
+					if encrypted {
+						after, _ := handler.mpuStateStore.Get(context.Background(), uploadID)
+						if fmt.Sprintf("%+v", after) != fmt.Sprintf("%+v", beforeState) {
+							t.Fatalf("state mutation: before=%+v after=%+v", beforeState, after)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func mustStatus(t *testing.T, s string) int {
+	n, err := strconv.Atoi(s)
+	require.NoError(t, err)
+	return n
 }
 
 func TestHandleCompleteMultipartUpload_Success(t *testing.T) {

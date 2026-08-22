@@ -20,16 +20,16 @@ import (
 // Based on the AWS SigV4 test suite (public domain).
 // Reference: https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
 type sigV4TestVector struct {
-	method      string
-	path        string
-	query       string
-	headers     map[string]string
-	signedHdrs  []string
-	secretKey   string
-	date        string
-	region      string
-	service     string
-	wantSig     string // if empty, compute and round-trip
+	method     string
+	path       string
+	query      string
+	headers    map[string]string
+	signedHdrs []string
+	secretKey  string
+	date       string
+	region     string
+	service    string
+	wantSig    string // if empty, compute and round-trip
 }
 
 // buildHMAC is a pure helper so tests can compute expected values without
@@ -174,7 +174,7 @@ func TestValidateSignatureV4_MissingAuthHeader(t *testing.T) {
 	req := httptest.NewRequest("GET", "/bucket/key", nil)
 	// No Authorization header, no X-Amz-Algorithm query param → error
 
-	err := ValidateSignatureV4(req, "any-secret", defaultClockSkew)
+	_, err := ValidateSignatureV4(req, "any-secret", defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for missing auth header, got nil")
 	}
@@ -200,7 +200,7 @@ func TestValidateSignatureV4_MalformedAuthHeader(t *testing.T) {
 				req.Header.Set("Authorization", tc.header)
 			}
 
-			err := ValidateSignatureV4(req, "secret", defaultClockSkew)
+			_, err := ValidateSignatureV4(req, "secret", defaultClockSkew)
 			if err == nil {
 				t.Errorf("ValidateSignatureV4(%q) expected error, got nil", tc.header)
 			}
@@ -238,7 +238,7 @@ func TestValidateSignatureV4_SignatureMismatch(t *testing.T) {
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("X-Amz-Date", timestamp)
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for wrong signature, got nil")
 	}
@@ -289,7 +289,7 @@ func TestValidateSignatureV4_Valid(t *testing.T) {
 	// Set the Authorization header and validate
 	req.Header.Set("Authorization", authHeader)
 
-	err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV4() expected nil error for valid signature, got: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestValidateSignatureV4_ClockSkew_Past(t *testing.T) {
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("X-Amz-Date", timestamp)
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for old timestamp, got nil")
 	}
@@ -342,7 +342,7 @@ func TestValidateSignatureV4_ClockSkew_Future(t *testing.T) {
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("X-Amz-Date", timestamp)
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for future timestamp, got nil")
 	}
@@ -385,7 +385,7 @@ func TestValidateSignatureV4_ClockSkew_WithinWindow(t *testing.T) {
 
 	req.Header.Set("Authorization", authHeader)
 
-	err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV4() expected nil error for timestamp within skew window, got: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestValidateSignatureV4_MissingTimestamp(t *testing.T) {
 	req.Header.Set("Authorization", authHeader)
 	// No X-Amz-Date or Date header
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for missing timestamp, got nil")
 	}
@@ -457,7 +457,7 @@ func TestValidateSignatureV4_PresignedURL(t *testing.T) {
 	req.Host = "localhost"
 
 	// This should succeed (valid presigned URL within clock-skew window)
-	err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err != nil {
 		if !errors.Is(err, ErrSignatureMismatch) && !strings.Contains(err.Error(), "signature") {
 			t.Errorf("ValidateSignatureV4() presigned: unexpected error type: %v", err)
@@ -551,7 +551,7 @@ func TestValidateSignatureV4_InvalidCredentialFormat(t *testing.T) {
 			req.Header.Set("Authorization", tc.auth)
 			req.Header.Set("X-Amz-Date", "20150830T123600Z")
 
-			err := ValidateSignatureV4(req, "secret", defaultClockSkew)
+			_, err := ValidateSignatureV4(req, "secret", defaultClockSkew)
 			if err == nil {
 				t.Errorf("ValidateSignatureV4(%q) expected error for malformed credential, got nil", tc.auth)
 			}
@@ -578,7 +578,7 @@ func TestValidateSignatureV4_CredentialDateMismatch_Header(t *testing.T) {
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("X-Amz-Date", timestamp)
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for credential date mismatch, got nil")
 	}
@@ -609,7 +609,7 @@ func TestValidateSignatureV4_CredentialDateMismatch_Presigned(t *testing.T) {
 	req := httptest.NewRequest("GET", reqURL, nil)
 	req.Host = "localhost"
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for credential date mismatch, got nil")
 	}
@@ -644,7 +644,7 @@ func TestValidateSignatureV4_PresignedURL_Expired(t *testing.T) {
 	req := httptest.NewRequest("GET", reqURL, nil)
 	req.Host = "localhost"
 
-	err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for expired presigned URL, got nil")
 	}
@@ -695,7 +695,7 @@ func TestValidateSignatureV4_PresignedURL_ExceedsMaxDuration(t *testing.T) {
 	req = httptest.NewRequest("GET", reqURL, nil)
 	req.Host = "localhost"
 
-	err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	_, err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for presigned URL exceeding max duration, got nil")
 	}
@@ -703,7 +703,6 @@ func TestValidateSignatureV4_PresignedURL_ExceedsMaxDuration(t *testing.T) {
 		t.Errorf("ValidateSignatureV4() error = %v, want 'exceeds maximum allowed duration'", err)
 	}
 }
-
 
 // TestValidateSignatureV2_HeaderAuth verifies that a valid V2 Authorization
 // header with a current timestamp is accepted.
@@ -866,9 +865,9 @@ func TestValidateSignatureV2_QueryParam_ValidFuture(t *testing.T) {
 // AWS4-HMAC-SHA256 and not the legacy "AWS " prefix.
 func TestIsSignatureV4Request(t *testing.T) {
 	tests := []struct {
-		name   string
-		setup  func(*http.Request)
-		want   bool
+		name  string
+		setup func(*http.Request)
+		want  bool
 	}{
 		{
 			name: "SigV4 header",
@@ -899,9 +898,9 @@ func TestIsSignatureV4Request(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "no auth",
+			name:  "no auth",
 			setup: func(r *http.Request) {},
-			want: false,
+			want:  false,
 		},
 	}
 
@@ -920,9 +919,9 @@ func TestIsSignatureV4Request(t *testing.T) {
 // "AWS " Authorization header and AWSAccessKeyId+Signature query params.
 func TestIsSignatureV2Request(t *testing.T) {
 	tests := []struct {
-		name   string
-		setup  func(*http.Request)
-		want   bool
+		name  string
+		setup func(*http.Request)
+		want  bool
 	}{
 		{
 			name: "V2 header",
@@ -953,9 +952,9 @@ func TestIsSignatureV2Request(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "no auth",
+			name:  "no auth",
 			setup: func(r *http.Request) {},
-			want: false,
+			want:  false,
 		},
 	}
 

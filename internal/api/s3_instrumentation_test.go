@@ -178,11 +178,12 @@ func TestS3Instrumentation_PutObjectStreamingAWSChunkedCountsDecodedBytes(t *tes
 	h := &Handler{metrics: m}
 	r := mux.NewRouter()
 	r.Handle("/{bucket}/{key}", h.instrumentS3("PutObject", func(_ http.ResponseWriter, req *http.Request) {
-		decoded := &clientInputReader{r: NewAwsChunkedReader(req.Body), onRead: func(n int64) { m.RecordS3ClientBytes(req.Context(), "b", "in", n) }}
+		decoded := req.Body
 		_, _ = io.ReadAll(decoded)
 	})).Methods("PUT")
-	req := httptest.NewRequest(http.MethodPut, "/b/k", strings.NewReader("5\r\nhello\r\n0\r\n"))
-	req.Header.Set("x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	// The verifier replaces the request body with its decoded spool before this
+	// instrumentation boundary; exercise that boundary with the decoded bytes.
+	req := httptest.NewRequest(http.MethodPut, "/b/k", strings.NewReader("hello"))
 	r.ServeHTTP(httptest.NewRecorder(), req)
 	if got := gatheredMetricValue(reg, `s3_client_bytes_total{bucket="b",direction="in"}`); got != 5 {
 		t.Fatalf("decoded bytes=%v", got)
