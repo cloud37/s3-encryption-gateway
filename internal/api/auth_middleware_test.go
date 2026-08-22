@@ -17,7 +17,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-
 func testCredentialStore() CredentialStore {
 	store, _ := NewStaticCredentialStore([]config.GatewayCredential{
 		{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Label: "test"},

@@ -67,38 +67,38 @@ func TestHandler_RecordRotatedRead(t *testing.T) {
 
 	// Test: Extract key version from metadata and compare with active version
 	testCases := []struct {
-		name              string
+		name               string
 		metadataKeyVersion string
-		activeVersion     int
-		shouldRecord      bool
+		activeVersion      int
+		shouldRecord       bool
 		expectedKeyVersion string
 	}{
 		{
-			name:              "Same version (no rotated read)",
+			name:               "Same version (no rotated read)",
 			metadataKeyVersion: "2",
-			activeVersion:     2,
-			shouldRecord:      false,
+			activeVersion:      2,
+			shouldRecord:       false,
 			expectedKeyVersion: "2",
 		},
 		{
-			name:              "Different version (rotated read)",
+			name:               "Different version (rotated read)",
 			metadataKeyVersion: "1",
-			activeVersion:     2,
-			shouldRecord:      true,
+			activeVersion:      2,
+			shouldRecord:       true,
 			expectedKeyVersion: "1",
 		},
 		{
-			name:              "No version in metadata",
+			name:               "No version in metadata",
 			metadataKeyVersion: "",
-			activeVersion:     2,
-			shouldRecord:      false,
+			activeVersion:      2,
+			shouldRecord:       false,
 			expectedKeyVersion: "0",
 		},
 		{
-			name:              "Invalid version string",
+			name:               "Invalid version string",
 			metadataKeyVersion: "invalid",
-			activeVersion:     2,
-			shouldRecord:      false,
+			activeVersion:      2,
+			shouldRecord:       false,
 			expectedKeyVersion: "0",
 		},
 	}
@@ -194,4 +194,3 @@ func TestHandler_AuditLogRotatedRead(t *testing.T) {
 	assert.Equal(t, 1, auditMetadata["key_version_used"].(int), "Should record key version used")
 	assert.Equal(t, 2, auditMetadata["active_key_version"].(int), "Should record active key version")
 }
-

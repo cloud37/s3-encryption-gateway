@@ -16,10 +16,10 @@ import (
 
 // AdminRotationHandler manages the /admin/kms/rotate/* endpoints.
 type AdminRotationHandler struct {
-	engine       crypto.EncryptionEngine
-	logger       *logrus.Logger
-	metrics      *metrics.Metrics
-	auditLogger  audit.Logger
+	engine      crypto.EncryptionEngine
+	logger      *logrus.Logger
+	metrics     *metrics.Metrics
+	auditLogger audit.Logger
 }
 
 // NewAdminRotationHandler creates new rotation admin handlers.
@@ -296,16 +296,16 @@ func (h *AdminRotationHandler) auditRotation(eventType, rotationID string, curre
 	}
 
 	h.auditLogger.LogAccessWithMetadata(
-		eventType,          // eventType
-		"",                 // bucket
-		"kms/rotation",     // key
-		"admin",            // clientIP
-		"admin-api",        // userAgent
-		rotationID,         // requestID
-		success,            // success
-		auditErr,           // err
-		0,                  // duration
-		fields,             // metadata
+		eventType,      // eventType
+		"",             // bucket
+		"kms/rotation", // key
+		"admin",        // clientIP
+		"admin-api",    // userAgent
+		rotationID,     // requestID
+		success,        // success
+		auditErr,       // err
+		0,              // duration
+		fields,         // metadata
 	)
 
 	h.logger.WithFields(logrus.Fields(fields)).Info("key rotation event")

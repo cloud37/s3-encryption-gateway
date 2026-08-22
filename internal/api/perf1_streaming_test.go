@@ -25,9 +25,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gorilla/mux"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -239,7 +239,7 @@ func TestHandleGetObject_Streaming_BoundedHeap(t *testing.T) {
 	if _, err := encBuf.ReadFrom(encReader); err != nil {
 		t.Fatalf("read encrypted: %v", err)
 	}
-	 encLen := int64(encBuf.Len())
+	encLen := int64(encBuf.Len())
 	if _, err := mockClient.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 	if _, err := encBuf.ReadFrom(encReader); err != nil {
 		t.Fatalf("read encrypted: %v", err)
 	}
-	 encLen := int64(encBuf.Len())
+	encLen := int64(encBuf.Len())
 	if _, err := mockClient.PutObject(context.Background(), "src-bkt", "src-key", bytes.NewReader(encBuf.Bytes()), encMeta, &encLen, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("PutObject source: %v", err)
 	}
