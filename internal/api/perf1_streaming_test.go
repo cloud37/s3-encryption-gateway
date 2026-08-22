@@ -157,7 +157,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 	// x-amz-meta-encryption-chunked).
 	legacyEngine, _ := crypto.NewEngine([]byte("test-password-perf1-123456"))
 	plain := bytes.Repeat([]byte("P"), 100) // 100 bytes — exceeds cap of 1
-	encReader, encMeta, err := legacyEngine.Encrypt(context.Background(), bytes.NewReader(plain), nil)
+	encReader, encMeta, err := legacyEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plain), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestHandleGetObject_Streaming_BoundedHeap(t *testing.T) {
 	plain := bytes.Repeat([]byte("Z"), payloadLen)
 
 	// Encrypt and store.
-	encReader, encMeta, err := chunkedEngine.Encrypt(context.Background(), bytes.NewReader(plain), nil)
+	encReader, encMeta, err := chunkedEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "bkt", Key: "obj"}, bytes.NewReader(plain), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 	// Store a chunked-encrypted source.
 	const payloadLen = 200_000
 	plain := bytes.Repeat([]byte("C"), payloadLen)
-	encReader, encMeta, err := chunkedEngine.Encrypt(context.Background(), bytes.NewReader(plain), nil)
+	encReader, encMeta, err := chunkedEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "src-bkt", Key: "src-key"}, bytes.NewReader(plain), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
 	if _, err := dstBuf.ReadFrom(dstReader); err != nil {
 		t.Fatalf("read dst: %v", err)
 	}
-	decReader, _, err := chunkedEngine.Decrypt(context.Background(), bytes.NewReader(dstBuf.Bytes()), dstMeta)
+	decReader, _, err := chunkedEngine.Decrypt(context.Background(), crypto.ObjectContext{Bucket: "dst-bkt", Key: "dst-key"}, bytes.NewReader(dstBuf.Bytes()), dstMeta)
 	if err != nil {
 		t.Fatalf("Decrypt dst: %v", err)
 	}

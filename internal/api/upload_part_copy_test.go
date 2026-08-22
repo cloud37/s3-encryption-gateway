@@ -554,6 +554,37 @@ func TestUploadPartCopy_LegacySourceExceedsCap(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "MaxLegacyCopySourceBytes")
 }
 
+func TestUploadPartCopy_LegacySource_RangeSuccess(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-legacy-copy-123456"))
+	require.NoError(t, err)
+	cfg := &config.Config{}
+	cfg.Server.MaxLegacyCopySourceBytes = 1024
+	handler := NewHandlerWithFeatures(mockClient, engine, logger, getTestMetrics(), nil, nil, nil, cfg, newPolicyManagerWithMPUOff(t, "dst-bucket"))
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	plain := []byte("legacy source payload")
+	encReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "src-bucket", Key: "legacy-source"}, bytes.NewReader(plain), nil)
+	require.NoError(t, err)
+	ciphertext, err := io.ReadAll(encReader)
+	require.NoError(t, err)
+	mockClient.objects["src-bucket/legacy-source"] = ciphertext
+	mockClient.metadata["src-bucket/legacy-source"] = metadata
+
+	req := httptest.NewRequest("PUT", "/dst-bucket/dst-key?partNumber=1&uploadId=upload123", nil)
+	req.Header.Set("x-amz-copy-source", "src-bucket/legacy-source")
+	req.Header.Set("x-amz-copy-source-range", "bytes=7-12")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var result CopyPartResultXML
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
+	require.NotEmpty(t, result.ETag)
+}
+
 // TestUploadPartCopy_LegacySourceWithinCap_NoContentLength verifies the
 // defensive ReadAll cap: even if the backend does not report a
 // Content-Length (or lies about it), reading more than the cap bytes of
@@ -708,7 +739,7 @@ type oversizedDecryptEngine struct {
 	returnBytes int64
 }
 
-func (e *oversizedDecryptEngine) DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, start, end int64) (io.Reader, map[string]string, error) {
+func (e *oversizedDecryptEngine) DecryptRange(ctx context.Context, object crypto.ObjectContext, reader io.Reader, metadata map[string]string, start, end int64) (io.Reader, map[string]string, error) {
 	return &infiniteReader{remaining: e.returnBytes}, metadata, nil
 }
 

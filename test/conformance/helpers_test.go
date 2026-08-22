@@ -5,12 +5,19 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
@@ -144,7 +151,7 @@ func putEncryptedObject(t *testing.T, client s3.Client, eng crypto.EncryptionEng
 	t.Helper()
 	ctx := context.Background()
 
-	encReader, encMeta, err := eng.Encrypt(ctx, bytes.NewReader(plaintext), nil)
+	encReader, encMeta, err := eng.Encrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("encrypt %s: %v", key, err)
 	}
@@ -159,6 +166,123 @@ func putEncryptedObject(t *testing.T, client s3.Client, eng crypto.EncryptionEng
 
 	if _, err := client.PutObject(ctx, bucket, key, bytes.NewReader(cipherdata), encMeta, nil, "", nil, "", "", "", "", ""); err != nil {
 		t.Fatalf("put object %s: %v", key, err)
+	}
+}
+
+// copyBackendObject copies the exact stored bytes and metadata between keys in
+// one bucket through the portable S3 client contract. It intentionally bypasses
+// gateway CopyObject so substitution tests exercise the backend relocation
+// boundary itself.
+func copyBackendObject(t *testing.T, client s3.Client, bucket, sourceKey, destinationKey string) {
+	t.Helper()
+	ctx := context.Background()
+	body, metadata, err := client.GetObject(ctx, bucket, sourceKey, nil, nil)
+	if err != nil {
+		t.Fatalf("get backend object %s: %v", sourceKey, err)
+	}
+	ciphertext, readErr := io.ReadAll(body)
+	_ = body.Close()
+	if readErr != nil {
+		t.Fatalf("read backend object %s: %v", sourceKey, readErr)
+	}
+	if _, err := client.PutObject(ctx, bucket, destinationKey, bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put backend object %s: %v", destinationKey, err)
+	}
+}
+
+func requireGatewayFailureWithoutPlaintext(t *testing.T, gw *harness.Gateway, bucket, key string, plaintext []byte) {
+	t.Helper()
+	requireGatewayRequestFailureWithoutPlaintext(t, gw, bucket, key, "", plaintext)
+}
+
+// putLegacyBufferedObject writes a pre-SEC-42 buffered object directly to the
+// backend, omitting the current format and binding metadata.
+func putLegacyBufferedObject(t *testing.T, client s3.Client, bucket, key, password string, plaintext []byte) {
+	t.Helper()
+	ctx := context.Background()
+	salt := bytes.Repeat([]byte{0x31}, 32)
+	nonce := bytes.Repeat([]byte{0x42}, 12)
+	derived := pbkdf2.Key([]byte(password), salt, crypto.LegacyPBKDF2Iterations, 32, sha256.New)
+	block, err := aes.NewCipher(derived)
+	if err != nil {
+		t.Fatalf("legacy cipher: %v", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("legacy AEAD: %v", err)
+	}
+	originalSize := fmt.Sprintf("%d", len(plaintext))
+	var aad bytes.Buffer
+	write := func(value []byte) {
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		aad.Write(length[:])
+		aad.Write(value)
+	}
+	write([]byte(crypto.AlgorithmAES256GCM))
+	write(salt)
+	write(nonce)
+	write(nil)
+	write(nil)
+	write([]byte(originalSize))
+	ciphertext := aead.Seal(nil, nonce, plaintext, aad.Bytes())
+	metadata := map[string]string{
+		crypto.MetaEncrypted:    "true",
+		crypto.MetaAlgorithm:    crypto.AlgorithmAES256GCM,
+		crypto.MetaKeySalt:      base64.RawStdEncoding.EncodeToString(salt),
+		crypto.MetaIV:           base64.RawStdEncoding.EncodeToString(nonce),
+		crypto.MetaOriginalSize: originalSize,
+	}
+	if _, err := client.PutObject(ctx, bucket, key, bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("put legacy object %s: %v", key, err)
+	}
+}
+
+func requireGatewayRangeFailure(t *testing.T, gw *harness.Gateway, bucket, key string, plaintext []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, objectURL(gw, bucket, key), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-99")
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusPartialContent || bytes.Contains(body, plaintext) {
+		t.Fatalf("substituted range succeeded: status=%d body=%q", resp.StatusCode, body)
+	}
+}
+
+// requireGatewayRangeFailureWithoutPlaintext verifies that a relocated object's
+// authenticated range path cannot return either a successful range or plaintext.
+func requireGatewayRangeFailureWithoutPlaintext(t *testing.T, gw *harness.Gateway, bucket, key, byteRange string, plaintext []byte) {
+	t.Helper()
+	requireGatewayRequestFailureWithoutPlaintext(t, gw, bucket, key, byteRange, plaintext)
+}
+
+func requireGatewayRequestFailureWithoutPlaintext(t *testing.T, gw *harness.Gateway, bucket, key, byteRange string, plaintext []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, objectURL(gw, bucket, key), nil)
+	if err != nil {
+		t.Fatalf("create GET %s: %v", key, err)
+	}
+	if byteRange != "" {
+		req.Header.Set("Range", byteRange)
+	}
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("get %s: %v", key, err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read failed response %s: %v", key, readErr)
+	}
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent || bytes.Contains(body, plaintext) {
+		t.Fatalf("substituted object %s returned plaintext/success: status=%d body=%q", key, resp.StatusCode, body)
 	}
 }
 

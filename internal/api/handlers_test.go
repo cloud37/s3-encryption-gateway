@@ -1488,7 +1488,7 @@ func TestContentRangeMapping(t *testing.T) {
 	originalMetadata := map[string]string{
 		"ETag": "\"original-etag-12345\"", // Mock original ETag
 	}
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(testData), originalMetadata)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "range-test"}, bytes.NewReader(testData), originalMetadata)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -2740,7 +2740,7 @@ func TestHandler_ListObjects_ReturnsCiphertextSize(t *testing.T) {
 	originalSize := int64(len(plaintext))
 
 	// Encrypt data inline
-	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), strings.NewReader(plaintext), map[string]string{
+	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "enc-key"}, strings.NewReader(plaintext), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -2802,7 +2802,7 @@ func TestHandler_HeadObject_ReturnsDecryptedSize(t *testing.T) {
 	plaintext := "hello world this is some plaintext for headobject test"
 	originalSize := int64(len(plaintext))
 
-	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), strings.NewReader(plaintext), map[string]string{
+	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "enc-key"}, strings.NewReader(plaintext), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -2851,7 +2851,7 @@ func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
 	plaintext := "hello world this is plaintext for getobject test"
 	originalSize := int64(len(plaintext))
 
-	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), strings.NewReader(plaintext), map[string]string{
+	encReader, encMeta, err := mockEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "enc-key"}, strings.NewReader(plaintext), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {

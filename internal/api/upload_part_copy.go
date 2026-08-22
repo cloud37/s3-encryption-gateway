@@ -268,6 +268,12 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
 		return
 	}
+	if destinationEncrypted {
+		if identityErr := validateMPURouteIdentity(destinationState, bucket, key); identityErr != nil {
+			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+			return
+		}
+	}
 
 	// Destination-policy / source-mode mismatch hard-refusal:
 	// if the destination bucket policy mandates encryption but the source
@@ -499,7 +505,7 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 	// Check MPU before the generic encrypted marker. MPU objects may carry
 	// MetaEncrypted as well as MetaMPUEncrypted, but they are not legacy
 	// single-AEAD objects and must use the manifest-backed MPU path.
-	if metadata[crypto.MetaMPUEncrypted] == "true" {
+	if metadata[crypto.MetaMPUEncrypted] == "true" || metadata[crypto.MetaMPUEncrypted] == "v2" {
 		// Object was assembled via the gateway's encrypted multipart upload
 		// path. Its ciphertext is a concatenation of AEAD-encrypted chunks;
 		// the plaintext DEK and manifest live in a companion .mpu-manifest
@@ -607,7 +613,7 @@ func (h *Handler) uploadPartCopyChunked(ctx context.Context, s3Client s3.Client,
 
 	// DecryptRange uses the manifest in metadata to seek within the encrypted
 	// stream and emits plaintext for the requested absolute range.
-	decryptedReader, _, err := srcEngine.DecryptRange(ctx, srcReader, srcMetadata, plaintextStart, plaintextEnd)
+	decryptedReader, _, err := srcEngine.DecryptRange(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, srcReader, srcMetadata, plaintextStart, plaintextEnd)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to decrypt range: %w", err)
 	}
@@ -665,7 +671,7 @@ func (h *Handler) uploadPartCopyLegacy(ctx context.Context, s3Client s3.Client,
 	}
 	defer srcReader.Close()
 
-	decryptedReader, _, err := srcEngine.Decrypt(ctx, srcReader, srcMetadata)
+	decryptedReader, _, err := srcEngine.Decrypt(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, srcReader, srcMetadata)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to decrypt source object: %w", err)
 	}
@@ -861,7 +867,7 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get chunked source: %w", err)
 		}
 		defer r.Close()
-		decR, _, err := srcEngine.DecryptRange(ctx, r, srcMeta, pStart, pEnd)
+		decR, _, err := srcEngine.DecryptRange(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, r, srcMeta, pStart, pEnd)
 		if err != nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypt chunked source: %w", err)
 		}
@@ -897,7 +903,7 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, err
 		}
 		defer r.Close()
-		decR, _, err := srcEngine.Decrypt(ctx, r, srcMeta)
+		decR, _, err := srcEngine.Decrypt(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, r, srcMeta)
 		if err != nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypt legacy source: %w", err)
 		}
@@ -1044,17 +1050,49 @@ func (h *Handler) readMPUPlaintextRange(
 	if err != nil {
 		return nil, err
 	}
-	plainManifest, _, err := engine.Decrypt(ctx, manifestReader, manifestMeta)
+	rawManifest, readErr := io.ReadAll(manifestReader)
+	if readErr != nil {
+		return nil, readErr
+	}
+	var bindingID [16]byte
+	isV2 := meta[crypto.MetaMPUEncrypted] == "v2"
+	if isV2 {
+		mainBinding, bindErr := base64.RawURLEncoding.DecodeString(meta[crypto.MetaObjectBindingID])
+		if bindErr != nil || len(mainBinding) != 16 {
+			return nil, fmt.Errorf("invalid main binding")
+		}
+		copy(bindingID[:], mainBinding)
+	}
+	if !isV2 && manifestMeta[crypto.MetaMPUManifestVersion] == "2" {
+		return nil, fmt.Errorf("legacy MPU manifest cannot declare v2 marker")
+	}
+	var manifestJSON []byte
+	if isV2 {
+		if manifestMeta[crypto.MetaMPUManifestVersion] != "2" {
+			return nil, fmt.Errorf("invalid companion marker")
+		}
+		manifestJSON, err = crypto.DecryptMPUManifest(ctx, engine, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID, rawManifest, manifestMeta)
+	} else {
+		plainManifest, _, decErr := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bytes.NewReader(rawManifest), manifestMeta)
+		err = decErr
+		if err == nil {
+			manifestJSON, err = io.ReadAll(plainManifest)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("decrypt manifest: %w", err)
 	}
-	manifestJSON, err := io.ReadAll(plainManifest)
 	if err != nil {
 		return nil, err
 	}
 	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
 	if err != nil {
 		return nil, err
+	}
+	if isV2 {
+		if err := manifest.ValidateFor(crypto.ObjectContext{Bucket: bucket, Key: key}, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID); err != nil {
+			return nil, err
+		}
 	}
 	if srcRange == nil {
 		srcRange = &s3.CopyPartRange{First: 0, Last: manifest.TotalPlainSize - 1}
@@ -1091,14 +1129,58 @@ func (h *Handler) readMPUPlaintextRange(
 	if err != nil {
 		return nil, err
 	}
-	return decodeMPUPlaintextRange(ciphertext, manifest, dek, uploadIDHash, ivPrefix, encRange, pStart, pEnd)
+	object := crypto.ObjectContext{Bucket: bucket, Key: key}
+	if !isV2 {
+		return decodeMPUPlaintextRangeV1(ciphertext, manifest, dek, uploadIDHash, ivPrefix, encRange, pStart, pEnd, object)
+	}
+	return decodeMPUPlaintextRange(ciphertext, manifest, dek, uploadIDHash, ivPrefix, encRange, pStart, pEnd, object, bindingID)
+}
+
+func decodeMPUPlaintextRangeV1(ciphertext []byte, manifest *crypto.MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, encRange crypto.MPURangeResult, pStart, pEnd int64, object crypto.ObjectContext) ([]byte, error) {
+	const encTagSize = 16
+	encChunkSize := manifest.ChunkSize + encTagSize
+	var plaintext []byte
+	consumed := 0
+	for pi := encRange.PartStartIdx; pi <= encRange.PartEndIdx; pi++ {
+		part := manifest.Parts[pi]
+		first, last := int32(0), part.ChunkCount-1
+		if pi == encRange.PartStartIdx {
+			first = encRange.ChunkStart
+		}
+		if pi == encRange.PartEndIdx {
+			last = encRange.ChunkEnd
+		}
+		partLen := int(last-first+1) * encChunkSize
+		if pi == encRange.PartEndIdx && last == part.ChunkCount-1 {
+			partLen = int(part.EncLen) - int(first)*encChunkSize
+		}
+		if consumed+partLen > len(ciphertext) {
+			return nil, fmt.Errorf("invalid legacy MPU ciphertext span")
+		}
+		plain, err := crypto.DecryptMPUPartRangeV1(object, ciphertext[consumed:consumed+partLen], dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, first, manifest.Algorithm)
+		if err != nil {
+			return nil, err
+		}
+		plaintext = append(plaintext, plain...)
+		consumed += partLen
+	}
+	base := int64(0)
+	for i := 0; i < encRange.PartStartIdx; i++ {
+		base += manifest.Parts[i].PlainLen
+	}
+	base += int64(encRange.ChunkStart) * int64(manifest.ChunkSize)
+	start, end := pStart-base, pEnd-base
+	if start < 0 || end >= int64(len(plaintext)) || start > end {
+		return nil, fmt.Errorf("decrypted legacy range outside plaintext")
+	}
+	return plaintext[start : end+1], nil
 }
 
 // decodeMPUPlaintextRange authenticates and decrypts the complete chunks needed
 // for one plaintext range, then trims the result to the requested bytes. The
 // caller owns source acquisition and key cleanup; this boundary is the
 // SEC-38-specific framing and authentication contract.
-func decodeMPUPlaintextRange(ciphertext []byte, manifest *crypto.MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, encRange crypto.MPURangeResult, pStart, pEnd int64) ([]byte, error) {
+func decodeMPUPlaintextRange(ciphertext []byte, manifest *crypto.MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, encRange crypto.MPURangeResult, pStart, pEnd int64, object crypto.ObjectContext, bindingID [16]byte) ([]byte, error) {
 	const encTagSize = 16
 	encChunkSize := manifest.ChunkSize + encTagSize
 	var plaintext []byte
@@ -1126,7 +1208,7 @@ func decodeMPUPlaintextRange(ciphertext []byte, manifest *crypto.MultipartManife
 		if consumed+partLen > len(ciphertext) {
 			partLen = len(ciphertext) - consumed
 		}
-		plain, err := crypto.DecryptMPUPartRange(ciphertext[consumed:consumed+partLen], dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, first, manifest.Algorithm)
+		plain, err := crypto.DecryptMPUPartRange(object, bindingID, ciphertext[consumed:consumed+partLen], dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, first, manifest.Algorithm)
 		if err != nil {
 			return nil, err
 		}

@@ -78,6 +78,11 @@ func TestConformance(t *testing.T) {
 				{"SEC37_ChunkedV2_TruncatedSuffix_CopyObjectNoDestination", 0, testSEC37_ChunkedV2_TruncatedSuffix_CopyObjectNoDestination},
 				{"SEC37_ChunkedV1_ReadCompatibility", 0, testSEC37_ChunkedV1_ReadCompatibility},
 				{"SEC37_UploadPartCopy_TruncatedChunkedV2Rejected", provider.CapMultipartCopy, testSEC37_UploadPartCopy_TruncatedChunkedV2Rejected},
+				{"SEC42_BufferedObject_BackendKeySubstitutionFailsClosed", 0, testSEC42_BufferedObject_BackendKeySubstitutionFailsClosed},
+				{"SEC42_ChunkedV2_BackendKeySubstitutionFailsClosed", 0, testSEC42_ChunkedV2_BackendKeySubstitutionFailsClosed},
+				{"SEC42_CopyObject_RebindsDestination", 0, testSEC42_CopyObject_RebindsDestination},
+				{"SEC42_MigrationRewrite_LegacyObjectBindsDestination", 0, testSEC42_MigrationRewrite_LegacyObjectBindsDestination},
+				{"SEC42_KeyManagerBackendRelocationFailsClosed", 0, testSEC42_KeyManagerBackendRelocationFailsClosed},
 
 				// Multipart operations.
 				{"Multipart_Basic", provider.CapMultipartUpload, testMultipartBasic},
@@ -161,6 +166,9 @@ func TestConformance(t *testing.T) {
 				{"SEC38_NonfatalMPUNegativeHelpers", provider.CapMultipartUpload, testSEC38_NonfatalMPUNegativeHelpers},
 				{"SEC38_EncryptedMPU_UploadPartCopyReplacementRejected", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyReplacementRejected},
 				{"SEC38_EncryptedMPU_UploadPartCopyIdenticalRetry", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry},
+				{"SEC42_EncryptedMPU_BackendKeySubstitutionFailsClosed", provider.CapEncryptedMPU, testSEC42_EncryptedMPU_BackendKeySubstitutionFailsClosed},
+				{"SEC42_EncryptedMPU_CompanionSubstitutionFailsClosed", provider.CapEncryptedMPU, testSEC42_EncryptedMPU_CompanionSubstitutionFailsClosed},
+				{"SEC42_EncryptedMPU_UploadPartCopyRebindsDestination", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC42_EncryptedMPU_UploadPartCopyRebindsDestination},
 
 				// V1.0-CONFIG-1 — Per-bucket encryption bypass + ENV policy configuration.
 				{"BypassEncryption_RoundTrip", 0, testBypassEncryption_RoundTrip},

@@ -67,7 +67,7 @@ func TestReproChunkedUploadIssue(t *testing.T) {
 	storedMeta := mockClient.metadata["test-bucket/test-key"]
 
 	// Check content
-	decryptedReader, _, err := engine.Decrypt(context.Background(), bytes.NewReader(storedData), storedMeta)
+	decryptedReader, _, err := engine.Decrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(storedData), storedMeta)
 	assert.NoError(t, err)
 	decryptedContent, err := io.ReadAll(decryptedReader)
 	assert.NoError(t, err)
@@ -92,7 +92,7 @@ func TestLegacyChunkedRangeGetFallsBackToFullFetch(t *testing.T) {
 	}
 
 	plaintext := bytes.Repeat([]byte("legacy-range-data-"), 3000)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "legacy-key"}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLegacyChunkedGetReportsDecryptedContentLength(t *testing.T) {
 	}
 
 	plaintext := bytes.Repeat([]byte("legacy-full-get-"), 400)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "legacy-full"}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestChunkedGetUsesExactSizeWhenChunkCountIsPresent(t *testing.T) {
 	}
 
 	plaintext := bytes.Repeat([]byte("short-final-chunk-"), 400)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "chunk-count"}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestChunkedRangeGetOverridesStaleOriginalSize(t *testing.T) {
 	}
 
 	plaintext := bytes.Repeat([]byte("stale-size-"), 40)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "stale-size"}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -276,7 +276,8 @@ func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
 	}
 
 	plaintext := bytes.Repeat([]byte("legacy-list-size-"), 400)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	objectKey := "docker/registry/v2/blobs/sha256/39/legacy/data"
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: objectKey}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -289,7 +290,6 @@ func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
 	delete(metadata, crypto.MetaChunkCount)
 	metadata["Content-Length"] = strconv.Itoa(len(encryptedData))
 
-	objectKey := "docker/registry/v2/blobs/sha256/39/legacy/data"
 	mockClient.PutObject(context.Background(), "test-bucket", objectKey, bytes.NewReader(encryptedData), metadata, nil, "", nil, "", "", "", "", "")
 
 	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
@@ -324,7 +324,7 @@ func TestChunkedRangeGetClampsFinalCiphertextChunk(t *testing.T) {
 	// Make the final chunk short. The nominal encrypted chunk size is 16 KiB
 	// plus a 16-byte AEAD tag, but the final ciphertext is shorter than that.
 	plaintext := bytes.Repeat([]byte("final-chunk-range-"), 1700)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "final-chunk"}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}

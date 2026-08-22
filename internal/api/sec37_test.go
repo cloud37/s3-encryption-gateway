@@ -21,7 +21,7 @@ import (
 
 func putSEC37Object(t *testing.T, client *mockS3Client, engine crypto.EncryptionEngine, key string, plaintext []byte) {
 	t.Helper()
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: key}, bytes.NewReader(plaintext), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestSEC37_FullGET_VerifiesAgainAfterPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, _, err := engine.Decrypt(context.Background(), full, metadata)
+	decrypted, _, err := engine.Decrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, full, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestSEC37_CompactedV2Truncated_APIPreflight(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("compact")), nil)
+			reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("compact")), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -349,7 +349,7 @@ func TestSEC37_CompactedV2Truncated_APIPreflight(t *testing.T) {
 
 func TestSEC37_V1GETAndHEAD_RemainReadable(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, false, crypto.MinChunkSize)
+	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ func TestSEC37_CompactedV2Truncated_EncryptedMPUDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler.encryptionEngine = engine
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("compact-mpu")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("compact-mpu")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestSEC37_PreflightChunkedCompleteness_BranchMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("preflight")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "source"}, bytes.NewReader([]byte("preflight")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestSEC37_PreflightChunkedCompleteness_BranchMatrix(t *testing.T) {
 	if _, err := h.preflightChunkedCompleteness(context.Background(), client, "test-bucket", "source", &versionID, validV2()); err == nil {
 		t.Fatal("suffix failure accepted")
 	}
-	if _, err := (crypto.PassthroughEngine{}).AuthenticateChunkedTrailer(context.Background(), nil, nil, 0); err == nil {
+	if _, err := (crypto.PassthroughEngine{}).AuthenticateChunkedTrailer(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, nil, nil, 0); err == nil {
 		t.Fatal("passthrough trailer unexpectedly accepted")
 	}
 }
@@ -588,7 +588,7 @@ func TestSEC37_ExpandMetadataForAPIBranches(t *testing.T) {
 	if _, err := h.expandMetadataForAPI("test-bucket", map[string]string{"Content-Length": "1"}); err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("protected")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("protected")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,16 +641,16 @@ func TestSEC37_ExpandMetadataForAPIBranches(t *testing.T) {
 
 type sec37APIExpander struct{ err error }
 
-func (e *sec37APIExpander) Encrypt(ctx context.Context, r io.Reader, m map[string]string) (io.Reader, map[string]string, error) {
+func (e *sec37APIExpander) Encrypt(ctx context.Context, object crypto.ObjectContext, r io.Reader, m map[string]string) (io.Reader, map[string]string, error) {
 	return r, m, nil
 }
-func (e *sec37APIExpander) Decrypt(ctx context.Context, r io.Reader, m map[string]string) (io.Reader, map[string]string, error) {
+func (e *sec37APIExpander) Decrypt(ctx context.Context, object crypto.ObjectContext, r io.Reader, m map[string]string) (io.Reader, map[string]string, error) {
 	return r, m, nil
 }
-func (e *sec37APIExpander) DecryptRange(ctx context.Context, r io.Reader, m map[string]string, a, b int64) (io.Reader, map[string]string, error) {
+func (e *sec37APIExpander) DecryptRange(ctx context.Context, object crypto.ObjectContext, r io.Reader, m map[string]string, a, b int64) (io.Reader, map[string]string, error) {
 	return r, m, nil
 }
-func (e *sec37APIExpander) AuthenticateChunkedTrailer(context.Context, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
+func (e *sec37APIExpander) AuthenticateChunkedTrailer(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
 	return crypto.ChunkedObjectInfo{}, nil
 }
 func (e *sec37APIExpander) IsEncrypted(map[string]string) bool { return false }
@@ -710,7 +710,7 @@ func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsInvalidTrailerBeforeUploadPart
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := chunkedEngine.Encrypt(context.Background(), bytes.NewReader([]byte("copy")), nil)
+	reader, metadata, err := chunkedEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("copy")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,7 +743,7 @@ func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsUnknownManifestVersion(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("copy")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("copy")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

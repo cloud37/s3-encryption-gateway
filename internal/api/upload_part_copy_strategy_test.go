@@ -98,7 +98,7 @@ func strategyHandler(client s3.Client, engine crypto.EncryptionEngine) *Handler 
 
 type strategyRangeEngine struct{ mockEngine }
 
-func (e *strategyRangeEngine) DecryptRange(_ context.Context, r io.Reader, _ map[string]string, start, end int64) (io.Reader, map[string]string, error) {
+func (e *strategyRangeEngine) DecryptRange(_ context.Context, _ crypto.ObjectContext, r io.Reader, _ map[string]string, start, end int64) (io.Reader, map[string]string, error) {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return nil, nil, err
@@ -114,11 +114,11 @@ type strategySourceEngine struct {
 	plain []byte
 }
 
-func (e *strategySourceEngine) DecryptRange(context.Context, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
+func (e *strategySourceEngine) DecryptRange(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
 	return bytes.NewReader(e.plain), nil, nil
 }
 
-func (e *strategySourceEngine) Decrypt(context.Context, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
+func (e *strategySourceEngine) Decrypt(context.Context, crypto.ObjectContext, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
 	return bytes.NewReader(e.plain), nil, nil
 }
 
@@ -191,16 +191,16 @@ func TestSEC37_Copy_Strategy_ChunkedDirectErrors(t *testing.T) {
 
 type strategyDecryptError struct{ err error }
 
-func (e *strategyDecryptError) Encrypt(context.Context, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
+func (e *strategyDecryptError) Encrypt(context.Context, crypto.ObjectContext, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
 	return nil, nil, nil
 }
-func (e *strategyDecryptError) Decrypt(context.Context, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
+func (e *strategyDecryptError) Decrypt(context.Context, crypto.ObjectContext, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
 	return nil, nil, e.err
 }
-func (e *strategyDecryptError) DecryptRange(context.Context, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
+func (e *strategyDecryptError) DecryptRange(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
 	return nil, nil, e.err
 }
-func (e *strategyDecryptError) AuthenticateChunkedTrailer(context.Context, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
+func (e *strategyDecryptError) AuthenticateChunkedTrailer(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
 	return crypto.ChunkedObjectInfo{}, nil
 }
 func (e *strategyDecryptError) IsEncrypted(map[string]string) bool { return true }
@@ -256,7 +256,7 @@ func setupStrategySource(t *testing.T, client *mpuMockS3Client) (string, string,
 	client.metadata["src/chunked"] = tmp.metadata["test-bucket/chunked"]
 	legacy, err := crypto.NewEngine([]byte(mpuTestPassword))
 	require.NoError(t, err)
-	legacyReader, legacyMetadata, err := legacy.Encrypt(context.Background(), bytes.NewReader([]byte("legacy strategy source")), nil)
+	legacyReader, legacyMetadata, err := legacy.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("legacy strategy source")), nil)
 	require.NoError(t, err)
 	legacyCiphertext, err := io.ReadAll(legacyReader)
 	require.NoError(t, err)

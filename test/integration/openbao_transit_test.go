@@ -105,7 +105,7 @@ func TestOpenBaoTransit_S3_EndToEnd(t *testing.T) {
 	plaintext := []byte("OpenBao Transit end-to-end: the quick brown fox encrypts the lazy DEK.")
 
 	// PUT (encrypt via engine -> OpenBao wraps the DEK).
-	encReader, metadata, err := eng.Encrypt(ctx, bytes.NewReader(plaintext), map[string]string{
+	encReader, metadata, err := eng.Encrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: objectKey}, bytes.NewReader(plaintext), map[string]string{
 		"Content-Type": "application/octet-stream",
 	})
 	require.NoError(t, err)
@@ -140,7 +140,7 @@ func TestOpenBaoTransit_S3_EndToEnd(t *testing.T) {
 	for k, v := range out.Metadata {
 		getMeta[k] = v
 	}
-	decReader, _, err := eng.Decrypt(ctx, bytes.NewReader(atRest), getMeta)
+	decReader, _, err := eng.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: objectKey}, bytes.NewReader(atRest), getMeta)
 	require.NoError(t, err)
 	decData, err := io.ReadAll(decReader)
 	require.NoError(t, err)
@@ -169,7 +169,7 @@ func TestOpenBaoTransit_S3_EndToEnd(t *testing.T) {
 	for k, v := range out2.Metadata {
 		getMeta2[k] = v
 	}
-	decReader2, _, err := eng.Decrypt(ctx, bytes.NewReader(atRest2), getMeta2)
+	decReader2, _, err := eng.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: objectKey}, bytes.NewReader(atRest2), getMeta2)
 	require.NoError(t, err)
 	decData2, err := io.ReadAll(decReader2)
 	require.NoError(t, err)

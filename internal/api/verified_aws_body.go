@@ -81,10 +81,15 @@ func verifyAndSpoolAWSBody(r *http.Request, signing *V4SigningContext) (verified
 	if mode != streamingNone && signing != nil && signing.mode != mode {
 		return nil, ErrStreamingFraming
 	}
-	if signing == nil && (mode == streamingSignedPayload || mode == streamingSignedPayloadTrailer) {
-		return nil, ErrSignatureMismatch
-	}
-	if mode != streamingNone && !validAWSContentEncoding(r.Header.Get("Content-Encoding")) {
+	// Gateways without configured client authentication still need to accept
+	// standard SigV4 streaming framing from compatible S3 clients. In that mode
+	// there is no client secret with which to verify the chunk chain; the parser
+	// still validates framing and decoded length. When authentication is enabled,
+	// signing is non-nil and every chunk remains authenticated below.
+	// Some unauthenticated S3 clients omit Content-Encoding while still sending
+	// correctly framed signed streaming payloads. Header-authenticated requests
+	// remain strict because AuthMiddleware validates their full signed header set.
+	if mode != streamingNone && !validAWSContentEncoding(r.Header.Get("Content-Encoding")) && !(signing == nil && r.Header.Get("Content-Encoding") == "") {
 		return nil, ErrStreamingFraming
 	}
 	if mode != streamingNone && len(r.Header.Values("X-Amz-Decoded-Content-Length")) != 1 {

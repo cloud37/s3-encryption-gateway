@@ -70,6 +70,14 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 			if !validLowerHex(supplied, 64) {
 				return total, previous, ErrStreamingFraming
 			}
+		} else if i := indexByteString(line, ";chunk-signature="); i >= 1 {
+			// Authentication is optional at the gateway boundary. Decode the
+			// standard signed framing even when no signing context is available;
+			// the signature remains verified whenever authentication is enabled.
+			if indexByteString(line[i+len(";chunk-signature="):], ";") >= 0 || !validLowerHex(line[i+len(";chunk-signature="):], 64) {
+				return total, previous, ErrStreamingFraming
+			}
+			sizeText = line[:i]
 		} else if indexByteString(line, ";") >= 0 {
 			return total, previous, ErrStreamingFraming
 		}
@@ -100,11 +108,21 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 				return total, previous, ErrStreamingLength
 			}
 			if !trailers {
-				_, err := b.ReadByte()
-				if err == nil {
+				// S3 clients differ on whether they emit the optional final CRLF
+				// after the signed zero-size chunk. Accept that exact terminator,
+				// but reject every other trailing byte sequence.
+				trailing, readErr := b.ReadByte()
+				if readErr == io.EOF {
+					return total, previous, nil
+				}
+				if readErr != nil || trailing != '\r' {
 					return total, previous, ErrStreamingTrailingData
 				}
-				if err != io.EOF {
+				lineEnd, readErr := b.ReadByte()
+				if readErr != nil || lineEnd != '\n' {
+					return total, previous, ErrStreamingTrailingData
+				}
+				if _, readErr = b.ReadByte(); readErr != io.EOF {
 					return total, previous, ErrStreamingTrailingData
 				}
 			}

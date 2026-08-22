@@ -1,13 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,9 +118,13 @@ func TestMPU_Complete_SelectedSubsetManifestMatchesBackend(t *testing.T) {
 	manifestBytes, ok := base.objects["subset-http-bucket/obj.mpu-manifest"]
 	require.True(t, ok, "selected MPU manifest missing")
 	manifestMeta := base.metadata["subset-http-bucket/obj.mpu-manifest"]
-	plainReader, _, err := h.encryptionEngine.Decrypt(context.Background(), bytes.NewReader(manifestBytes), manifestMeta)
+	encodedBinding := base.metadata["subset-http-bucket/obj"][crypto.MetaObjectBindingID]
+	binding, err := base64.RawURLEncoding.DecodeString(encodedBinding)
 	require.NoError(t, err)
-	plainManifest, err := io.ReadAll(plainReader)
+	require.Len(t, binding, 16)
+	var bindingID [16]byte
+	copy(bindingID[:], binding)
+	plainManifest, err := crypto.DecryptMPUManifest(context.Background(), h.encryptionEngine, crypto.ObjectContext{Bucket: "subset-http-bucket", Key: "obj.mpu-manifest"}, bindingID, manifestBytes, manifestMeta)
 	require.NoError(t, err)
 	manifest, err := crypto.UnmarshalMultipartManifest(plainManifest)
 	require.NoError(t, err)

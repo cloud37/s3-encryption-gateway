@@ -32,7 +32,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 			"MINIO_ROOT_USER":     "minioadmin",
 			"MINIO_ROOT_PASSWORD": "minioadmin",
 		},
-		Cmd: []string{"server", "/data"},
+		Cmd:        []string{"server", "/data"},
 		WaitingFor: wait.ForLog("API:").WithStartupTimeout(60 * time.Second),
 	}
 	minioC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -91,7 +91,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 	// PUT an object
 	plaintext := []byte("Hello, Self-Contained Encryption! This is integration test data.")
 	reader := bytes.NewReader(plaintext)
-	encReader, metadata, err := eng.Encrypt(ctx, reader, map[string]string{
+	encReader, metadata, err := eng.Encrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: objectKey}, reader, map[string]string{
 		"Content-Type": "application/octet-stream",
 	})
 	require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	getOutput.Body.Close()
 
-	decReader, _, err := eng.Decrypt(ctx, bytes.NewReader(encBody), getMetadata)
+	decReader, _, err := eng.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: objectKey}, bytes.NewReader(encBody), getMetadata)
 	require.NoError(t, err)
 
 	decData, err := io.ReadAll(decReader)
@@ -143,8 +143,9 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 
 	// New object should use new version
 	newPlaintext := []byte("Post-rotation plaintext data")
+	newObjectKey := "test-object-rotated.dat"
 	newReader := bytes.NewReader(newPlaintext)
-	newEncReader, newMetadata, err := eng.Encrypt(ctx, newReader, map[string]string{
+	newEncReader, newMetadata, err := eng.Encrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: newObjectKey}, newReader, map[string]string{
 		"Content-Type": "application/octet-stream",
 	})
 	require.NoError(t, err)
@@ -157,7 +158,6 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 		newS3Metadata[k] = v
 	}
 
-	newObjectKey := "test-object-rotated.dat"
 	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:   aws.String(bucket),
 		Key:      aws.String(newObjectKey),
@@ -182,7 +182,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	getOutput2.Body.Close()
 
-	decReader2, _, err := eng.Decrypt(ctx, bytes.NewReader(encBody2), getMetadata2)
+	decReader2, _, err := eng.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: objectKey}, bytes.NewReader(encBody2), getMetadata2)
 	require.NoError(t, err)
 
 	decData2, err := io.ReadAll(decReader2)
@@ -205,7 +205,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	getOutput3.Body.Close()
 
-	decReader3, _, err := eng.Decrypt(ctx, bytes.NewReader(encBody3), getMetadata3)
+	decReader3, _, err := eng.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: newObjectKey}, bytes.NewReader(encBody3), getMetadata3)
 	require.NoError(t, err)
 
 	decData3, err := io.ReadAll(decReader3)

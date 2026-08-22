@@ -32,7 +32,7 @@ func TestEncryptWithMetadataEncryption_Enabled(t *testing.T) {
 	data := []byte("Hello, encrypted metadata world!")
 	ctx := context.Background()
 
-	encReader, encMeta, err := engine.Encrypt(ctx, bytes.NewReader(data), nil)
+	encReader, encMeta, err := engine.Encrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-encryption-enabled"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestEncryptWithMetadataEncryption_Enabled(t *testing.T) {
 	}
 
 	// Decrypt and verify.
-	decReader, decMeta, err := engine.Decrypt(ctx, bytes.NewReader(encData), encMeta)
+	decReader, decMeta, err := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-encryption-enabled"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestEncryptWithMetadataEncryption_Disabled(t *testing.T) {
 	data := []byte("Hello, plain metadata world!")
 	ctx := context.Background()
 
-	encReader, encMeta, err := engine.Encrypt(ctx, bytes.NewReader(data), nil)
+	encReader, encMeta, err := engine.Encrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-encryption-disabled"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestEncryptWithMetadataEncryption_Disabled(t *testing.T) {
 	}
 
 	// Verify decrypt still works.
-	decReader, _, err := engine.Decrypt(ctx, bytes.NewReader(encData), encMeta)
+	decReader, _, err := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-encryption-disabled"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestDecryptWithMetadataEncryption_BackwardCompat(t *testing.T) {
 	data := []byte("Backward compatible data")
 	ctx := context.Background()
 
-	encReader, encMeta, err := engineNoMeta.Encrypt(ctx, bytes.NewReader(data), nil)
+	encReader, encMeta, err := engineNoMeta.Encrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-backward-compat"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt (no meta key): %v", err)
 	}
@@ -171,7 +171,7 @@ func TestDecryptWithMetadataEncryption_BackwardCompat(t *testing.T) {
 		t.Fatalf("NewEngineWithOpts: %v", err)
 	}
 
-	decReader, _, err := engineWithMeta.Decrypt(ctx, bytes.NewReader(encData), encMeta)
+	decReader, _, err := engineWithMeta.Decrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-backward-compat"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Backward-compatible Decrypt: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestEncryptWithMetadataEncryption_Compaction(t *testing.T) {
 	data := []byte("Compaction test data")
 	ctx := context.Background()
 
-	encReader, encMeta, err := engine.Encrypt(ctx, bytes.NewReader(data), nil)
+	encReader, encMeta, err := engine.Encrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-compaction"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestEncryptWithMetadataEncryption_Compaction(t *testing.T) {
 	}
 
 	// Decrypt and verify round-trip.
-	decReader, _, err := engine.Decrypt(ctx, bytes.NewReader(encData), encMeta)
+	decReader, _, err := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-compaction"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestEncryptWithMetadataEncryption_FallbackV1(t *testing.T) {
 		"x-amz-meta-large-payload": string(bytes.Repeat([]byte("X"), 8192)),
 	}
 
-	encReader, encMeta, err := engine.Encrypt(ctx, bytes.NewReader(data), userMeta)
+	encReader, encMeta, err := engine.Encrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-fallback-v1"}, bytes.NewReader(data), userMeta)
 	if err != nil {
 		t.Fatalf("Encrypt (with large metadata, fallback): %v", err)
 	}
@@ -280,7 +280,7 @@ func TestEncryptWithMetadataEncryption_FallbackV1(t *testing.T) {
 	}
 
 	// Decrypt and verify.
-	decReader, _, err := engine.Decrypt(ctx, bytes.NewReader(encData), encMeta)
+	decReader, _, err := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-fallback-v1"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt (fallback path): %v", err)
 	}
@@ -324,7 +324,7 @@ func TestEncryptWithMetadataEncryption_FallbackV2(t *testing.T) {
 		"x-amz-meta-large-payload": string(bytes.Repeat([]byte("X"), 8192)),
 	}
 
-	encReader, encMeta, err := engine.Encrypt(ctx, bytes.NewReader(data), userMeta)
+	encReader, encMeta, err := engine.Encrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-fallback-v2"}, bytes.NewReader(data), userMeta)
 	if err != nil {
 		t.Fatalf("Encrypt (chunked + large metadata): %v", err)
 	}
@@ -335,7 +335,7 @@ func TestEncryptWithMetadataEncryption_FallbackV2(t *testing.T) {
 	}
 
 	// Decrypt and verify.
-	decReader, _, err := engine.Decrypt(ctx, bytes.NewReader(encData), encMeta)
+	decReader, _, err := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: "test-bucket", Key: "metadata-fallback-v2"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt (V2 fallback path): %v", err)
 	}
@@ -368,8 +368,8 @@ func TestIsEncrypted_WithCompactedEncryptedMetadata(t *testing.T) {
 
 	// Test 1: Standard MetaEncryptedMetadata with MetaEncrypted=true
 	meta1 := map[string]string{
-		crypto.MetaEncrypted:          "true",
-		crypto.MetaEncryptedMetadata:  "some-blob-value",
+		crypto.MetaEncrypted:         "true",
+		crypto.MetaEncryptedMetadata: "some-blob-value",
 	}
 	if !engine.IsEncrypted(meta1) {
 		t.Error("IsEncrypted should return true for metadata with MetaEncrypted=true and MetaEncryptedMetadata")
@@ -377,7 +377,7 @@ func TestIsEncrypted_WithCompactedEncryptedMetadata(t *testing.T) {
 
 	// Test 2: Compacted form with MetaEncrypted=true and compacted metadata blob
 	meta2 := map[string]string{
-		"x-amz-meta-e":               "true",
+		"x-amz-meta-e":                      "true",
 		crypto.MetaEncryptedMetadataCompact: "some-blob-value",
 	}
 	if !engine.IsEncrypted(meta2) {
@@ -407,8 +407,8 @@ func TestIsEncrypted_WithCompactedEncryptedMetadata(t *testing.T) {
 
 	// Test 6: MetaEncryptedMetadata present but MetaEncrypted is false
 	meta6 := map[string]string{
-		crypto.MetaEncrypted:          "false",
-		crypto.MetaEncryptedMetadata:  "some-blob",
+		crypto.MetaEncrypted:         "false",
+		crypto.MetaEncryptedMetadata: "some-blob",
 	}
 	if engine.IsEncrypted(meta6) {
 		t.Error("IsEncrypted should return false when MetaEncrypted is false")
@@ -417,7 +417,7 @@ func TestIsEncrypted_WithCompactedEncryptedMetadata(t *testing.T) {
 	// Test 7: Only MetaEncryptedMetadataCompact (should check through compacted marker)
 	meta7 := map[string]string{
 		crypto.MetaEncryptedMetadataCompact: "some-blob",
-		"x-amz-meta-e": "true",
+		"x-amz-meta-e":                      "true",
 	}
 	if !engine.IsEncrypted(meta7) {
 		t.Error("IsEncrypted should return true with compacted blob and compacted encrypted marker")

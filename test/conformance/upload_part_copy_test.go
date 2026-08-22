@@ -110,6 +110,31 @@ func testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry(t *testing.T, inst prov
 	}
 }
 
+func testSEC42_EncryptedMPU_UploadPartCopyRebindsDestination(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	backend := newS3Client(t, inst)
+	source, destination := uniqueKey(t), uniqueKey(t)
+	data := bytes.Repeat([]byte("SEC42 MPU copied part"), 2048)
+	sourceUpload := initiateMultipartUpload(t, gw, inst.Bucket, source)
+	sourceETag := uploadPart(t, gw, inst.Bucket, source, sourceUpload, 1, data)
+	completeMultipartUpload(t, gw, inst.Bucket, source, sourceUpload, []mpuPart{{1, sourceETag}})
+
+	destinationUpload := initiateMultipartUpload(t, gw, inst.Bucket, destination)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, destination, destinationUpload) })
+	destinationETag := doUploadPartCopy(t, gw, inst.Bucket, destination, destinationUpload, 1, inst.Bucket, source, "")
+	completeMultipartUpload(t, gw, inst.Bucket, destination, destinationUpload, []mpuPart{{1, destinationETag}})
+	if got := get(t, gw, inst.Bucket, destination); !bytes.Equal(got, data) {
+		t.Fatal("UploadPartCopy destination plaintext mismatch")
+	}
+
+	relocated := uniqueKey(t)
+	copyBackendObject(t, backend, inst.Bucket, destination, relocated)
+	copyBackendObject(t, backend, inst.Bucket, destination+".mpu-manifest", relocated+".mpu-manifest")
+	requireGatewayFailureWithoutPlaintext(t, gw, inst.Bucket, relocated, data)
+}
+
 // testUPC_Full copies a full chunked-encrypted source object via UploadPartCopy
 // and verifies the assembled object matches the original plaintext.
 func testUPC_Full(t *testing.T, inst provider.Instance) {

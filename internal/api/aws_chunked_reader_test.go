@@ -360,6 +360,71 @@ func TestV4SigningContext_CloseZeroizesKeyAndSeed(t *testing.T) {
 	}
 }
 
+func TestVerifyAndSpoolAWSBody_SignedPayloadWithoutGatewayAuth(t *testing.T) {
+	data := []byte("unsigned gateway streaming payload")
+	body := fmt.Sprintf("%x;chunk-signature=%s\r\n%s\r\n0;chunk-signature=%s\r\n", len(data), strings.Repeat("0", 64), data, strings.Repeat("0", 64))
+	r := httptest.NewRequest(http.MethodPut, "http://example.test/bucket/key", strings.NewReader(body))
+	r.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	r.Header.Set("Content-Encoding", "aws-chunked")
+	r.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(len(data)))
+
+	spool, err := verifyAndSpoolAWSBody(r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.Close()
+	got, err := io.ReadAll(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("decoded body = %q, want %q", got, data)
+	}
+}
+
+func TestVerifyAndSpoolAWSBody_AcceptsFinalSignedChunkCRLF(t *testing.T) {
+	data := []byte("final CRLF")
+	body := fmt.Sprintf("%x;chunk-signature=%s\r\n%s\r\n0;chunk-signature=%s\r\n\r\n", len(data), strings.Repeat("0", 64), data, strings.Repeat("0", 64))
+	r := httptest.NewRequest(http.MethodPut, "http://example.test/bucket/key", strings.NewReader(body))
+	r.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	r.Header.Set("Content-Encoding", "aws-chunked")
+	r.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(len(data)))
+
+	spool, err := verifyAndSpoolAWSBody(r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.Close()
+	got, err := io.ReadAll(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("decoded body = %q, want %q", got, data)
+	}
+}
+
+func TestVerifyAndSpoolAWSBody_AcceptsSignedPayloadWithoutContentEncodingWhenUnauthenticated(t *testing.T) {
+	data := []byte("restic-compatible streaming payload")
+	body := fmt.Sprintf("%x;chunk-signature=%s\r\n%s\r\n0;chunk-signature=%s\r\n", len(data), strings.Repeat("0", 64), data, strings.Repeat("0", 64))
+	r := httptest.NewRequest(http.MethodPut, "http://example.test/bucket/key", strings.NewReader(body))
+	r.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	r.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(len(data)))
+
+	spool, err := verifyAndSpoolAWSBody(r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.Close()
+	got, err := io.ReadAll(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("decoded body = %q, want %q", got, data)
+	}
+}
+
 func TestAWSChunkedVerifier_TrailerChecksums(t *testing.T) {
 	data := []byte("all checksum algorithms")
 	checks := map[string][]byte{}

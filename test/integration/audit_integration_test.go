@@ -42,7 +42,7 @@ func TestAudit_MinIO_InspectVerifyList_EndToEnd(t *testing.T) {
 			"MINIO_ROOT_USER":     "minioadmin",
 			"MINIO_ROOT_PASSWORD": "minioadmin",
 		},
-		Cmd: []string{"server", "/data"},
+		Cmd:        []string{"server", "/data"},
 		WaitingFor: wait.ForLog("API:").WithStartupTimeout(60 * time.Second),
 	}
 	minioC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -224,7 +224,7 @@ func writeEncryptedObject(t *testing.T, ctx context.Context, client s3.Client,
 
 	t.Helper()
 
-	encReader, encMeta, err := eng.Encrypt(ctx, bytes.NewReader(plaintext), nil)
+	encReader, encMeta, err := eng.Encrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, bytes.NewReader(plaintext), nil)
 	require.NoError(t, err)
 
 	cipherdata, err := io.ReadAll(encReader)

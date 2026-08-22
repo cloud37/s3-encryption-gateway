@@ -72,7 +72,8 @@ func TestRotationMetrics_EngineAndCounter(t *testing.T) {
 
 	// Encrypt with v1 — envelope carries KeyVersion=1.
 	plaintext := []byte("Object encrypted with key version 1")
-	encReader, encMeta, err := enc.Encrypt(context.Background(), bytes.NewReader(plaintext), map[string]string{"Content-Type": "text/plain"})
+	object := crypto.ObjectContext{Bucket: "metrics-test", Key: "rotation-object"}
+	encReader, encMeta, err := enc.Encrypt(context.Background(), object, bytes.NewReader(plaintext), map[string]string{"Content-Type": "text/plain"})
 	require.NoError(t, err)
 	require.Equal(t, "1", encMeta[crypto.MetaKeyVersion], "engine must stamp MetaKeyVersion")
 
@@ -83,7 +84,7 @@ func TestRotationMetrics_EngineAndCounter(t *testing.T) {
 	km.activeVersion = 2
 
 	// Decrypt — engine decrypts successfully; simulated handler checks key version.
-	decReader, _, err := enc.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	decReader, _, err := enc.Decrypt(context.Background(), object, bytes.NewReader(encData), encMeta)
 	require.NoError(t, err)
 	decrypted, err := io.ReadAll(decReader)
 	require.NoError(t, err)
@@ -102,14 +103,14 @@ func TestRotationMetrics_EngineAndCounter(t *testing.T) {
 
 	// Encrypt + decrypt a v2 object — must NOT emit a rotated-read metric.
 	plaintext2 := []byte("Object encrypted with key version 2")
-	encReader2, encMeta2, err := enc.Encrypt(context.Background(), bytes.NewReader(plaintext2), map[string]string{"Content-Type": "text/plain"})
+	encReader2, encMeta2, err := enc.Encrypt(context.Background(), object, bytes.NewReader(plaintext2), map[string]string{"Content-Type": "text/plain"})
 	require.NoError(t, err)
 	require.Equal(t, "2", encMeta2[crypto.MetaKeyVersion])
 
 	encData2, err := io.ReadAll(encReader2)
 	require.NoError(t, err)
 
-	decReader2, _, err := enc.Decrypt(context.Background(), bytes.NewReader(encData2), encMeta2)
+	decReader2, _, err := enc.Decrypt(context.Background(), object, bytes.NewReader(encData2), encMeta2)
 	require.NoError(t, err)
 	decrypted2, err := io.ReadAll(decReader2)
 	require.NoError(t, err)

@@ -20,19 +20,19 @@ type mockEngine struct {
 	closeCount int
 }
 
-func (m *mockEngine) Encrypt(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (m *mockEngine) Encrypt(ctx context.Context, object crypto.ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
 	return reader, metadata, nil
 }
 
-func (m *mockEngine) Decrypt(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (m *mockEngine) Decrypt(ctx context.Context, object crypto.ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
 	return reader, metadata, nil
 }
 
-func (m *mockEngine) DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, _, _ int64) (io.Reader, map[string]string, error) {
+func (m *mockEngine) DecryptRange(ctx context.Context, object crypto.ObjectContext, reader io.Reader, metadata map[string]string, _, _ int64) (io.Reader, map[string]string, error) {
 	return reader, metadata, nil
 }
 
-func (m *mockEngine) AuthenticateChunkedTrailer(context.Context, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
+func (m *mockEngine) AuthenticateChunkedTrailer(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
 	return crypto.ChunkedObjectInfo{}, nil
 }
 

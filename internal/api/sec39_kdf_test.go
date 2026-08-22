@@ -18,16 +18,16 @@ import (
 
 type sec39ErrorEngine struct{ err error }
 
-func (e *sec39ErrorEngine) Encrypt(context.Context, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
+func (e *sec39ErrorEngine) Encrypt(context.Context, crypto.ObjectContext, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
 	return nil, nil, e.err
 }
-func (e *sec39ErrorEngine) Decrypt(context.Context, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
+func (e *sec39ErrorEngine) Decrypt(context.Context, crypto.ObjectContext, io.Reader, map[string]string) (io.Reader, map[string]string, error) {
 	return nil, nil, e.err
 }
-func (e *sec39ErrorEngine) DecryptRange(context.Context, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
+func (e *sec39ErrorEngine) DecryptRange(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
 	return nil, nil, e.err
 }
-func (e *sec39ErrorEngine) AuthenticateChunkedTrailer(context.Context, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
+func (e *sec39ErrorEngine) AuthenticateChunkedTrailer(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64) (crypto.ChunkedObjectInfo, error) {
 	return crypto.ChunkedObjectInfo{}, e.err
 }
 func (*sec39ErrorEngine) IsEncrypted(map[string]string) bool { return true }

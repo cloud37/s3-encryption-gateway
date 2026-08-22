@@ -120,6 +120,41 @@ func testSelfContained_AES_EncryptedMPU_RangedGet(t *testing.T, inst provider.In
 	}
 }
 
+func testSEC42_EncryptedMPU_BackendKeySubstitutionFailsClosed(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	backend := newS3Client(t, inst)
+	source, destination := uniqueKey(t), uniqueKey(t)
+	data := bytes.Repeat([]byte("SEC42 encrypted MPU relocation"), 4096)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, source)
+	etag := uploadPart(t, gw, inst.Bucket, source, uploadID, 1, data)
+	completeMultipartUpload(t, gw, inst.Bucket, source, uploadID, []mpuPart{{1, etag}})
+
+	// Both objects are moved byte-for-byte. The destination must still fail
+	// because the parent payload and companion are bound to the source identity.
+	copyBackendObject(t, backend, inst.Bucket, source, destination)
+	copyBackendObject(t, backend, inst.Bucket, source+".mpu-manifest", destination+".mpu-manifest")
+	requireGatewayFailureWithoutPlaintext(t, gw, inst.Bucket, destination, data)
+	requireGatewayRangeFailureWithoutPlaintext(t, gw, inst.Bucket, destination, "bytes=0-99", data[:100])
+}
+
+func testSEC42_EncryptedMPU_CompanionSubstitutionFailsClosed(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	vk := provider.StartValkey(context.Background(), t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	backend := newS3Client(t, inst)
+	first, second := uniqueKey(t), uniqueKey(t)
+	firstData := []byte("SEC42 first MPU companion")
+	for key, data := range map[string][]byte{first: firstData, second: []byte("SEC42 second MPU companion")} {
+		uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+		etag := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, data)
+		completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{{1, etag}})
+	}
+	copyBackendObject(t, backend, inst.Bucket, second+".mpu-manifest", first+".mpu-manifest")
+	requireGatewayFailureWithoutPlaintext(t, gw, inst.Bucket, first, firstData)
+}
+
 // testSelfContained_AES_EncryptedMPU_AtRest verifies that objects assembled via
 // encrypted MPU with an AES KEK are stored as ciphertext on the backend:
 //

@@ -384,7 +384,13 @@ func newMPUTestHandler(t *testing.T, bucketPattern string) (*Handler, *mpuMockS3
 	t.Helper()
 	mockClient := newMPUMockS3Client()
 
-	engine, err := crypto.NewEngine([]byte(mpuTestPassword))
+	// SEC-42 has many isolated handler fixtures. Keep their KDF work bounded
+	// under -race without changing the production/default test configuration.
+	pbkdf2Iterations := crypto.DefaultPBKDF2Iterations
+	if strings.HasPrefix(bucketPattern, "sec42-") {
+		pbkdf2Iterations = 100000
+	}
+	engine, err := crypto.NewEngineWithChunkingAndProvider([]byte(mpuTestPassword), "", nil, false, crypto.DefaultChunkSize, "default", pbkdf2Iterations)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -413,7 +419,7 @@ encrypt_multipart_uploads: true
 	}
 
 	// Password-mode KeyManager — mirrors what cmd/server/main.go does.
-	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(pbkdf2Iterations))
 	if err != nil {
 		t.Fatalf("password keymanager: %v", err)
 	}
@@ -2270,6 +2276,9 @@ func TestMPU_UploadPartCopy_FromMPUSource(t *testing.T) {
 	}
 
 	// ── Stage 2: start a destination MPU and copy from source ────────────────
+	// Keep the source's durable MPU metadata, but explicitly opt the destination
+	// out of encrypted MPU so the route exercises uploadPartCopyFromMPUSource.
+	handler.policyManager = newPolicyManagerWithMPUOff(t, dstBucket)
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("POST", "/"+dstBucket+"/"+dstKey+"?uploads=", nil))
 	if w.Code != http.StatusOK {
@@ -2282,6 +2291,7 @@ func TestMPU_UploadPartCopy_FromMPUSource(t *testing.T) {
 	copyReq := httptest.NewRequest("PUT",
 		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", dstBucket, dstKey, dstUploadID), nil)
 	copyReq.Header.Set("x-amz-copy-source", "/"+srcBucket+"/"+srcKey)
+	copyReq.Header.Set("x-amz-copy-source-range", "bytes=1-5")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, copyReq)
 	if w.Code != http.StatusOK {
@@ -2312,7 +2322,7 @@ func TestMPU_UploadPartCopy_FromMPUSource(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("dst GET: %d %s", w.Code, w.Body.String())
 	}
-	if !bytes.Equal(w.Body.Bytes(), plainContent) {
+	if !bytes.Equal(w.Body.Bytes(), plainContent[1:6]) {
 		t.Errorf("content mismatch after UploadPartCopy from MPU source: got %d bytes, want %d",
 			w.Body.Len(), len(plainContent))
 	}
