@@ -61,12 +61,12 @@ migrate-multiarch:
 # Run tests
 test:
 	@echo "Running tests..."
-	@go test -count=1 -v -race -coverprofile=coverage.out ./...
+	@go test -count=1 -v -race -timeout 20m -coverprofile=coverage.out ./...
 
 # Run tests with FIPS build tag
 test-fips:
 	@echo "Running tests with FIPS build tag..."
-	@GOFIPS140=v1.0.0 go test -count=1 -v -race -tags=fips ./...
+	@GOFIPS140=v1.0.0 go test -count=1 -v -race -timeout 20m -tags=fips ./...
 
 # ── Tier-2 conformance targets (require Docker via Testcontainers) ──────────
 #

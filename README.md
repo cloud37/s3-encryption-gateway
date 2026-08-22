@@ -250,6 +250,11 @@ Envelope encryption removes key derivation from the per-request hot path: a rand
 
 > **Migrating from password-only?** Set `encryption.password` to your existing password and enable `key_manager`. The gateway reads the password for objects encrypted before the switch and uses the KEK for all new objects — no data migration required. To re-encrypt existing objects, use the **GET-through-gateway → PUT-through-gateway** pattern with any standard S3 client. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for details.
 
+> **Location binding:** New encrypted payloads are authenticated for their
+> gateway bucket/key location. Do not use backend-native moves or copies;
+> use gateway `CopyObject` or GET-through-gateway → PUT-through-gateway
+> migration. See [`docs/MIGRATION.md`](docs/MIGRATION.md).
+
 Three variants are supported:
 
 #### Self-contained AES KEK (simplest, no external dependencies)

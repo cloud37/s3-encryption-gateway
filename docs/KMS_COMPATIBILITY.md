@@ -302,6 +302,12 @@ Every implementation MUST satisfy these invariants:
    methods MUST return `ErrProviderUnavailable`.
 6. A nil `KeyManager` is never valid; callers must check.
 
+7. The `metadata` argument to `WrapKey` and `UnwrapKey` is **advisory
+   context only**. Provider adapters may ignore it and deployments MUST NOT
+   rely on it for bucket, key, or object-location integrity. The gateway's
+   payload AEAD `ObjectContext` binding is the independent, universal
+   integrity boundary for password mode and every `KeyManager` mode.
+
 ### Registering a third-party adapter
 
 Call `crypto.Register` from your own package's `init()` function:

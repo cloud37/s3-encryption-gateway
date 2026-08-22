@@ -30,6 +30,23 @@ writing it back **through** the gateway. This ensures:
 - No separate crypto stack needs to track gateway evolution.
 - Standard S3 tools (`awscli`, `s5cmd`, `mc`) perform the copy.
 
+## Object Location Binding
+
+Current encrypted writes bind payload authentication to the gateway-derived
+bucket and object key. A raw backend move, copy, or rename that preserves the
+ciphertext and metadata but changes the object location therefore fails
+authentication; editing metadata to try to repair the move is not supported
+and must never be used as a recovery procedure. This binding is enforced by
+the payload AEAD independently of whether the DEK is protected by password
+mode or a `KeyManager` provider.
+
+Use the gateway's `CopyObject`, which decrypts the source and re-encrypts the
+destination with a fresh binding, or use the supported GET-through-gateway ->
+PUT-through-gateway migration pattern. This includes rewriting legacy MPU v1
+objects into the current bound formats. Objects being moved between locations
+should be read and re-written at the destination through the gateway rather
+than relocated with a backend-native copy or rename.
+
 ## Supported Re-encryption Patterns
 
 ### Standard re-encryption (GET → PUT)

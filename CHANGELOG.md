@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **V1.0-SEC-42 object location binding:** New writes bind ciphertext to their
+  gateway bucket/key location; legacy objects remain readable, but backend-
+  native moves fail authentication. Use gateway `CopyObject` or
+  GET-through-gateway -> PUT-through-gateway rewriting for migration.
+
 - **V1.0-SEC-37 authenticated chunked completeness:** New chunked v2 objects
   authenticate their exact data-chunk count and plaintext size with a terminal
   record, and unknown manifest versions fail closed. V1 chunked objects remain
