@@ -1761,17 +1761,15 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Get S3 client (may use client credentials if enabled)
-	s3Client, err := h.getS3Client(r)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to get S3 client")
-		h.writeS3ClientError(w, r, err, "PUT", start)
-		return
-	}
-
 	// Check if this is a copy operation
 	copySource := r.Header.Get("x-amz-copy-source")
 	if copySource != "" {
+		s3Client, err := h.getS3Client(r)
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to get S3 client")
+			h.writeS3ClientError(w, r, err, "PUT", start)
+			return
+		}
 		// Handle copy operation (pass s3Client)
 		h.handleCopyObject(w, r, bucket, key, copySource, start, s3Client)
 		return
@@ -1859,6 +1857,29 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if contentDisposition := r.Header.Get("Content-Disposition"); contentDisposition != "" {
 		metadata[crypto.MetaContentDisposition] = contentDisposition
 	}
+	var inputReader io.Reader = r.Body
+	if mode, modeErr := classifyStreamingPayloadMode(r.Header.Get("x-amz-content-sha256")); modeErr != nil {
+		writeStreamingPayloadError(w, r.URL.Path, modeErr)
+		return
+	} else if mode != streamingNone {
+		spool, verifyErr := verifyAndSpoolAWSBody(r, streamingContext(r))
+		if verifyErr != nil {
+			writeStreamingPayloadError(w, r.URL.Path, verifyErr)
+			return
+		}
+		defer spool.Close()
+		inputReader = spool
+		originalBytes, haveContentLength = spool.DecodedLength(), true
+		metadata["Content-Length"] = strconv.FormatInt(originalBytes, 10)
+	}
+
+	// Verify and spool streaming bodies before touching backend or encryption state.
+	s3Client, err := h.getS3Client(r)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to get S3 client")
+		h.writeS3ClientError(w, r, err, "PUT", start)
+		return
+	}
 
 	// Get encryption engine for this bucket
 	engine, err := h.getEncryptionEngine(bucket)
@@ -1873,25 +1894,6 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		s3Err.WriteXML(w)
 		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
-	}
-
-	// Check for AWS Chunked Uploads
-	// If detected, we must decode the stream to remove chunk metadata (signatures)
-	// before encrypting, otherwise the encrypted content will be corrupted with metadata.
-	// Check for any STREAMING- header value (e.g. STREAMING-AWS4-HMAC-SHA256-PAYLOAD or STREAMING-UNSIGNED-PAYLOAD-TRAILER)
-	var inputReader io.Reader = r.Body
-	contentSha256 := r.Header.Get("x-amz-content-sha256")
-	if strings.HasPrefix(contentSha256, "STREAMING-") {
-		inputReader = &clientInputReader{r: NewAwsChunkedReader(r.Body), onRead: func(n int64) {
-			if h.metrics != nil {
-				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
-			}
-		}}
-		h.logger.WithFields(logrus.Fields{
-			"bucket": bucket,
-			"key":    key,
-			"mode":   contentSha256,
-		}).Debug("Detected AWS Chunked Upload, decoding stream before encryption")
 	}
 
 	// Encrypt the object
@@ -3951,29 +3953,30 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Get S3 client (may use client credentials if enabled)
+	var inputReader io.Reader = r.Body
+	mode, modeErr := classifyStreamingPayloadMode(r.Header.Get("x-amz-content-sha256"))
+	if modeErr != nil {
+		writeStreamingPayloadError(w, r.URL.Path, modeErr)
+		return
+	}
+	if mode != streamingNone {
+		spool, verifyErr := verifyAndSpoolAWSBody(r, streamingContext(r))
+		if verifyErr != nil {
+			writeStreamingPayloadError(w, r.URL.Path, verifyErr)
+			return
+		}
+		defer spool.Close()
+		inputReader = spool
+		// All downstream length calculations use verified bytes.
+		r.Header.Set("Content-Length", strconv.FormatInt(spool.DecodedLength(), 10))
+	}
+
+	// Verify and spool streaming bodies before backend, cache, or MPU state work.
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to get S3 client")
 		h.writeS3ClientError(w, r, err, "PUT", start)
 		return
-	}
-
-	// Decode AWS streaming payloads before either MPU path. The chunk framing and
-	// signatures are transport data, not part of the plaintext to store.
-	var inputReader io.Reader = r.Body
-	contentSha256 := r.Header.Get("x-amz-content-sha256")
-	if strings.HasPrefix(contentSha256, "STREAMING-") {
-		inputReader = &clientInputReader{r: NewAwsChunkedReader(r.Body), onRead: func(n int64) {
-			if h.metrics != nil {
-				h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
-			}
-		}}
-		h.logger.WithFields(logrus.Fields{
-			"bucket": bucket,
-			"key":    key,
-			"mode":   contentSha256,
-		}).Debug("Detected AWS Chunked MPU upload, decoding stream before processing")
 	}
 
 	// Default: no encryption layer added here (plaintext parts per ADR 0002, or

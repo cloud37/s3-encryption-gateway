@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -130,8 +131,9 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 
 			// 3. Validate signature
 			var sigErr error
+			var signingContext *V4SigningContext
 			if IsSignatureV4Request(r) {
-				sigErr = ValidateSignatureV4(r, secretKey, clockSkew)
+				signingContext, sigErr = ValidateSignatureV4(r, secretKey, clockSkew)
 			} else if IsSignatureV2Request(r) {
 				// Enforce V4-only policy when configured.
 				if !allowSigV2 {
@@ -151,6 +153,12 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			}
 
 			if sigErr != nil {
+				if errors.Is(sigErr, ErrUnsupportedStreamingMode) || errors.Is(sigErr, ErrInvalidStreamingHeaders) {
+					logger.WithError(sigErr).WithField("access_key", creds.AccessKey).Warn("Invalid streaming request headers")
+					emitAuthFailure(creds.AccessKey, sigErr)
+					writeStreamingPayloadError(w, r.URL.Path, sigErr)
+					return
+				}
 				if sigErr == ErrSignatureMismatch {
 					logger.WithField("access_key", creds.AccessKey).Warn("Signature mismatch")
 					emitAuthFailure(creds.AccessKey, ErrSignatureMismatch)
@@ -162,6 +170,10 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 				emitAuthFailure(creds.AccessKey, sigErr)
 				writeS3ClientError(w, r, ErrSignatureMismatch, r.Method)
 				return
+			}
+			if signingContext != nil {
+				defer signingContext.Close()
+				r = r.WithContext(context.WithValue(r.Context(), v4SigningContextKey{}, signingContext))
 			}
 
 			// 4. Attach label to context for downstream audit logging

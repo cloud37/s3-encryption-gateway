@@ -71,3 +71,14 @@ The S3 Encryption Gateway is designed with the following properties:
 - **Constant-time comparisons**: All security-sensitive byte comparisons use `crypto/subtle`.
 
 For the full security architecture, see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) and [`docs/ENCRYPTION_DESIGN.md`](docs/ENCRYPTION_DESIGN.md).
+# SigV4 streaming uploads
+
+The gateway accepts only the exact `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`,
+`STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`, and
+`STREAMING-UNSIGNED-PAYLOAD-TRAILER` modes. Signed modes authenticate every
+chunk and the terminal chunk. Trailer modes require declared, lowercase,
+supported checksum trailers and strict framing. Bodies are fully verified into
+0600 temporary spools before backend or multipart state mutation; decoded
+length, line, trailer, and chunk bounds are enforced. Invalid or unknown modes
+fail closed and internal spool failures return `InternalError` without
+revealing signatures, keys, payloads, or trailer values.

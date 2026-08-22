@@ -123,3 +123,10 @@ go test -count=1 -tags=conformance -v \
 
 - [V1.0-COMPAT-1 Implementation Plan](../docs/plans/V1.0-COMPAT-1-plan.md)
 - [Conformance Test Suite](../test/conformance/)
+# Streaming upload compatibility
+
+AWS SigV4 streaming payloads are supported only with the exact protocol modes
+documented in `SECURITY.md`. AWS CLI and SDK-style signed multi-chunk uploads
+are verified atomically before storage. Signed trailers and all four supported
+checksum trailers are verified before storage; unknown or ambiguous modes are
+rejected rather than decoded as plaintext.

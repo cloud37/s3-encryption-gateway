@@ -4,6 +4,7 @@
 
 - Security: bound metadata and password-envelope KDF costs with configurable decrypt limits.
 - Security (V1.0-SEC-40): always redact SigV2 and SigV4 presigned signatures from access logs and traces.
+- Security (V1.0-SEC-41): verify AWS SigV4 streaming chunks and trailers into an atomic bounded-memory spool; reject unknown modes and malformed framing.
 
 All notable changes to this project will be documented in this file.
 
@@ -2758,3 +2759,8 @@ unless noted.
   integration tests against a local MinIO instance.
 
 - **MIT License**.
+# V1.0 security
+
+- Add strict SigV4 streaming-chain verification, checksum trailers, bounded
+  atomic spooling, and fail-closed rejection of malformed or unknown streaming
+  payload modes.

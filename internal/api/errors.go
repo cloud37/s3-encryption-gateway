@@ -14,6 +14,27 @@ import (
 // gateway-owned manifest is unavailable.
 var ErrMissingMPUManifest = errors.New("encrypted multipart object manifest is missing")
 
+func writeStreamingPayloadError(w http.ResponseWriter, resource string, err error) {
+	code, message, status := "InvalidRequest", "The AWS-chunked request body is invalid.", http.StatusBadRequest
+	switch {
+	case errors.Is(err, ErrStreamingSpool):
+		code, message, status = "InternalError", "We encountered an internal error. Please try again.", http.StatusInternalServerError
+	case errors.Is(err, ErrUnsupportedStreamingMode):
+		message = "The streaming payload mode is not supported."
+	case errors.Is(err, ErrInvalidStreamingHeaders):
+		message = "The streaming payload mode is not supported."
+	case errors.Is(err, ErrStreamingLength):
+		message = "The decoded content length does not match x-amz-decoded-content-length."
+	case errors.Is(err, ErrIncompleteBody):
+		code, message = "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header."
+	case errors.Is(err, ErrStreamingCanceled):
+		code, message = "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header."
+	case errors.Is(err, ErrSignatureMismatch):
+		code, message, status = "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", http.StatusForbidden
+	}
+	(&S3Error{Code: code, Message: message, Resource: resource, HTTPStatus: status}).WriteXML(w)
+}
+
 // S3Error represents an S3 API error response.
 type S3Error struct {
 	Code       string

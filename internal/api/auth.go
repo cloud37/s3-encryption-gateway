@@ -13,8 +13,108 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+type streamingPayloadMode uint8
+
+const (
+	streamingNone streamingPayloadMode = iota
+	streamingSignedPayload
+	streamingSignedPayloadTrailer
+	streamingUnsignedPayloadTrailer
+)
+
+var (
+	ErrUnsupportedStreamingMode = errors.New("unsupported SigV4 streaming payload mode")
+	ErrInvalidStreamingHeaders  = errors.New("invalid SigV4 streaming request headers")
+	ErrStreamingFraming         = errors.New("invalid AWS-chunked framing")
+	ErrStreamingLength          = errors.New("decoded payload length mismatch")
+	ErrStreamingTrailer         = errors.New("invalid AWS-chunked trailer")
+	ErrStreamingTrailingData    = errors.New("data follows AWS-chunked message")
+	ErrIncompleteBody           = errors.New("incomplete AWS-chunked request body")
+	ErrStreamingCanceled        = errors.New("AWS-chunked request canceled")
+	ErrStreamingSpool           = errors.New("AWS-chunked spool I/O failed")
+)
+
+func classifyStreamingPayloadMode(value string) (streamingPayloadMode, error) {
+	switch value {
+	case "STREAMING-AWS4-HMAC-SHA256-PAYLOAD":
+		return streamingSignedPayload, nil
+	case "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER":
+		return streamingSignedPayloadTrailer, nil
+	case "STREAMING-UNSIGNED-PAYLOAD-TRAILER":
+		return streamingUnsignedPayloadTrailer, nil
+	case "", "UNSIGNED-PAYLOAD":
+		return streamingNone, nil
+	default:
+		if len(value) == 64 {
+			if _, err := hex.DecodeString(value); err == nil && strings.ToLower(value) == value {
+				return streamingNone, nil
+			}
+		}
+		return streamingNone, ErrUnsupportedStreamingMode
+	}
+}
+
+func validateStreamingRequestHeaders(r *http.Request, mode streamingPayloadMode) error {
+	if mode == streamingNone {
+		return nil
+	}
+	if len(r.Header.Values("X-Amz-Content-Sha256")) != 1 || len(r.Header.Values("Content-Encoding")) != 1 || len(r.Header.Values("X-Amz-Decoded-Content-Length")) != 1 {
+		return fmt.Errorf("%w: %w", ErrInvalidStreamingHeaders, ErrStreamingFraming)
+	}
+	if r.Header.Get("X-Amz-Content-Sha256") != r.Header.Values("X-Amz-Content-Sha256")[0] || strings.Contains(r.Header.Get("X-Amz-Content-Sha256"), ",") {
+		return fmt.Errorf("%w: %w", ErrInvalidStreamingHeaders, ErrStreamingFraming)
+	}
+	if !validAWSContentEncoding(r.Header.Get("Content-Encoding")) {
+		return fmt.Errorf("%w: %w", ErrInvalidStreamingHeaders, ErrStreamingFraming)
+	}
+	if len(r.Header.Values("X-Amz-Trailer")) > 1 || r.Header.Get("X-Amz-Trailer") == "" && (mode == streamingSignedPayloadTrailer || mode == streamingUnsignedPayloadTrailer) {
+		return fmt.Errorf("%w: %w", ErrInvalidStreamingHeaders, ErrStreamingTrailer)
+	}
+	return nil
+}
+
+type V4SigningContext struct {
+	timestamp       string
+	credentialScope string
+	signingKey      []byte
+	seedSignature   [32]byte
+	mode            streamingPayloadMode
+	closed          bool
+	closeMu         sync.Mutex
+}
+
+func (c *V4SigningContext) Close() {
+	if c == nil {
+		return
+	}
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	if c.closed {
+		return
+	}
+	for i := range c.signingKey {
+		c.signingKey[i] = 0
+	}
+	for i := range c.seedSignature {
+		c.seedSignature[i] = 0
+	}
+	c.signingKey = nil
+	c.closed = true
+}
+
+func streamingContext(r *http.Request) *V4SigningContext {
+	if r == nil {
+		return nil
+	}
+	c, _ := r.Context().Value(v4SigningContextKey{}).(*V4SigningContext)
+	return c
+}
+
+type v4SigningContextKey struct{}
 
 // Sentinel authentication errors.
 //
@@ -45,7 +145,6 @@ var (
 	// ErrMissingCredentials indicates credentials could not be extracted or
 	// were incomplete (missing access key or secret key).
 	ErrMissingCredentials = errors.New("missing or incomplete credentials")
-
 )
 
 const defaultClockSkew = 5 * time.Minute
@@ -56,7 +155,7 @@ const defaultClockSkew = 5 * time.Minute
 // clockSkew is the maximum acceptable difference between the request
 // timestamp and server time; zero or negative values fall back to
 // defaultClockSkew (5 minutes).
-func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Duration) error {
+func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Duration) (*V4SigningContext, error) {
 	if clockSkew <= 0 {
 		clockSkew = defaultClockSkew
 	}
@@ -76,14 +175,14 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 		// Credential format: AccessKey/Date/Region/Service/aws4_request
 		parts := strings.Split(credential, "/")
 		if len(parts) != 5 {
-			return fmt.Errorf("invalid credential format")
+			return nil, fmt.Errorf("invalid credential format")
 		}
 		credentialScope = strings.Join(parts[1:], "/")
 		timestamp = query.Get("X-Amz-Date")
 	} else {
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256 ") {
-			return fmt.Errorf("missing or invalid Authorization header")
+			return nil, fmt.Errorf("missing or invalid Authorization header")
 		}
 		// Parse Authorization header
 		// AWS4-HMAC-SHA256 Credential=..., SignedHeaders=..., Signature=...
@@ -100,7 +199,7 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 		credential := params["Credential"]
 		credParts := strings.Split(credential, "/")
 		if len(credParts) != 5 {
-			return fmt.Errorf("invalid credential format in header")
+			return nil, fmt.Errorf("invalid credential format in header")
 		}
 		credentialScope = strings.Join(credParts[1:], "/")
 		timestamp = r.Header.Get("X-Amz-Date")
@@ -110,10 +209,10 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 	}
 
 	if signature == "" {
-		return fmt.Errorf("missing signature")
+		return nil, fmt.Errorf("missing signature")
 	}
 	if timestamp == "" {
-		return fmt.Errorf("missing timestamp")
+		return nil, fmt.Errorf("missing timestamp")
 	}
 
 	// Clock-skew validation: reject requests whose timestamp is outside the
@@ -121,12 +220,12 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 	// requests and prevents indefinite replay of captured signatures.
 	t, err := time.Parse("20060102T150405Z", timestamp)
 	if err != nil {
-		return fmt.Errorf("invalid timestamp format")
+		return nil, fmt.Errorf("invalid timestamp format")
 	}
 	now := time.Now().UTC()
 	skew := now.Sub(t).Abs()
 	if skew > clockSkew {
-		return fmt.Errorf("request timestamp outside clock skew window")
+		return nil, fmt.Errorf("request timestamp outside clock skew window")
 	}
 
 	// Cross-validate credential-scope date against X-Amz-Date.
@@ -135,17 +234,17 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 	// the clock-skew window.
 	scopeParts := strings.Split(credentialScope, "/")
 	if len(scopeParts) != 4 {
-		return fmt.Errorf("invalid credential scope")
+		return nil, fmt.Errorf("invalid credential scope")
 	}
 	credDate := scopeParts[0]
 	if credDate != t.Format("20060102") {
-		return fmt.Errorf("credential date mismatch")
+		return nil, fmt.Errorf("credential date mismatch")
 	}
 
 	// 1. Create Canonical Request
 	canonicalRequest, err := createCanonicalRequest(r, isPresigned, signedHeaders)
 	if err != nil {
-		return fmt.Errorf("failed to create canonical request: %w", err)
+		return nil, fmt.Errorf("failed to create canonical request: %w", err)
 	}
 
 	// 2. Create String to Sign
@@ -156,16 +255,30 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 	region := scopeParts[1]
 	service := scopeParts[2]
 
-	signingKey := getSignatureKey(secretKey, date, region, service)
-	calculatedSignature := hex.EncodeToString(sign(signingKey, []byte(stringToSign)))
+	signingKey := deriveSignatureKey(secretKey, date, region, service)
+	defer func() {
+		for i := range signingKey {
+			signingKey[i] = 0
+		}
+	}()
+	calculated := sign(signingKey, []byte(stringToSign))
+	provided, decodeErr := hex.DecodeString(signature)
+	defer func() {
+		for i := range calculated {
+			calculated[i] = 0
+		}
+		for i := range provided {
+			provided[i] = 0
+		}
+	}()
 
 	// 4. Compare using constant-time comparison to avoid timing side channels.
 	// Do NOT include the computed or expected signatures in the error: the error
 	// message propagates into HTTP response bodies (see writeS3ClientError),
 	// and leaking the computed signature would turn this endpoint into a
 	// signing oracle for the shared secret.
-	if !hmac.Equal([]byte(calculatedSignature), []byte(signature)) {
-		return ErrSignatureMismatch
+	if decodeErr != nil || len(provided) != sha256.Size || !hmac.Equal(calculated, provided) {
+		return nil, ErrSignatureMismatch
 	}
 
 	// Check Expiry for Presigned URLs
@@ -174,18 +287,28 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 		if expiresStr != "" {
 			expires, err := strconv.Atoi(expiresStr)
 			if err != nil {
-				return fmt.Errorf("invalid expires format")
+				return nil, fmt.Errorf("invalid expires format")
 			}
 			if expires > 604800 {
-				return fmt.Errorf("presigned url expiry exceeds maximum allowed duration")
+				return nil, fmt.Errorf("presigned url expiry exceeds maximum allowed duration")
 			}
 			if now.After(t.Add(time.Duration(expires) * time.Second)) {
-				return fmt.Errorf("presigned url expired")
+				return nil, fmt.Errorf("presigned url expired")
 			}
 		}
 	}
 
-	return nil
+	mode, err := classifyStreamingPayloadMode(r.Header.Get("X-Amz-Content-Sha256"))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStreamingRequestHeaders(r, mode); err != nil {
+		return nil, err
+	}
+	ctx := &V4SigningContext{timestamp: timestamp, credentialScope: credentialScope, mode: mode}
+	copy(ctx.seedSignature[:], calculated)
+	ctx.signingKey = deriveSignatureKey(secretKey, date, region, service)
+	return ctx, nil
 }
 
 // ValidateSignatureV2 validates an AWS Signature Version 2 request.
@@ -479,10 +602,28 @@ func sign(key []byte, data []byte) []byte {
 
 func getSignatureKey(secret, date, region, service string) []byte {
 	kDate := sign([]byte("AWS4"+secret), []byte(date))
+	defer clearAuthBytes(kDate)
 	kRegion := sign(kDate, []byte(region))
+	defer clearAuthBytes(kRegion)
 	kService := sign(kRegion, []byte(service))
-	kSigning := sign(kService, []byte("aws4_request"))
-	return kSigning
+	defer clearAuthBytes(kService)
+	return sign(kService, []byte("aws4_request"))
+}
+
+func deriveSignatureKey(secret, date, region, service string) []byte {
+	kDate := sign([]byte("AWS4"+secret), []byte(date))
+	defer clearAuthBytes(kDate)
+	kRegion := sign(kDate, []byte(region))
+	defer clearAuthBytes(kRegion)
+	kService := sign(kRegion, []byte(service))
+	defer clearAuthBytes(kService)
+	return sign(kService, []byte("aws4_request"))
+}
+
+func clearAuthBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 // uriEncode encodes strings for AWS Signature V4 (RFC 3986)
