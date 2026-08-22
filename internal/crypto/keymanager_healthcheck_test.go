@@ -13,11 +13,11 @@ import (
 
 // mockHCKM implements KeyManager for health check tests.
 type mockHCKM struct {
-	provider       string
-	healthErr      error
+	provider        string
+	healthErr       error
 	healthCallCount atomic.Int32
-	mu             sync.Mutex
-	blockHealth    chan struct{} // if set, HealthCheck blocks until closed
+	mu              sync.Mutex
+	blockHealth     chan struct{} // if set, HealthCheck blocks until closed
 }
 
 func (m *mockHCKM) Provider() string { return m.provider }

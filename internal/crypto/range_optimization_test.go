@@ -464,7 +464,7 @@ func TestRangeDecryptionEdgeCases(t *testing.T) {
 
 	// Encrypt the data
 	reader := bytes.NewReader(originalData)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), reader, nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -634,8 +634,8 @@ func TestRangeDecryptionEdgeCases(t *testing.T) {
 
 			// Use the engine's DecryptRange method
 			rangeReader, _, err := engine.(interface {
-				DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
-			}).DecryptRange(context.Background(), encryptedReader2, metadata, tc.plaintextStart, tc.plaintextEnd)
+				DecryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
+			}).DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, encryptedReader2, metadata, tc.plaintextStart, tc.plaintextEnd)
 
 			if tc.expectError {
 				if err == nil {
@@ -779,7 +779,7 @@ func TestRangeDecryptionAuthenticationVerification(t *testing.T) {
 
 	// Encrypt the data
 	reader := bytes.NewReader(originalData)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), reader, nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -809,8 +809,8 @@ func TestRangeDecryptionAuthenticationVerification(t *testing.T) {
 	expectedSize := plaintextEnd - plaintextStart + 1
 
 	rangeReader, _, err := engine.(interface {
-		DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
-	}).DecryptRange(context.Background(), bytes.NewReader(encryptedData), metadata, plaintextStart, plaintextEnd)
+		DecryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
+	}).DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), metadata, plaintextStart, plaintextEnd)
 
 	if err != nil {
 		t.Fatalf("Failed to create range reader: %v", err)
@@ -846,8 +846,8 @@ func TestRangeDecryptionAuthenticationVerification(t *testing.T) {
 
 		// Try to decrypt range - should fail due to auth tag verification
 		rangeReader, _, err := engine.(interface {
-			DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
-		}).DecryptRange(context.Background(), bytes.NewReader(corruptedData), metadata, plaintextStart, plaintextEnd)
+			DecryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
+		}).DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(corruptedData), metadata, plaintextStart, plaintextEnd)
 
 		if err != nil {
 			// Should fail during range reader creation or reading
@@ -877,7 +877,7 @@ func TestRangeDecryptionChunkAlignment(t *testing.T) {
 
 	// Encrypt the data
 	reader := bytes.NewReader(originalData)
-	encryptedReader, metadata, err := engine.Encrypt(context.Background(), reader, nil)
+	encryptedReader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, nil)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -907,8 +907,8 @@ func TestRangeDecryptionChunkAlignment(t *testing.T) {
 	expectedSize := plaintextEnd - plaintextStart + 1
 
 	rangeReader, _, err := engine.(interface {
-		DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
-	}).DecryptRange(context.Background(), bytes.NewReader(encryptedData), metadata, plaintextStart, plaintextEnd)
+		DecryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
+	}).DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), metadata, plaintextStart, plaintextEnd)
 
 	if err != nil {
 		t.Fatalf("Failed to create range reader: %v", err)

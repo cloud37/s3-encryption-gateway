@@ -27,7 +27,7 @@ func benchmarkMPUEncryptReader(b *testing.B, plainLen int) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r, _, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(plainLen), "AES256GCM")
+		r, _, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(plainLen), "AES256GCM")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -50,8 +50,9 @@ func BenchmarkMPUDecryptReader_100MiB(b *testing.B) {
 	plain := bytes.Repeat([]byte{0xAB}, plainLen)
 
 	// 1) Build the ciphertext + manifest once (outside the timed loop).
-	enc, encLen, err := NewMPUPartEncryptReader(
+	enc, encLen, err := newMPUPartEncryptReaderV1(
 		context.Background(),
+		ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{},
 		bytes.NewReader(plain),
 		testDEK, testUIDHash, testIVPrefix,
 		1, DefaultChunkSize, int64(plainLen), "AES256GCM",
@@ -69,12 +70,12 @@ func BenchmarkMPUDecryptReader_100MiB(b *testing.B) {
 
 	chunks := int32((int64(plainLen) + int64(DefaultChunkSize) - 1) / int64(DefaultChunkSize))
 	manifest := &MultipartManifest{
-		Version:        1,
-		Algorithm:      "AES256GCM",
-		ChunkSize:      DefaultChunkSize,
-		IVPrefix:       "aabbccddeeff112233445566",
-		UploadIDHash:   encodeBase64(testUIDHash[:]),
-		WrappedDEK:     "bench",
+		Version:      1,
+		Algorithm:    "AES256GCM",
+		ChunkSize:    DefaultChunkSize,
+		IVPrefix:     "aabbccddeeff112233445566",
+		UploadIDHash: encodeBase64(testUIDHash[:]),
+		WrappedDEK:   "bench",
 		Parts: []MPUPartRecord{{
 			PartNumber: 1,
 			PlainLen:   int64(plainLen),
@@ -89,7 +90,7 @@ func BenchmarkMPUDecryptReader_100MiB(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		r, err := NewMPUDecryptReader(bytes.NewReader(ct), manifest, testDEK, testUIDHash, testIVPrefix, "AES256GCM")
+		r, err := newMPUDecryptReaderV1(ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(ct), manifest, testDEK, testUIDHash, testIVPrefix, "AES256GCM")
 		if err != nil {
 			b.Fatal(err)
 		}

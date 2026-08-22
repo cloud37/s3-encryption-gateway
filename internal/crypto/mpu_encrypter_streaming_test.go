@@ -24,13 +24,13 @@ import (
 func TestMPUEncryptReader_DeterministicCiphertext_AcrossRetries(t *testing.T) {
 	plain := bytes.Repeat([]byte{0xAB}, 200_000) // cross-chunk, non-power-of-2
 
-	r1, encLen1, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
+	r1, encLen1, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
 	require.NoError(t, err)
 	ct1, err := io.ReadAll(r1)
 	require.NoError(t, err)
 	require.Equal(t, encLen1, int64(len(ct1)))
 
-	r2, encLen2, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
+	r2, encLen2, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
 	require.NoError(t, err)
 	ct2, err := io.ReadAll(r2)
 	require.NoError(t, err)
@@ -66,7 +66,7 @@ func TestMPUEncryptReader_EncLenFormula(t *testing.T) {
 			if tc.plainLen > 0 {
 				plain = bytes.Repeat([]byte{0x42}, int(tc.plainLen))
 			}
-			r, encLen, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, cs, tc.plainLen, "AES256GCM")
+			r, encLen, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, cs, tc.plainLen, "AES256GCM")
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantEncLen, encLen, "encLen formula for plainLen=%d", tc.plainLen)
 
@@ -87,7 +87,7 @@ func TestMPUEncryptReader_Streaming_BoundedHeap(t *testing.T) {
 	const plainBytes = 5 * 1024 * 1024
 	plain := bytes.Repeat([]byte{0xCC}, plainBytes)
 
-	r, encLen, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 2, DefaultChunkSize, int64(plainBytes), "AES256GCM")
+	r, encLen, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 2, DefaultChunkSize, int64(plainBytes), "AES256GCM")
 	require.NoError(t, err)
 
 	// Read one byte at a time to exercise the buffering logic in Read.
@@ -122,7 +122,7 @@ func TestMPUEncryptReader_DEKCopied(t *testing.T) {
 	// First: produce ciphertext from a clean DEK (reference).
 	dekOrig := make([]byte, len(testDEK))
 	copy(dekOrig, testDEK)
-	r1, encLen1, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), dekOrig, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
+	r1, encLen1, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), dekOrig, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
 	require.NoError(t, err)
 	// Zero the DEK immediately — simulating defer zeroBytes in the caller.
 	for i := range dekOrig {
@@ -135,7 +135,7 @@ func TestMPUEncryptReader_DEKCopied(t *testing.T) {
 	// Second: produce ciphertext from a fresh DEK (control).
 	dekFresh := make([]byte, len(testDEK))
 	copy(dekFresh, testDEK)
-	r2, encLen2, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), dekFresh, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
+	r2, encLen2, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), dekFresh, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
 	require.NoError(t, err)
 	ct2, err := io.ReadAll(r2)
 	require.NoError(t, err)

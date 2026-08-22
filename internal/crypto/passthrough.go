@@ -15,25 +15,25 @@ var _ EncryptionEngine = PassthroughEngine{}
 
 type PassthroughEngine struct{}
 
-func (PassthroughEngine) Encrypt(_ context.Context, r io.Reader, meta map[string]string) (io.Reader, map[string]string, error) {
+func (PassthroughEngine) Encrypt(_ context.Context, _ ObjectContext, r io.Reader, meta map[string]string) (io.Reader, map[string]string, error) {
 	return r, meta, nil
 }
 
-func (PassthroughEngine) Decrypt(_ context.Context, r io.Reader, meta map[string]string) (io.Reader, map[string]string, error) {
+func (PassthroughEngine) Decrypt(_ context.Context, _ ObjectContext, r io.Reader, meta map[string]string) (io.Reader, map[string]string, error) {
 	if IsEncryptedMetadata(meta) {
 		return nil, nil, ErrEncryptedObjectInBypassBucket
 	}
 	return r, meta, nil
 }
 
-func (PassthroughEngine) DecryptRange(_ context.Context, r io.Reader, meta map[string]string, _, _ int64) (io.Reader, map[string]string, error) {
+func (PassthroughEngine) DecryptRange(_ context.Context, _ ObjectContext, r io.Reader, meta map[string]string, _, _ int64) (io.Reader, map[string]string, error) {
 	if IsEncryptedMetadata(meta) {
 		return nil, nil, ErrEncryptedObjectInBypassBucket
 	}
 	return r, meta, nil
 }
 
-func (PassthroughEngine) AuthenticateChunkedTrailer(_ context.Context, _ io.Reader, _ map[string]string, _ int64) (ChunkedObjectInfo, error) {
+func (PassthroughEngine) AuthenticateChunkedTrailer(_ context.Context, _ ObjectContext, _ io.Reader, _ map[string]string, _ int64) (ChunkedObjectInfo, error) {
 	return ChunkedObjectInfo{}, fmt.Errorf("chunked trailer authentication is unavailable in passthrough mode")
 }
 

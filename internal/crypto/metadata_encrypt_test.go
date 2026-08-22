@@ -11,15 +11,15 @@ func TestEncryptDecryptMetadata_RoundTrip(t *testing.T) {
 
 	// Build a representative encMetadata map.
 	encMeta := map[string]string{
-		MetaEncrypted:     "true",
-		MetaAlgorithm:     "AES256-GCM",
-		MetaKeySalt:       "abc123+def456=",
-		MetaIV:            "nonce12345678",
-		MetaOriginalSize:  "4096",
-		MetaOriginalETag:  `"abc123def456"`,
-		MetaKDFParams:     "pbkdf2-sha256:600000",
-		"Content-Type":    "application/octet-stream",
-		"x-amz-meta-foo":  "user-visible-header", // should remain outside blob
+		MetaEncrypted:    "true",
+		MetaAlgorithm:    "AES256-GCM",
+		MetaKeySalt:      "abc123+def456=",
+		MetaIV:           "nonce12345678",
+		MetaOriginalSize: "4096",
+		MetaOriginalETag: `"abc123def456"`,
+		MetaKDFParams:    "pbkdf2-sha256:600000",
+		"Content-Type":   "application/octet-stream",
+		"x-amz-meta-foo": "user-visible-header", // should remain outside blob
 	}
 
 	blob, err := engine.encryptMetadata(encMeta)

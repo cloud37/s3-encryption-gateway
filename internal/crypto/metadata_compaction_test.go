@@ -7,24 +7,24 @@ import (
 
 func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 	profile := &ProviderProfile{
-		Name:              "test",
+		Name:               "test",
 		CompactionStrategy: "base64url",
 	}
 
 	compactor := NewMetadataCompactor(profile)
 
 	originalMetadata := map[string]string{
-		"Content-Type":                   "application/json",
-		"x-amz-meta-user-key":            "user-value",
-		MetaEncrypted:                   "true",
-		MetaAlgorithm:                   "AES256-GCM",
-		MetaKeySalt:                     "dGVzdC1zYWx0", // base64 "test-salt"
-		MetaIV:                          "dGVzdC1pdg==", // base64 "test-iv"
-		MetaOriginalSize:                "1024",
-		MetaOriginalETag:                "abcd1234",
-		MetaChunkedFormat:               "true",
-		MetaChunkSize:                   "65536",
-		MetaManifest:                    "dGVzdC1tYW5pZmVzdA==", // base64 "test-manifest"
+		"Content-Type":        "application/json",
+		"x-amz-meta-user-key": "user-value",
+		MetaEncrypted:         "true",
+		MetaAlgorithm:         "AES256-GCM",
+		MetaKeySalt:           "dGVzdC1zYWx0", // base64 "test-salt"
+		MetaIV:                "dGVzdC1pdg==", // base64 "test-iv"
+		MetaOriginalSize:      "1024",
+		MetaOriginalETag:      "abcd1234",
+		MetaChunkedFormat:     "true",
+		MetaChunkSize:         "65536",
+		MetaManifest:          "dGVzdC1tYW5pZmVzdA==", // base64 "test-manifest"
 	}
 
 	compacted, err := compactor.CompactMetadata(originalMetadata)
@@ -34,17 +34,17 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 
 	// Check that compacted metadata contains short keys
 	expectedCompacted := map[string]string{
-		"Content-Type":                   "application/json",
-		"x-amz-meta-user-key":            "user-value",
-		"x-amz-meta-e":                   "true",           // encrypted
-		"x-amz-meta-a":                   "AES256-GCM",     // algorithm
-		"x-amz-meta-s":                   "dGVzdC1zYWx0",   // salt
-		"x-amz-meta-i":                   "dGVzdC1pdg==",   // iv
-		"x-amz-meta-os":                  "1024",           // original size
-		"x-amz-meta-oe":                  "abcd1234",       // original etag
-		"x-amz-meta-c":                   "true",           // chunked
-		"x-amz-meta-cs":                  "65536",          // chunk size
-		"x-amz-meta-m":                   "dGVzdC1tYW5pZmVzdA==", // manifest
+		"Content-Type":        "application/json",
+		"x-amz-meta-user-key": "user-value",
+		"x-amz-meta-e":        "true",                 // encrypted
+		"x-amz-meta-a":        "AES256-GCM",           // algorithm
+		"x-amz-meta-s":        "dGVzdC1zYWx0",         // salt
+		"x-amz-meta-i":        "dGVzdC1pdg==",         // iv
+		"x-amz-meta-os":       "1024",                 // original size
+		"x-amz-meta-oe":       "abcd1234",             // original etag
+		"x-amz-meta-c":        "true",                 // chunked
+		"x-amz-meta-cs":       "65536",                // chunk size
+		"x-amz-meta-m":        "dGVzdC1tYW5pZmVzdA==", // manifest
 	}
 
 	if !reflect.DeepEqual(compacted, expectedCompacted) {
@@ -54,24 +54,24 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 
 func TestMetadataCompactor_ExpandMetadata(t *testing.T) {
 	profile := &ProviderProfile{
-		Name:              "test",
+		Name:               "test",
 		CompactionStrategy: "base64url",
 	}
 
 	compactor := NewMetadataCompactor(profile)
 
 	compactedMetadata := map[string]string{
-		"Content-Type":                   "application/json",
-		"x-amz-meta-user-key":            "user-value",
-		"x-amz-meta-e":                   "true",           // encrypted
-		"x-amz-meta-a":                   "AES256-GCM",     // algorithm
-		"x-amz-meta-s":                   "dGVzdC1zYWx0",   // salt
-		"x-amz-meta-i":                   "dGVzdC1pdg==",   // iv
-		"x-amz-meta-os":                  "1024",           // original size
-		"x-amz-meta-oe":                  "abcd1234",       // original etag
-		"x-amz-meta-c":                   "true",           // chunked
-		"x-amz-meta-cs":                  "65536",          // chunk size
-		"x-amz-meta-m":                   "dGVzdC1tYW5pZmVzdA==", // manifest
+		"Content-Type":        "application/json",
+		"x-amz-meta-user-key": "user-value",
+		"x-amz-meta-e":        "true",                 // encrypted
+		"x-amz-meta-a":        "AES256-GCM",           // algorithm
+		"x-amz-meta-s":        "dGVzdC1zYWx0",         // salt
+		"x-amz-meta-i":        "dGVzdC1pdg==",         // iv
+		"x-amz-meta-os":       "1024",                 // original size
+		"x-amz-meta-oe":       "abcd1234",             // original etag
+		"x-amz-meta-c":        "true",                 // chunked
+		"x-amz-meta-cs":       "65536",                // chunk size
+		"x-amz-meta-m":        "dGVzdC1tYW5pZmVzdA==", // manifest
 	}
 
 	expanded, err := compactor.ExpandMetadata(compactedMetadata)
@@ -81,17 +81,17 @@ func TestMetadataCompactor_ExpandMetadata(t *testing.T) {
 
 	// Check that expanded metadata contains full keys
 	expectedExpanded := map[string]string{
-		"Content-Type":                   "application/json",
-		"x-amz-meta-user-key":            "user-value",
-		MetaEncrypted:                   "true",
-		MetaAlgorithm:                   "AES256-GCM",
-		MetaKeySalt:                     "dGVzdC1zYWx0",
-		MetaIV:                          "dGVzdC1pdg==",
-		MetaOriginalSize:                "1024",
-		MetaOriginalETag:                "abcd1234",
-		MetaChunkedFormat:               "true",
-		MetaChunkSize:                   "65536",
-		MetaManifest:                    "dGVzdC1tYW5pZmVzdA==",
+		"Content-Type":        "application/json",
+		"x-amz-meta-user-key": "user-value",
+		MetaEncrypted:         "true",
+		MetaAlgorithm:         "AES256-GCM",
+		MetaKeySalt:           "dGVzdC1zYWx0",
+		MetaIV:                "dGVzdC1pdg==",
+		MetaOriginalSize:      "1024",
+		MetaOriginalETag:      "abcd1234",
+		MetaChunkedFormat:     "true",
+		MetaChunkSize:         "65536",
+		MetaManifest:          "dGVzdC1tYW5pZmVzdA==",
 	}
 
 	if !reflect.DeepEqual(expanded, expectedExpanded) {
@@ -101,24 +101,24 @@ func TestMetadataCompactor_ExpandMetadata(t *testing.T) {
 
 func TestMetadataCompactor_RoundTrip(t *testing.T) {
 	profile := &ProviderProfile{
-		Name:              "test",
+		Name:               "test",
 		CompactionStrategy: "base64url",
 	}
 
 	compactor := NewMetadataCompactor(profile)
 
 	originalMetadata := map[string]string{
-		"Content-Type":                   "application/json",
-		"x-amz-meta-user-key":            "user-value",
-		MetaEncrypted:                   "true",
-		MetaAlgorithm:                   "AES256-GCM",
-		MetaKeySalt:                     "dGVzdC1zYWx0",
-		MetaIV:                          "dGVzdC1pdg==",
-		MetaOriginalSize:                "1024",
-		MetaOriginalETag:                "abcd1234",
-		MetaChunkedFormat:               "true",
-		MetaChunkSize:                   "65536",
-		MetaManifest:                    "dGVzdC1tYW5pZmVzdA==",
+		"Content-Type":        "application/json",
+		"x-amz-meta-user-key": "user-value",
+		MetaEncrypted:         "true",
+		MetaAlgorithm:         "AES256-GCM",
+		MetaKeySalt:           "dGVzdC1zYWx0",
+		MetaIV:                "dGVzdC1pdg==",
+		MetaOriginalSize:      "1024",
+		MetaOriginalETag:      "abcd1234",
+		MetaChunkedFormat:     "true",
+		MetaChunkSize:         "65536",
+		MetaManifest:          "dGVzdC1tYW5pZmVzdA==",
 	}
 
 	// Compact then expand
@@ -140,16 +140,16 @@ func TestMetadataCompactor_RoundTrip(t *testing.T) {
 
 func TestMetadataCompactor_NoCompaction(t *testing.T) {
 	profile := &ProviderProfile{
-		Name:              "test",
+		Name:               "test",
 		CompactionStrategy: "none",
 	}
 
 	compactor := NewMetadataCompactor(profile)
 
 	originalMetadata := map[string]string{
-		"Content-Type":                   "application/json",
-		MetaEncrypted:                   "true",
-		MetaAlgorithm:                   "AES256-GCM",
+		"Content-Type": "application/json",
+		MetaEncrypted:  "true",
+		MetaAlgorithm:  "AES256-GCM",
 	}
 
 	compacted, err := compactor.CompactMetadata(originalMetadata)

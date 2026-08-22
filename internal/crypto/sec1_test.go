@@ -62,7 +62,7 @@ func TestMPUDecryptReader_DEKZeroizedAfterEOF(t *testing.T) {
 	copy(dek, testDEK)
 
 	// Encrypt one part.
-	r, _, err := NewMPUPartEncryptReader(ctx, bytes.NewReader(plaintext), dek, testUIDHash, testIVPrefix, 1, chunkSize, int64(len(plaintext)), "AES256GCM")
+	r, _, err := newMPUPartEncryptReaderV1(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plaintext), dek, testUIDHash, testIVPrefix, 1, chunkSize, int64(len(plaintext)), "AES256GCM")
 	require.NoError(t, err)
 	ciphertext, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestMPUDecryptReader_DEKZeroizedAfterEOF(t *testing.T) {
 	dekForReader := make([]byte, len(dek))
 	copy(dekForReader, testDEK)
 
-	reader, err := NewMPUDecryptReader(bytes.NewReader(ciphertext), manifest, dekForReader, testUIDHash, testIVPrefix, "AES256GCM")
+	reader, err := newMPUDecryptReaderV1(ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(ciphertext), manifest, dekForReader, testUIDHash, testIVPrefix, "AES256GCM")
 	require.NoError(t, err)
 
 	// Reach into the concrete type to access dek after reading.
@@ -107,7 +107,7 @@ func TestMPUDecryptReader_CallerDEKUnaffected(t *testing.T) {
 	original := make([]byte, len(callerDEK))
 	copy(original, callerDEK)
 
-	r, _, err := NewMPUPartEncryptReader(ctx, bytes.NewReader(plaintext), callerDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plaintext)), "AES256GCM")
+	r, _, err := newMPUPartEncryptReaderV1(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plaintext), callerDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plaintext)), "AES256GCM")
 	require.NoError(t, err)
 	ciphertext, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -119,7 +119,7 @@ func TestMPUDecryptReader_CallerDEKUnaffected(t *testing.T) {
 		},
 	}
 
-	reader, err := NewMPUDecryptReader(bytes.NewReader(ciphertext), manifest, callerDEK, testUIDHash, testIVPrefix, "AES256GCM")
+	reader, err := newMPUDecryptReaderV1(ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(ciphertext), manifest, callerDEK, testUIDHash, testIVPrefix, "AES256GCM")
 	require.NoError(t, err)
 
 	_, err = io.ReadAll(reader)
@@ -152,7 +152,7 @@ func TestDecrypt_NoBase64InErrorMessage(t *testing.T) {
 	stubKMS := &stubKeyManager{}
 	SetKeyManager(eng, stubKMS)
 
-	_, _, decErr := eng.Decrypt(context.Background(), bytes.NewReader(make([]byte, 32)), metadata)
+	_, _, decErr := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(make([]byte, 32)), metadata)
 	require.Error(t, decErr)
 
 	// The error must not contain the bogus wrapped-key value.
@@ -231,10 +231,10 @@ func TestSEC1_EncryptDecryptRoundTrip(t *testing.T) {
 	defer eng.(io.Closer).Close()
 
 	plaintext := "hello, V1.0-SEC-1 world!"
-	reader, meta, err := eng.Encrypt(context.Background(), strings.NewReader(plaintext), nil)
+	reader, meta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader(plaintext), nil)
 	require.NoError(t, err)
 
-	decReader, _, err := eng.Decrypt(context.Background(), reader, meta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, meta)
 	require.NoError(t, err)
 
 	decrypted, err := io.ReadAll(decReader)

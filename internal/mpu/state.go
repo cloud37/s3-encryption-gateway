@@ -112,9 +112,10 @@ type SelectedPart struct {
 
 // UploadState holds the encryption state for an in-flight multipart upload.
 type UploadState struct {
-	UploadID string `json:"upload_id"`
-	Bucket   string `json:"bucket"`
-	Key      string `json:"key"`
+	UploadID  string `json:"upload_id"`
+	Bucket    string `json:"bucket"`
+	Key       string `json:"key"`
+	BindingID string `json:"binding_id,omitempty"`
 	// UploadIDHash is hex(sha256(uploadID)) — stored so IVs can be reconstructed
 	// during decryption without re-querying the state.
 	UploadIDHash string `json:"uid_hash"`
@@ -136,6 +137,24 @@ type UploadState struct {
 	StateVersion   uint8          `json:"state_version"`
 	Phase          UploadPhase    `json:"phase"`
 	Revision       uint64         `json:"revision"`
+}
+
+// BindingIDBytes validates and decodes the persisted v2 binding. Empty means
+// an explicitly legacy in-flight upload; malformed non-empty values fail.
+func (s *UploadState) BindingIDBytes() ([16]byte, bool, error) {
+	var out [16]byte
+	if s == nil || s.BindingID == "" {
+		return out, false, nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(s.BindingID)
+	if err != nil || len(b) != 16 {
+		return out, false, fmt.Errorf("mpu: invalid binding ID")
+	}
+	copy(out[:], b)
+	if out == [16]byte{} {
+		return out, false, fmt.Errorf("mpu: zero binding ID")
+	}
+	return out, true, nil
 }
 
 // PolicySnapshot captures the policy fields that affect multipart encryption.
@@ -675,6 +694,9 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 	if state == nil {
 		return fmt.Errorf("mpu: nil upload state")
 	}
+	if _, _, err := state.BindingIDBytes(); err != nil {
+		return err
+	}
 	// Creation is a schema boundary. Do not allow callers to smuggle lifecycle
 	// controls into authenticated metadata that the Lua create script replaces.
 	state.StateVersion = CurrentStateVersion
@@ -1140,6 +1162,9 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	var state UploadState
 	if err := json.Unmarshal(metaBytes, &state); err != nil {
 		return nil, fmt.Errorf("mpu: unmarshal state: %w", err)
+	}
+	if _, _, err := state.BindingIDBytes(); err != nil {
+		return nil, err
 	}
 	// Legacy state remains readable so handlers can return the abort-only
 	// OperationAborted contract. For authenticated non-legacy metadata, every

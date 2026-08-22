@@ -153,6 +153,18 @@ func (c *MetadataCompactor) compactEncryptionMetadata(metadata map[string]string
 		if v := metadata[MetaKDFParams]; v != "" {
 			compacted["x-amz-meta-kdf"] = v // kdf params
 		}
+		if v := metadata[MetaFallbackMode]; v != "" {
+			compacted["x-amz-meta-fb"] = v
+		}
+		if v := metadata[MetaFallbackVersion]; v != "" {
+			compacted["x-amz-meta-fbv"] = v
+		}
+		if v := metadata[MetaObjectFormatVersion]; v != "" {
+			compacted["x-amz-meta-fmt"] = v
+		}
+		if v := metadata[MetaObjectBindingID]; v != "" {
+			compacted["x-amz-meta-bid"] = v
+		}
 
 		// V1.0-CRYPTO-3: encrypted metadata blob
 		if v := metadata[MetaEncryptedMetadata]; v != "" {
@@ -231,6 +243,18 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 		if v := metadata["x-amz-meta-kdf"]; v != "" {
 			expanded[MetaKDFParams] = v
 		}
+		if v := metadata["x-amz-meta-fb"]; v != "" {
+			expanded[MetaFallbackMode] = v
+		}
+		if v := metadata["x-amz-meta-fbv"]; v != "" {
+			expanded[MetaFallbackVersion] = v
+		}
+		if v := metadata["x-amz-meta-fmt"]; v != "" {
+			expanded[MetaObjectFormatVersion] = v
+		}
+		if v := metadata["x-amz-meta-bid"]; v != "" {
+			expanded[MetaObjectBindingID] = v
+		}
 		// V1.0-CRYPTO-3: encrypted metadata blob expansion
 		if v := metadata[MetaEncryptedMetadataCompact]; v != "" {
 			expanded[MetaEncryptedMetadata] = v
@@ -258,6 +282,7 @@ func (c *MetadataCompactor) isCompactedKey(key string) bool {
 		"x-amz-meta-os", "x-amz-meta-oe", "x-amz-meta-c", "x-amz-meta-cs",
 		"x-amz-meta-cc", "x-amz-meta-m", "x-amz-meta-kv", "x-amz-meta-wk",
 		"x-amz-meta-kid", "x-amz-meta-kp", "x-amz-meta-kdf",
+		"x-amz-meta-fb", "x-amz-meta-fbv", "x-amz-meta-fmt", "x-amz-meta-bid",
 		MetaEncryptedMetadataCompact,
 	}
 

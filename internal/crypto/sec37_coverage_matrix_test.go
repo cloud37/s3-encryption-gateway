@@ -15,32 +15,32 @@ func TestSEC37_Coverage_ConstructorAndTerminalMatrix(t *testing.T) {
 	data, _ := cipher.NewGCM(block)
 	terminal, _ := cipher.NewGCM(block)
 	iv := bytes.Repeat([]byte{2}, nonceSize)
-	if _, _, err := newChunkedEncryptReaderV2(context.Background(), nil, data, iv, MinChunkSize, nil, ChunkedFormatV1, terminal); err == nil {
+	if _, _, err := newLegacyChunkedEncryptReaderV2(context.Background(), nil, data, iv, MinChunkSize, nil, ChunkedFormatV1, terminal); err == nil {
 		t.Fatal("writer accepted unknown v2 version")
 	}
-	if _, _, err := newChunkedEncryptReaderV2(context.Background(), nil, data, iv, MinChunkSize, nil, ChunkedFormatV2, nil); err == nil {
+	if _, _, err := newLegacyChunkedEncryptReaderV2(context.Background(), nil, data, iv, MinChunkSize, nil, ChunkedFormatV2, nil); err == nil {
 		t.Fatal("writer accepted nil terminal")
 	}
-	if _, err := newChunkedDecryptReaderV2(context.Background(), nil, data, &ChunkManifest{Version: 1}, nil, terminal); err == nil {
+	if _, err := newLegacyChunkedDecryptReaderV2(context.Background(), nil, data, &ChunkManifest{Version: 1}, nil, terminal); err == nil {
 		t.Fatal("decrypt accepted v1 as v2")
 	}
-	if _, err := newChunkedDecryptReaderV2(context.Background(), nil, data, &ChunkManifest{Version: 2, BaseIV: "%%%"}, nil, terminal); err == nil {
+	if _, err := newLegacyChunkedDecryptReaderV2(context.Background(), nil, data, &ChunkManifest{Version: 2, BaseIV: "%%%"}, nil, terminal); err == nil {
 		t.Fatal("decrypt accepted bad IV")
 	}
-	if _, err := newChunkedDecryptReaderV2(context.Background(), nil, data, &ChunkManifest{Version: 2, BaseIV: encodeBase64(iv)}, nil, nil); err == nil {
+	if _, err := newLegacyChunkedDecryptReaderV2(context.Background(), nil, data, &ChunkManifest{Version: 2, BaseIV: encodeBase64(iv)}, nil, nil); err == nil {
 		t.Fatal("decrypt accepted nil terminal")
 	}
 	if _, _, err := newChunkedEncryptReaderWithContext(context.Background(), bytes.NewReader([]byte("v1")), data, nil, iv, MinChunkSize, ChunkedFormatV1, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := newChunkedEncryptReaderWithContext(context.Background(), bytes.NewReader([]byte("v2")), data, terminal, iv, MinChunkSize, ChunkedFormatV2, nil); err != nil {
-		t.Fatal(err)
+	if _, _, err := newChunkedEncryptReaderWithContext(context.Background(), bytes.NewReader([]byte("v2")), data, terminal, iv, MinChunkSize, ChunkedFormatV2, nil); err == nil {
+		t.Fatal("generic current v2 writer accepted an unbound stream")
 	}
 	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, nil, &ChunkManifest{Version: 1, BaseIV: encodeBase64(iv)}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, terminal, &ChunkManifest{Version: 2, BaseIV: encodeBase64(iv)}, nil); err != nil {
-		t.Fatal(err)
+	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, terminal, &ChunkManifest{Version: 2, BaseIV: encodeBase64(iv)}, nil); err == nil {
+		t.Fatal("generic current v2 reader accepted an unbound stream")
 	}
 	for _, v := range []int{0, 3, 255} {
 		if _, _, err := newChunkedEncryptReaderWithContext(context.Background(), nil, data, terminal, iv, MinChunkSize, uint8(v), nil); err == nil {
@@ -63,7 +63,7 @@ func TestSEC37_Coverage_ConstructorAndTerminalMatrix(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &ChunkManifest{Version: 2, ChunkSize: MinChunkSize, BaseIV: encodeBase64(iv)}
-			r, err := newChunkedDecryptReaderV2(context.Background(), nil, data, m, nil, terminal)
+			r, err := newLegacyChunkedDecryptReaderV2(context.Background(), nil, data, m, nil, terminal)
 			if err != nil {
 				t.Fatal(err)
 			}

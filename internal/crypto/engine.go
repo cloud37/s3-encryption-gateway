@@ -8,6 +8,7 @@ import (
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -70,31 +71,142 @@ const (
 	// Legacy marker for objects encrypted before AAD was introduced.
 	// The no-AAD fallback in Decrypt is only permitted when this flag is "true".
 	// Deprecated: remove no-AAD fallback path in v3.0 (same policy as XOR-IV and fallback-v1).
-	MetaLegacyNoAAD = "x-amz-meta-enc-legacy-no-aad"
+	MetaLegacyNoAAD         = "x-amz-meta-enc-legacy-no-aad"
+	MetaObjectFormatVersion = "x-amz-meta-encryption-format-version"
+	MetaObjectBindingID     = "x-amz-meta-encryption-binding-id"
+	MetaMPUManifestVersion  = "x-amz-meta-encryption-mpu-manifest-version"
 )
+
+// ObjectContext is the trusted S3 identity supplied by the authenticated
+// route. It is intentionally separate from mutable object metadata.
+type ObjectContext struct {
+	Bucket string
+	Key    string
+}
+
+func (o ObjectContext) Validate() error {
+	if o.Bucket == "" || len(o.Bucket) > 63 {
+		return fmt.Errorf("invalid object bucket")
+	}
+	if o.Key == "" || len(o.Key) > 1024 {
+		return fmt.Errorf("invalid object key")
+	}
+	return nil
+}
+
+type aadDomain string
+
+const (
+	aadBufferedV2       aadDomain = "s3eg/buffered/v2"
+	aadChunkedV2Data    aadDomain = "s3eg/chunked/v2/data"
+	aadChunkedV2Trailer aadDomain = "s3eg/chunked/v2/trailer"
+	aadMPUV2Chunk       aadDomain = "s3eg/mpu/v2/chunk"
+	aadMPUV2Manifest    aadDomain = "s3eg/mpu/v2/manifest"
+)
+
+func buildObjectAAD(domain aadDomain, object ObjectContext, bindingID []byte, fields ...uint64) ([]byte, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	switch domain {
+	case aadBufferedV2, aadChunkedV2Data, aadChunkedV2Trailer, aadMPUV2Chunk, aadMPUV2Manifest:
+	default:
+		return nil, fmt.Errorf("unsupported AAD domain %q", domain)
+	}
+	if len(bindingID) != 16 {
+		return nil, fmt.Errorf("binding ID must be exactly 16 bytes")
+	}
+	if len(fields) > 65535 {
+		return nil, fmt.Errorf("AAD field count exceeds uint16")
+	}
+	var out bytes.Buffer
+	out.WriteString("S3EGAAD\x00")
+	_ = binary.Write(&out, binary.BigEndian, uint16(1))
+	writeBytes := func(value []byte) error {
+		if uint64(len(value)) > uint64(^uint32(0)) {
+			return fmt.Errorf("AAD component exceeds uint32")
+		}
+		_ = binary.Write(&out, binary.BigEndian, uint32(len(value)))
+		_, _ = out.Write(value)
+		return nil
+	}
+	if err := writeBytes([]byte(domain)); err != nil {
+		return nil, err
+	}
+	if err := writeBytes([]byte(object.Bucket)); err != nil {
+		return nil, err
+	}
+	if err := writeBytes([]byte(object.Key)); err != nil {
+		return nil, err
+	}
+	if err := writeBytes(bindingID); err != nil {
+		return nil, err
+	}
+	_ = binary.Write(&out, binary.BigEndian, uint16(len(fields)))
+	for _, field := range fields {
+		_ = binary.Write(&out, binary.BigEndian, field)
+	}
+	return out.Bytes(), nil
+}
+
+func newObjectBindingID() ([]byte, error) {
+	bindingID := make([]byte, 16)
+	if _, err := rand.Read(bindingID); err != nil {
+		return nil, fmt.Errorf("generate binding ID: %w", err)
+	}
+	return bindingID, nil
+}
+
+func parseObjectBindingID(value string) ([]byte, error) {
+	bindingID, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(bindingID) != 16 || base64.RawURLEncoding.EncodeToString(bindingID) != value {
+		return nil, fmt.Errorf("invalid encryption binding ID")
+	}
+	return bindingID, nil
+}
 
 // EncryptionEngine provides encryption and decryption functionality.
 type EncryptionEngine interface {
 	// Encrypt encrypts data from the reader and returns an encrypted reader
 	// along with encryption metadata.
-	Encrypt(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error)
+	Encrypt(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error)
 
 	// Decrypt decrypts data from the reader using the provided metadata
 	// and returns a decrypted reader along with updated metadata.
-	Decrypt(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error)
+	Decrypt(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error)
 
 	// DecryptRange decrypts a specific byte range from the reader, returning plaintext
 	// bounded by the requested plaintext range [plaintextStart, plaintextEnd].
 	// Efficiently handles chunked sources by seeking within the encrypted stream.
-	DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
+	DecryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
 
-	AuthenticateChunkedTrailer(ctx context.Context, trailer io.Reader, metadata map[string]string, ciphertextSize int64) (ChunkedObjectInfo, error)
+	AuthenticateChunkedTrailer(ctx context.Context, object ObjectContext, trailer io.Reader, metadata map[string]string, ciphertextSize int64) (ChunkedObjectInfo, error)
 
 	// IsEncrypted checks if the metadata indicates the object is encrypted.
 	IsEncrypted(metadata map[string]string) bool
 
 	// PreferredAlgorithm returns the preferred encryption algorithm for new objects.
 	PreferredAlgorithm() string
+}
+
+type MPUManifestEngine interface {
+	EncryptMPUManifest(context.Context, ObjectContext, [16]byte, []byte) ([]byte, map[string]string, error)
+	DecryptMPUManifest(context.Context, ObjectContext, [16]byte, []byte, map[string]string) ([]byte, error)
+}
+
+func EncryptMPUManifest(ctx context.Context, e EncryptionEngine, object ObjectContext, bindingID [16]byte, plaintext []byte) ([]byte, map[string]string, error) {
+	m, ok := e.(MPUManifestEngine)
+	if !ok {
+		return nil, nil, fmt.Errorf("mpu manifest crypto unavailable")
+	}
+	return m.EncryptMPUManifest(ctx, object, bindingID, plaintext)
+}
+func DecryptMPUManifest(ctx context.Context, e EncryptionEngine, object ObjectContext, bindingID [16]byte, ciphertext []byte, metadata map[string]string) ([]byte, error) {
+	m, ok := e.(MPUManifestEngine)
+	if !ok {
+		return nil, fmt.Errorf("mpu manifest crypto unavailable")
+	}
+	return m.DecryptMPUManifest(ctx, object, bindingID, ciphertext, metadata)
 }
 
 // APIExpandedMetadata returns the metadata view needed for API classification.
@@ -436,7 +548,10 @@ var generateDataKey = func(size int) ([]byte, error) {
 
 // Encrypt encrypts data from the reader and returns an encrypted reader
 // along with encryption metadata.
-func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (e *engine) Encrypt(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+	if err := object.Validate(); err != nil {
+		return nil, nil, err
+	}
 	ctx, span := e.tracer.Start(ctx, "Crypto.Encrypt",
 		trace.WithAttributes(
 			attribute.String("crypto.algorithm", e.preferredAlgorithm),
@@ -447,7 +562,7 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 
 	// If chunked mode is enabled, use streaming chunked encryption
 	if e.chunkedMode {
-		encryptedReader, meta, err := e.encryptChunked(ctx, reader, metadata)
+		encryptedReader, meta, err := e.encryptChunked(ctx, object, reader, metadata)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, nil, err
@@ -554,6 +669,12 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		}
 	}
 	encMetadata[MetaEncrypted] = "true"
+	bindingID, err := newObjectBindingID()
+	if err != nil {
+		return nil, nil, err
+	}
+	encMetadata[MetaObjectFormatVersion] = "buffered-v2"
+	encMetadata[MetaObjectBindingID] = base64.RawURLEncoding.EncodeToString(bindingID)
 	encMetadata[MetaAlgorithm] = algorithm
 	encMetadata[MetaKeySalt] = encodeBase64(salt)
 	encMetadata[MetaIV] = encodeBase64(nonce)
@@ -621,7 +742,7 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 
 	// Check if we need fallback metadata storage before encrypting.
 	if e.needsMetadataFallback(encMetadata) {
-		return e.encryptWithMetadataFallback(plaintext, encMetadata, contentType, originalSize, originalETag)
+		return e.encryptWithMetadataFallback(ctx, object, plaintext, encMetadata, contentType, originalSize, originalETag, salt, nonce, key, envelope, bindingID)
 	}
 
 	// Create cipher using selected algorithm
@@ -643,7 +764,10 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 		MetaKeyVersion:   metadata[MetaKeyVersion],
 		MetaOriginalSize: fmt.Sprintf("%d", originalSize),
 	}
-	aad := buildAAD(algorithm, salt, nonce, aadMeta)
+	aad, err := buildObjectAAD(aadBufferedV2, object, bindingID)
+	if err != nil {
+		return nil, nil, err
+	}
 	// Debug: log AAD for troubleshooting (no raw crypto values logged).
 	if debug.Enabled() {
 		slog.Debug("encrypt AAD built",
@@ -682,9 +806,98 @@ func (e *engine) Encrypt(ctx context.Context, reader io.Reader, metadata map[str
 	return encryptedReader, compactedMetadata, nil
 }
 
+// EncryptMPUManifest seals the manifest with its own AAD domain. It is kept
+// separate from Encrypt so a companion can never be confused with a normal
+// buffered object.
+func (e *engine) EncryptMPUManifest(ctx context.Context, object ObjectContext, bindingID [16]byte, plaintext []byte) ([]byte, map[string]string, error) {
+	if err := object.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if bindingID == [16]byte{} {
+		return nil, nil, fmt.Errorf("mpu manifest: binding ID is required")
+	}
+	algorithm := e.preferredAlgorithm
+	salt, err := e.generateSalt()
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce, err := e.generateNonceForAlgorithm(algorithm)
+	if err != nil {
+		return nil, nil, err
+	}
+	key, err := e.deriveKey(salt)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer zeroBytes(key)
+	aead, err := createAEADCipher(algorithm, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	aad, err := buildObjectAAD(aadMPUV2Manifest, object, bindingID[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	meta := map[string]string{MetaEncrypted: "true", MetaMPUManifestVersion: "2", MetaObjectFormatVersion: "mpu-manifest-v2", MetaObjectBindingID: base64.RawURLEncoding.EncodeToString(bindingID[:]), MetaAlgorithm: algorithm, MetaKeySalt: encodeBase64(salt), MetaIV: encodeBase64(nonce), MetaKDFParams: FormatKDFParams(e.defaultKDFParams())}
+	return aead.Seal(nil, nonce, plaintext, aad), meta, nil
+}
+
+func (e *engine) DecryptMPUManifest(ctx context.Context, object ObjectContext, bindingID [16]byte, ciphertext []byte, metadata map[string]string) ([]byte, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	if bindingID == [16]byte{} {
+		return nil, fmt.Errorf("mpu manifest: binding ID is required")
+	}
+	expanded, err := e.compactor.ExpandMetadata(metadata)
+	if err != nil {
+		return nil, err
+	}
+	if expanded[MetaObjectFormatVersion] != "mpu-manifest-v2" || expanded[MetaMPUManifestVersion] != "2" {
+		return nil, fmt.Errorf("mpu manifest: missing v2 marker")
+	}
+	declared, err := parseObjectBindingID(expanded[MetaObjectBindingID])
+	if err != nil || !bytes.Equal(declared, bindingID[:]) {
+		return nil, fmt.Errorf("mpu manifest: binding mismatch")
+	}
+	salt, err := decodeBase64(expanded[MetaKeySalt])
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := decodeBase64(expanded[MetaIV])
+	if err != nil {
+		return nil, err
+	}
+	params, err := ParseKDFParams(expanded[MetaKDFParams])
+	if err != nil {
+		return nil, err
+	}
+	key, err := e.deriveKeyWithParams(salt, params)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(key)
+	aead, err := createAEADCipher(expanded[MetaAlgorithm], key)
+	if err != nil {
+		return nil, err
+	}
+	aad, err := buildObjectAAD(aadMPUV2Manifest, object, bindingID[:])
+	if err != nil {
+		return nil, err
+	}
+	plain, err := aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("mpu manifest: authentication failed: %w", err)
+	}
+	return plain, nil
+}
+
 // Decrypt decrypts data from the reader using the provided metadata
 // and returns a decrypted reader along with updated metadata.
-func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+	if err := object.Validate(); err != nil {
+		return nil, nil, err
+	}
 	ctx, span := e.tracer.Start(ctx, "Crypto.Decrypt",
 		trace.WithAttributes(
 			attribute.Bool("crypto.chunked", e.IsEncrypted(metadata) && isChunkedFormat(metadata)),
@@ -694,11 +907,6 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 	if !e.IsEncrypted(metadata) {
 		// Not encrypted, return as-is
 		return reader, metadata, nil
-	}
-
-	// Check if this is fallback mode (metadata stored in object body)
-	if e.isFallbackMode(metadata) {
-		return e.decryptWithMetadataFallback(ctx, reader, metadata)
 	}
 
 	// Expand compacted metadata first
@@ -724,6 +932,38 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 			delete(expandedMetadata, blobKey)
 		}
 	}
+	// Check if this is fallback mode (metadata stored in object body). This is
+	// intentionally after expansion because fallback headers may be compacted.
+	if e.isFallbackMode(expandedMetadata) {
+		if expandedMetadata[MetaFallbackVersion] == "3" {
+			if expandedMetadata[MetaObjectFormatVersion] != "buffered-fallback-v2" {
+				return nil, nil, fmt.Errorf("fallback-v2: unsupported or missing bound format marker")
+			}
+			if _, parseErr := parseObjectBindingID(expandedMetadata[MetaObjectBindingID]); parseErr != nil {
+				return nil, nil, parseErr
+			}
+		}
+		return e.decryptWithMetadataFallback(ctx, object, reader, expandedMetadata)
+	}
+	if marker := expandedMetadata[MetaObjectFormatVersion]; marker != "" && marker != "buffered-v2" && marker != "chunked-v2" {
+		return nil, nil, fmt.Errorf("unsupported encryption format version %q", marker)
+	}
+	if expandedMetadata[MetaObjectFormatVersion] == "buffered-v2" {
+		if isChunkedFormat(expandedMetadata) {
+			return nil, nil, fmt.Errorf("buffered-v2 format marker cannot use chunked metadata")
+		}
+		if _, err := parseObjectBindingID(expandedMetadata[MetaObjectBindingID]); err != nil {
+			return nil, nil, err
+		}
+	}
+	if expandedMetadata[MetaObjectFormatVersion] == "chunked-v2" {
+		if !isChunkedFormat(expandedMetadata) {
+			return nil, nil, fmt.Errorf("chunked-v2 format marker requires chunked metadata")
+		}
+		if _, err := parseObjectBindingID(expandedMetadata[MetaObjectBindingID]); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	// Check if this is chunked format
 	if isChunkedFormat(expandedMetadata) {
@@ -732,7 +972,7 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 		} else if version == ChunkedFormatV2 {
 			// Terminal AEAD is constructed below and passed to the stream reader.
 		}
-		return e.decryptChunked(ctx, reader, expandedMetadata)
+		return e.decryptChunked(ctx, object, reader, expandedMetadata)
 	}
 
 	// Legacy buffered mode for backward compatibility
@@ -853,7 +1093,16 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 		MetaOriginalSize: expandedMetadata[MetaOriginalSize],
 		"Content-Type":   contentType,
 	}
-	aad := buildAAD(algorithm, salt, iv, aadMeta)
+	var aad []byte
+	if expandedMetadata[MetaObjectFormatVersion] == "buffered-v2" {
+		bindingID, bindingErr := parseObjectBindingID(expandedMetadata[MetaObjectBindingID])
+		if bindingErr != nil {
+			return nil, nil, bindingErr
+		}
+		aad, err = buildObjectAAD(aadBufferedV2, object, bindingID)
+	} else {
+		aad = buildAAD(algorithm, salt, iv, aadMeta)
+	}
 	// Debug: log AAD for troubleshooting (no raw crypto values logged).
 	if debug.Enabled() {
 		slog.Debug("decrypt AAD built",
@@ -870,6 +1119,9 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 	// Attempt decrypt with current key and AAD (new length-prefixed format)
 	plaintext, openErr := gcm.Open(nil, iv, ciphertext, aad)
 	if openErr != nil {
+		if expandedMetadata[MetaObjectFormatVersion] == "buffered-v2" {
+			return nil, nil, fmt.Errorf("failed to decrypt buffered-v2 object: %w", openErr)
+		}
 		// Backward compatibility: try legacy pipe-delimited AAD format
 		// for objects created before V1.0-SEC-H01.
 		aadLegacy := buildAADLegacy(algorithm, salt, iv, aadMeta)
@@ -935,7 +1187,7 @@ func (e *engine) Decrypt(ctx context.Context, reader io.Reader, metadata map[str
 }
 
 // encryptChunked implements streaming chunked encryption.
-func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
 	// Extract content type from metadata (no pre-read required).
 	contentType := ""
 	if metadata != nil {
@@ -995,6 +1247,12 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	}
 	// Add chunked-specific metadata
 	encMetadata[MetaChunkedFormat] = "true"
+	bindingID, err := newObjectBindingID()
+	if err != nil {
+		return nil, nil, err
+	}
+	encMetadata[MetaObjectFormatVersion] = "chunked-v2"
+	encMetadata[MetaObjectBindingID] = base64.RawURLEncoding.EncodeToString(bindingID)
 	encMetadata[MetaChunkSize] = fmt.Sprintf("%d", e.chunkSize)
 
 	// V1.0-CRYPTO-3: encrypt metadata blob if metadata key is configured.
@@ -1016,7 +1274,7 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 
 	// Check if we need fallback metadata storage
 	if e.needsMetadataFallback(encMetadata) {
-		return e.encryptChunkedWithMetadataFallback(ctx, reader, encMetadata, contentType, originalSize, originalETag)
+		return e.encryptChunkedWithMetadataFallback(ctx, object, reader, encMetadata, contentType, originalSize, originalETag, bindingID)
 	}
 
 	// Determine algorithm to use
@@ -1100,7 +1358,7 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", err)
 	}
-	chunkedReader, manifest, err := newChunkedEncryptReaderV2(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
+	chunkedReader, manifest, err := newChunkedEncryptReaderV2Bound(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, terminalAEAD, object, bindingID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1162,7 +1420,7 @@ func (e *engine) encryptChunked(ctx context.Context, reader io.Reader, metadata 
 }
 
 // encryptChunkedWithMetadataFallback encrypts chunked data with metadata stored in object body
-func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader io.Reader, fullMetadata map[string]string, contentType string, originalSize int64, originalETag string) (io.Reader, map[string]string, error) {
+func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, object ObjectContext, reader io.Reader, fullMetadata map[string]string, contentType string, originalSize int64, originalETag string, bindingID []byte) (io.Reader, map[string]string, error) {
 	// Generate encryption parameters
 	salt, err := e.generateSalt()
 	if err != nil {
@@ -1243,7 +1501,7 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create terminal AEAD: %w", err)
 	}
-	chunkedReader, manifest, err := newChunkedEncryptReaderV2(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, ChunkedFormatV2, terminalAEAD)
+	chunkedReader, manifest, err := newChunkedEncryptReaderV2Bound(ctx, reader, aead, baseIV, e.chunkSize, e.bufferPool, terminalAEAD, object, bindingID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1353,7 +1611,7 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, reader 
 }
 
 // decryptChunked implements streaming chunked decryption.
-func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (e *engine) decryptChunked(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
 	// V1.0-CRYPTO-3: decrypt encrypted metadata blob if metadata key is configured.
 	if e.metadataKey != nil {
 		blobKey := MetaEncryptedMetadata
@@ -1376,6 +1634,17 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 	manifest, err := loadManifestFromMetadata(metadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load manifest: %w", err)
+	}
+	var bindingID []byte
+	boundV2 := manifest.Version == int(ChunkedFormatV2) && metadata[MetaObjectFormatVersion] == "chunked-v2"
+	if metadata[MetaObjectFormatVersion] == "chunked-v2" && !boundV2 {
+		return nil, nil, fmt.Errorf("chunked-v2 format marker requires a v2 manifest")
+	}
+	if boundV2 {
+		bindingID, err = parseObjectBindingID(metadata[MetaObjectBindingID])
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Extract encryption parameters from metadata
@@ -1466,7 +1735,11 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 	}
 	var chunkedReader *chunkedDecryptReader
 	if uint8(manifest.Version) == ChunkedFormatV2 {
-		chunkedReader, err = newChunkedDecryptReaderV2(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD)
+		if boundV2 {
+			chunkedReader, err = newChunkedDecryptReaderV2Bound(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD, object, bindingID)
+		} else {
+			chunkedReader, err = newLegacyChunkedDecryptReaderV2(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD)
+		}
 	} else {
 		chunkedReader, err = newChunkedDecryptReaderV1(ctx, reader, aead, manifest, e.bufferPool)
 	}
@@ -1545,12 +1818,18 @@ func (e *engine) decryptChunked(ctx context.Context, reader io.Reader, metadata 
 // DecryptRange decrypts only the chunks needed for a specific plaintext range.
 // This optimizes range requests by decrypting only necessary chunks.
 // The source reader must contain the FULL encrypted object starting at chunk 0.
-func (e *engine) DecryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error) {
-	return e.decryptRange(ctx, reader, metadata, plaintextStart, plaintextEnd, false)
+func (e *engine) DecryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error) {
+	if err := object.Validate(); err != nil {
+		return nil, nil, err
+	}
+	return e.decryptRange(ctx, object, reader, metadata, plaintextStart, plaintextEnd, false)
 }
 
-func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, trailer io.Reader, metadata map[string]string, ciphertextSize int64) (ChunkedObjectInfo, error) {
+func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, object ObjectContext, trailer io.Reader, metadata map[string]string, ciphertextSize int64) (ChunkedObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	if err := object.Validate(); err != nil {
 		return ChunkedObjectInfo{}, err
 	}
 	expanded, err := e.expandMetadataForCrypto(metadata)
@@ -1570,9 +1849,19 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, trailer io.Read
 	if err != nil {
 		return ChunkedObjectInfo{}, err
 	}
+	if version == ChunkedFormatV2 && expanded[MetaObjectFormatVersion] != "chunked-v2" {
+		return ChunkedObjectInfo{}, fmt.Errorf("chunked-v2 trailer authentication requires declared chunked-v2 marker")
+	}
 	manifest, err := loadManifestFromMetadata(expanded)
 	if err != nil {
 		return ChunkedObjectInfo{}, err
+	}
+	var bindingID []byte
+	if version == ChunkedFormatV2 {
+		bindingID, err = parseObjectBindingID(expanded[MetaObjectBindingID])
+		if err != nil {
+			return ChunkedObjectInfo{}, err
+		}
 	}
 	if version == ChunkedFormatV1 {
 		plain, count, sizeErr := ChunkedPlaintextSize(ciphertextSize, manifest.ChunkSize, version)
@@ -1639,7 +1928,20 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, trailer io.Read
 	if err != nil {
 		return ChunkedObjectInfo{}, err
 	}
-	plain, err := terminal.Open(nil, nonce, tail[:ChunkedTerminalSize], buildTerminalAAD(version))
+	var trailerAAD []byte
+	if version == ChunkedFormatV2 {
+		plainSize, count, sizeErr := ChunkedPlaintextSize(ciphertextSize, manifest.ChunkSize, version)
+		if sizeErr != nil {
+			return ChunkedObjectInfo{}, sizeErr
+		}
+		trailerAAD, err = buildObjectAAD(aadChunkedV2Trailer, object, bindingID, count, uint64(plainSize))
+	} else {
+		trailerAAD = buildTerminalAAD(version)
+	}
+	if err != nil {
+		return ChunkedObjectInfo{}, err
+	}
+	plain, err := terminal.Open(nil, nonce, tail[:ChunkedTerminalSize], trailerAAD)
 	if err != nil {
 		return ChunkedObjectInfo{}, fmt.Errorf("%w: %v", ErrChunkedObjectIncomplete, err)
 	}
@@ -1686,12 +1988,15 @@ func readChunkedTrailer(ctx context.Context, reader io.Reader, dst []byte) (int,
 // the caller has already translated the plaintext range to a ciphertext
 // range and fetched only those bytes from the backend). The reader will
 // NOT skip leading chunks.
-func (e *engine) DecryptRangeOptimized(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error) {
-	return e.decryptRange(ctx, reader, metadata, plaintextStart, plaintextEnd, true)
+func (e *engine) DecryptRangeOptimized(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error) {
+	if err := object.Validate(); err != nil {
+		return nil, nil, err
+	}
+	return e.decryptRange(ctx, object, reader, metadata, plaintextStart, plaintextEnd, true)
 }
 
 // decryptRange is the shared implementation for DecryptRange and DecryptRangeOptimized.
-func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64, isOptimizedSource bool) (io.Reader, map[string]string, error) {
+func (e *engine) decryptRange(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64, isOptimizedSource bool) (io.Reader, map[string]string, error) {
 	if !e.IsEncrypted(metadata) {
 		return nil, nil, fmt.Errorf("object is not encrypted")
 	}
@@ -1721,6 +2026,9 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	}
 
 	// Only supports chunked format for range optimization
+	if expandedMetadata[MetaObjectFormatVersion] == "buffered-v2" {
+		return nil, nil, fmt.Errorf("buffered-v2 format marker cannot use range chunked metadata")
+	}
 	if !isChunkedFormat(expandedMetadata) {
 		return nil, nil, fmt.Errorf("range optimization only supported for chunked format")
 	}
@@ -1730,6 +2038,14 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	manifestForRange, manifestErr := loadManifestFromMetadata(expandedMetadata)
 	if manifestErr != nil {
 		return nil, nil, fmt.Errorf("failed to load manifest: %w", manifestErr)
+	}
+	if expandedMetadata[MetaObjectFormatVersion] == "chunked-v2" {
+		if manifestForRange.Version != int(ChunkedFormatV2) {
+			return nil, nil, fmt.Errorf("chunked-v2 format marker requires a v2 manifest")
+		}
+		if _, bindingErr := parseObjectBindingID(expandedMetadata[MetaObjectBindingID]); bindingErr != nil {
+			return nil, nil, bindingErr
+		}
 	}
 	// Get plaintext size for validation. Prefer the caller's original size when
 	// the stored content length is absent or is a legacy/non-canonical fixture.
@@ -1856,9 +2172,25 @@ func (e *engine) decryptRange(ctx context.Context, reader io.Reader, metadata ma
 	aead := aeadCipher.(cipher.AEAD)
 
 	// Create range-aware decrypt reader
-	rangeReader, err := newRangeDecryptReader(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool, isOptimizedSource, plaintextSize)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create range reader: %w", err)
+	var rangeReader *rangeDecryptReader
+	if manifest.Version == int(ChunkedFormatV2) && expandedMetadata[MetaObjectFormatVersion] == "chunked-v2" {
+		if expandedMetadata[MetaObjectFormatVersion] != "chunked-v2" {
+			return nil, nil, fmt.Errorf("unsupported or missing chunked-v2 format marker")
+		}
+		bindingID, bindingErr := parseObjectBindingID(expandedMetadata[MetaObjectBindingID])
+		if bindingErr != nil {
+			return nil, nil, bindingErr
+		}
+		var rangeErr error
+		rangeReader, rangeErr = newRangeDecryptReaderBound(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool, isOptimizedSource, plaintextSize, object, bindingID)
+		if rangeErr != nil {
+			return nil, nil, fmt.Errorf("failed to create range reader: %w", rangeErr)
+		}
+	} else {
+		rangeReader, err = newRangeDecryptReader(reader, aead, manifest, baseIV, plaintextStart, plaintextEnd, e.bufferPool, isOptimizedSource, plaintextSize)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create range reader: %w", err)
+		}
 	}
 
 	// Prepare decrypted metadata
@@ -1905,39 +2237,18 @@ func (e *engine) needsMetadataFallback(metadata map[string]string) bool {
 }
 
 // encryptWithMetadataFallback encrypts data with metadata stored in object body
-func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[string]string, contentType string, originalSize int64, originalETag string) (io.Reader, map[string]string, error) {
+func (e *engine) encryptWithMetadataFallback(ctx context.Context, object ObjectContext, plaintext []byte, fullMetadata map[string]string, contentType string, originalSize int64, originalETag string, salt, nonce, key []byte, envelope *KeyEnvelope, bindingID []byte) (io.Reader, map[string]string, error) {
 	data := plaintext
-
-	// Generate encryption parameters
-	salt, err := e.generateSalt()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate salt: %w", err)
-	}
-
-	nonce, err := e.generateNonce()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
 	algorithm := e.preferredAlgorithm
-
-	// Derive key
-	key, err := e.deriveKey(salt)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to derive key: %w", err)
+	if len(bindingID) != 16 {
+		return nil, nil, fmt.Errorf("fallback-v2: invalid binding ID")
 	}
-	defer zeroBytes(key)
-
-	// Adjust key size for algorithm
 	keySize := aesKeySize
 	if algorithm == AlgorithmChaCha20Poly1305 {
 		keySize = chacha20KeySize
 	}
-	// deriveKey always returns exactly aesKeySize bytes via PBKDF2;
-	// the following size check is a defensive assertion only.
 	if len(key) != keySize {
-		zeroBytes(key)
-		return nil, nil, fmt.Errorf("internal: PBKDF2 returned unexpected key size %d (want %d)", len(key), keySize)
+		return nil, nil, fmt.Errorf("fallback-v2: invalid data key size %d (want %d)", len(key), keySize)
 	}
 
 	// Create cipher
@@ -1965,11 +2276,12 @@ func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[
 	copy(pt[4:], metadataJSON)
 	copy(pt[4+len(metadataJSON):], data)
 
-	// Build AAD for authentication
-	aad := buildAAD(algorithm, salt, nonce, map[string]string{
-		"Content-Type":   contentType,
-		MetaOriginalSize: fmt.Sprintf("%d", originalSize),
-	})
+	// New fallback writes use the same trusted identity contract as buffered-v2.
+	// Legacy fallback-v1 remains read-only in decryptFallbackV1.
+	aad, err := buildObjectAAD(aadBufferedV2, object, bindingID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Encrypt the combined data
 	ciphertext := aeadCipher.Seal(nil, nonce, pt, aad)
@@ -1979,20 +2291,26 @@ func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[
 
 	// Create minimal header metadata
 	minimalMetadata := map[string]string{
-		MetaEncrypted:    "true",
-		MetaFallbackMode: "true",
-		MetaAlgorithm:    algorithm,
-		MetaKeySalt:      encodeBase64(salt),
-		MetaIV:           encodeBase64(nonce),
-		MetaOriginalSize: fmt.Sprintf("%d", originalSize),
-		MetaOriginalETag: originalETag,
-		MetaKDFParams:    FormatKDFParams(e.defaultKDFParams()),
+		MetaEncrypted:           "true",
+		MetaFallbackMode:        "true",
+		MetaFallbackVersion:     "3",
+		MetaObjectFormatVersion: "buffered-fallback-v2",
+		MetaObjectBindingID:     base64.RawURLEncoding.EncodeToString(bindingID),
+		MetaAlgorithm:           algorithm,
+		MetaKeySalt:             encodeBase64(salt),
+		MetaIV:                  encodeBase64(nonce),
+		MetaOriginalSize:        fmt.Sprintf("%d", originalSize),
+		MetaOriginalETag:        originalETag,
+		MetaKDFParams:           FormatKDFParams(e.defaultKDFParams()),
 	}
-
-	// Copy original user metadata
-	for k, v := range fullMetadata {
-		if !IsEncryptionMetadata(k) {
-			minimalMetadata[k] = v
+	if envelope != nil {
+		minimalMetadata[MetaKeyVersion] = fmt.Sprintf("%d", envelope.KeyVersion)
+		minimalMetadata[MetaWrappedKeyCiphertext] = encodeBase64(envelope.Ciphertext)
+		if envelope.KeyID != "" {
+			minimalMetadata[MetaKMSKeyID] = envelope.KeyID
+		}
+		if envelope.Provider != "" {
+			minimalMetadata[MetaKMSProvider] = envelope.Provider
 		}
 	}
 
@@ -2008,7 +2326,14 @@ func (e *engine) encryptWithMetadataFallback(plaintext []byte, fullMetadata map[
 		minimalMetadata[MetaContentDisposition] = value
 	}
 
-	return bytes.NewReader(ciphertext), minimalMetadata, nil
+	compactedMetadata, err := e.compactor.CompactMetadata(minimalMetadata)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fallback-v2: failed to compact headers: %w", err)
+	}
+	if EstimateMetadataSize(compactedMetadata) > e.providerProfile.TotalHeaderLimit {
+		return nil, nil, fmt.Errorf("fallback-v2: required encryption headers exceed provider limit")
+	}
+	return bytes.NewReader(ciphertext), compactedMetadata, nil
 }
 
 // isFallbackMode checks if the metadata indicates fallback mode
@@ -2018,7 +2343,7 @@ func (e *engine) isFallbackMode(metadata map[string]string) bool {
 }
 
 // decryptWithMetadataFallback decrypts data with metadata stored in object body
-func (e *engine) decryptWithMetadataFallback(ctx context.Context, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+func (e *engine) decryptWithMetadataFallback(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
 	// V1.0-SEC-27: dispatch on the on-disk format version stored in header metadata.
 	//
 	// Version "2" (MetaFallbackVersion == "2"): streaming format written by the
@@ -2031,16 +2356,131 @@ func (e *engine) decryptWithMetadataFallback(ctx context.Context, reader io.Read
 	// Legacy / absent version: the object was encrypted by the old code which
 	// wrapped the chunked ciphertext in a second outer AEAD Seal. Handled by
 	// decryptFallbackV1 for backward compatibility.
+	if metadata[MetaFallbackVersion] == "3" {
+		if metadata[MetaObjectFormatVersion] != "buffered-fallback-v2" {
+			return nil, nil, fmt.Errorf("fallback-v2: unsupported or missing bound format marker")
+		}
+		return e.decryptFallbackBound(ctx, object, reader, metadata)
+	}
 	if metadata[MetaFallbackVersion] == "2" {
-		return e.decryptFallbackV2(ctx, reader, metadata)
+		return e.decryptFallbackV2(ctx, object, reader, metadata)
+	}
+	if metadata[MetaFallbackVersion] != "" && metadata[MetaFallbackVersion] != "1" {
+		return nil, nil, fmt.Errorf("fallback: unsupported format version %q", metadata[MetaFallbackVersion])
 	}
 	return e.decryptFallbackV1(reader, metadata)
+}
+
+// decryptFallbackBound opens the current buffered overflow format. Its
+// declared marker is terminal: authentication errors never enter v1 recovery.
+func (e *engine) decryptFallbackBound(ctx context.Context, object ObjectContext, reader io.Reader, metadata map[string]string) (io.Reader, map[string]string, error) {
+	bindingID, err := parseObjectBindingID(metadata[MetaObjectBindingID])
+	if err != nil {
+		return nil, nil, err
+	}
+	salt, err := decodeBase64(metadata[MetaKeySalt])
+	if err != nil {
+		return nil, nil, fmt.Errorf("fallback-v2: failed to decode salt: %w", err)
+	}
+	iv, err := decodeBase64(metadata[MetaIV])
+	if err != nil {
+		return nil, nil, fmt.Errorf("fallback-v2: failed to decode IV: %w", err)
+	}
+	var key []byte
+	if e.kmsManager != nil {
+		if metadata[MetaWrappedKeyCiphertext] == "" || metadata[MetaKMSKeyID] == "" || metadata[MetaKMSProvider] == "" || parseKeyVersion(metadata[MetaKeyVersion]) <= 0 {
+			return nil, nil, fmt.Errorf("fallback-v2: incomplete wrapped key metadata")
+		}
+		wrapped, decodeErr := decodeBase64(metadata[MetaWrappedKeyCiphertext])
+		if decodeErr != nil {
+			return nil, nil, fmt.Errorf("fallback-v2: failed to decode wrapped data key: %w", decodeErr)
+		}
+		env := &KeyEnvelope{
+			KeyID:      metadata[MetaKMSKeyID],
+			KeyVersion: parseKeyVersion(metadata[MetaKeyVersion]),
+			Provider:   metadata[MetaKMSProvider],
+			Ciphertext: wrapped,
+		}
+		if env.KeyID == "" || len(env.Ciphertext) == 0 {
+			return nil, nil, fmt.Errorf("fallback-v2: incomplete wrapped key metadata")
+		}
+		key, err = e.kmsManager.UnwrapKey(ctx, env, metadata)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fallback-v2: failed to unwrap data key: %w", err)
+		}
+	} else {
+		params, parseErr := ParseKDFParams(metadata[MetaKDFParams])
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("fallback-v2: failed to parse KDF params: %w", parseErr)
+		}
+		key, err = e.deriveKeyWithParams(salt, params)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	defer zeroBytes(key)
+	keySize := aesKeySize
+	if metadata[MetaAlgorithm] == AlgorithmChaCha20Poly1305 {
+		keySize = chacha20KeySize
+	}
+	if len(key) != keySize {
+		return nil, nil, fmt.Errorf("fallback-v2: invalid data key size %d (want %d)", len(key), keySize)
+	}
+	aead, err := createAEADCipher(metadata[MetaAlgorithm], key)
+	if err != nil {
+		return nil, nil, err
+	}
+	ciphertext, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	aad, err := buildObjectAAD(aadBufferedV2, object, bindingID)
+	if err != nil {
+		return nil, nil, err
+	}
+	plaintext, err := aead.Open(nil, iv, ciphertext, aad)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fallback-v2: authentication failed: %w", err)
+	}
+	if len(plaintext) < 4 {
+		return nil, nil, fmt.Errorf("fallback-v2: encrypted data too short")
+	}
+	metadataLen := int(uint32(plaintext[0])<<24 | uint32(plaintext[1])<<16 | uint32(plaintext[2])<<8 | uint32(plaintext[3]))
+	if metadataLen > len(plaintext)-4 {
+		return nil, nil, fmt.Errorf("fallback-v2: invalid metadata length")
+	}
+	fullMetadata, err := decodeMetadataFromJSON(plaintext[4 : 4+metadataLen])
+	if err != nil {
+		return nil, nil, fmt.Errorf("fallback-v2: failed to decode metadata: %w", err)
+	}
+	decMetadata := make(map[string]string)
+	for k, v := range fullMetadata {
+		if !IsEncryptionMetadata(k) {
+			decMetadata[k] = v
+		}
+	}
+	if v := fullMetadata[MetaContentType]; v != "" {
+		decMetadata["Content-Type"] = v
+	}
+	if v := fullMetadata[MetaCacheControl]; v != "" {
+		decMetadata["Cache-Control"] = v
+	}
+	if v := fullMetadata[MetaContentDisposition]; v != "" {
+		decMetadata["Content-Disposition"] = v
+	}
+	if v := fullMetadata[MetaOriginalSize]; v != "" {
+		decMetadata["Content-Length"] = v
+	}
+	if v := fullMetadata[MetaOriginalETag]; v != "" {
+		decMetadata["ETag"] = v
+	}
+	return bytes.NewReader(plaintext[4+metadataLen:]), decMetadata, nil
 }
 
 // decryptFallbackV2 decrypts objects written by the fixed (V1.0-SEC-27) fallback
 // encrypt path. Format: [4-byte BE metadata_length][metadata_json][chunked_stream].
 // No outer AEAD — integrity comes from the per-chunk AEAD in the chunked layer.
-func (e *engine) decryptFallbackV2(ctx context.Context, reader io.Reader, headerMetadata map[string]string) (io.Reader, map[string]string, error) {
+func (e *engine) decryptFallbackV2(ctx context.Context, object ObjectContext, reader io.Reader, headerMetadata map[string]string) (io.Reader, map[string]string, error) {
 	// Read the 4-byte big-endian metadata length prefix.
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(reader, lenBuf[:]); err != nil {
@@ -2069,7 +2509,7 @@ func (e *engine) decryptFallbackV2(ctx context.Context, reader io.Reader, header
 
 	// The remainder of reader is the raw chunked ciphertext stream. Delegate
 	// to decryptChunked which is fully streaming — no io.ReadAll required.
-	return e.decryptChunked(ctx, reader, fullMetadata)
+	return e.decryptChunked(ctx, object, reader, fullMetadata)
 }
 
 // decryptFallbackV1 decrypts objects written by the legacy fallback encrypt path
@@ -2270,7 +2710,10 @@ func IsEncryptionMetadata(key string) bool {
 		key == MetaFallbackVersion ||
 		key == MetaIVDerivation ||
 		key == MetaLegacyNoAAD ||
-		key == MetaKDFParams
+		key == MetaKDFParams ||
+		key == MetaObjectFormatVersion ||
+		key == MetaObjectBindingID ||
+		key == MetaMPUManifestVersion
 }
 
 // buildAADLegacy is the old pipe-delimited AAD format.

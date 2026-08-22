@@ -28,11 +28,17 @@ type KeyManager interface {
 
 	// WrapKey encrypts the provided plaintext DEK and returns an envelope
 	// suitable for persisting alongside the encrypted object metadata.
+	// metadata is advisory context only. Providers may ignore it; callers MUST
+	// not rely on it for bucket, key, or object-location integrity. Payload AEAD
+	// ObjectContext binding enforces that integrity independently.
 	WrapKey(ctx context.Context, plaintext []byte, metadata map[string]string) (*KeyEnvelope, error)
 
 	// UnwrapKey decrypts the ciphertext contained in the given envelope and
 	// returns the plaintext DEK. The returned slice is owned by the caller,
-	// who must zeroize it when done.
+	// who must zeroize it when done. metadata is advisory context only and
+	// providers may ignore it; it MUST NOT be used as the object-location
+	// integrity boundary. Payload AEAD ObjectContext binding is enforced
+	// independently of the configured KeyManager.
 	UnwrapKey(ctx context.Context, envelope *KeyEnvelope, metadata map[string]string) ([]byte, error)
 
 	// ActiveKeyVersion returns the version identifier of the primary wrapping key.

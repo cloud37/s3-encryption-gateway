@@ -13,16 +13,16 @@ import (
 // mockRetryKM implements KeyManager with controllable failure for retry tests.
 type mockRetryKM struct {
 	KeyManager
-	provider        string
-	wrapAttempts    atomic.Int32
-	unwrapAttempts  atomic.Int32
-	healthAttempts  atomic.Int32
-	failWrapsUntil int32  // fail the first N WrapKey calls
+	provider         string
+	wrapAttempts     atomic.Int32
+	unwrapAttempts   atomic.Int32
+	healthAttempts   atomic.Int32
+	failWrapsUntil   int32 // fail the first N WrapKey calls
 	failUnwrapsUntil int32 // fail the first N UnwrapKey calls
-	wrapErr         error
-	unwrapErr       error
-	wrapResult      *KeyEnvelope
-	unwrapResult    []byte
+	wrapErr          error
+	unwrapErr        error
+	wrapResult       *KeyEnvelope
+	unwrapResult     []byte
 }
 
 func (m *mockRetryKM) Provider() string { return m.provider }
@@ -97,9 +97,9 @@ func TestRetryingKeyManager_WrapKey_TransientErrorRetries(t *testing.T) {
 
 func TestRetryingKeyManager_UnwrapKey_PermanentError_NotRetried(t *testing.T) {
 	inner := &mockRetryKM{
-		provider:        "test",
+		provider:         "test",
 		failUnwrapsUntil: 100, // always fails
-		unwrapErr:       ErrUnwrapFailed,
+		unwrapErr:        ErrUnwrapFailed,
 	}
 	cfg := DefaultRetryConfig()
 	cfg.InitialInterval = time.Millisecond
@@ -190,9 +190,9 @@ func TestRetryingKeyManager_AllPermanentErrors_NotRetried(t *testing.T) {
 	for _, permErr := range permanentErrs {
 		t.Run(permErr.Error(), func(t *testing.T) {
 			inner := &mockRetryKM{
-				provider:        "test",
+				provider:         "test",
 				failUnwrapsUntil: 100,
-				unwrapErr:       permErr,
+				unwrapErr:        permErr,
 			}
 			cfg := DefaultRetryConfig()
 			cfg.InitialInterval = time.Millisecond
@@ -207,5 +207,3 @@ func TestRetryingKeyManager_AllPermanentErrors_NotRetried(t *testing.T) {
 		})
 	}
 }
-
-

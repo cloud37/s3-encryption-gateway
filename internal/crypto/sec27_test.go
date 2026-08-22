@@ -74,7 +74,7 @@ func TestSEC27_ChunkedFallbackV2_Format(t *testing.T) {
 	e, _ := newChunkedFallbackEngine(t)
 
 	plaintext := []byte("hello sec-27 streaming fallback")
-	encReader, encMeta, err := e.Encrypt(context.Background(), bytes.NewReader(plaintext), largeMetadataMap())
+	encReader, encMeta, err := e.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plaintext), largeMetadataMap())
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestSEC27_ChunkedFallbackV2_RoundTrip(t *testing.T) {
 			plaintext := bytes.Repeat([]byte{0xAB}, sz)
 			meta := largeMetadataMap()
 
-			encReader, encMeta, err := e.Encrypt(context.Background(), bytes.NewReader(plaintext), meta)
+			encReader, encMeta, err := e.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plaintext), meta)
 			if err != nil {
 				t.Fatalf("Encrypt: %v", err)
 			}
@@ -116,7 +116,7 @@ func TestSEC27_ChunkedFallbackV2_RoundTrip(t *testing.T) {
 				t.Fatalf("unexpected fallback version %q, want \"2\"", encMeta[MetaFallbackVersion])
 			}
 
-			decReader, decMeta, err := e.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+			decReader, decMeta, err := e.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
 			if err != nil {
 				t.Fatalf("Decrypt: %v", err)
 			}
@@ -149,7 +149,7 @@ func TestSEC27_ChunkedFallbackV2_NoOuterAEAD(t *testing.T) {
 	e, _ := newChunkedFallbackEngine(t)
 
 	plaintext := []byte("outer aead must be absent")
-	encReader, encMeta, err := e.Encrypt(context.Background(), bytes.NewReader(plaintext), largeMetadataMap())
+	encReader, encMeta, err := e.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plaintext), largeMetadataMap())
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -167,20 +167,19 @@ func TestSEC27_ChunkedFallbackV2_NoOuterAEAD(t *testing.T) {
 	}
 }
 
-// TestSEC27_BackwardCompatibility_LegacyV1 verifies that objects encrypted with
-// the old outer-AEAD (v1) format can still be decrypted after the fix.
-// This test manually constructs a v1 fallback object using the legacy path.
-func TestSEC27_BackwardCompatibility_LegacyV1(t *testing.T) {
-	// Use a non-chunked engine to produce a v1 fallback object (legacy format).
-	// The non-chunked Encrypt path calls encryptWithMetadataFallback, which is
-	// the original single-AEAD implementation and is unchanged.
+// TestSEC27_BufferedFallbackUsesBoundFormat verifies that current buffered
+// overflow writes cannot silently emit the unbound legacy fallback format.
+func TestSEC27_BufferedFallbackUsesBoundFormat(t *testing.T) {
+	// Use a non-chunked engine to produce the current bound fallback format.
 	profile := &ProviderProfile{
 		Name:                "test-legacy-fallback",
 		UserMetadataLimit:   50,
 		SystemMetadataLimit: 0,
-		TotalHeaderLimit:    80,
-		SupportsLongKeys:    true,
-		CompactionStrategy:  "base64url",
+		// The mandatory bound fallback headers must fit; user metadata still
+		// exceeds the compacted limit and forces the fallback body format.
+		TotalHeaderLimit:   500,
+		SupportsLongKeys:   true,
+		CompactionStrategy: "base64url",
 	}
 	legacyEnc, err := NewEngineWithProvider([]byte("sec27-test-password-2026"), "", nil, "default")
 	if err != nil {
@@ -193,7 +192,7 @@ func TestSEC27_BackwardCompatibility_LegacyV1(t *testing.T) {
 	plaintext := []byte("legacy fallback v1 object")
 	meta := largeMetadataMap()
 
-	encReader, encMeta, err := legacyEngine.Encrypt(context.Background(), bytes.NewReader(plaintext), meta)
+	encReader, encMeta, err := legacyEngine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plaintext), meta)
 	if err != nil {
 		t.Fatalf("Encrypt (legacy): %v", err)
 	}
@@ -202,14 +201,16 @@ func TestSEC27_BackwardCompatibility_LegacyV1(t *testing.T) {
 		t.Fatalf("ReadAll: %v", err)
 	}
 
-	// Legacy engine produces v1 (no MetaFallbackVersion), with outer AEAD.
-	// Confirm the version header is absent (or "1").
-	ver := encMeta[MetaFallbackVersion]
-	if ver != "" && ver != "1" {
-		t.Fatalf("unexpected version %q from legacy engine, want empty or \"1\"", ver)
+	expandedMeta, err := legacyEngine.compactor.ExpandMetadata(encMeta)
+	if err != nil {
+		t.Fatalf("ExpandMetadata: %v", err)
+	}
+	ver := expandedMeta[MetaFallbackVersion]
+	if ver != "3" || expandedMeta[MetaObjectFormatVersion] != "buffered-fallback-v2" {
+		t.Fatalf("unexpected bound fallback markers: version=%q format=%q", ver, expandedMeta[MetaObjectFormatVersion])
 	}
 
-	// Now decrypt using the updated engine — must still work (backward compat).
+	// Decrypt using the updated engine.
 	updatedEnc, err := NewEngineWithChunkingAndProvider(
 		[]byte("sec27-test-password-2026"), "", nil, true, 65536, "default", DefaultPBKDF2Iterations,
 	)
@@ -220,16 +221,16 @@ func TestSEC27_BackwardCompatibility_LegacyV1(t *testing.T) {
 	updatedEngine.providerProfile = profile
 	updatedEngine.compactor = NewMetadataCompactor(profile)
 
-	decReader, _, err := updatedEngine.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	decReader, _, err := updatedEngine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
-		t.Fatalf("Decrypt (legacy v1 object with updated engine): %v", err)
+		t.Fatalf("Decrypt (bound fallback object): %v", err)
 	}
 	got, err := io.ReadAll(decReader)
 	if err != nil {
 		t.Fatalf("ReadAll decrypted: %v", err)
 	}
 	if !bytes.Equal(got, plaintext) {
-		t.Errorf("backward compat: got %q, want %q", got, plaintext)
+		t.Errorf("bound fallback: got %q, want %q", got, plaintext)
 	}
 }
 
@@ -258,7 +259,7 @@ func TestSEC27_FallbackV2_MetadataLengthSanityCheck(t *testing.T) {
 		MetaIV:              encodeBase64(make([]byte, nonceSize)),
 	}
 
-	_, _, err := e.decryptFallbackV2(context.Background(), fakeBody, fakeHeaderMeta)
+	_, _, err := e.decryptFallbackV2(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, fakeBody, fakeHeaderMeta)
 	if err == nil {
 		t.Error("expected error for oversize metadata length, got nil")
 	}
@@ -282,7 +283,7 @@ func BenchmarkSEC27_ChunkedFallback_PeakHeap(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&before)
 
-		encReader, _, err := e.Encrypt(context.Background(), bytes.NewReader(plaintext), meta)
+		encReader, _, err := e.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plaintext), meta)
 		if err != nil {
 			b.Fatalf("Encrypt: %v", err)
 		}

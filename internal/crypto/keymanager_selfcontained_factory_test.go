@@ -64,9 +64,9 @@ func TestSelfContainedFactory_RSAType_PEMFile(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := map[string]any{
-		"type":                "rsa",
-		"private_key_source":  "file:" + pemPath,
-		"key_version":         1,
+		"type":               "rsa",
+		"private_key_source": "file:" + pemPath,
+		"key_version":        1,
 	}
 
 	km, err := selfContainedFactory(context.Background(), cfg)

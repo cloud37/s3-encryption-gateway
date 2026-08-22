@@ -19,11 +19,11 @@ func TestEngine_StandardObjectMetadataRoundTrip(t *testing.T) {
 		"Cache-Control":       "max-age=3600",
 		"Content-Disposition": `attachment; filename="test.txt"`,
 	}
-	ciphertext, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("metadata")), original)
+	ciphertext, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("metadata")), original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, restored, err := engine.Decrypt(context.Background(), ciphertext, metadata)
+	plain, restored, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, ciphertext, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestEngine_EncryptDecrypt(t *testing.T) {
 			metadata := make(map[string]string)
 			metadata["Content-Type"] = "text/plain"
 
-			encryptedReader, encMetadata, err := engine.Encrypt(context.Background(), reader, metadata)
+			encryptedReader, encMetadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, metadata)
 			if err != nil {
 				t.Fatalf("Encrypt() error: %v", err)
 			}
@@ -167,7 +167,7 @@ func TestEngine_EncryptDecrypt(t *testing.T) {
 			}
 
 			// Decrypt
-			decryptedReader, decMetadata, err := engine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+			decryptedReader, decMetadata, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 			if err != nil {
 				t.Fatalf("Decrypt() error: %v", err)
 			}
@@ -260,7 +260,7 @@ func TestEngine_DecryptUnencrypted(t *testing.T) {
 		"Content-Type": "text/plain",
 	}
 
-	decryptedReader, decMetadata, err := engine.Decrypt(context.Background(), bytes.NewReader(data), metadata)
+	decryptedReader, decMetadata, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), metadata)
 	if err != nil {
 		t.Fatalf("Decrypt() should not error on unencrypted data: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestEngine_WrongPassword(t *testing.T) {
 
 	data := []byte("secret data")
 	reader := bytes.NewReader(data)
-	encryptedReader, encMetadata, err := engine1.Encrypt(context.Background(), reader, nil)
+	encryptedReader, encMetadata, err := engine1.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestEngine_WrongPassword(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 
-	_, _, err = engine2.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	_, _, err = engine2.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err == nil {
 		t.Errorf("Decrypt() with wrong password should fail")
 	}
@@ -320,12 +320,12 @@ func TestEngine_DifferentSaltPerEncryption(t *testing.T) {
 	data := []byte("test data")
 
 	// Encrypt twice
-	encrypted1, metadata1, err := engine.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encrypted1, metadata1, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
 
-	encrypted2, metadata2, err := engine.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encrypted2, metadata2, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -348,8 +348,8 @@ func TestEngine_DifferentSaltPerEncryption(t *testing.T) {
 	}
 
 	// But both should decrypt to same plaintext
-	dec1, _, _ := engine.Decrypt(context.Background(), bytes.NewReader(encData1), metadata1)
-	dec2, _, _ := engine.Decrypt(context.Background(), bytes.NewReader(encData2), metadata2)
+	dec1, _, _ := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData1), metadata1)
+	dec2, _, _ := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData2), metadata2)
 	decData1, _ := io.ReadAll(dec1)
 	decData2, _ := io.ReadAll(dec2)
 
@@ -378,7 +378,7 @@ func TestEngine_OriginalETagPreservation(t *testing.T) {
 	metadata := map[string]string{
 		"ETag": expectedETag,
 	}
-	encryptedReader, encMetadata, err := engine.Encrypt(context.Background(), reader, metadata)
+	encryptedReader, encMetadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, metadata)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestEngine_OriginalETagPreservation(t *testing.T) {
 
 	// Decrypt and verify ETag is restored
 	encryptedData, _ := io.ReadAll(encryptedReader)
-	decryptedReader, decMetadata, err := engine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, decMetadata, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestEncryptDecrypt_DefaultIterations(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for default iterations")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestEncryptDecrypt_DefaultIterations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestEncryptDecrypt_ExplicitIterations_100k(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for 100k iterations")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestEncryptDecrypt_ExplicitIterations_100k(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestEncryptDecrypt_ExplicitIterations_600k(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for 600k iterations")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestEncryptDecrypt_ExplicitIterations_600k(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestDecrypt_LegacyAbsentKDFParams(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for legacy fallback")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestDecrypt_LegacyAbsentKDFParams(t *testing.T) {
 	}
 	// Strip KDF params to simulate legacy object
 	delete(encMetadata, MetaKDFParams)
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -548,7 +548,7 @@ func TestDecrypt_CrossIteration_100k_to_600k(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for cross iteration")
-	encryptedReader, encMetadata, err := eng100k.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng100k.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestDecrypt_CrossIteration_100k_to_600k(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng600k.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng600k.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestDecrypt_CrossIteration_600k_to_100k(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for cross iteration")
-	encryptedReader, encMetadata, err := eng600k.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng600k.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -587,7 +587,7 @@ func TestDecrypt_CrossIteration_600k_to_100k(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng100k.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng100k.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestEncrypt_WritesKDFParamsMetadata(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data")
-	_, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	_, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -621,7 +621,7 @@ func TestEncrypt_WritesKDFParamsMetadata_CustomIter(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data")
-	_, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	_, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestChunked_EncryptDecrypt_KDFParams(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for chunked kdf params")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestChunked_EncryptDecrypt_KDFParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -670,7 +670,7 @@ func TestDecrypt_AbsentMetadata_FallbackIs100k(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for absent metadata fallback")
-	encryptedReader, encMetadata, err := eng100k.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng100k.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -680,7 +680,7 @@ func TestDecrypt_AbsentMetadata_FallbackIs100k(t *testing.T) {
 	}
 	// Strip KDF params to simulate legacy object
 	delete(encMetadata, MetaKDFParams)
-	decryptedReader, _, err := eng600k.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng600k.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestChunked_CrossIteration(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for chunked cross iteration")
-	encryptedReader, encMetadata, err := eng100k.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng100k.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -714,7 +714,7 @@ func TestChunked_CrossIteration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng600k.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng600k.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -733,7 +733,7 @@ func TestChunked_LegacyAbsentKDFParams(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 	data := []byte("test data for chunked legacy fallback")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -743,7 +743,7 @@ func TestChunked_LegacyAbsentKDFParams(t *testing.T) {
 	}
 	// Strip KDF params to simulate legacy object
 	delete(encMetadata, MetaKDFParams)
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -769,7 +769,7 @@ func TestEncryptDecrypt_Argon2id(t *testing.T) {
 	}
 
 	data := []byte("hello argon2id encryption")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -777,7 +777,7 @@ func TestEncryptDecrypt_Argon2id(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -798,7 +798,7 @@ func TestEncryptDecrypt_Argon2id_LegacyPBKDF2Read(t *testing.T) {
 	}
 
 	data := []byte("legacy pbkdf2 object read by argon2id engine")
-	encryptedReader, encMetadata, err := pbkdf2Engine.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := pbkdf2Engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -815,7 +815,7 @@ func TestEncryptDecrypt_Argon2id_LegacyPBKDF2Read(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create argon2id engine: %v", err)
 	}
-	decryptedReader, _, err := argon2idEngine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := argon2idEngine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -842,7 +842,7 @@ func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
 	}
 
 	data := []byte("argon2id object read by pbkdf2 engine")
-	encryptedReader, encMetadata, err := argon2idEngine.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := argon2idEngine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -856,7 +856,7 @@ func TestEncryptDecrypt_PBKDF2_LegacyArgon2idRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create PBKDF2 engine: %v", err)
 	}
-	decryptedReader, _, err := pbkdf2Engine.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := pbkdf2Engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -882,7 +882,7 @@ func TestEncrypt_WritesArgon2idMetadata(t *testing.T) {
 	}
 
 	data := []byte("test data for argon2id metadata")
-	_, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	_, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -907,7 +907,7 @@ func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
 	}
 
 	data := []byte("chunked argon2id encryption test data")
-	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encryptedReader, encMetadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -918,7 +918,7 @@ func TestEncryptDecrypt_Argon2id_Chunked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
-	decryptedReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMetadata)
+	decryptedReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMetadata)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -948,7 +948,7 @@ func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
 	}
 
 	data := []byte("chacha20-poly1305 test payload for coverage")
-	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -957,7 +957,7 @@ func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
 		t.Fatalf("io.ReadAll(encrypted): %v", err)
 	}
 
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -986,7 +986,7 @@ func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
 	}
 
 	data := []byte("non-chunked chacha20 test payload")
-	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt() error: %v", err)
 	}
@@ -995,7 +995,7 @@ func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
 		t.Fatalf("io.ReadAll(encrypted): %v", err)
 	}
 
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -1039,7 +1039,7 @@ func TestEngine_Decrypt_WithAESKEKManager(t *testing.T) {
 
 	data := bytes.Repeat([]byte("aes-kek-engine-test"), 512) // ~9 KiB
 
-	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -1056,7 +1056,7 @@ func TestEngine_Decrypt_WithAESKEKManager(t *testing.T) {
 		t.Error("Encrypt with AES KEK: MetaKMSKeyID is absent from metadata")
 	}
 
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
@@ -1100,7 +1100,7 @@ func TestEngine_Decrypt_WithRSAKEKManager(t *testing.T) {
 
 	data := bytes.Repeat([]byte("rsa-kek-engine-test"), 256) // ~4.5 KiB
 
-	encReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+	encReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestEngine_Decrypt_WithRSAKEKManager(t *testing.T) {
 		t.Error("Encrypt with RSA KEK: MetaKMSKeyID is absent from metadata")
 	}
 
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}

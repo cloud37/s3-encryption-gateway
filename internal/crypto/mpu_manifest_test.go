@@ -155,7 +155,7 @@ func TestMultipartManifest_PlainOffsetToPartChunk_OutOfRange(t *testing.T) {
 // TestEncRangeForPlaintextRange verifies backend byte range calculation.
 func TestEncRangeForPlaintextRange(t *testing.T) {
 	const partSize = 8 * 1024 * 1024 // 8 MiB
-	const chunkSz = DefaultChunkSize  // 64 KiB
+	const chunkSz = DefaultChunkSize // 64 KiB
 	const tagSz = 16
 	const encChunkSz = int64(chunkSz + tagSz)
 
@@ -229,7 +229,7 @@ func TestDecryptMPUPartRange(t *testing.T) {
 	plain := bytes.Repeat([]byte("abcd"), DefaultChunkSize) // 2.5 chunks
 
 	// Encrypt as a full part.
-	r, _, err := NewMPUPartEncryptReader(ctx, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
+	r, _, err := newMPUPartEncryptReaderV1(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, int64(len(plain)), "AES256GCM")
 	require.NoError(t, err)
 	ct, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -243,12 +243,12 @@ func TestDecryptMPUPartRange(t *testing.T) {
 
 	// Decrypt just chunk 1 (second chunk) via DecryptMPUPartRange.
 	chunk1Ct := ct[encChunkSz : 2*encChunkSz]
-	gotChunk1, err := DecryptMPUPartRange(chunk1Ct, testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, 1, "AES256GCM")
+	gotChunk1, err := decryptMPUPartRangeV1(ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, chunk1Ct, testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, 1, "AES256GCM")
 	require.NoError(t, err)
 	assert.Equal(t, plain[DefaultChunkSize:2*DefaultChunkSize], gotChunk1)
 
 	// Decrypt chunks 0+1 via DecryptMPUPartRange starting from 0.
-	gotChunks01, err := DecryptMPUPartRange(ct[:2*encChunkSz], testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, 0, "AES256GCM")
+	gotChunks01, err := decryptMPUPartRangeV1(ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, ct[:2*encChunkSz], testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, 0, "AES256GCM")
 	require.NoError(t, err)
 	assert.Equal(t, plain[:2*DefaultChunkSize], gotChunks01)
 
@@ -256,7 +256,7 @@ func TestDecryptMPUPartRange(t *testing.T) {
 	tampered := make([]byte, len(chunk1Ct))
 	copy(tampered, chunk1Ct)
 	tampered[0] ^= 0xff
-	_, err = DecryptMPUPartRange(tampered, testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, 1, "AES256GCM")
+	_, err = decryptMPUPartRangeV1(ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, tampered, testDEK, testUIDHash, testIVPrefix, 1, DefaultChunkSize, 1, "AES256GCM")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth failure")
 }

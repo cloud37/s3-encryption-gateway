@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,7 @@ import (
 
 const (
 	// mpuManifestVersion is the current version of the MultipartManifest JSON format.
-	mpuManifestVersion = 1
+	mpuManifestVersion = 2
 
 	// mpuInlineLimit is the maximum byte size for an inline manifest in S3 metadata.
 	// AWS limits x-amz-meta-* headers to 2 KiB total; we use 1.8 KiB to leave ~200 B
@@ -37,7 +38,12 @@ type MPUPartRecord struct {
 // inline in x-amz-meta-encryption-mpu or as a fallback companion object.
 type MultipartManifest struct {
 	// Version is the manifest format version; currently always 1.
-	Version int `json:"v"`
+	Version         int    `json:"v"`
+	ParentBucket    string `json:"parent_bucket,omitempty"`
+	ParentKey       string `json:"parent_key,omitempty"`
+	CompanionBucket string `json:"companion_bucket,omitempty"`
+	CompanionKey    string `json:"companion_key,omitempty"`
+	BindingID       string `json:"binding_id,omitempty"`
 	// Algorithm is the AEAD algorithm (e.g. "AES256GCM").
 	Algorithm string `json:"alg"`
 	// ChunkSize is the plaintext chunk size used for every part (bytes).
@@ -101,10 +107,33 @@ func UnmarshalMultipartManifest(data []byte) (*MultipartManifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("mpu_manifest: unmarshal: %w", err)
 	}
-	if m.Version != mpuManifestVersion {
+	if m.Version != 1 && m.Version != mpuManifestVersion {
 		return nil, fmt.Errorf("mpu_manifest: unsupported version %d (want %d)", m.Version, mpuManifestVersion)
 	}
 	return &m, nil
+}
+
+func (m *MultipartManifest) ValidateFor(parent, companion ObjectContext, bindingID [16]byte) error {
+	if err := parent.Validate(); err != nil {
+		return err
+	}
+	if err := companion.Validate(); err != nil {
+		return err
+	}
+	if m.Version == 1 {
+		return nil
+	}
+	if m.Version != mpuManifestVersion {
+		return fmt.Errorf("mpu_manifest: unsupported version %d", m.Version)
+	}
+	if m.ParentBucket != parent.Bucket || m.ParentKey != parent.Key || m.CompanionBucket != companion.Bucket || m.CompanionKey != companion.Key {
+		return fmt.Errorf("mpu_manifest: object relationship mismatch")
+	}
+	b, err := base64.RawURLEncoding.DecodeString(m.BindingID)
+	if err != nil || len(b) != 16 || !bytes.Equal(b, bindingID[:]) {
+		return fmt.Errorf("mpu_manifest: binding mismatch")
+	}
+	return nil
 }
 
 // UnmarshalMultipartManifestBase64 deserialises from a base64url-encoded string.

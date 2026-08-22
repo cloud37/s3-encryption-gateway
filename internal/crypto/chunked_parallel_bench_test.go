@@ -27,7 +27,7 @@ func BenchmarkChunkedEncrypt_Parallel(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		reader := bytes.NewReader(data)
-		encrypted, _, err := engine.Encrypt(context.Background(), reader, nil)
+		encrypted, _, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, nil)
 		if err != nil {
 			b.Fatalf("Encryption failed: %v", err)
 		}
@@ -54,7 +54,7 @@ func BenchmarkChunkedDecrypt_Parallel(b *testing.B) {
 	}
 
 	reader := bytes.NewReader(data)
-	encrypted, metadata, err := engine.Encrypt(context.Background(), reader, nil)
+	encrypted, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, nil)
 	if err != nil {
 		b.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -70,7 +70,7 @@ func BenchmarkChunkedDecrypt_Parallel(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		reader := bytes.NewReader(encryptedData)
-		decrypted, _, err := engine.Decrypt(context.Background(), reader, metadata)
+		decrypted, _, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, metadata)
 		if err != nil {
 			b.Fatalf("Decryption failed: %v", err)
 		}

@@ -30,7 +30,7 @@ func newSEC37V2Fixture(t *testing.T, plaintext []byte) ([]byte, *ChunkManifest, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, manifest, err := newChunkedEncryptReaderV2(context.Background(), bytes.NewReader(plaintext), dataAEAD, baseIV, MinChunkSize, nil, ChunkedFormatV2, terminalAEAD)
+	reader, manifest, err := newLegacyChunkedEncryptReaderV2(context.Background(), bytes.NewReader(plaintext), dataAEAD, baseIV, MinChunkSize, nil, ChunkedFormatV2, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ReadsExactTrailerAndOverread(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("trailer")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("trailer")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ReadsExactTrailerAndOverread(t *testin
 		t.Fatal(err)
 	}
 	source := &sec37ReadCounter{reader: bytes.NewReader(append(append([]byte{}, ciphertext[len(ciphertext)-ChunkedTerminalSize:]...), 1))}
-	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), source, metadata, int64(len(ciphertext))); !errors.Is(err, ErrChunkedObjectIncomplete) {
+	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, source, metadata, int64(len(ciphertext))); !errors.Is(err, ErrChunkedObjectIncomplete) {
 		t.Fatalf("error = %v", err)
 	}
 	if source.bytes != ChunkedTerminalSize+1 {
@@ -315,7 +315,7 @@ func TestSEC37_EncryptV2_DataAADRejectsReordering(t *testing.T) {
 	second := ciphertext[MinChunkSize+tagSize : 2*(MinChunkSize+tagSize)]
 	mutated := append(append([]byte{}, second...), first...)
 	mutated = append(mutated, ciphertext[2*(MinChunkSize+tagSize):]...)
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(mutated), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(mutated), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestSEC37_EncryptV2_DataAADRejectsReordering(t *testing.T) {
 
 func TestSEC37_DecryptV2_VerifiesTerminalAtEOF(t *testing.T) {
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, []byte("complete"))
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestSEC37_DecryptV2_VerifiesTerminalAtEOF(t *testing.T) {
 
 func TestSEC37_DecryptV2_RejectsMissingTerminal(t *testing.T) {
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, []byte("complete"))
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext[:len(ciphertext)-ChunkedTerminalSize]), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext[:len(ciphertext)-ChunkedTerminalSize]), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestSEC37_DecryptV2_RejectsWholeChunkTruncation(t *testing.T) {
 	plaintext := bytes.Repeat([]byte("c"), MinChunkSize*2)
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, plaintext)
 	cut := MinChunkSize + tagSize
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(append([]byte{}, ciphertext[:len(ciphertext)-cut]...)), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(append([]byte{}, ciphertext[:len(ciphertext)-cut]...)), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestSEC37_DecryptV2_RejectsWholeChunkTruncation(t *testing.T) {
 func TestSEC37_DecryptV2_RejectsTamperedTerminal(t *testing.T) {
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, []byte("terminal"))
 	ciphertext[len(ciphertext)-1] ^= 1
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestSEC37_DecryptV2_RejectsTerminalFromOtherObject(t *testing.T) {
 	terminalPlain := encodeChunkedTerminal(1, 9)
 	valid := otherTerminal.Seal(nil, nonce, terminalPlain[:], buildTerminalAAD(ChunkedFormatV2))
 	copy(ciphertext[len(ciphertext)-ChunkedTerminalSize:], valid)
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +399,7 @@ func TestSEC37_DecryptV2_RejectsTerminalFromOtherObject(t *testing.T) {
 func TestSEC37_DecryptV2_RejectsCountMismatch(t *testing.T) {
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, []byte("count"))
 	resealSEC37Terminal(t, ciphertext, manifest, terminalAEAD, 2, 5)
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestSEC37_DecryptV2_RejectsCountMismatch(t *testing.T) {
 func TestSEC37_DecryptV2_RejectsSizeMismatch(t *testing.T) {
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, []byte("size"))
 	resealSEC37Terminal(t, ciphertext, manifest, terminalAEAD, 1, 99)
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestSEC37_DecryptV2_RejectsSizeMismatch(t *testing.T) {
 func TestSEC37_DecryptV2_RejectsTrailingBytes(t *testing.T) {
 	ciphertext, manifest, dataAEAD, terminalAEAD := newSEC37V2Fixture(t, []byte("trailing"))
 	ciphertext = append(ciphertext, 0)
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestSEC37_AuthenticateChunkedTrailer_Password(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("trailer")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("trailer")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestSEC37_AuthenticateChunkedTrailer_Password(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(ciphertext[len(ciphertext)-ChunkedTerminalSize:]), metadata, int64(len(ciphertext)))
+	info, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(ciphertext[len(ciphertext)-ChunkedTerminalSize:]), metadata, int64(len(ciphertext)))
 	if err != nil || !info.Authenticated || info.PlaintextSize != 7 {
 		t.Fatalf("trailer info = %+v, error = %v", info, err)
 	}
@@ -473,7 +473,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ContextCanceled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := engine.AuthenticateChunkedTrailer(ctx, bytes.NewReader(nil), nil, 0); !errors.Is(err, context.Canceled) {
+	if _, err := engine.AuthenticateChunkedTrailer(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(nil), nil, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context cancellation", err)
 	}
 }
@@ -488,7 +488,7 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("km trailer")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("km trailer")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(ciphertext[len(ciphertext)-ChunkedTerminalSize:]), metadata, int64(len(ciphertext)))
+	info, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(ciphertext[len(ciphertext)-ChunkedTerminalSize:]), metadata, int64(len(ciphertext)))
 	if err != nil || !info.Authenticated || info.PlaintextSize != 10 {
 		t.Fatalf("trailer info = %+v, error = %v", info, err)
 	}
@@ -513,7 +513,7 @@ func TestSEC37_AuthenticateChunkedTrailer_V1Unauthenticated(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := map[string]string{MetaChunkedFormat: "true", MetaManifest: manifestEncoded}
-	info, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(nil), metadata, int64(MinChunkSize+tagSize))
+	info, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(nil), metadata, int64(MinChunkSize+tagSize))
 	if err != nil || info.Authenticated || info.Version != ChunkedFormatV1 {
 		t.Fatalf("v1 trailer info = %+v, error = %v", info, err)
 	}
@@ -548,7 +548,7 @@ func TestSEC37_AuthenticateChunkedTrailer_WrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := good.Encrypt(context.Background(), bytes.NewReader([]byte("wrong key")), nil)
+	reader, metadata, err := good.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("wrong key")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func TestSEC37_AuthenticateChunkedTrailer_WrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bad.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(ciphertext[len(ciphertext)-ChunkedTerminalSize:]), metadata, int64(len(ciphertext))); !errors.Is(err, ErrChunkedObjectIncomplete) {
+	if _, err := bad.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(ciphertext[len(ciphertext)-ChunkedTerminalSize:]), metadata, int64(len(ciphertext))); !errors.Is(err, ErrChunkedObjectIncomplete) {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -566,7 +566,7 @@ func TestSEC37_AuthenticateChunkedTrailer_RejectsMalformedLengthsAndCommitments(
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("auth branches")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("auth branches")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +585,7 @@ func TestSEC37_AuthenticateChunkedTrailer_RejectsMalformedLengthsAndCommitments(
 		{"canonical size mismatch", trailer, int64(len(ciphertext) + 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(tc.input), metadata, tc.size); !errors.Is(err, ErrChunkedObjectIncomplete) {
+			if _, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(tc.input), metadata, tc.size); !errors.Is(err, ErrChunkedObjectIncomplete) {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -598,7 +598,7 @@ func TestSEC37_AuthenticateChunkedTrailer_RejectsMalformedLengthsAndCommitments(
 		return a
 	}(), 2, 99)
 	copy(bad, ciphertext[len(ciphertext)-ChunkedTerminalSize:])
-	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(bad), metadata, int64(len(ciphertext))); !errors.Is(err, ErrChunkedObjectIncomplete) {
+	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(bad), metadata, int64(len(ciphertext))); !errors.Is(err, ErrChunkedObjectIncomplete) {
 		t.Fatalf("mismatched terminal error = %v", err)
 	}
 }
@@ -609,17 +609,17 @@ func TestSEC37_DecryptRange_ValidationBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, metadata := range []map[string]string{nil, {MetaEncrypted: "true"}, {MetaEncrypted: "true", MetaChunkedFormat: "true", MetaManifest: "%%%"}} {
-		if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(nil), metadata, 0, 0); err == nil {
+		if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(nil), metadata, 0, 0); err == nil {
 			t.Fatal("invalid range metadata accepted")
 		}
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("range")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("range")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ciphertext, _ := io.ReadAll(reader)
 	metadata[MetaOriginalSize] = "1"
-	if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(ciphertext), metadata, 0, 4); err == nil {
+	if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(ciphertext), metadata, 0, 4); err == nil {
 		t.Fatal("invalid plaintext range accepted")
 	}
 }
@@ -629,7 +629,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ErrorMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := good.Encrypt(context.Background(), bytes.NewReader([]byte("matrix")), nil)
+	reader, metadata, err := good.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("matrix")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,14 +647,14 @@ func TestSEC37_AuthenticateChunkedTrailer_ErrorMatrix(t *testing.T) {
 		{"wrong size", trailer, int64(len(body) - 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := good.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(tc.data), metadata, tc.size); !errors.Is(err, ErrChunkedObjectIncomplete) {
+			if _, err := good.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(tc.data), metadata, tc.size); !errors.Is(err, ErrChunkedObjectIncomplete) {
 				t.Fatalf("error=%v", err)
 			}
 		})
 	}
 	badTrailer := append([]byte{}, trailer...)
 	badTrailer[0] ^= 1
-	if _, err := good.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(badTrailer), metadata, int64(len(body))); !errors.Is(err, ErrChunkedObjectIncomplete) {
+	if _, err := good.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(badTrailer), metadata, int64(len(body))); !errors.Is(err, ErrChunkedObjectIncomplete) {
 		t.Fatalf("tag error=%v", err)
 	}
 	manifest, err := loadManifestFromMetadata(metadata)
@@ -672,7 +672,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ErrorMatrix(t *testing.T) {
 	}{{"count", 9, 6}, {"plaintext size", 1, 99}} {
 		plain := encodeChunkedTerminal(tc.count, tc.size)
 		replacement := terminal.Seal(nil, nonce, plain[:], buildTerminalAAD(ChunkedFormatV2))
-		if _, err := good.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(replacement), metadata, int64(len(body))); !errors.Is(err, ErrChunkedObjectIncomplete) {
+		if _, err := good.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(replacement), metadata, int64(len(body))); !errors.Is(err, ErrChunkedObjectIncomplete) {
 			t.Fatalf("%s error=%v", tc.name, err)
 		}
 	}
@@ -683,12 +683,12 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManagerAndMetadataErrors(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(nil), map[string]string{MetaEncryptedMetadata: "%%%"}, 0); err == nil {
+	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(nil), map[string]string{MetaEncryptedMetadata: "%%%"}, 0); err == nil {
 		t.Fatal("metadata decrypt error accepted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := engine.AuthenticateChunkedTrailer(ctx, bytes.NewReader(nil), nil, 0); !errors.Is(err, context.Canceled) {
+	if _, err := engine.AuthenticateChunkedTrailer(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(nil), nil, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("context error = %v", err)
 	}
 }
@@ -698,7 +698,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ProtectedChunkedMetadata(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("protected chunked")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("protected chunked")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ProtectedChunkedMetadata(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err != nil {
+	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -717,14 +717,14 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManagerErrorBranches(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("kms")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("kms")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(reader)
 	metadata[MetaOriginalSize] = "12"
 	metadata[MetaWrappedKeyCiphertext] = encodeBase64([]byte("wrapped"))
-	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err == nil {
+	if _, err := engine.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err == nil {
 		t.Fatal("unwrap error accepted")
 	}
 }
@@ -738,7 +738,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ReachableErrorMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := eng.Encrypt(context.Background(), bytes.NewReader([]byte("auth errors")), nil)
+	reader, metadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("auth errors")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +770,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ReachableErrorMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := eng.AuthenticateChunkedTrailer(context.Background(), tc.trailer, tc.metadata(), tc.size); err == nil {
+			if _, err := eng.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, tc.trailer, tc.metadata(), tc.size); err == nil {
 				t.Fatal("error path accepted")
 			}
 		})
@@ -783,7 +783,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ReachableErrorMatrix(t *testing.T) {
 	terminal, _ := cipher.NewGCM(block)
 	plain := encodeChunkedTerminal(99, 11)
 	countMismatch := terminal.Seal(nil, nonce, plain[:], buildTerminalAAD(ChunkedFormatV2))
-	if _, err := eng.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(countMismatch), metadata, int64(len(body))); !errors.Is(err, ErrChunkedObjectIncomplete) {
+	if _, err := eng.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(countMismatch), metadata, int64(len(body))); !errors.Is(err, ErrChunkedObjectIncomplete) {
 		t.Fatalf("count mismatch error=%v", err)
 	}
 }
@@ -795,13 +795,13 @@ func TestSEC37_AuthenticateChunkedTrailer_CompactorAndTerminalDecodeBranches(t *
 	}
 	e := eng.(*engine)
 	e.metadataExpansionOverride = func(map[string]string) (map[string]string, error) { return nil, errors.New("compactor failure") }
-	if _, err := eng.AuthenticateChunkedTrailer(context.Background(), nil, nil, 0); err == nil {
+	if _, err := eng.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, nil, nil, 0); err == nil {
 		t.Fatal("compactor failure ignored")
 	}
 	e.metadataExpansionOverride = nil
 	// A validly sealed terminal carrying non-canonical data exercises the
 	// decoder/commitment rejection without relying on impossible AES failures.
-	reader, metadata, err := eng.Encrypt(context.Background(), bytes.NewReader([]byte("decode")), nil)
+	reader, metadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("decode")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +815,7 @@ func TestSEC37_AuthenticateChunkedTrailer_CompactorAndTerminalDecodeBranches(t *
 	terminal, _ := cipher.NewGCM(block)
 	invalidPlain := make([]byte, 15)
 	sealed := terminal.Seal(nil, nonce, invalidPlain, buildTerminalAAD(ChunkedFormatV2))
-	if _, err := eng.AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(sealed), metadata, int64(len(body))); err == nil {
+	if _, err := eng.AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(sealed), metadata, int64(len(body))); err == nil {
 		t.Fatal("invalid terminal plaintext accepted")
 	}
 }
@@ -852,13 +852,13 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManagerContextAndZeroization(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, metadata, err := eng.Encrypt(context.Background(), bytes.NewReader([]byte("recorded")), nil)
+	r, metadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("recorded")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(r)
 	ctx := context.WithValue(context.Background(), "sec37-marker", "marker")
-	if _, err := eng.AuthenticateChunkedTrailer(ctx, bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err != nil {
+	if _, err := eng.AuthenticateChunkedTrailer(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err != nil {
 		t.Fatal(err)
 	}
 	if km.unwrapContext == nil || km.unwrapContext.Value("sec37-marker") != "marker" {
@@ -870,7 +870,7 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManagerContextAndZeroization(t *tes
 		}
 	}
 	km.returnError = errors.New("unwrap error")
-	if _, err := eng.AuthenticateChunkedTrailer(ctx, bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err == nil {
+	if _, err := eng.AuthenticateChunkedTrailer(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body[len(body)-ChunkedTerminalSize:]), metadata, int64(len(body))); err == nil {
 		t.Fatal("unwrap error accepted")
 	}
 	for _, b := range km.returned {
@@ -892,7 +892,7 @@ func (k *sec37FailingKeyManager) HealthCheck(context.Context) error             
 func (k *sec37FailingKeyManager) Close(context.Context) error                   { return nil }
 
 func TestSEC37_PassthroughAuthenticateChunkedTrailer(t *testing.T) {
-	_, err := (PassthroughEngine{}).AuthenticateChunkedTrailer(context.Background(), bytes.NewReader(nil), nil, 0)
+	_, err := (PassthroughEngine{}).AuthenticateChunkedTrailer(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(nil), nil, 0)
 	if err == nil || !strings.Contains(err.Error(), "unavailable in passthrough mode") {
 		t.Fatalf("error = %v", err)
 	}
@@ -903,7 +903,7 @@ func TestSEC37_DecryptRange_MetadataAndKeyManagerBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("range metadata")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("range metadata")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,12 +912,12 @@ func TestSEC37_DecryptRange_MetadataAndKeyManagerBranches(t *testing.T) {
 		{MetaEncrypted: "true", MetaChunkedFormat: "true", MetaManifest: "%%%"},
 		{MetaEncrypted: "true", MetaChunkedFormat: "true", MetaOriginalSize: "14", "Content-Length": "bad"},
 	} {
-		if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(body), m, 0, 1); err == nil {
+		if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), m, 0, 1); err == nil {
 			t.Fatal("malformed range metadata accepted")
 		}
 	}
 	metadata[MetaOriginalSize] = "1"
-	if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(body), metadata, 0, 13); err == nil {
+	if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 13); err == nil {
 		t.Fatal("invalid range accepted")
 	}
 }
@@ -952,7 +952,7 @@ func TestSEC37_DecryptRange_PasswordAndOptimizedBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader(bytes.Repeat([]byte("r"), 37)), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(bytes.Repeat([]byte("r"), 37)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -963,13 +963,13 @@ func TestSEC37_DecryptRange_PasswordAndOptimizedBranches(t *testing.T) {
 	metadata["Content-Length"] = fmt.Sprintf("%d", len(body))
 	metadata[MetaOriginalSize] = "37"
 	optimized := engine.(interface {
-		DecryptRangeOptimized(context.Context, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error)
+		DecryptRangeOptimized(context.Context, ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error)
 	})
-	if _, _, err := optimized.DecryptRangeOptimized(context.Background(), bytes.NewReader(body), metadata, 0, 3); err != nil {
+	if _, _, err := optimized.DecryptRangeOptimized(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 3); err != nil {
 		t.Fatal(err)
 	}
 	metadata[MetaOriginalSize] = "bad"
-	if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(body), metadata, 0, 3); err != nil {
+	if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 3); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -979,7 +979,7 @@ func TestSEC37_DecryptRange_EngineEntryBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("engine range")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("engine range")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +998,7 @@ func TestSEC37_DecryptRange_EngineEntryBranches(t *testing.T) {
 		{"bad range", metadata, -1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(body), tc.m, tc.start, tc.end); err == nil {
+			if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), tc.m, tc.start, tc.end); err == nil {
 				t.Fatal("invalid engine range accepted")
 			}
 		})
@@ -1008,15 +1008,15 @@ func TestSEC37_DecryptRange_EngineEntryBranches(t *testing.T) {
 		protected[k] = v
 	}
 	protected[MetaEncryptedMetadata] = "%%%"
-	if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(body), protected, 0, 1); err == nil {
+	if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), protected, 0, 1); err == nil {
 		t.Fatal("metadata decrypt failure accepted")
 	}
 	optimized := engine.(interface {
-		DecryptRangeOptimized(context.Context, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error)
+		DecryptRangeOptimized(context.Context, ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error)
 	})
 	metadata["Content-Length"] = fmt.Sprintf("%d", len(body))
 	metadata[MetaOriginalSize] = "12"
-	if _, _, err := optimized.DecryptRangeOptimized(context.Background(), bytes.NewReader(body), metadata, 0, 1); err != nil {
+	if _, _, err := optimized.DecryptRangeOptimized(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1026,7 +1026,7 @@ func TestSEC37_DecryptRange_ParameterErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("parameter range")), nil)
+	reader, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("parameter range")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1051,7 @@ func TestSEC37_DecryptRange_ParameterErrorBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := base()
 			tc.mutate(m)
-			if _, _, err := engine.DecryptRange(context.Background(), bytes.NewReader(body), m, 0, 1); err == nil {
+			if _, _, err := engine.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), m, 0, 1); err == nil {
 				t.Fatal("parameter error accepted")
 			}
 		})
@@ -1063,7 +1063,7 @@ func TestSEC37_DecryptRange_ReachableParameterMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := eng.Encrypt(context.Background(), bytes.NewReader([]byte("range errors")), nil)
+	reader, metadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("range errors")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1089,7 +1089,7 @@ func TestSEC37_DecryptRange_ReachableParameterMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := clone()
 			tc.mutate(m)
-			if _, _, err := eng.DecryptRange(context.Background(), bytes.NewReader(body), m, 0, 1); err == nil {
+			if _, _, err := eng.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), m, 0, 1); err == nil {
 				t.Fatal("parameter error accepted")
 			}
 		})
@@ -1098,7 +1098,7 @@ func TestSEC37_DecryptRange_ReachableParameterMatrix(t *testing.T) {
 	metadata[MetaContentType] = "application/test"
 	metadata[MetaCacheControl] = "max-age=1"
 	metadata[MetaContentDisposition] = "inline"
-	if _, out, err := eng.DecryptRange(context.Background(), bytes.NewReader(body), metadata, 0, 1); err != nil {
+	if _, out, err := eng.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 1); err != nil {
 		t.Fatal(err)
 	} else if out["Content-Type"] == "" || out["Cache-Control"] == "" || out["Content-Disposition"] == "" {
 		t.Fatal("restored response headers missing")
@@ -1112,17 +1112,17 @@ func TestSEC37_DecryptRange_CompactorAndProtectedMetadataErrors(t *testing.T) {
 	}
 	e := eng.(*engine)
 	e.metadataExpansionOverride = func(map[string]string) (map[string]string, error) { return nil, errors.New("compactor failure") }
-	if _, _, err := eng.DecryptRange(context.Background(), nil, map[string]string{MetaEncrypted: "true"}, 0, 1); err == nil {
+	if _, _, err := eng.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, nil, map[string]string{MetaEncrypted: "true"}, 0, 1); err == nil {
 		t.Fatal("compactor error ignored")
 	}
 	e.metadataExpansionOverride = nil
-	reader, metadata, err := eng.Encrypt(context.Background(), bytes.NewReader([]byte("protected range")), nil)
+	reader, metadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("protected range")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(reader)
 	metadata[MetaEncryptedMetadata] = "%%%"
-	if _, _, err := eng.DecryptRange(context.Background(), bytes.NewReader(body), metadata, 0, 1); err == nil {
+	if _, _, err := eng.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 1); err == nil {
 		t.Fatal("protected metadata error ignored")
 	}
 }
@@ -1132,7 +1132,7 @@ func TestSEC37_DecryptRange_ResponseMetadataAndFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, metadata, err := eng.Encrypt(context.Background(), bytes.NewReader([]byte("response metadata")), nil)
+	reader, metadata, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("response metadata")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1142,7 +1142,7 @@ func TestSEC37_DecryptRange_ResponseMetadataAndFallback(t *testing.T) {
 	metadata[MetaContentDisposition] = "inline"
 	metadata[MetaOriginalSize] = "17"
 	delete(metadata, "Content-Length")
-	r, out, err := eng.DecryptRange(context.Background(), bytes.NewReader(body), metadata, 0, 3)
+	r, out, err := eng.DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(body), metadata, 0, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1172,12 +1172,14 @@ func TestSEC37_UnknownVersion_FailsClosed(t *testing.T) {
 	}
 }
 
-func TestSEC37_EncryptWrapperTerminalUsesSuppliedAEAD(t *testing.T) {
+// TestSEC37_LegacyV2EncryptWrapperTerminalUsesSuppliedAEAD verifies the
+// supplied terminal AEAD on the legacy, unbound V2 writer.
+func TestSEC37_LegacyV2EncryptWrapperTerminalUsesSuppliedAEAD(t *testing.T) {
 	key := bytes.Repeat([]byte{0x41}, aesKeySize)
 	block, _ := aes.NewCipher(key)
 	data, _ := cipher.NewGCM(block)
 	terminal, _ := cipher.NewGCM(block)
-	reader, manifest, err := newChunkedEncryptReaderWithContext(context.Background(), bytes.NewReader([]byte("wrapper")), data, terminal, bytes.Repeat([]byte{0x22}, nonceSize), MinChunkSize, ChunkedFormatV2, nil)
+	reader, manifest, err := newLegacyChunkedEncryptReaderV2(context.Background(), bytes.NewReader([]byte("wrapper")), data, bytes.Repeat([]byte{0x22}, nonceSize), MinChunkSize, nil, ChunkedFormatV2, terminal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1358,7 +1360,7 @@ func FuzzSEC37_DecryptV2Mutations(f *testing.F) {
 		if len(ciphertext) > 0 {
 			ciphertext[int(offset)%len(ciphertext)] ^= mutation
 		}
-		reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+		reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1379,7 +1381,7 @@ func TestSEC37_ConcurrentV2RoundTrips(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
+			reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(ciphertext), dataAEAD, manifest, nil, terminalAEAD)
 			if err != nil {
 				errs <- err
 				return

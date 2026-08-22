@@ -17,7 +17,7 @@ func TestEncrypt_DoesNotSetLegacyNoAADFlag(t *testing.T) {
 	}
 
 	data := []byte("hello world")
-	_, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	_, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -39,7 +39,7 @@ func TestAADFallback_NewObjectTamperedFails(t *testing.T) {
 	}
 
 	data := []byte("sensitive payload")
-	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -51,10 +51,14 @@ func TestAADFallback_NewObjectTamperedFails(t *testing.T) {
 		t.Fatalf("ReadAll() error: %v", err)
 	}
 
-	// Tamper with an AAD-bound field so the AAD does not match.
-	encMeta[MetaOriginalSize] = "99999"
+	// Tamper with the v2 binding identifier so the object AAD does not match.
+	if encMeta[MetaObjectBindingID][0] == 'A' {
+		encMeta[MetaObjectBindingID] = "B" + encMeta[MetaObjectBindingID][1:]
+	} else {
+		encMeta[MetaObjectBindingID] = "A" + encMeta[MetaObjectBindingID][1:]
+	}
 
-	_, _, err = eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMeta)
+	_, _, err = eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMeta)
 	if err == nil {
 		t.Fatalf("Decrypt() expected error for tampered metadata without legacy flag, got nil")
 	}
@@ -69,7 +73,7 @@ func TestAADFallback_LegacyObjectWithFlagSucceeds(t *testing.T) {
 	}
 
 	data := []byte("legacy payload")
-	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -83,7 +87,7 @@ func TestAADFallback_LegacyObjectWithFlagSucceeds(t *testing.T) {
 
 	// Recover plaintext by decrypting the AAD-encrypted data so we can
 	// re-encrypt it without AAD using the same key material.
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -123,8 +127,10 @@ func TestAADFallback_LegacyObjectWithFlagSucceeds(t *testing.T) {
 
 	// Mark as legacy and attempt decryption.
 	encMeta[MetaLegacyNoAAD] = "true"
+	delete(encMeta, MetaObjectFormatVersion)
+	delete(encMeta, MetaObjectBindingID)
 
-	decReader, _, err = eng.Decrypt(context.Background(), bytes.NewReader(noAADCiphertext), encMeta)
+	decReader, _, err = eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(noAADCiphertext), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error for legacy object with flag: %v", err)
 	}
@@ -146,7 +152,7 @@ func TestAADFallback_LegacyObjectWithoutFlagFails(t *testing.T) {
 	}
 
 	data := []byte("legacy payload without flag")
-	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -158,7 +164,7 @@ func TestAADFallback_LegacyObjectWithoutFlagFails(t *testing.T) {
 		t.Fatalf("ReadAll() error: %v", err)
 	}
 
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -198,9 +204,8 @@ func TestAADFallback_LegacyObjectWithoutFlagFails(t *testing.T) {
 	// Ensure the legacy flag is NOT set.
 	delete(encMeta, MetaLegacyNoAAD)
 
-	_, _, err = eng.Decrypt(context.Background(), bytes.NewReader(noAADCiphertext), encMeta)
+	_, _, err = eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(noAADCiphertext), encMeta)
 	if err == nil {
 		t.Fatalf("Decrypt() expected error for legacy object without flag, got nil")
 	}
 }
-

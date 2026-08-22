@@ -75,7 +75,6 @@ func TestPBKDF2StringPassword(t *testing.T) {
 	}
 }
 
-
 // TestPBKDF2KAT_600k verifies PBKDF2-HMAC-SHA256 with 600000 iterations.
 func TestPBKDF2KAT_600k(t *testing.T) {
 	const (

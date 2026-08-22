@@ -24,7 +24,7 @@ func TestMPU_SEC38_GoldenCompletedObjectCompatibility(t *testing.T) {
 		prefix[i] = byte(0xa0 + i)
 	}
 	plain := []byte("golden completed MPU")
-	r, encLen, err := NewMPUPartEncryptReader(context.Background(), bytes.NewReader(plain), dek, uid, prefix, 1, DefaultChunkSize, int64(len(plain)), AlgorithmAES256GCM)
+	r, encLen, err := newMPUPartEncryptReaderV1(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, [16]byte{}, bytes.NewReader(plain), dek, uid, prefix, 1, DefaultChunkSize, int64(len(plain)), AlgorithmAES256GCM)
 	require.NoError(t, err)
 	ciphertext, err := io.ReadAll(r)
 	require.NoError(t, err)

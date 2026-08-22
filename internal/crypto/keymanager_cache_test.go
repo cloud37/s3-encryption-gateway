@@ -16,10 +16,10 @@ import (
 // mockCacheKM implements KeyManager with controllable call counting for cache tests.
 type mockCacheKM struct {
 	KeyManager
-	provider       string
+	provider        string
 	unwrapCallCount atomic.Int32
-	unwrapResult   []byte
-	unwrapErr      error
+	unwrapResult    []byte
+	unwrapErr       error
 }
 
 func (m *mockCacheKM) Provider() string { return m.provider }

@@ -93,7 +93,7 @@ func TestDecrypt_BackwardCompatibility_LegacyAAD(t *testing.T) {
 	}
 
 	data := []byte("backward compatibility payload")
-	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestDecrypt_BackwardCompatibility_LegacyAAD(t *testing.T) {
 	}
 
 	// Decrypt through the normal path (should use new AAD format)
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -154,9 +154,11 @@ func TestDecrypt_BackwardCompatibility_LegacyAAD(t *testing.T) {
 	}
 	legacyAAD := buildAADLegacy(algorithm, salt, iv, legacyAADMeta)
 	legacyCiphertext := gcm.Seal(nil, iv, data, legacyAAD)
+	delete(encMeta, MetaObjectFormatVersion)
+	delete(encMeta, MetaObjectBindingID)
 
 	// Attempt decryption — engine should fall back to legacy AAD format
-	decReader2, _, err := eng.Decrypt(context.Background(), bytes.NewReader(legacyCiphertext), encMeta)
+	decReader2, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(legacyCiphertext), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error for legacy-AAD object: %v", err)
 	}

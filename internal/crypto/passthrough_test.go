@@ -18,7 +18,7 @@ func TestPassthroughEngine_Encrypt_IsIdentity(t *testing.T) {
 	input := "hello world"
 	meta := map[string]string{"foo": "bar"}
 
-	reader, outMeta, err := eng.Encrypt(ctx, strings.NewReader(input), meta)
+	reader, outMeta, err := eng.Encrypt(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader(input), meta)
 	if err != nil {
 		t.Fatalf("Encrypt returned error: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestPassthroughEngine_Decrypt_PlaintextObject(t *testing.T) {
 	input := "plaintext data"
 	meta := map[string]string{"foo": "bar"}
 
-	reader, outMeta, err := eng.Decrypt(ctx, strings.NewReader(input), meta)
+	reader, outMeta, err := eng.Decrypt(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader(input), meta)
 	if err != nil {
 		t.Fatalf("Decrypt returned error: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestPassthroughEngine_Decrypt_EncryptedObject_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 	meta := map[string]string{MetaEncrypted: "true"}
 
-	_, _, err := eng.Decrypt(ctx, strings.NewReader("data"), meta)
+	_, _, err := eng.Decrypt(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader("data"), meta)
 	if !errors.Is(err, ErrEncryptedObjectInBypassBucket) {
 		t.Fatalf("Decrypt on encrypted metadata: got %v, want %v", err, ErrEncryptedObjectInBypassBucket)
 	}
@@ -69,7 +69,7 @@ func TestPassthroughEngine_Decrypt_CompactedKey_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 	meta := map[string]string{"x-amz-meta-e": "true"}
 
-	_, _, err := eng.Decrypt(ctx, strings.NewReader("data"), meta)
+	_, _, err := eng.Decrypt(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader("data"), meta)
 	if !errors.Is(err, ErrEncryptedObjectInBypassBucket) {
 		t.Fatalf("Decrypt on compacted encrypted key: got %v, want %v", err, ErrEncryptedObjectInBypassBucket)
 	}
@@ -81,7 +81,7 @@ func TestPassthroughEngine_DecryptRange_PlaintextObject(t *testing.T) {
 	input := "plaintext data"
 	meta := map[string]string{"foo": "bar"}
 
-	reader, outMeta, err := eng.DecryptRange(ctx, strings.NewReader(input), meta, 0, 5)
+	reader, outMeta, err := eng.DecryptRange(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader(input), meta, 0, 5)
 	if err != nil {
 		t.Fatalf("DecryptRange returned error: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestPassthroughEngine_DecryptRange_EncryptedObject_ReturnsError(t *testing.
 	ctx := context.Background()
 	meta := map[string]string{MetaEncrypted: "true"}
 
-	_, _, err := eng.DecryptRange(ctx, strings.NewReader("data"), meta, 0, 3)
+	_, _, err := eng.DecryptRange(ctx, ObjectContext{Bucket: "test-bucket", Key: "test-key"}, strings.NewReader("data"), meta, 0, 3)
 	if !errors.Is(err, ErrEncryptedObjectInBypassBucket) {
 		t.Fatalf("DecryptRange on encrypted metadata: got %v, want %v", err, ErrEncryptedObjectInBypassBucket)
 	}

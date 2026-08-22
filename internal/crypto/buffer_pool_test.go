@@ -331,10 +331,10 @@ func TestDecodeBase64Loose_Variants(t *testing.T) {
 		input   string
 		wantErr bool
 	}{
-		{"standard padded", "aGVsbG8=", false},     // "hello"
-		{"standard 4-padded", "aGVsbG8=", false},   // "hello"
-		{"empty", "", false},                        // empty string → empty bytes
-		{"invalid", "!@#$", true},                  // invalid chars
+		{"standard padded", "aGVsbG8=", false},   // "hello"
+		{"standard 4-padded", "aGVsbG8=", false}, // "hello"
+		{"empty", "", false},                     // empty string → empty bytes
+		{"invalid", "!@#$", true},                // invalid chars
 	}
 
 	for _, tc := range tests {

@@ -111,7 +111,7 @@ func BenchmarkEncryptWithMemoryKM(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, err := eng.Encrypt(context.Background(), bytes.NewReader(data), nil)
+		_, _, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), nil)
 		if err != nil {
 			b.Fatal(err)
 		}

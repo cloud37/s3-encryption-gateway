@@ -18,7 +18,7 @@ func TestMPUPartClaim_FIPS_HMACSHA256(t *testing.T) {
 	require.NotEqual(t, [32]byte{}, claim)
 	engine, err := crypto.NewEngine(bytes.Repeat([]byte{9}, 32))
 	require.NoError(t, err)
-	r, _, err := engine.Encrypt(context.Background(), bytes.NewReader([]byte("fips mpu")), nil)
+	r, _, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "fips-mpu"}, bytes.NewReader([]byte("fips mpu")), nil)
 	require.NoError(t, err)
 	_, err = io.ReadAll(r)
 	require.NoError(t, err)

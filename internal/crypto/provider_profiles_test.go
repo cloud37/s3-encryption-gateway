@@ -68,7 +68,7 @@ func TestProviderProfile_ValidateMetadataSize(t *testing.T) {
 		{
 			name: "exceeds total header limit",
 			metadata: map[string]string{
-				"content-type": "application/json",
+				"content-type":    "application/json",
 				"x-amz-meta-key1": "value1",
 				"x-amz-meta-key2": "value2",
 				"x-amz-meta-key3": "value3",

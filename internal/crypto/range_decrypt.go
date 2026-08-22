@@ -32,6 +32,24 @@ type rangeDecryptReader struct {
 	err                error
 	isOptimized        bool // Whether source contains only needed chunks
 	plaintextSize      int64
+	object             ObjectContext
+	bindingID          []byte
+	boundV2            bool
+}
+
+func newRangeDecryptReaderBound(source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, baseIV []byte, start, end int64, pool *BufferPool, optimized bool, plaintextSize int64, object ObjectContext, bindingID []byte) (*rangeDecryptReader, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	if len(bindingID) != 16 {
+		return nil, fmt.Errorf("binding ID must be exactly 16 bytes")
+	}
+	r, err := newRangeDecryptReader(source, aead, manifest, baseIV, start, end, pool, optimized, plaintextSize)
+	if err != nil {
+		return nil, err
+	}
+	r.object, r.bindingID, r.boundV2 = object, append([]byte(nil), bindingID...), true
+	return r, nil
 }
 
 // newRangeDecryptReader creates a decryption reader that only decrypts chunks needed for a range.
@@ -196,10 +214,10 @@ func (r *rangeDecryptReader) Read(p []byte) (int, error) {
 
 		// For last chunk in the source, it might be smaller
 		expectedSize := encryptedChunkSize
-		if r.isOptimized && r.manifest.Version == int(ChunkedFormatV2) && r.currentChunkIndex == r.manifest.ChunkCount-1 {
+		if r.manifest.Version == int(ChunkedFormatV2) && r.currentChunkIndex == r.manifest.ChunkCount-1 && (r.boundV2 || r.plaintextSize >= 0) {
 			// The backend range contains the complete final data record, not only
 			// the requested plaintext suffix. Its length comes from object size.
-			if r.plaintextSize < 0 {
+			if r.plaintextSize < 0 && r.boundV2 {
 				r.err = fmt.Errorf("exact plaintext size required for optimized v2 final chunk")
 				return totalRead, r.err
 			}
@@ -236,7 +254,15 @@ func (r *rangeDecryptReader) Read(p []byte) (int, error) {
 		}
 		var aad []byte
 		if r.manifest.Version == int(ChunkedFormatV2) {
-			aad = buildChunkAAD(ChunkedFormatV2, r.currentChunkIndex)
+			if r.boundV2 {
+				aad, err = buildObjectAAD(aadChunkedV2Data, r.object, r.bindingID, r.currentChunkIndex)
+			} else {
+				aad = buildChunkAAD(ChunkedFormatV2, r.currentChunkIndex)
+			}
+			if err != nil {
+				r.err = err
+				return totalRead, err
+			}
 		}
 		plaintext, err := r.aead.Open(nil, chunkIV, r.buffer[:n], aad)
 		if err != nil {

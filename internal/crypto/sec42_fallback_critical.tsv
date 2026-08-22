@@ -1,0 +1,8 @@
+# file start end rationale
+engine.go 2231 2328 buffered fallback-v3 writer: validation, seal, envelope headers, compaction, overflow fail-closed, return
+engine.go 2337 2364 fallback dispatch: v3 terminal branch, v2 compatibility branch, unsupported version, legacy-v1 dispatch
+engine.go 2366 2469 fallback-v3 opener: binding/parameters, KMS and password key-source branches, AEAD open, body parsing, restoration
+engine.go 2514 2617 legacy fallback-v1 compatibility decrypt and metadata restoration relied on by SEC-42
+metadata_compaction.go 156 170 fallback-v3 compact aliases for mode/version/format/binding and KMS envelope metadata
+metadata_compaction.go 246 260 fallback-v3 compact alias expansion for mode/version/format/binding and KMS envelope metadata
+metadata_compaction.go 285 285 compact alias classification for fallback-v3 fields

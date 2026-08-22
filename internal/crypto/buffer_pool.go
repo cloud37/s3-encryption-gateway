@@ -55,7 +55,7 @@ func (p *BufferPool) Get(size int) []byte {
 	if size == 4 {
 		return p.Get4()
 	}
-	
+
 	// For chunk buffers, we support anything up to the pool size
 	// This covers default chunks (64KB) plus encryption overhead
 	if size <= 64*1024+128 && size > 32 {

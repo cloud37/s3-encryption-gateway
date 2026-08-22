@@ -27,7 +27,7 @@ func makeSEC37V2Object(t *testing.T, plaintext []byte) ([]byte, *ChunkManifest, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, manifest, err := newChunkedEncryptReaderV2(context.Background(), bytes.NewReader(plaintext), dataAEAD, baseIV, MinChunkSize, nil, ChunkedFormatV2, terminalAEAD)
+	reader, manifest, err := newLegacyChunkedEncryptReaderV2(context.Background(), bytes.NewReader(plaintext), dataAEAD, baseIV, MinChunkSize, nil, ChunkedFormatV2, terminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestSEC37PhaseB_V2CompletenessFailures(t *testing.T) {
 	}
 	for _, tc := range baseCases {
 		t.Run(tc.name, func(t *testing.T) {
-			reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(tc.mutate(append([]byte(nil), ciphertext...))), dataAEAD, manifest, nil, terminalAEAD)
+			reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(tc.mutate(append([]byte(nil), ciphertext...))), dataAEAD, manifest, nil, terminalAEAD)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,7 @@ func TestSEC37PhaseB_V2CompletenessFailures(t *testing.T) {
 			replacement := terminalAEAD.Seal(nil, nonce, terminal[:], buildTerminalAAD(ChunkedFormatV2))
 			mutated := append([]byte(nil), ciphertext[:len(ciphertext)-ChunkedTerminalSize]...)
 			mutated = append(mutated, replacement...)
-			reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(mutated), dataAEAD, manifest, nil, terminalAEAD)
+			reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(mutated), dataAEAD, manifest, nil, terminalAEAD)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -92,7 +92,7 @@ func TestSEC37PhaseB_V2CompletenessFailures(t *testing.T) {
 	}
 
 	emptyCiphertext, emptyManifest, emptyDataAEAD, emptyTerminalAEAD := makeSEC37V2Object(t, nil)
-	reader, err := newChunkedDecryptReaderV2(context.Background(), bytes.NewReader(emptyCiphertext), emptyDataAEAD, emptyManifest, nil, emptyTerminalAEAD)
+	reader, err := newLegacyChunkedDecryptReaderV2(context.Background(), bytes.NewReader(emptyCiphertext), emptyDataAEAD, emptyManifest, nil, emptyTerminalAEAD)
 	if err != nil {
 		t.Fatal(err)
 	}

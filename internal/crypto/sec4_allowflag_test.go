@@ -57,7 +57,7 @@ func testNoAADWithoutFlagFails(t *testing.T, eng EncryptionEngine) {
 	data := []byte("legacy payload without flag for closed test")
 
 	// Encrypt normally (with AAD).
-	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -69,7 +69,7 @@ func testNoAADWithoutFlagFails(t *testing.T, eng EncryptionEngine) {
 	}
 
 	// Decrypt to recover plaintext and extract crypto params.
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -109,8 +109,10 @@ func testNoAADWithoutFlagFails(t *testing.T, eng EncryptionEngine) {
 
 	// Ensure the legacy flag is NOT set.
 	delete(encMeta, MetaLegacyNoAAD)
+	delete(encMeta, MetaObjectFormatVersion)
+	delete(encMeta, MetaObjectBindingID)
 
-	_, _, err = eng.Decrypt(context.Background(), bytes.NewReader(noAADCiphertext), encMeta)
+	_, _, err = eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(noAADCiphertext), encMeta)
 	if err == nil {
 		t.Fatalf("Decrypt() expected error for unmarked no-AAD object with flag off, got nil")
 	}
@@ -122,7 +124,7 @@ func testNoAADWithoutFlagSucceeds(t *testing.T, eng EncryptionEngine) {
 	t.Helper()
 	data := []byte("legacy payload without flag for recovery test")
 
-	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), bytes.NewReader(data), map[string]string{
+	encryptedReader, encMeta, err := eng.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	if err != nil {
@@ -133,7 +135,7 @@ func testNoAADWithoutFlagSucceeds(t *testing.T, eng EncryptionEngine) {
 		t.Fatalf("ReadAll() error: %v", err)
 	}
 
-	decReader, _, err := eng.Decrypt(context.Background(), bytes.NewReader(encryptedData), encMeta)
+	decReader, _, err := eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() error: %v", err)
 	}
@@ -172,8 +174,10 @@ func testNoAADWithoutFlagSucceeds(t *testing.T, eng EncryptionEngine) {
 
 	// Ensure the legacy flag is NOT set.
 	delete(encMeta, MetaLegacyNoAAD)
+	delete(encMeta, MetaObjectFormatVersion)
+	delete(encMeta, MetaObjectBindingID)
 
-	decReader, _, err = eng.Decrypt(context.Background(), bytes.NewReader(noAADCiphertext), encMeta)
+	decReader, _, err = eng.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(noAADCiphertext), encMeta)
 	if err != nil {
 		t.Fatalf("Decrypt() expected success for unmarked no-AAD object with flag on, got: %v", err)
 	}

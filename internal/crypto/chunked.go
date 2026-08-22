@@ -79,6 +79,9 @@ type chunkedEncryptReader struct {
 	pending      []byte
 	done         bool
 	err          error
+	object       ObjectContext
+	bindingID    []byte
+	boundV2      bool
 }
 
 // newChunkedEncryptReader creates a legacy-compatible v1 reader.
@@ -90,7 +93,7 @@ func newChunkedEncryptReaderV1(ctx context.Context, source io.Reader, aead ciphe
 	return newChunkedEncryptReaderForVersion(ctx, source, aead, baseIV, chunkSize, bufferPool, ChunkedFormatV1, nil)
 }
 
-func newChunkedEncryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, version uint8, terminalAEAD cipher.AEAD) (*chunkedEncryptReader, *ChunkManifest, error) {
+func newLegacyChunkedEncryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, version uint8, terminalAEAD cipher.AEAD) (*chunkedEncryptReader, *ChunkManifest, error) {
 	if version != ChunkedFormatV2 {
 		return nil, nil, fmt.Errorf("unsupported v2 chunked writer version: %d", version)
 	}
@@ -101,14 +104,26 @@ func newChunkedEncryptReaderV2(ctx context.Context, source io.Reader, aead ciphe
 	return reader, manifest, nil
 }
 
+func newChunkedEncryptReaderV2Bound(ctx context.Context, source io.Reader, aead cipher.AEAD, baseIV []byte, chunkSize int, bufferPool *BufferPool, terminalAEAD cipher.AEAD, object ObjectContext, bindingID []byte) (*chunkedEncryptReader, *ChunkManifest, error) {
+	if err := object.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if len(bindingID) != 16 {
+		return nil, nil, fmt.Errorf("binding ID must be exactly 16 bytes")
+	}
+	r, m, err := newLegacyChunkedEncryptReaderV2(ctx, source, aead, baseIV, chunkSize, bufferPool, ChunkedFormatV2, terminalAEAD)
+	if err != nil {
+		return nil, nil, err
+	}
+	r.object, r.bindingID, r.boundV2 = object, append([]byte(nil), bindingID...), true
+	return r, m, nil
+}
+
 // newChunkedEncryptReaderWithContext is the plan-specified versioned entry
 // point. The typed constructors remain the implementation-specific helpers.
 func newChunkedEncryptReaderWithContext(ctx context.Context, source io.Reader, aead cipher.AEAD, terminalAEAD cipher.AEAD, baseIV []byte, chunkSize int, version uint8, bufferPool *BufferPool) (*chunkedEncryptReader, *ChunkManifest, error) {
 	if version == ChunkedFormatV2 {
-		if aead == nil {
-			return nil, nil, fmt.Errorf("v2 chunked writer requires data AEAD")
-		}
-		return newChunkedEncryptReaderV2(ctx, source, aead, baseIV, chunkSize, bufferPool, version, terminalAEAD)
+		return nil, nil, fmt.Errorf("current chunked-v2 writer requires object binding")
 	}
 	if version != ChunkedFormatV1 {
 		return nil, nil, fmt.Errorf("unsupported chunked format version: %d", version)
@@ -194,7 +209,11 @@ func (r *chunkedEncryptReader) Read(p []byte) (int, error) {
 			var aad []byte
 			if r.version == ChunkedFormatV2 {
 				nonce, r.err = deriveChunkNonceHKDF(r.baseIV, r.version, r.index)
-				aad = buildChunkAAD(r.version, r.index)
+				if r.boundV2 {
+					aad, r.err = buildObjectAAD(aadChunkedV2Data, r.object, r.bindingID, r.index)
+				} else {
+					aad = buildChunkAAD(r.version, r.index)
+				}
 			} else {
 				nonce, r.err = deriveChunkIVHKDFIndex(r.baseIV, r.index)
 				aad = nil
@@ -230,7 +249,15 @@ func (r *chunkedEncryptReader) Read(p []byte) (int, error) {
 			nonce, r.err = deriveTerminalNonceHKDF(r.baseIV, r.version)
 			if r.err == nil {
 				terminal := encodeChunkedTerminal(r.index, r.plainSize)
-				r.pending = r.terminalAEAD.Seal(nil, nonce, terminal[:], buildTerminalAAD(r.version))
+				var aad []byte
+				if r.boundV2 {
+					aad, r.err = buildObjectAAD(aadChunkedV2Trailer, r.object, r.bindingID, r.index, r.plainSize)
+				} else {
+					aad = buildTerminalAAD(r.version)
+				}
+				if r.err == nil {
+					r.pending = r.terminalAEAD.Seal(nil, nonce, terminal[:], aad)
+				}
 			}
 			if r.err != nil {
 				return written, r.err
@@ -265,6 +292,9 @@ type chunkedDecryptReader struct {
 	lookbehind   []byte
 	done         bool
 	err          error
+	object       ObjectContext
+	bindingID    []byte
+	boundV2      bool
 }
 
 func newChunkedDecryptReader(source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
@@ -275,7 +305,7 @@ func newChunkedDecryptReaderV1(ctx context.Context, source io.Reader, aead ciphe
 	return newChunkedDecryptReaderForVersion(ctx, source, aead, manifest, bufferPool, nil)
 }
 
-func newChunkedDecryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminalAEAD cipher.AEAD) (*chunkedDecryptReader, error) {
+func newLegacyChunkedDecryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminalAEAD cipher.AEAD) (*chunkedDecryptReader, error) {
 	if manifest == nil || uint8(manifest.Version) != ChunkedFormatV2 {
 		return nil, fmt.Errorf("v2 chunked reader requires version 2 manifest")
 	}
@@ -285,11 +315,26 @@ func newChunkedDecryptReaderV2(ctx context.Context, source io.Reader, aead ciphe
 	return newChunkedDecryptReaderForVersion(ctx, source, aead, manifest, bufferPool, terminalAEAD)
 }
 
+func newChunkedDecryptReaderV2Bound(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminalAEAD cipher.AEAD, object ObjectContext, bindingID []byte) (*chunkedDecryptReader, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	if len(bindingID) != 16 {
+		return nil, fmt.Errorf("binding ID must be exactly 16 bytes")
+	}
+	r, err := newLegacyChunkedDecryptReaderV2(ctx, source, aead, manifest, bufferPool, terminalAEAD)
+	if err != nil {
+		return nil, err
+	}
+	r.object, r.bindingID, r.boundV2 = object, append([]byte(nil), bindingID...), true
+	return r, nil
+}
+
 // newChunkedDecryptReaderWithContext is the plan-specified versioned entry
 // point for callers that already selected the terminal AEAD when needed.
 func newChunkedDecryptReaderWithContext(ctx context.Context, source io.Reader, dataAEAD cipher.AEAD, terminalAEAD cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool) (*chunkedDecryptReader, error) {
 	if manifest != nil && manifest.Version == int(ChunkedFormatV2) {
-		return newChunkedDecryptReaderV2(ctx, source, dataAEAD, manifest, bufferPool, terminalAEAD)
+		return nil, fmt.Errorf("current chunked-v2 reader requires object binding")
 	}
 	return newChunkedDecryptReaderV1(ctx, source, dataAEAD, manifest, bufferPool)
 }
@@ -402,7 +447,16 @@ func (r *chunkedDecryptReader) verifyTerminal(terminal []byte) error {
 	if err != nil {
 		return err
 	}
-	plain, err := r.terminalAEAD.Open(nil, nonce, terminal, buildTerminalAAD(r.version))
+	var aad []byte
+	if r.boundV2 {
+		aad, err = buildObjectAAD(aadChunkedV2Trailer, r.object, r.bindingID, r.index, r.plainSize)
+	} else {
+		aad = buildTerminalAAD(r.version)
+	}
+	if err != nil {
+		return err
+	}
+	plain, err := r.terminalAEAD.Open(nil, nonce, terminal, aad)
 	if err != nil {
 		return fmt.Errorf("%w: terminal authentication failed: %v", ErrChunkedObjectIncomplete, err)
 	}
@@ -422,7 +476,11 @@ func (r *chunkedDecryptReader) decryptData(ciphertext []byte) error {
 	var err error
 	if r.version == ChunkedFormatV2 {
 		nonce, err = deriveChunkNonceHKDF(r.baseIV, r.version, r.index)
-		aad = buildChunkAAD(r.version, r.index)
+		if r.boundV2 {
+			aad, err = buildObjectAAD(aadChunkedV2Data, r.object, r.bindingID, r.index)
+		} else {
+			aad = buildChunkAAD(r.version, r.index)
+		}
 	} else {
 		if r.manifest.IVDerivation == "hkdf-sha256" {
 			nonce, err = deriveChunkIVHKDFIndex(r.baseIV, r.index)

@@ -62,15 +62,15 @@ var (
 		CompactionStrategy:  "base64url",
 	}
 
-// Default profile for unknown providers - no compaction by default for backward compatibility
-ProviderDefault = &ProviderProfile{
-	Name:                "default",
-	UserMetadataLimit:   2048, // Conservative default
-	SystemMetadataLimit: 0,
-	TotalHeaderLimit:    8192,
-	SupportsLongKeys:    true,
-	CompactionStrategy:  "none",
-}
+	// Default profile for unknown providers - no compaction by default for backward compatibility
+	ProviderDefault = &ProviderProfile{
+		Name:                "default",
+		UserMetadataLimit:   2048, // Conservative default
+		SystemMetadataLimit: 0,
+		TotalHeaderLimit:    8192,
+		SupportsLongKeys:    true,
+		CompactionStrategy:  "none",
+	}
 )
 
 // GetProviderProfile returns the profile for the given provider name

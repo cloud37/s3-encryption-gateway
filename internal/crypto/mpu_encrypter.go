@@ -22,16 +22,19 @@ const mpuAEADTagSize = 16 // AES-GCM and ChaCha20-Poly1305 authentication tag si
 // is byte-identical across retries for the same source — the SDK retry
 // contract is preserved.
 type mpuEncryptReader struct {
-	src      io.Reader
-	gcm      cipher.AEAD
-	dek      []byte
-	hash     [32]byte
-	prefix   [12]byte
-	part     uint32
-	csz      int // chunk size (plaintext)
+	src     io.Reader
+	gcm     cipher.AEAD
+	dek     []byte
+	hash    [32]byte
+	prefix  [12]byte
+	part    uint32
+	csz     int // chunk size (plaintext)
+	object  ObjectContext
+	binding [16]byte
+	bound   bool
 
 	// per-chunk state
-	plainBuf []byte // pooled, cap=csz
+	plainBuf  []byte // pooled, cap=csz
 	cipherBuf []byte // current chunk ciphertext output
 	cipherOff int    // read position within cipherBuf
 	chunkIdx  uint32
@@ -60,6 +63,8 @@ var plainChunkPool = sync.Pool{New: func() any { return make([]byte, DefaultChun
 // O(chunkSize + chunkSize+tagSize) regardless of part size.
 func NewMPUPartEncryptReader(
 	ctx context.Context,
+	object ObjectContext,
+	bindingID [16]byte,
 	body io.Reader,
 	dek []byte,
 	uploadIDHash [32]byte,
@@ -69,6 +74,19 @@ func NewMPUPartEncryptReader(
 	plainLen int64,
 	algorithm string,
 ) (io.Reader, int64, error) {
+	if err := object.Validate(); err != nil {
+		return nil, 0, err
+	}
+	if bindingID == [16]byte{} {
+		return nil, 0, fmt.Errorf("mpu: v2 binding ID is required")
+	}
+	return newMPUPartEncryptReader(ctx, object, bindingID, body, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, plainLen, algorithm, true)
+}
+
+func newMPUPartEncryptReader(ctx context.Context, object ObjectContext, bindingID [16]byte, body io.Reader, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, partNumber int32, chunkSize int, plainLen int64, algorithm string, bound bool) (io.Reader, int64, error) {
+	if err := object.Validate(); err != nil {
+		return nil, 0, err
+	}
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -120,6 +138,7 @@ func NewMPUPartEncryptReader(
 		prefix: ivPrefix,
 		part:   uint32(partNumber), // #nosec G115 — S3 part number ≤ 10000, fits uint32
 		csz:    chunkSize,
+		object: object, binding: bindingID, bound: bound,
 
 		plainBuf: plainBuf,
 		srcDone:  plainLen == 0,
@@ -181,7 +200,15 @@ func (r *mpuEncryptReader) Read(p []byte) (int, error) {
 		}
 
 		iv := DeriveMultipartIV(r.dek, r.hash, r.prefix, r.part, r.chunkIdx)
-		r.cipherBuf = r.gcm.Seal(r.cipherBuf[:0], iv[:], r.plainBuf[:n], nil)
+		var aad []byte
+		if r.bound {
+			aad, r.err = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(r.part), uint64(r.chunkIdx))
+			if r.err != nil {
+				r.returnPlainBuf()
+				return total, r.err
+			}
+		}
+		r.cipherBuf = r.gcm.Seal(r.cipherBuf[:0], iv[:], r.plainBuf[:n], aad)
 		r.cipherOff = 0
 		r.chunkIdx++
 	}
@@ -206,8 +233,10 @@ func (r *mpuEncryptReader) returnPlainBuf() {
 
 // newMPUPartEncryptReader is the unexported alias used from within the api package via the exported function.
 // Both names delegate to the same implementation.
-func newMPUPartEncryptReader(
+func newMPUPartEncryptReaderV1(
 	ctx context.Context,
+	object ObjectContext,
+	bindingID [16]byte,
 	body io.Reader,
 	dek []byte,
 	uploadIDHash [32]byte,
@@ -217,7 +246,13 @@ func newMPUPartEncryptReader(
 	plainLen int64,
 	algorithm string,
 ) (io.Reader, int64, error) {
-	return NewMPUPartEncryptReader(ctx, body, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, plainLen, algorithm)
+	return newMPUPartEncryptReader(ctx, object, bindingID, body, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, plainLen, algorithm, false)
+}
+
+// NewMPUPartEncryptReaderV1 is the explicit compatibility helper for legacy
+// MPU objects. New v2 callers must use NewMPUPartEncryptReader with a binding.
+func NewMPUPartEncryptReaderV1(ctx context.Context, object ObjectContext, src io.Reader, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, partNumber int32, chunkSize int, plainLen int64, algorithm string) (io.Reader, int64, error) {
+	return newMPUPartEncryptReaderV1(ctx, object, [16]byte{}, src, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, plainLen, algorithm)
 }
 
 // mpuDecryptReader is a streaming io.Reader that decrypts an MPU-encrypted
@@ -235,6 +270,9 @@ type mpuDecryptReader struct {
 	uploadIDHash [32]byte
 	ivPrefix     [12]byte
 	gcm          cipher.AEAD
+	object       ObjectContext
+	binding      [16]byte
+	bound        bool
 
 	// read state
 	partIdx  int
@@ -263,6 +301,8 @@ var encBufPool = sync.Pool{New: func() any { return make([]byte, DefaultChunkSiz
 // The caller retains ownership of src and must close it after the reader
 // is fully consumed.
 func NewMPUDecryptReader(
+	object ObjectContext,
+	bindingID [16]byte,
 	src io.Reader,
 	manifest *MultipartManifest,
 	dek []byte,
@@ -270,6 +310,34 @@ func NewMPUDecryptReader(
 	ivPrefix [12]byte,
 	algorithm string,
 ) (io.Reader, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	if manifest == nil {
+		return nil, fmt.Errorf("mpu: nil manifest")
+	}
+	if manifest.Version == 1 {
+		return newMPUDecryptReaderV1(object, bindingID, src, manifest, dek, uploadIDHash, ivPrefix, algorithm)
+	}
+	if manifest.Version != 2 || bindingID == [16]byte{} {
+		return nil, fmt.Errorf("mpu: v2 binding ID is required")
+	}
+	return newMPUDecryptReader(object, bindingID, src, manifest, dek, uploadIDHash, ivPrefix, algorithm, true)
+}
+
+// NewMPUDecryptReaderV1 is the explicit compatibility reader for legacy MPU
+// objects. New v2 callers must use NewMPUDecryptReader with a binding.
+func NewMPUDecryptReaderV1(object ObjectContext, src io.Reader, manifest *MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, algorithm string) (io.Reader, error) {
+	return newMPUDecryptReaderV1(object, [16]byte{}, src, manifest, dek, uploadIDHash, ivPrefix, algorithm)
+}
+
+func newMPUDecryptReader(object ObjectContext, bindingID [16]byte, src io.Reader, manifest *MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, algorithm string, bound bool) (io.Reader, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	if manifest == nil {
+		return nil, fmt.Errorf("mpu: nil manifest")
+	}
 	if len(manifest.Parts) == 0 {
 		return bytes.NewReader(nil), nil
 	}
@@ -290,7 +358,12 @@ func NewMPUDecryptReader(
 		ivPrefix:     ivPrefix,
 		gcm:          aead,
 		encBuf:       encBufPool.Get().([]byte),
+		object:       object, binding: bindingID, bound: bound,
 	}, nil
+}
+
+func newMPUDecryptReaderV1(object ObjectContext, bindingID [16]byte, src io.Reader, manifest *MultipartManifest, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, algorithm string) (io.Reader, error) {
+	return newMPUDecryptReader(object, bindingID, src, manifest, dek, uploadIDHash, ivPrefix, algorithm, false)
 }
 
 // Read implements io.Reader. It decrypts one AEAD chunk per call to the
@@ -354,7 +427,15 @@ func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
 	}
 
 	iv := DeriveMultipartIV(r.dek, r.uploadIDHash, r.ivPrefix, uint32(part.PartNumber), uint32(r.chunkIdx)) // #nosec G115 — partNumber ≤ 10000, chunkIdx bounded by part size
-	plain, err := r.gcm.Open(nil, iv[:], encChunk, nil)
+	var aad []byte
+	if r.bound {
+		var aadErr error
+		aad, aadErr = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(part.PartNumber), uint64(r.chunkIdx))
+		if aadErr != nil {
+			return aadErr
+		}
+	}
+	plain, err := r.gcm.Open(nil, iv[:], encChunk, aad)
 	if err != nil {
 		return fmt.Errorf("mpu_decrypt: part %d chunk %d auth failure: %w", part.PartNumber, r.chunkIdx, err)
 	}
@@ -391,6 +472,8 @@ func (r *mpuDecryptReader) returnEncBuf() {
 // All bytes in ciphertext are consumed (one or more chunks); authentication failure on
 // any chunk returns an error with the chunk index, satisfying the tamper-detection requirement.
 func DecryptMPUPartRange(
+	object ObjectContext,
+	bindingID [16]byte,
 	ciphertext []byte,
 	dek []byte,
 	uploadIDHash [32]byte,
@@ -400,6 +483,19 @@ func DecryptMPUPartRange(
 	startChunkIdx int32,
 	algorithm string,
 ) ([]byte, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
+	if bindingID == [16]byte{} {
+		return nil, fmt.Errorf("mpu: v2 binding ID is required")
+	}
+	return decryptMPUPartRange(object, bindingID, ciphertext, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, startChunkIdx, algorithm, true)
+}
+
+func decryptMPUPartRange(object ObjectContext, bindingID [16]byte, ciphertext []byte, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, partNumber int32, chunkSize int, startChunkIdx int32, algorithm string, bound bool) ([]byte, error) {
+	if err := object.Validate(); err != nil {
+		return nil, err
+	}
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -423,7 +519,14 @@ func DecryptMPUPartRange(
 		}
 		encChunk := ciphertext[offset:end]
 		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex) // #nosec G115 — partNumber ≤ 10000, chunkIndex already uint32
-		plain, err := aead.Open(nil, iv[:], encChunk, nil)
+		var aad []byte
+		if bound {
+			aad, err = buildObjectAAD(aadMPUV2Chunk, object, bindingID[:], uint64(partNumber), uint64(chunkIndex))
+			if err != nil {
+				return nil, err
+			}
+		}
+		plain, err := aead.Open(nil, iv[:], encChunk, aad)
 		if err != nil {
 			return nil, fmt.Errorf("mpu_encrypter: chunk %d auth failure in part %d: %w", chunkIndex, partNumber, err)
 		}
@@ -432,6 +535,16 @@ func DecryptMPUPartRange(
 		chunkIndex++
 	}
 	return out, nil
+}
+
+func decryptMPUPartRangeV1(object ObjectContext, bindingID [16]byte, ciphertext []byte, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, partNumber int32, chunkSize int, startChunkIdx int32, algorithm string) ([]byte, error) {
+	return decryptMPUPartRange(object, bindingID, ciphertext, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, startChunkIdx, algorithm, false)
+}
+
+// DecryptMPUPartRangeV1 is the explicit compatibility helper for legacy MPU
+// objects. New v2 callers must use DecryptMPUPartRange with a binding.
+func DecryptMPUPartRangeV1(object ObjectContext, ciphertext []byte, dek []byte, uploadIDHash [32]byte, ivPrefix [12]byte, partNumber int32, chunkSize int, startChunkIdx int32, algorithm string) ([]byte, error) {
+	return decryptMPUPartRangeV1(object, [16]byte{}, ciphertext, dek, uploadIDHash, ivPrefix, partNumber, chunkSize, startChunkIdx, algorithm)
 }
 
 // DecryptMPUPart decrypts a single MPU part. It reconstructs per-chunk IVs

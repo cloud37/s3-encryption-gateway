@@ -6,11 +6,11 @@ package crypto
 // This is an integration test at the layer below the API handler — it exercises
 // the path:
 //
-//	engine.Encrypt(context.Background(), reader, meta)
+//	engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, meta)
 //	  → WrapKey (KMIP Encrypt operation)
 //	  → stores MetaWrappedKeyCiphertext in object metadata
 //
-//	engine.Decrypt(context.Background(), reader, meta)
+//	engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, reader, meta)
 //	  → UnwrapKey (KMIP Decrypt operation)
 //	  → decrypts ciphertext back to original plaintext
 //
@@ -63,7 +63,7 @@ func TestEncryptionEngineWithCosmianKMIP(t *testing.T) {
 	plaintext := []byte("cosmian-encryption-test")
 
 	// Encrypt: must stamp MetaEncrypted, MetaWrappedKeyCiphertext, MetaKMSProvider.
-	encReader, encMeta, err := engine.Encrypt(context.Background(), bytes.NewReader(plaintext), map[string]string{
+	encReader, encMeta, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plaintext), map[string]string{
 		"Content-Type": "text/plain",
 	})
 	require.NoError(t, err)
@@ -72,7 +72,7 @@ func TestEncryptionEngineWithCosmianKMIP(t *testing.T) {
 	require.Equal(t, "test-kmip", encMeta[MetaKMSProvider])
 
 	// Decrypt: must recover original plaintext and surface Content-Type.
-	decReader, decMeta, err := engine.Decrypt(context.Background(), encReader, encMeta)
+	decReader, decMeta, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, encReader, encMeta)
 	require.NoError(t, err)
 	require.Equal(t, "text/plain", decMeta["Content-Type"])
 
