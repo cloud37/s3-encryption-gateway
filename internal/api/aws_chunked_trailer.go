@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
@@ -196,14 +197,18 @@ func verifyTrailerChecksums(body *os.File, values map[string]string) error {
 	if v, ok := values["x-amz-checksum-crc32"]; ok {
 		want, e := base64.StdEncoding.DecodeString(v)
 		got := crc32h.Sum32()
-		if e != nil || len(want) != 4 || !hmac.Equal(want, []byte{byte(got >> 24), byte(got >> 16), byte(got >> 8), byte(got)}) {
+		var checksum [4]byte
+		binary.BigEndian.PutUint32(checksum[:], got)
+		if e != nil || len(want) != len(checksum) || !hmac.Equal(want, checksum[:]) {
 			return ErrSignatureMismatch
 		}
 	}
 	if v, ok := values["x-amz-checksum-crc32c"]; ok {
 		want, e := base64.StdEncoding.DecodeString(v)
 		got := crc32ch.Sum32()
-		if e != nil || len(want) != 4 || !hmac.Equal(want, []byte{byte(got >> 24), byte(got >> 16), byte(got >> 8), byte(got)}) {
+		var checksum [4]byte
+		binary.BigEndian.PutUint32(checksum[:], got)
+		if e != nil || len(want) != len(checksum) || !hmac.Equal(want, checksum[:]) {
 			return ErrSignatureMismatch
 		}
 	}

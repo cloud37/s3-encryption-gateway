@@ -429,8 +429,11 @@ func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
 	iv := DeriveMultipartIV(r.dek, r.uploadIDHash, r.ivPrefix, uint32(part.PartNumber), uint32(r.chunkIdx)) // #nosec G115 — partNumber ≤ 10000, chunkIdx bounded by part size
 	var aad []byte
 	if r.bound {
+		if part.PartNumber < 0 || r.chunkIdx < 0 {
+			return fmt.Errorf("mpu_decrypt: negative part or chunk index")
+		}
 		var aadErr error
-		aad, aadErr = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(part.PartNumber), uint64(r.chunkIdx))
+		aad, aadErr = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(part.PartNumber), uint64(r.chunkIdx)) // #nosec G115 -- negative values are rejected above
 		if aadErr != nil {
 			return aadErr
 		}
@@ -521,7 +524,10 @@ func decryptMPUPartRange(object ObjectContext, bindingID [16]byte, ciphertext []
 		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex) // #nosec G115 — partNumber ≤ 10000, chunkIndex already uint32
 		var aad []byte
 		if bound {
-			aad, err = buildObjectAAD(aadMPUV2Chunk, object, bindingID[:], uint64(partNumber), uint64(chunkIndex))
+			if partNumber < 0 {
+				return nil, fmt.Errorf("mpu_encrypter: negative part number")
+			}
+			aad, err = buildObjectAAD(aadMPUV2Chunk, object, bindingID[:], uint64(partNumber), uint64(chunkIndex)) // #nosec G115 -- partNumber is non-negative and chunkIndex is uint32
 			if err != nil {
 				return nil, err
 			}

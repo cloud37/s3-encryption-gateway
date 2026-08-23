@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1011,7 +1012,11 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	}
 	if claimStore != nil {
 		claim.ETag, claim.EncLen = etag, encLen
-		claim.ChunkCount = int32((int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize))
+		chunkCount := (int64(len(plaintextData)) + int64(crypto.DefaultChunkSize) - 1) / int64(crypto.DefaultChunkSize)
+		if chunkCount > math.MaxInt32 {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: chunk count overflow")
+		}
+		claim.ChunkCount = int32(chunkCount) // #nosec G115 -- chunkCount is bounded by MaxInt32 above
 		if err := claimStore.CommitPart(ctx, uploadID, claim); err != nil {
 			return nil, 0, fmt.Errorf("%w: %v", errMPUStateUnavailable, err)
 		}

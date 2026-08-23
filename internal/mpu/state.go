@@ -814,6 +814,9 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 			if !ok {
 				return Reservation{}, fmt.Errorf("mpu: malformed reserve revision")
 			}
+			if revision < 0 {
+				return Reservation{}, fmt.Errorf("mpu: invalid reserve revision")
+			}
 			return Reservation{Token: part.Token, Revision: uint64(revision)}, nil
 		case 7:
 			continue

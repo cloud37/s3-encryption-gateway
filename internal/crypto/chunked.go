@@ -145,6 +145,9 @@ func newChunkedEncryptReaderForVersion(ctx context.Context, source io.Reader, ae
 
 // deriveChunkIVHKDF preserves the v1 wire format for legacy reads.
 func deriveChunkIVHKDF(baseIV []byte, chunkIndex int) []byte {
+	if chunkIndex < 0 {
+		return nil
+	}
 	iv, _ := deriveChunkIVHKDFIndex(baseIV, uint64(chunkIndex))
 	return iv
 }
@@ -306,7 +309,7 @@ func newChunkedDecryptReaderV1(ctx context.Context, source io.Reader, aead ciphe
 }
 
 func newLegacyChunkedDecryptReaderV2(ctx context.Context, source io.Reader, aead cipher.AEAD, manifest *ChunkManifest, bufferPool *BufferPool, terminalAEAD cipher.AEAD) (*chunkedDecryptReader, error) {
-	if manifest == nil || uint8(manifest.Version) != ChunkedFormatV2 {
+	if manifest == nil || manifest.Version != int(ChunkedFormatV2) {
 		return nil, fmt.Errorf("v2 chunked reader requires version 2 manifest")
 	}
 	if terminalAEAD == nil {
@@ -343,17 +346,24 @@ func newChunkedDecryptReaderForVersion(ctx context.Context, source io.Reader, ae
 	if manifest == nil {
 		return nil, fmt.Errorf("missing chunk manifest")
 	}
-	if err := validateChunkedVersion(uint8(manifest.Version)); err != nil {
+	if manifest.Version != int(ChunkedFormatV1) && manifest.Version != int(ChunkedFormatV2) {
+		return nil, ErrUnsupportedChunkedVersion
+	}
+	version := ChunkedFormatV1
+	if manifest.Version == int(ChunkedFormatV2) {
+		version = ChunkedFormatV2
+	}
+	if err := validateChunkedVersion(version); err != nil {
 		return nil, err
 	}
 	baseIV, err := decodeBase64(manifest.BaseIV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base IV: %w", err)
 	}
-	if uint8(manifest.Version) == ChunkedFormatV2 && terminalAEAD == nil {
+	if manifest.Version == int(ChunkedFormatV2) && terminalAEAD == nil {
 		return nil, fmt.Errorf("v2 chunked reader requires terminal AEAD")
 	}
-	return &chunkedDecryptReader{source: source, aead: aead, terminalAEAD: terminalAEAD, manifest: manifest, baseIV: baseIV, chunkSize: manifest.ChunkSize, bufferPool: bufferPool, ctx: ctx, version: uint8(manifest.Version)}, nil
+	return &chunkedDecryptReader{source: source, aead: aead, terminalAEAD: terminalAEAD, manifest: manifest, baseIV: baseIV, chunkSize: manifest.ChunkSize, bufferPool: bufferPool, ctx: ctx, version: version}, nil
 }
 
 func (r *chunkedDecryptReader) Read(p []byte) (int, error) {

@@ -131,8 +131,11 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 		if size > maxAWSChunkBytes {
 			return total, previous, ErrStreamingLength
 		}
-		if decodedLength >= 0 && (size > uint64(decodedLength-total)) {
-			return total, previous, ErrStreamingLength
+		if decodedLength >= 0 {
+			remaining := decodedLength - total
+			if remaining < 0 || size > uint64(remaining) { // #nosec G115 -- remaining is checked non-negative
+				return total, previous, ErrStreamingLength
+			}
 		}
 		var dataHash hashWriter
 		if signing != nil {

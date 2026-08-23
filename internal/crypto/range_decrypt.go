@@ -97,10 +97,10 @@ func newRangeDecryptReader(
 	// partial stream.
 	if !isOptimizedSource && startChunk > 0 {
 		encryptedChunkSize := manifest.ChunkSize + tagSize
-		if startChunk > uint64(^uint64(0)/uint64(encryptedChunkSize)) || startChunk*uint64(encryptedChunkSize) > uint64(^uint64(0)>>1) {
+		if encryptedChunkSize <= 0 || startChunk > uint64(math.MaxInt64)/uint64(encryptedChunkSize) {
 			return nil, fmt.Errorf("chunk range overflow")
 		}
-		skipBytes := int64(startChunk * uint64(encryptedChunkSize))
+		skipBytes := int64(startChunk * uint64(encryptedChunkSize)) // #nosec G115 -- product was bounded by MaxInt64 above
 		skipped, err := io.CopyN(io.Discard, source, skipBytes)
 		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("failed to skip to start chunk: %w", err)
@@ -221,11 +221,11 @@ func (r *rangeDecryptReader) Read(p []byte) (int, error) {
 				r.err = fmt.Errorf("exact plaintext size required for optimized v2 final chunk")
 				return totalRead, r.err
 			}
-			if r.currentChunkIndex > uint64(math.MaxInt64)/uint64(r.chunkSize) {
+			if r.chunkSize <= 0 || r.currentChunkIndex > uint64(math.MaxInt64)/uint64(r.chunkSize) {
 				r.err = fmt.Errorf("final chunk offset overflow")
 				return totalRead, r.err
 			}
-			finalPlainSize := r.plaintextSize - int64(r.currentChunkIndex*uint64(r.chunkSize))
+			finalPlainSize := r.plaintextSize - int64(r.currentChunkIndex)*int64(r.chunkSize) // #nosec G115 -- index was bounded by MaxInt64/chunkSize above
 			if finalPlainSize > 0 && finalPlainSize < int64(r.chunkSize) {
 				expectedSize = int(finalPlainSize) + tagSize
 			}

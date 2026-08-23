@@ -5770,10 +5770,10 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 	if version == crypto.ChunkedFormatV1 {
 		if expandedMetadata["Content-Length"] == "" {
 			plain, sizeErr := crypto.GetPlaintextSizeFromMetadata(expandedMetadata)
-			if sizeErr != nil {
+			if sizeErr != nil || plain < 0 {
 				return crypto.ChunkedObjectInfo{Version: version}, nil
 			}
-			return crypto.ChunkedObjectInfo{Version: version, PlaintextSize: uint64(plain)}, nil
+			return crypto.ChunkedObjectInfo{Version: version, PlaintextSize: uint64(plain)}, nil // #nosec G115 -- negative sizes are rejected above
 		}
 		ciphertextSize, parseErr := strconv.ParseInt(expandedMetadata["Content-Length"], 10, 64)
 		if parseErr != nil || ciphertextSize < 0 {
@@ -5787,7 +5787,10 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 		if sizeErr != nil {
 			return crypto.ChunkedObjectInfo{}, sizeErr
 		}
-		return crypto.ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil
+		if plain < 0 {
+			return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: negative plaintext size", crypto.ErrChunkedObjectIncomplete)
+		}
+		return crypto.ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil // #nosec G115 -- negative sizes are rejected above
 	}
 	// The caller's HeadObject metadata is authoritative. Do not issue a second
 	// HEAD here: preflight must be exactly one 32-byte suffix GET and all reads

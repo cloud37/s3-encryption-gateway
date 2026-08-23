@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strconv"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/debug"
@@ -126,7 +127,7 @@ func buildObjectAAD(domain aadDomain, object ObjectContext, bindingID []byte, fi
 		if uint64(len(value)) > uint64(^uint32(0)) {
 			return fmt.Errorf("AAD component exceeds uint32")
 		}
-		_ = binary.Write(&out, binary.BigEndian, uint32(len(value)))
+		_ = binary.Write(&out, binary.BigEndian, uint32(len(value))) // #nosec G115 -- value length was checked above
 		_, _ = out.Write(value)
 		return nil
 	}
@@ -142,7 +143,7 @@ func buildObjectAAD(domain aadDomain, object ObjectContext, bindingID []byte, fi
 	if err := writeBytes(bindingID); err != nil {
 		return nil, err
 	}
-	_ = binary.Write(&out, binary.BigEndian, uint16(len(fields)))
+	_ = binary.Write(&out, binary.BigEndian, uint16(len(fields))) // #nosec G115 -- field count was checked above
 	for _, field := range fields {
 		_ = binary.Write(&out, binary.BigEndian, field)
 	}
@@ -1723,7 +1724,7 @@ func (e *engine) decryptChunked(ctx context.Context, object ObjectContext, reade
 
 	// Create chunked decrypt reader
 	var terminalAEAD cipher.AEAD
-	if uint8(manifest.Version) == ChunkedFormatV2 {
+	if manifest.Version == int(ChunkedFormatV2) {
 		terminalBlock, terminalErr := aes.NewCipher(key)
 		if terminalErr != nil {
 			return nil, nil, fmt.Errorf("failed to create terminal cipher: %w", terminalErr)
@@ -1734,7 +1735,7 @@ func (e *engine) decryptChunked(ctx context.Context, object ObjectContext, reade
 		}
 	}
 	var chunkedReader *chunkedDecryptReader
-	if uint8(manifest.Version) == ChunkedFormatV2 {
+	if manifest.Version == int(ChunkedFormatV2) {
 		if boundV2 {
 			chunkedReader, err = newChunkedDecryptReaderV2Bound(ctx, reader, aead, manifest, e.bufferPool, terminalAEAD, object, bindingID)
 		} else {
@@ -1795,8 +1796,7 @@ func (e *engine) decryptChunked(ctx context.Context, object ObjectContext, reade
 			if chunkSize <= 0 {
 				chunkSize = int64(DefaultChunkSize)
 			}
-			version := uint8(manifest.Version)
-			if plainSize, _, sizeErr := ChunkedPlaintextSize(ct, int(chunkSize), version); sizeErr == nil && plainSize > 0 {
+			if plainSize, _, sizeErr := ChunkedPlaintextSize(ct, int(chunkSize), ChunkedFormatV2); sizeErr == nil && plainSize > 0 {
 				decMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
 			}
 		}
@@ -1868,7 +1868,7 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, object ObjectCo
 		if sizeErr != nil {
 			return ChunkedObjectInfo{}, sizeErr
 		}
-		return ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil
+		return ChunkedObjectInfo{Version: version, ChunkCount: count, PlaintextSize: uint64(plain)}, nil // #nosec G115 -- ChunkedPlaintextSize rejects negative sizes
 	}
 	if ciphertextSize < ChunkedTerminalSize {
 		return ChunkedObjectInfo{}, fmt.Errorf("%w: short ciphertext", ErrChunkedObjectIncomplete)
@@ -1934,7 +1934,7 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, object ObjectCo
 		if sizeErr != nil {
 			return ChunkedObjectInfo{}, sizeErr
 		}
-		trailerAAD, err = buildObjectAAD(aadChunkedV2Trailer, object, bindingID, count, uint64(plainSize))
+		trailerAAD, err = buildObjectAAD(aadChunkedV2Trailer, object, bindingID, count, uint64(plainSize)) // #nosec G115 -- ChunkedPlaintextSize rejects negative sizes
 	} else {
 		trailerAAD = buildTerminalAAD(version)
 	}
@@ -1949,11 +1949,15 @@ func (e *engine) AuthenticateChunkedTrailer(ctx context.Context, object ObjectCo
 	if err != nil {
 		return ChunkedObjectInfo{}, err
 	}
-	canonical, err := ChunkedCiphertextSize(int64(size), manifest.ChunkSize, version)
+	if size > uint64(math.MaxInt64) {
+		return ChunkedObjectInfo{}, fmt.Errorf("%w: plaintext size overflow", ErrChunkedObjectIncomplete)
+	}
+	plaintextSize := int64(size)
+	canonical, err := ChunkedCiphertextSize(plaintextSize, manifest.ChunkSize, version)
 	if err != nil || canonical != ciphertextSize {
 		return ChunkedObjectInfo{}, fmt.Errorf("%w: size mismatch", ErrChunkedObjectIncomplete)
 	}
-	canonicalCount, err := ChunkedDataChunkCount(int64(size), manifest.ChunkSize)
+	canonicalCount, err := ChunkedDataChunkCount(plaintextSize, manifest.ChunkSize)
 	if err != nil || count != canonicalCount {
 		return ChunkedObjectInfo{}, fmt.Errorf("%w: count mismatch", ErrChunkedObjectIncomplete)
 	}
