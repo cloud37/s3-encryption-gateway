@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.8.x (latest) | ✅ |
-| < 0.8 | ❌ |
+| 0.11.x (latest) | ✅ |
+| < 0.11 | ❌ |
 
 We provide security fixes for the current minor release only. Older versions do not receive backports.
 
