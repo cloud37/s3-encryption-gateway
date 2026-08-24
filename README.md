@@ -343,7 +343,7 @@ encryption:
     provider: "cosmian"
     dual_read_window: 1
     cosmian:
-      endpoint: "http://localhost:9998/kmip/2_1"
+      endpoint: "https://kms.example.com/kmip/2_1"
       timeout: "10s"
       keys:
         - id: "your-key-id-from-cosmian"
@@ -356,17 +356,17 @@ Or via environment variables:
 export KEY_MANAGER_ENABLED=true
 export KEY_MANAGER_PROVIDER=cosmian
 export KEY_MANAGER_DUAL_READ_WINDOW=1
-export COSMIAN_KMS_ENDPOINT=http://localhost:9998/kmip/2_1
+export COSMIAN_KMS_ENDPOINT=https://kms.example.com/kmip/2_1
 export COSMIAN_KMS_TIMEOUT=10s
 export COSMIAN_KMS_KEYS="your-key-id:1"
 ```
 
 ##### Protocol options
 
-**JSON/HTTP (recommended, tested in CI)**:
-- Full URL: `http://localhost:9998/kmip/2_1` or `https://kms.example.com/kmip/2_1`
-- Base URL also works: `http://localhost:9998` (path `/kmip/2_1` is auto-appended)
-- No client certificates required for HTTP; `ca_cert` recommended for HTTPS
+**JSON/HTTPS (recommended, tested in CI)**:
+- Full URL: `https://kms.example.com/kmip/2_1`
+- Base URL also works: `https://kms.example.com` (path `/kmip/2_1` is auto-appended)
+- HTTP sends plaintext DEKs over the network and is rejected by default. For a trusted development endpoint only, set `insecure_allow_plaintext_transport: true` or `COSMIAN_KMS_INSECURE_ALLOW_PLAINTEXT_TRANSPORT=true`.
 
 **Binary KMIP (advanced, requires TLS)**:
 - Endpoint format: `localhost:5696` or `kms.example.com:5696`

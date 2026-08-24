@@ -227,8 +227,8 @@ encryption:
     provider: cosmian
     dual_read_window: 1  # Covers the old single-password objects
     cosmian:
-      endpoint: "http://kms-host:9998/kmip/2_1"  # JSON/HTTP (recommended)
-      # endpoint: "http://kms-host:9998"            # Base URL also works
+      endpoint: "https://kms-host:9998/kmip/2_1" # JSON/HTTPS (recommended)
+      # endpoint: "https://kms-host:9998"          # Base URL also works
       # For binary KMIP (requires TLS):
       # endpoint: "kms-host:5696"
       # ca_cert: "/etc/gateway/kms-ca.pem"
@@ -243,7 +243,7 @@ encryption:
 Environment variables (alternative to embedding in config):
 
 ```bash
-export COSMIAN_KMS_ENDPOINT="http://kms-host:9998/kmip/2_1"
+export COSMIAN_KMS_ENDPOINT="https://kms-host:9998/kmip/2_1"
 export COSMIAN_KMS_TIMEOUT="10s"
 export KEY_MANAGER_PROVIDER="cosmian"
 export KEY_MANAGER_ENABLED="true"
@@ -253,7 +253,7 @@ export KEY_MANAGER_ENABLED="true"
 
 ```bash
 # Test KMS reachability
-curl -f http://kms-host:9998/kmip/2_1 || echo "KMS not reachable"
+curl -f https://kms-host:9998/kmip/2_1 || echo "KMS not reachable"
 
 # Validate gateway config
 ./s3-encryption-gateway --config config.yaml --validate

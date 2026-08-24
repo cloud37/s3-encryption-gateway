@@ -990,13 +990,14 @@
                   "description": "Cosmian KMS provider configuration.",
                   "additionalProperties": false,
                   "properties": {
-                    "endpoint":           { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Cosmian KMS endpoint URL (e.g. http://host:9998/kmip/2_1)." },
+                    "endpoint":           { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Cosmian KMS endpoint URL (e.g. https://host:9998/kmip/2_1)." },
                     "timeout":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "KMS request timeout (Go duration string, e.g. 10s)." },
                     "keys":               { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Comma-separated wrapping key list (format: name:version[,name:version])." },
                     "caCert":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "TLS CA certificate (base64 PEM). Required for binary KMIP." },
                     "clientCert":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "TLS client certificate for mTLS. Required for binary KMIP." },
                     "clientKey":          { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "TLS client private key for mTLS." },
-                    "insecureSkipVerify": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Skip TLS verification (testing ONLY — do not use in production)." }
+                    "insecureSkipVerify": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Skip TLS verification (testing ONLY — do not use in production)." },
+                    "insecureAllowPlaintextTransport": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Permit a plaintext HTTP KMIP endpoint. Development only; HTTP transmits DEKs without TLS." }
                   }
                 },
                 "selfContained": {

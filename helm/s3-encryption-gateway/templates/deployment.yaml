@@ -139,6 +139,7 @@ spec:
         {{- if or .Values.config.encryption.keyManager.cosmian.endpoint.value .Values.config.encryption.keyManager.cosmian.endpoint.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "COSMIAN_KMS_ENDPOINT" "value" .Values.config.encryption.keyManager.cosmian.endpoint.value "valueFrom" .Values.config.encryption.keyManager.cosmian.endpoint.valueFrom) | nindent 8 }}
         {{- end }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "COSMIAN_KMS_INSECURE_ALLOW_PLAINTEXT_TRANSPORT" "value" .Values.config.encryption.keyManager.cosmian.insecureAllowPlaintextTransport.value "valueFrom" .Values.config.encryption.keyManager.cosmian.insecureAllowPlaintextTransport.valueFrom) | nindent 8 }}
         {{- if or .Values.config.encryption.keyManager.cosmian.timeout.value .Values.config.encryption.keyManager.cosmian.timeout.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "COSMIAN_KMS_TIMEOUT" "value" .Values.config.encryption.keyManager.cosmian.timeout.value "valueFrom" .Values.config.encryption.keyManager.cosmian.timeout.valueFrom) | nindent 8 }}
         {{- end }}

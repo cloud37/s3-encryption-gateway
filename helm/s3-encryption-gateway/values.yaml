@@ -301,9 +301,9 @@ config:
         #     key: key-manager-dual-read-window
       cosmian:
         endpoint:
-          # RECOMMENDED: JSON/HTTP endpoint (tested and verified in CI)
-          # Full URL format (recommended): "http://host:9998/kmip/2_1" or "https://host:9998/kmip/2_1"
-          # Base URL format (also works): "http://host:9998" (path /kmip/2_1 is auto-appended)
+          # RECOMMENDED: JSON/HTTPS endpoint
+          # Full URL format (recommended): "https://host:9998/kmip/2_1"
+          # Base URL format (also works): "https://host:9998" (path /kmip/2_1 is auto-appended)
           # ADVANCED: Binary KMIP endpoint (requires TLS certificates)
           # Format: "host:5696" - requires caCert, clientCert, clientKey
           value: ""
@@ -311,6 +311,9 @@ config:
           #   secretKeyRef:
           #     name: s3-encryption-gateway-secrets
           #     key: cosmian-kms-endpoint
+        insecureAllowPlaintextTransport:
+          # Development only: permits a plaintext http:// Cosmian JSON/KMIP endpoint.
+          value: "false"
         timeout:
           value: "10s"
           # valueFrom:

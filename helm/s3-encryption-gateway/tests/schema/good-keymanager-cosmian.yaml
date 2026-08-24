@@ -8,7 +8,7 @@ config:
         value: "cosmian"
       cosmian:
         endpoint:
-          value: "http://cosmian-kms.kms.svc.cluster.local:9998/kmip/2_1"
+          value: "https://cosmian-kms.kms.svc.cluster.local:9998/kmip/2_1"
         keys:
           valueFrom:
             secretKeyRef:

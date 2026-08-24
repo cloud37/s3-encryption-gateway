@@ -258,7 +258,9 @@ config:
         value: "1"
       cosmian:
         endpoint:
-          value: "http://cosmian-kms:9998/kmip/2_1"
+          value: "https://cosmian-kms:9998/kmip/2_1"
+        insecureAllowPlaintextTransport:
+          value: "false"
         timeout:
           value: "10s"
         keys:
@@ -283,7 +285,8 @@ config:
 ```
 
 **Cosmian Protocol Selection**:
-- **JSON/HTTP (Recommended)**: Full URL `http://host:9998/kmip/2_1`; no client certificates needed for HTTP
+- **JSON/HTTPS (Recommended)**: Full URL `https://host:9998/kmip/2_1`
+- **JSON/HTTP (Development only)**: Set `insecureAllowPlaintextTransport.value: "true"` explicitly. HTTP transmits plaintext DEKs and is rejected by default.
 - **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS)
 
 #### Valkey (Multipart Upload State + ListObjects Size Cache)
@@ -772,8 +775,10 @@ config:
         value: "1"
       cosmian:
         endpoint:
-          # JSON/HTTP (recommended): full URL or base URL with auto-appended /kmip/2_1
-          value: "http://cosmian-kms:9998/kmip/2_1"
+          # JSON/HTTPS (recommended): full URL or base URL with auto-appended /kmip/2_1
+          value: "https://cosmian-kms:9998/kmip/2_1"
+        insecureAllowPlaintextTransport:
+          value: "false"
         timeout:
           value: "10s"
         keys:

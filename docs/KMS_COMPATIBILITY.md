@@ -33,9 +33,9 @@ and can be selected via `encryption.key_manager.provider` in configuration.
 
 #### `cosmian` / `kmip` adapter
 
-- **JSON/HTTP protocol**: Fully tested and verified in CI
-  - Endpoint format: `http://host:9998/kmip/2_1` or `https://host:9998/kmip/2_1`
-  - No TLS client certificates required for HTTP
+- **JSON/HTTPS protocol**: Fully tested and verified in CI
+  - Endpoint format: `https://host:9998/kmip/2_1`. Plain `http://` endpoints require `insecure_allow_plaintext_transport: true` and are intended only for trusted development environments.
+  - No TLS client certificates required unless mTLS is configured
   - TLS `ca_cert` recommended for HTTPS
 - **Binary KMIP protocol**: Implemented; requires proper TLS
   - Endpoint format: `host:5696`
@@ -509,10 +509,11 @@ docker run -d --rm --name cosmian-kms \
   -p 5696:5696 -p 9998:9998 --entrypoint cosmian_kms ghcr.io/cosmian/kms:5.22.0
 ```
 
-**Recommended: JSON/HTTP Endpoint** (tested and verified):
-- Endpoint (full URL, recommended): `http://localhost:9998/kmip/2_1`
-- Endpoint (base URL, also works): `http://localhost:9998` (path `/kmip/2_1` is automatically appended)
-- No TLS client certificates required for HTTP (testing)
+**Recommended: JSON/HTTPS Endpoint** (tested and verified):
+- Endpoint (full URL, recommended): `https://kms.example.com:9998/kmip/2_1`
+- Endpoint (base URL, also works): `https://kms.example.com:9998` (path `/kmip/2_1` is automatically appended)
+- Plain HTTP transmits plaintext DEKs and requires the explicit `insecure_allow_plaintext_transport: true` development-only override.
+- No TLS client certificates required unless mTLS is configured
 - TLS `ca_cert` recommended for HTTPS (production)
 - Fully tested and verified in CI
 
