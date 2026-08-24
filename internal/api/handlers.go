@@ -36,8 +36,12 @@ import (
 
 // Handler handles HTTP requests for S3 operations.
 type Handler struct {
-	s3Client         s3.Client         // Legacy: kept for backward compatibility
-	clientFactory    *s3.ClientFactory // New: factory for per-request clients
+	s3Client      s3.Client         // Legacy: kept for backward compatibility
+	clientFactory *s3.ClientFactory // New: factory for per-request clients
+	// clientAcquirer, when non-nil, overrides client resolution in
+	// getS3Client. It is a test seam for observing that authorization
+	// precedes backend client acquisition.
+	clientAcquirer   func(*http.Request) (s3.Client, error)
 	encryptionEngine crypto.EncryptionEngine
 	logger           *logrus.Logger
 	metrics          *metrics.Metrics
@@ -240,142 +244,147 @@ func (h *Handler) IsAdmin(r *http.Request) bool {
 }
 
 // RegisterRoutes registers all API routes.
+// Every route carries a Name() so tests can assert exact router/classifier
+// parity; names have no effect on matching.
 func (h *Handler) RegisterRoutes(r *mux.Router) {
-	r.HandleFunc("/health", h.handleHealth).Methods("GET")
-	r.HandleFunc("/healthz", h.handleHealth).Methods("GET") // k8s-convention alias
-	r.HandleFunc("/ready", h.handleReady).Methods("GET")
-	r.HandleFunc("/readyz", h.handleReady).Methods("GET") // k8s-convention alias
-	r.HandleFunc("/live", h.handleLive).Methods("GET")
-	r.HandleFunc("/livez", h.handleLive).Methods("GET") // k8s-convention alias
+	r.HandleFunc("/health", h.handleHealth).Methods("GET").Name("Health")
+	r.HandleFunc("/healthz", h.handleHealth).Methods("GET").Name("Health") // k8s-convention alias
+	r.HandleFunc("/ready", h.handleReady).Methods("GET").Name("Ready")
+	r.HandleFunc("/readyz", h.handleReady).Methods("GET").Name("Ready") // k8s-convention alias
+	r.HandleFunc("/live", h.handleLive).Methods("GET").Name("Live")
+	r.HandleFunc("/livez", h.handleLive).Methods("GET").Name("Live") // k8s-convention alias
 
-	r.Handle("/", h.instrumentS3("ListBuckets", h.handleListBuckets)).Methods("GET")
+	r.Handle("/", h.instrumentS3("ListBuckets", h.handleListBuckets)).Methods("GET").Name("ListBuckets")
 
 	// S3 API routes
 	s3Router := r.PathPrefix("/").Subrouter()
 	s3Router.Use(h.s3InstrumentationMiddleware)
 
 	// Multipart upload routes (must be registered first to ensure query parameter matching)
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCreateMultipartUpload).Methods("POST").Queries("uploads", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCompleteMultipartUpload).Methods("POST").Queries("uploadId", "{uploadId}")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleAbortMultipartUpload).Methods("DELETE").Queries("uploadId", "{uploadId}")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleListParts).Methods("GET").Queries("uploadId", "{uploadId}")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCreateMultipartUpload).Methods("POST").Queries("uploads", "").Name("CreateMultipartUpload")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCompleteMultipartUpload).Methods("POST").Queries("uploadId", "{uploadId}").Name("CompleteMultipartUpload")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleAbortMultipartUpload).Methods("DELETE").Queries("uploadId", "{uploadId}").Name("AbortMultipartUpload")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleListParts).Methods("GET").Queries("uploadId", "{uploadId}").Name("ListParts")
 
 	// Multipart-specific PUT route
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleUploadPart).Methods("PUT").Queries("partNumber", "{partNumber:[0-9]+}", "uploadId", "{uploadId}")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleUploadPart).Methods("PUT").Queries("partNumber", "{partNumber:[0-9]+}", "uploadId", "{uploadId}").Name("UploadPart")
 
 	// Object Lock subresources (object-level) — must be registered BEFORE the
 	// generic GET/PUT/{bucket}/{key:.+} routes so gorilla/mux matches the
 	// query-parameter-scoped handlers first. V0.6-S3-2.
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectRetention).Methods("GET").Queries("retention", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectRetention).Methods("PUT").Queries("retention", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectLegalHold).Methods("GET").Queries("legal-hold", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectLegalHold).Methods("PUT").Queries("legal-hold", "")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectRetention).Methods("GET").Queries("retention", "").Name("GetObjectRetention")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectRetention).Methods("PUT").Queries("retention", "").Name("PutObjectRetention")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectLegalHold).Methods("GET").Queries("legal-hold", "").Name("GetObjectLegalHold")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectLegalHold).Methods("PUT").Queries("legal-hold", "").Name("PutObjectLegalHold")
 
 	// Object tagging subresources
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectTagging).Methods("GET").Queries("tagging", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectTagging).Methods("PUT").Queries("tagging", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleDeleteObjectTagging).Methods("DELETE").Queries("tagging", "")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectTagging).Methods("GET").Queries("tagging", "").Name("GetObjectTagging")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectTagging).Methods("PUT").Queries("tagging", "").Name("PutObjectTagging")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleDeleteObjectTagging).Methods("DELETE").Queries("tagging", "").Name("DeleteObjectTagging")
 
 	// Object ACL subresources
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectACL).Methods("GET").Queries("acl", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectACL).Methods("PUT").Queries("acl", "")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObjectACL).Methods("GET").Queries("acl", "").Name("GetObjectACL")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObjectACL).Methods("PUT").Queries("acl", "").Name("PutObjectACL")
 
 	// RestoreObject
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleRestoreObject).Methods("POST").Queries("restore", "")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleRestoreObject).Methods("POST").Queries("restore", "").Name("RestoreObject")
 
 	// SelectObjectContent (501 NotImplemented)
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleSelectObjectContent).Methods("POST").Queries("select", "")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleSelectObjectContent).Methods("POST").Queries("select-type", "2")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleSelectObjectContent).Methods("POST").Queries("select", "").Name("SelectObjectContent")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleSelectObjectContent).Methods("POST").Queries("select-type", "2").Name("SelectObjectContent")
 
 	// Object Lock configuration (bucket-level) — must be registered BEFORE
 	// the generic /{bucket} GET/PUT routes.
-	s3Router.HandleFunc("/{bucket}", h.handleGetObjectLockConfiguration).Methods("GET").Queries("object-lock", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutObjectLockConfiguration).Methods("PUT").Queries("object-lock", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetObjectLockConfiguration).Methods("GET").Queries("object-lock", "").Name("GetObjectLockConfiguration")
+	s3Router.HandleFunc("/{bucket}", h.handlePutObjectLockConfiguration).Methods("PUT").Queries("object-lock", "").Name("PutObjectLockConfiguration")
 
 	// CORS preflight
-	s3Router.HandleFunc("/{bucket}", h.handleCORSPreflight).Methods("OPTIONS")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCORSPreflight).Methods("OPTIONS")
-
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucket).Methods("DELETE")
+	s3Router.HandleFunc("/{bucket}", h.handleCORSPreflight).Methods("OPTIONS").Name("CORSPreflight")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleCORSPreflight).Methods("OPTIONS").Name("CORSPreflight")
 
 	// Bucket lifecycle subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketLifecycle).Methods("GET").Queries("lifecycle", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketLifecycle).Methods("PUT").Queries("lifecycle", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketLifecycle).Methods("DELETE").Queries("lifecycle", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketLifecycle).Methods("GET").Queries("lifecycle", "").Name("GetBucketLifecycle")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketLifecycle).Methods("PUT").Queries("lifecycle", "").Name("PutBucketLifecycle")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketLifecycle).Methods("DELETE").Queries("lifecycle", "").Name("DeleteBucketLifecycle")
 
 	// Bucket policy subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketPolicy).Methods("GET").Queries("policy", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketPolicy).Methods("PUT").Queries("policy", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketPolicy).Methods("DELETE").Queries("policy", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketPolicy).Methods("GET").Queries("policy", "").Name("GetBucketPolicy")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketPolicy).Methods("PUT").Queries("policy", "").Name("PutBucketPolicy")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketPolicy).Methods("DELETE").Queries("policy", "").Name("DeleteBucketPolicy")
 
 	// Bucket CORS subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketCors).Methods("GET").Queries("cors", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketCors).Methods("PUT").Queries("cors", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketCors).Methods("DELETE").Queries("cors", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketCors).Methods("GET").Queries("cors", "").Name("GetBucketCors")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketCors).Methods("PUT").Queries("cors", "").Name("PutBucketCors")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketCors).Methods("DELETE").Queries("cors", "").Name("DeleteBucketCors")
 
 	// Bucket versioning subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketVersioning).Methods("GET").Queries("versioning", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketVersioning).Methods("PUT").Queries("versioning", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketVersioning).Methods("GET").Queries("versioning", "").Name("GetBucketVersioning")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketVersioning).Methods("PUT").Queries("versioning", "").Name("PutBucketVersioning")
 
 	// Bucket encryption subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketEncryption).Methods("GET").Queries("encryption", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketEncryption).Methods("PUT").Queries("encryption", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketEncryption).Methods("DELETE").Queries("encryption", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketEncryption).Methods("GET").Queries("encryption", "").Name("GetBucketEncryption")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketEncryption).Methods("PUT").Queries("encryption", "").Name("PutBucketEncryption")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketEncryption).Methods("DELETE").Queries("encryption", "").Name("DeleteBucketEncryption")
 
 	// Bucket ACL subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketACL).Methods("GET").Queries("acl", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketACL).Methods("PUT").Queries("acl", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketACL).Methods("GET").Queries("acl", "").Name("GetBucketACL")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketACL).Methods("PUT").Queries("acl", "").Name("PutBucketACL")
 
 	// Bucket location
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketLocation).Methods("GET").Queries("location", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketLocation).Methods("GET").Queries("location", "").Name("GetBucketLocation")
 
 	// Bucket uploads listing (multipart)
-	s3Router.HandleFunc("/{bucket}", h.handleListMultipartUploads).Methods("GET").Queries("uploads", "")
+	s3Router.HandleFunc("/{bucket}", h.handleListMultipartUploads).Methods("GET").Queries("uploads", "").Name("ListMultipartUploads")
 
 	// Bucket notification subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketNotification).Methods("GET").Queries("notification", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketNotification).Methods("PUT").Queries("notification", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketNotification).Methods("GET").Queries("notification", "").Name("GetBucketNotification")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketNotification).Methods("PUT").Queries("notification", "").Name("PutBucketNotification")
 
 	// Bucket replication subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketReplication).Methods("GET").Queries("replication", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketReplication).Methods("PUT").Queries("replication", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketReplication).Methods("DELETE").Queries("replication", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketReplication).Methods("GET").Queries("replication", "").Name("GetBucketReplication")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketReplication).Methods("PUT").Queries("replication", "").Name("PutBucketReplication")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketReplication).Methods("DELETE").Queries("replication", "").Name("DeleteBucketReplication")
 
 	// Bucket logging subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketLogging).Methods("GET").Queries("logging", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketLogging).Methods("PUT").Queries("logging", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketLogging).Methods("GET").Queries("logging", "").Name("GetBucketLogging")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketLogging).Methods("PUT").Queries("logging", "").Name("PutBucketLogging")
 
 	// Bucket requestPayment subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketRequestPayment).Methods("GET").Queries("requestPayment", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketRequestPayment).Methods("PUT").Queries("requestPayment", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketRequestPayment).Methods("GET").Queries("requestPayment", "").Name("GetBucketRequestPayment")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketRequestPayment).Methods("PUT").Queries("requestPayment", "").Name("PutBucketRequestPayment")
 
 	// Bucket website subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketWebsite).Methods("GET").Queries("website", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketWebsite).Methods("PUT").Queries("website", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketWebsite).Methods("DELETE").Queries("website", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketWebsite).Methods("GET").Queries("website", "").Name("GetBucketWebsite")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketWebsite).Methods("PUT").Queries("website", "").Name("PutBucketWebsite")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketWebsite).Methods("DELETE").Queries("website", "").Name("DeleteBucketWebsite")
 
 	// Bucket inventory subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketInventory).Methods("GET").Queries("inventory", "")
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketInventory).Methods("PUT").Queries("inventory", "")
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketInventory).Methods("DELETE").Queries("inventory", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketInventory).Methods("GET").Queries("inventory", "").Name("GetBucketInventory")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketInventory).Methods("PUT").Queries("inventory", "").Name("PutBucketInventory")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucketInventory).Methods("DELETE").Queries("inventory", "").Name("DeleteBucketInventory")
 
 	// Bucket analytics subresources
-	s3Router.HandleFunc("/{bucket}", h.handleGetBucketAnalytics).Methods("GET").Queries("analytics", "")
+	s3Router.HandleFunc("/{bucket}", h.handleGetBucketAnalytics).Methods("GET").Queries("analytics", "").Name("GetBucketAnalytics")
 
 	// Bucket intelligent-tiering
-	s3Router.HandleFunc("/{bucket}", h.handlePutBucketIntelligentTiering).Methods("PUT").Queries("intelligent-tiering", "")
+	s3Router.HandleFunc("/{bucket}", h.handlePutBucketIntelligentTiering).Methods("PUT").Queries("intelligent-tiering", "").Name("PutBucketIntelligentTiering")
+
+	// Generic bucket routes. DELETE is intentionally placed AFTER all
+	// query-specific bucket subresource routes so gorilla/mux gives the
+	// subresource matchers higher priority.
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteBucket).Methods("DELETE").Name("DeleteBucket")
 
 	// Generic S3 routes
-	s3Router.HandleFunc("/{bucket}", h.handleListObjects).Methods("GET")
-	s3Router.HandleFunc("/{bucket}", h.handleHeadBucket).Methods("HEAD")
-	s3Router.HandleFunc("/{bucket}", h.handleCreateBucket).Methods("PUT")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObject).Methods("GET")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObject).Methods("PUT")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleDeleteObject).Methods("DELETE")
-	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleHeadObject).Methods("HEAD")
+	s3Router.HandleFunc("/{bucket}", h.handleListObjects).Methods("GET").Name("ListObjects")
+	s3Router.HandleFunc("/{bucket}", h.handleHeadBucket).Methods("HEAD").Name("HeadBucket")
+	s3Router.HandleFunc("/{bucket}", h.handleCreateBucket).Methods("PUT").Name("CreateBucket")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleGetObject).Methods("GET").Name("GetObject")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handlePutObject).Methods("PUT").Name("PutObject")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleDeleteObject).Methods("DELETE").Name("DeleteObject")
+	s3Router.HandleFunc("/{bucket:[^/]+}/{key:.+}", h.handleHeadObject).Methods("HEAD").Name("HeadObject")
 
 	// Batch operations
-	s3Router.HandleFunc("/{bucket}", h.handleDeleteObjects).Methods("POST").Queries("delete", "")
+	s3Router.HandleFunc("/{bucket}", h.handleDeleteObjects).Methods("POST").Queries("delete", "").Name("DeleteObjects")
 }
 
 // writeS3ClientError writes an appropriate S3 error response for client
@@ -597,7 +606,7 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 		h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
-	defer backendResp.Body.Close()
+	defer func() { _ = backendResp.Body.Close() }()
 
 	// Log backend response for debugging
 	h.logger.WithFields(logrus.Fields{
@@ -726,6 +735,9 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 // Authentication has already been validated by AuthMiddleware before this
 // point; this function only needs to return the pre-configured client.
 func (h *Handler) getS3Client(r *http.Request) (s3.Client, error) {
+	if h.clientAcquirer != nil {
+		return h.clientAcquirer(r)
+	}
 	if h.s3Client != nil {
 		return h.s3Client, nil
 	}
@@ -1253,7 +1265,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	// Authenticate the v2 terminal before any success headers or plaintext are
 	// exposed. Ranged GETs already performed this check during HEAD planning.
@@ -1341,7 +1353,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			}).Error("MPU decrypt failed on first chunk (tamper or corruption)")
 			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected")
 			if h.auditLogger != nil {
-				h.auditLogger.Log(&audit.AuditEvent{
+				_ = h.auditLogger.Log(&audit.AuditEvent{
 					EventType: audit.EventTypeMPUTamperDetected,
 					Timestamp: time.Now().UTC(),
 					Bucket:    bucket,
@@ -1392,7 +1404,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 					}).Error("MPU decrypt failed mid-stream after 200 OK; connection terminated")
 					h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected_midstream")
 					if h.auditLogger != nil {
-						h.auditLogger.Log(&audit.AuditEvent{
+						_ = h.auditLogger.Log(&audit.AuditEvent{
 							EventType: audit.EventTypeMPUTamperDetected,
 							Timestamp: time.Now().UTC(),
 							Bucket:    bucket,
@@ -1771,6 +1783,25 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Check if this is a copy operation
 	copySource := r.Header.Get("x-amz-copy-source")
 	if copySource != "" {
+		// V1.0-AUTH-2: parse and authorize the copy destination and source
+		// before the handler can acquire a backend client. This mirrors the
+		// AuthorizationMiddleware check as defense-in-depth so copy
+		// authorization never depends on middleware ordering.
+		if err := h.authorizeCopyOperation(r, bucket, copySource); err != nil {
+			if errors.Is(err, ErrAccessDenied) {
+				writeAuthorizationDenied(w, r, h.auditLogger, "bucket_scope")
+			} else {
+				s3Err := &S3Error{
+					Code:       "InvalidArgument",
+					Message:    "Invalid x-amz-copy-source header",
+					Resource:   r.URL.Path,
+					HTTPStatus: http.StatusBadRequest,
+				}
+				s3Err.WriteXML(w)
+				h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			}
+			return
+		}
 		s3Client, err := h.getS3Client(r)
 		if err != nil {
 			h.logger.WithError(err).Error("Failed to get S3 client")
@@ -1782,6 +1813,13 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get S3 client after authorization and copy classification.
+	s3Client, err := h.getS3Client(r)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to get S3 client")
+		h.writeS3ClientError(w, r, err, "PUT", start)
+		return
+	}
 	// Extract tagging header
 	tagging := r.Header.Get("x-amz-tagging")
 	if err := validateTags(tagging); err != nil {
@@ -1881,7 +1919,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify and spool streaming bodies before touching backend or encryption state.
-	s3Client, err := h.getS3Client(r)
+	s3Client, err = h.getS3Client(r)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to get S3 client")
 		h.writeS3ClientError(w, r, err, "PUT", start)
@@ -3508,7 +3546,7 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 
 		h.metrics.RecordMPUEncrypted("success")
 		if h.auditLogger != nil {
-			h.auditLogger.Log(&audit.AuditEvent{
+			_ = h.auditLogger.Log(&audit.AuditEvent{
 				EventType: audit.EventTypeMPUCreate,
 				Timestamp: time.Now().UTC(),
 				Bucket:    bucket,
@@ -3537,7 +3575,7 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(result)
+	_ = xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordS3Operation(r.Context(), "CreateMultipartUpload", bucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, http.StatusOK, time.Since(start), 0)
@@ -4042,7 +4080,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		}).Error("mpu.state.unavailable: cannot determine upload encryption status; failing closed")
 		h.metrics.RecordS3Error(r.Context(), "UploadPart", bucket, "StateUnavailable")
 		if h.auditLogger != nil {
-			h.auditLogger.Log(&audit.AuditEvent{
+			_ = h.auditLogger.Log(&audit.AuditEvent{
 				EventType: audit.EventTypeMPUValkeyUnavail,
 				Timestamp: time.Now().UTC(),
 				Bucket:    bucket,
@@ -4219,6 +4257,16 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 			}
 			h.metrics.RecordMPUPart("success")
 			h.metrics.RecordEncryptionOperation(r.Context(), "encrypt", encMPUEncryptDuration, encMPUPlainLen)
+			if h.auditLogger != nil {
+				_ = h.auditLogger.Log(&audit.AuditEvent{
+					EventType: audit.EventTypeMPUPart,
+					Timestamp: time.Now().UTC(),
+					Bucket:    bucket,
+					Key:       key,
+					Success:   true,
+					Metadata:  map[string]interface{}{"upload_id": uploadID},
+				})
+			}
 		}
 	}
 
@@ -4320,7 +4368,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		}).Error("mpu.state.unavailable: cannot determine encryption state at Complete; failing closed")
 		h.metrics.RecordS3Error(r.Context(), "CompleteMultipartUpload", bucket, "StateUnavailable")
 		if h.auditLogger != nil {
-			h.auditLogger.Log(&audit.AuditEvent{
+			_ = h.auditLogger.Log(&audit.AuditEvent{
 				EventType: audit.EventTypeMPUValkeyUnavail,
 				Timestamp: time.Now().UTC(),
 				Bucket:    bucket,
@@ -4377,7 +4425,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		}
 
 		if h.auditLogger != nil {
-			h.auditLogger.Log(&audit.AuditEvent{
+			_ = h.auditLogger.Log(&audit.AuditEvent{
 				EventType: audit.EventTypeMPUComplete,
 				Timestamp: time.Now().UTC(),
 				Bucket:    bucket,
@@ -4457,7 +4505,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(result)
+	_ = xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordS3Operation(r.Context(), "CompleteMultipartUpload", bucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, http.StatusOK, time.Since(start), 0)
@@ -4564,6 +4612,16 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 		}
 		if delErr := abortStore.Delete(ctx, uploadID); delErr != nil {
 			h.logger.WithError(delErr).Warn("mpu.abort.orphan: failed to delete MPU state after finalized abort")
+		}
+		if h.auditLogger != nil {
+			_ = h.auditLogger.Log(&audit.AuditEvent{
+				EventType: audit.EventTypeMPUAbort,
+				Timestamp: time.Now().UTC(),
+				Bucket:    bucket,
+				Key:       key,
+				Success:   true,
+				Metadata:  map[string]interface{}{"upload_id": uploadID},
+			})
 		}
 	}
 
@@ -4852,7 +4910,7 @@ func (h *Handler) serveMPURangedGet(
 				}).Error("serveMPURangedGet: tamper detected")
 				h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected")
 				if h.auditLogger != nil {
-					h.auditLogger.Log(&audit.AuditEvent{
+					_ = h.auditLogger.Log(&audit.AuditEvent{
 						EventType: audit.EventTypeMPUTamperDetected,
 						Timestamp: time.Now().UTC(),
 						Bucket:    bucket,
@@ -5430,7 +5488,7 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 // handleCopyObject handles PUT Object Copy requests.
 func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBucket, dstKey, copySource string, start time.Time, s3Client s3.Client) {
 	// Parse copy source: format is "bucket/key" or "bucket/key?versionId=xxx"
-	srcBucket, srcKey, srcVersionID, err := parseCopySource(copySource)
+	srcBucket, srcKey, srcVersionID, err := ParseCopySource(copySource)
 	if err != nil {
 		s3Err := &S3Error{
 			Code:       "InvalidArgument",
@@ -6068,10 +6126,10 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 	h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
-// parseCopySource extracts bucket, key, and version ID from an x-amz-copy-source header.
+// ParseCopySource extracts bucket, key, and version ID from an x-amz-copy-source header.
 // Format: "bucket/key" or "bucket/key?versionId=xxx" or "/bucket/key" or "/bucket/key?versionId=xxx"
 // Returns error if the format is invalid.
-func parseCopySource(copySource string) (bucket, key string, versionID *string, err error) {
+func ParseCopySource(copySource string) (bucket, key string, versionID *string, err error) {
 	// Remove leading slash if present
 	if strings.HasPrefix(copySource, "/") {
 		copySource = copySource[1:]
@@ -6124,7 +6182,66 @@ func effectiveMaxPartBuffer(cfg *config.Config) int64 {
 
 // handleListBuckets handles GET / — ListBuckets.
 func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "ListBuckets", "", "")
+	credential, ok := CredentialFromContext(r)
+	if !ok {
+		writeAuthorizationDenied(w, r, h.auditLogger, "unknown_operation")
+		return
+	}
+	if credential.Policy.Permissions != config.ObjectPermissionReadOnly && credential.Policy.Permissions != config.ObjectPermissionReadWrite {
+		writeAuthorizationDenied(w, r, h.auditLogger, "read_only")
+		return
+	}
+	resp, err := h.forwardToBackend(r)
+	if err != nil {
+		(&S3Error{Code: "BadGateway", Message: "The upstream S3 backend returned an error.", Resource: r.URL.Path, HTTPStatus: http.StatusBadGateway}).WriteXML(w)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if _, err := copyProxyResponse(w, resp); err != nil {
+			h.logger.WithError(err).Warn("Failed to copy proxy response for ListBuckets")
+		}
+		return
+	}
+	const maxListBucketsResponse = 8 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxListBucketsResponse+1))
+	if err != nil || len(body) > maxListBucketsResponse {
+		(&S3Error{Code: "BadGateway", Message: "The upstream S3 backend returned an invalid response.", Resource: r.URL.Path, HTTPStatus: http.StatusBadGateway}).WriteXML(w)
+		return
+	}
+	type bucket struct {
+		Name         string `xml:"Name"`
+		CreationDate string `xml:"CreationDate"`
+	}
+	type listResult struct {
+		XMLName xml.Name `xml:"ListAllMyBucketsResult"`
+		XMLNS   string   `xml:"xmlns,attr,omitempty"`
+		Owner   struct {
+			ID          string `xml:"ID"`
+			DisplayName string `xml:"DisplayName"`
+		} `xml:"Owner"`
+		Buckets struct {
+			Items []bucket `xml:"Bucket"`
+		} `xml:"Buckets"`
+	}
+	var result listResult
+	if err := xml.Unmarshal(body, &result); err != nil || result.XMLName.Local != "ListAllMyBucketsResult" {
+		(&S3Error{Code: "BadGateway", Message: "The upstream S3 backend returned an invalid response.", Resource: r.URL.Path, HTTPStatus: http.StatusBadGateway}).WriteXML(w)
+		return
+	}
+	result.XMLNS = result.XMLName.Space
+	filtered := result.Buckets.Items[:0]
+	for _, bucket := range result.Buckets.Items {
+		if credential.AllowsBucket(bucket.Name) && (h.config == nil || h.config.ProxiedBucket == "" || bucket.Name == h.config.ProxiedBucket) {
+			filtered = append(filtered, bucket)
+		}
+	}
+	result.Buckets.Items = filtered
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		return
+	}
 }
 
 // handleDeleteBucket handles DELETE /{bucket} — DeleteBucket.

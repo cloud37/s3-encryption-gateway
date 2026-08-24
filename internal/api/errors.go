@@ -77,8 +77,8 @@ func (e *S3Error) WriteXML(w http.ResponseWriter) {
 		return
 	}
 
-	w.Write([]byte(xml.Header))
-	w.Write(xmlData)
+	_, _ = w.Write([]byte(xml.Header))
+	_, _ = w.Write(xmlData)
 }
 
 // TranslateError translates AWS SDK and other errors to S3 errors.
@@ -248,3 +248,10 @@ var (
 		HTTPStatus: http.StatusMethodNotAllowed,
 	}
 )
+
+// WriteAccessDenied writes a request-local clone to avoid sharing mutable S3 errors.
+func WriteAccessDenied(w http.ResponseWriter, resource string) {
+	s3Err := *ErrAccessDenied
+	s3Err.Resource = resource
+	s3Err.WriteXML(w)
+}

@@ -459,6 +459,7 @@ func TestHandleCopyObject_Success(t *testing.T) {
 
 	req := httptest.NewRequest("PUT", "/dstbucket/dstkey", nil)
 	req.Header.Set("x-amz-copy-source", "srcbucket/srckey")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -484,6 +485,7 @@ func TestHandleCopyObject_PreservesStandardMetadata(t *testing.T) {
 	}
 	req := httptest.NewRequest("PUT", "/dstbucket/destination", nil)
 	req.Header.Set("x-amz-copy-source", "srcbucket/source")
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

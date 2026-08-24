@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -471,9 +472,11 @@ func TestSEC41AuthMiddleware_AuditFailureAndStreamingHeaderPaths(t *testing.T) {
 
 type sec41LookupErrorStore struct{}
 
-func (sec41LookupErrorStore) Lookup(string) (string, string, error) {
-	return "", "", errors.New("lookup failed")
+func (sec41LookupErrorStore) Lookup(string) (Credential, error) {
+	return Credential{}, errors.New("lookup failed")
 }
+
+func (sec41LookupErrorStore) Replace([]config.GatewayCredential) error { return nil }
 
 func TestSEC41R7AuthMiddlewareFailureMatrix(t *testing.T) {
 	logger := logrus.New()

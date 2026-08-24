@@ -190,6 +190,10 @@ config:
               name: s3-encryption-gateway-secrets
               key: gateway-secret-key
         label: "default"
+        # Omit buckets for unrestricted access; use [] for deny-all.
+        # buckets: ["tenant-a", "shared-*"]
+        # permissions: rw # ro or rw
+        # bucketPermissions: [] # create and/or delete
 
     # Alternatively, reference an existing Kubernetes Secret containing the
     # full credentials list as a single file (YAML or JSON). Useful when

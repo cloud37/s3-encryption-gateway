@@ -2387,6 +2387,7 @@ func TestMPU_UploadPartCopy_FromMPUSource(t *testing.T) {
 		fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", dstBucket, dstKey, dstUploadID), nil)
 	copyReq.Header.Set("x-amz-copy-source", "/"+srcBucket+"/"+srcKey)
 	copyReq.Header.Set("x-amz-copy-source-range", "bytes=1-5")
+	copyReq = attachTestCredential(copyReq)
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, copyReq)
 	if w.Code != http.StatusOK {
@@ -2480,6 +2481,7 @@ func TestMPU_CopyObject_FromMPUSource(t *testing.T) {
 	// ── CopyObject: simulate Harbor's small-blob moveBlob() ──────────────────
 	copyReq := httptest.NewRequest("PUT", "/"+dstBucket+"/"+dstKey, nil)
 	copyReq.Header.Set("x-amz-copy-source", "/"+srcBucket+"/"+srcKey)
+	copyReq = attachTestCredential(copyReq)
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, copyReq)
 	if w.Code != http.StatusOK {

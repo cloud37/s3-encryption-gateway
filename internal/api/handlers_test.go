@@ -16,11 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/aws/smithy-go"
+	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
@@ -94,6 +96,7 @@ type mockS3Client struct {
 	putObjectCallCount     int
 	deleteObjectsCallCount int
 	deleteObjectCallCount  int
+	getObjectCallCount     int
 }
 
 func newMockS3Client() *mockS3Client {
@@ -104,6 +107,183 @@ func newMockS3Client() *mockS3Client {
 		retentions:  make(map[string]*s3.RetentionConfig),
 		legalHolds:  make(map[string]string),
 		lockConfigs: make(map[string]*s3.ObjectLockConfiguration),
+	}
+}
+
+// permissiveTestCredential is an unrestricted read-write principal used by
+// tests that exercise the handler's copy-authorization boundary directly,
+// without running the AuthMiddleware/AuthorizationMiddleware chain.
+func permissiveTestCredential() Credential {
+	return Credential{Policy: AuthorizationPolicy{Permissions: config.ObjectPermissionReadWrite}}
+}
+
+// attachTestCredential attaches an unrestricted credential to a test request.
+func attachTestCredential(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), credentialKey, permissiveTestCredential()))
+}
+
+// failOnAnyCallS3Client implements s3.Client by failing the test on every
+// method invocation. It proves that authorization denials occur before any
+// backend call.
+type failOnAnyCallS3Client struct {
+	t         *testing.T
+	callCount atomic.Int64
+}
+
+func (f *failOnAnyCallS3Client) fail(method string) {
+	f.callCount.Add(1)
+	f.t.Errorf("backend %s called before authorization denial", method)
+}
+
+func (f *failOnAnyCallS3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *s3.ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
+	f.fail("PutObject")
+	return "", nil
+}
+
+func (f *failOnAnyCallS3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
+	f.fail("GetObject")
+	return nil, nil, nil
+}
+
+func (f *failOnAnyCallS3Client) DeleteObject(ctx context.Context, bucket, key string, versionID *string) error {
+	f.fail("DeleteObject")
+	return nil
+}
+
+func (f *failOnAnyCallS3Client) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
+	f.fail("HeadObject")
+	return nil, nil
+}
+
+func (f *failOnAnyCallS3Client) ListObjects(ctx context.Context, bucket, prefix string, opts s3.ListOptions) (s3.ListResult, error) {
+	f.fail("ListObjects")
+	return s3.ListResult{}, nil
+}
+
+func (f *failOnAnyCallS3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
+	f.fail("CreateMultipartUpload")
+	return "", nil
+}
+
+func (f *failOnAnyCallS3Client) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, reader io.Reader, contentLength *int64) (string, error) {
+	f.fail("UploadPart")
+	return "", nil
+}
+
+func (f *failOnAnyCallS3Client) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []s3.CompletedPart, lock *s3.ObjectLockInput) (string, error) {
+	f.fail("CompleteMultipartUpload")
+	return "", nil
+}
+
+func (f *failOnAnyCallS3Client) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	f.fail("AbortMultipartUpload")
+	return nil
+}
+
+func (f *failOnAnyCallS3Client) ListParts(ctx context.Context, bucket, key, uploadID string) ([]s3.PartInfo, error) {
+	f.fail("ListParts")
+	return nil, nil
+}
+
+func (f *failOnAnyCallS3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *s3.ObjectLockInput) (string, map[string]string, error) {
+	f.fail("CopyObject")
+	return "", nil, nil
+}
+
+func (f *failOnAnyCallS3Client) UploadPartCopy(ctx context.Context, dstBucket, dstKey, uploadID string, partNumber int32, srcBucket, srcKey string, srcVersionID *string, srcRange *s3.CopyPartRange) (*s3.CopyPartResult, error) {
+	f.fail("UploadPartCopy")
+	return nil, nil
+}
+
+func (f *failOnAnyCallS3Client) DeleteObjects(ctx context.Context, bucket string, keys []s3.ObjectIdentifier) ([]s3.DeletedObject, []s3.ErrorObject, error) {
+	f.fail("DeleteObjects")
+	return nil, nil, nil
+}
+
+func (f *failOnAnyCallS3Client) PutObjectRetention(ctx context.Context, bucket, key string, versionID *string, retention *s3.RetentionConfig) error {
+	f.fail("PutObjectRetention")
+	return nil
+}
+
+func (f *failOnAnyCallS3Client) GetObjectRetention(ctx context.Context, bucket, key string, versionID *string) (*s3.RetentionConfig, error) {
+	f.fail("GetObjectRetention")
+	return nil, nil
+}
+
+func (f *failOnAnyCallS3Client) PutObjectLegalHold(ctx context.Context, bucket, key string, versionID *string, status string) error {
+	f.fail("PutObjectLegalHold")
+	return nil
+}
+
+func (f *failOnAnyCallS3Client) GetObjectLegalHold(ctx context.Context, bucket, key string, versionID *string) (string, error) {
+	f.fail("GetObjectLegalHold")
+	return "", nil
+}
+
+func (f *failOnAnyCallS3Client) PutObjectLockConfiguration(ctx context.Context, bucket string, config *s3.ObjectLockConfiguration) error {
+	f.fail("PutObjectLockConfiguration")
+	return nil
+}
+
+func (f *failOnAnyCallS3Client) GetObjectLockConfiguration(ctx context.Context, bucket string) (*s3.ObjectLockConfiguration, error) {
+	f.fail("GetObjectLockConfiguration")
+	return nil, nil
+}
+
+// newCopySpyHandler builds a Handler whose backend client resolution is
+// instrumented: every acquisition is counted and the returned client fails
+// the test on any method call.
+func newCopySpyHandler(t *testing.T) (*Handler, *atomic.Int64, *failOnAnyCallS3Client) {
+	t.Helper()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockEngine, err := crypto.NewEngine([]byte("test-password-123456"))
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	handler := NewHandler(nil, mockEngine, logger, getTestMetrics())
+	failClient := &failOnAnyCallS3Client{t: t}
+	var acquisitions atomic.Int64
+	handler.clientAcquirer = func(*http.Request) (s3.Client, error) {
+		acquisitions.Add(1)
+		return failClient, nil
+	}
+	return handler, &acquisitions, failClient
+}
+
+// copySpyDenialModes runs the same copy request through the middleware-wrapped
+// router and the bare router, asserting each denial happens with zero client
+// acquisitions and zero backend calls.
+func copySpyDenialModes(t *testing.T, handler *Handler, acquisitions *atomic.Int64, failClient *failOnAnyCallS3Client, credential Credential, method, target, copySource string) {
+	t.Helper()
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	for _, mode := range []string{"middleware", "handler"} {
+		t.Run(mode, func(t *testing.T) {
+			req := httptest.NewRequest(method, target, nil)
+			req.Header.Set("x-amz-copy-source", copySource)
+			req = req.WithContext(context.WithValue(req.Context(), credentialKey, credential))
+
+			rec := httptest.NewRecorder()
+			if mode == "middleware" {
+				AuthorizationMiddleware("", nil)(router).ServeHTTP(rec, req)
+			} else {
+				router.ServeHTTP(rec, req)
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status=%d want=403 body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "<Code>AccessDenied</Code>") {
+				t.Fatalf("response missing AccessDenied code: %s", rec.Body.String())
+			}
+			if got := acquisitions.Load(); got != 0 {
+				t.Fatalf("backend client acquired %d times before authorization denial", got)
+			}
+			if got := failClient.callCount.Load(); got != 0 {
+				t.Fatalf("backend called %d times before authorization denial", got)
+			}
+		})
 	}
 }
 
@@ -134,6 +314,9 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader
 }
 
 func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
+	m.locksMu.Lock()
+	m.getObjectCallCount++
+	m.locksMu.Unlock()
 	if err := m.errors[bucket+"/"+key+"/get"]; err != nil {
 		return nil, nil, err
 	}
@@ -2590,6 +2773,7 @@ func TestHandleListBuckets(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{Policy: AuthorizationPolicy{Permissions: config.ObjectPermissionReadWrite}}))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -3365,6 +3549,7 @@ func TestCopyObject_SizeCache_Populated(t *testing.T) {
 	// CopyObject is issued as a PUT with x-amz-copy-source header.
 	req := httptest.NewRequest("PUT", "/"+bucket+"/"+dstKey, nil)
 	req.Header.Set("x-amz-copy-source", "/"+bucket+"/"+srcKey)
+	req = attachTestCredential(req)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -3448,6 +3633,830 @@ func TestCompleteMultipartUpload_SizeCache_Populated(t *testing.T) {
 	// The cached plaintext size should equal the part plaintext length.
 	assert.Equal(t, int64(len(partData)), results[key],
 		"cached plaintext size should match the uploaded part length")
+}
+
+// ---- V1.0-AUTH-2 ListBuckets authorization tests ----------------------------
+
+func TestHandleListBuckets_ExactScopeFiltersXML(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Errorf("expected path /, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner><ID>test-id</ID><DisplayName>test</DisplayName></Owner>
+  <Buckets>
+    <Bucket><Name>exact-bucket</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+    <Bucket><Name>other-bucket</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"exact-bucket"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "exact-bucket") {
+		t.Errorf("expected exact-bucket in response, got: %s", body)
+	}
+	if strings.Contains(body, "other-bucket") {
+		t.Errorf("expected other-bucket to be filtered out, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_WildcardScopeFiltersXML(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Buckets>
+    <Bucket><Name>tenant-a</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+    <Bucket><Name>tenant-b</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+    <Bucket><Name>other</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"tenant-*"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "tenant-a") {
+		t.Errorf("expected tenant-a in response, got: %s", body)
+	}
+	if !strings.Contains(body, "tenant-b") {
+		t.Errorf("expected tenant-b in response, got: %s", body)
+	}
+	if strings.Contains(body, "other") {
+		t.Errorf("expected other to be filtered out, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_ExplicitEmptyScopeReturnsEmptyBuckets(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Buckets>
+    <Bucket><Name>some-bucket</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "some-bucket") {
+		t.Errorf("expected no buckets in response, got: %s", body)
+	}
+	if !strings.Contains(body, "<Buckets>") || !strings.Contains(body, "</Buckets>") {
+		t.Errorf("expected empty <Buckets></Buckets> in response, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_MalformedBackendXMLFailsClosed(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"any"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "<Foo/>") {
+		t.Errorf("expected raw malformed XML NOT to be returned, got: %s", body)
+	}
+	if !strings.Contains(body, "BadGateway") {
+		t.Errorf("expected BadGateway error code, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_ProxiedBucketIntersection(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Buckets>
+    <Bucket><Name>proxied</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+    <Bucket><Name>other</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+		ProxiedBucket: "proxied",
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"proxied", "other"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "proxied") {
+		t.Errorf("expected proxied in response, got: %s", body)
+	}
+	if strings.Contains(body, "other") {
+		t.Errorf("expected other to be filtered out by proxied bucket, got: %s", body)
+	}
+}
+
+// ---- V1.0-AUTH-2 Copy authorization tests with backend-operation spies ----
+
+func TestCopyObject_SourceBucketOutOfScopeDeniedBeforeBackend(t *testing.T) {
+	handler, acquisitions, failClient := newCopySpyHandler(t)
+	credential := Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"destination"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}
+	copySpyDenialModes(t, handler, acquisitions, failClient, credential,
+		http.MethodPut, "/destination/key", "source/key")
+}
+
+func TestCopyObject_DestinationBucketOutOfScopeDeniedBeforeBackend(t *testing.T) {
+	handler, acquisitions, failClient := newCopySpyHandler(t)
+	credential := Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"source"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}
+	copySpyDenialModes(t, handler, acquisitions, failClient, credential,
+		http.MethodPut, "/destination/key", "source/key")
+}
+
+func TestUploadPartCopy_SourceBucketOutOfScopeDeniedBeforeBackend(t *testing.T) {
+	handler, acquisitions, failClient := newCopySpyHandler(t)
+	credential := Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"destination"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}
+	copySpyDenialModes(t, handler, acquisitions, failClient, credential,
+		http.MethodPut, "/destination/key?partNumber=1&uploadId=upload", "source/key")
+}
+
+func TestCopyObject_ReadOnlyDeniedBeforeBackend(t *testing.T) {
+	handler, acquisitions, failClient := newCopySpyHandler(t)
+	credential := Credential{Policy: AuthorizationPolicy{
+		Buckets:     []string{"destination", "source"},
+		Permissions: config.ObjectPermissionReadOnly,
+	}}
+	copySpyDenialModes(t, handler, acquisitions, failClient, credential,
+		http.MethodPut, "/destination/key", "source/key")
+}
+
+func TestUploadPartCopy_ReadOnlyDeniedBeforeBackend(t *testing.T) {
+	handler, acquisitions, failClient := newCopySpyHandler(t)
+	credential := Credential{Policy: AuthorizationPolicy{
+		Buckets:     []string{"destination", "source"},
+		Permissions: config.ObjectPermissionReadOnly,
+	}}
+	copySpyDenialModes(t, handler, acquisitions, failClient, credential,
+		http.MethodPut, "/destination/key?partNumber=1&uploadId=upload", "source/key")
+}
+
+// TestUploadPartCopy_AuthorizationAppliesToAllSourceClasses proves that copy
+// source authorization is class-agnostic. For every source encryption class
+// (plaintext, chunked, legacy, MPU-encrypted):
+//   - an out-of-scope source is denied with zero client acquisitions and zero
+//     backend calls — the handler never reaches classification; and
+//   - an in-scope source reaches classification (exactly one HeadObject),
+//     proving authorization does not falsely deny any class.
+func TestUploadPartCopy_AuthorizationAppliesToAllSourceClasses(t *testing.T) {
+	classes := []struct {
+		name     string
+		srcKey   string
+		metadata map[string]string
+	}{
+		{"plaintext", "src/plain", map[string]string{}},
+		{"chunked", "src/chunked", map[string]string{crypto.MetaChunkedFormat: "true", crypto.MetaEncrypted: "true", crypto.MetaOriginalSize: "100"}},
+		{"legacy", "src/legacy", map[string]string{crypto.MetaEncrypted: "true", "Content-Length": "100"}},
+		{"mpu_encrypted", "src/mpu", map[string]string{crypto.MetaMPUEncrypted: "true", crypto.MetaEncrypted: "true"}},
+	}
+	for _, class := range classes {
+		t.Run(class.name, func(t *testing.T) {
+			t.Run("out-of-scope-denied-before-classification", func(t *testing.T) {
+				handler, acquisitions, failClient := newCopySpyHandler(t)
+				credential := Credential{
+					Policy: AuthorizationPolicy{
+						Buckets:     []string{"destination"},
+						Permissions: config.ObjectPermissionReadWrite,
+					},
+				}
+				copySpyDenialModes(t, handler, acquisitions, failClient, credential,
+					http.MethodPut, "/destination/key?partNumber=1&uploadId=upload", "outside/"+class.name)
+			})
+
+			t.Run("in-scope-reaches-classification", func(t *testing.T) {
+				mockClient := newMockS3Client()
+				logger := logrus.New()
+				logger.SetLevel(logrus.ErrorLevel)
+				mockEngine, err := crypto.NewEngine([]byte("test-password-123456"))
+				if err != nil {
+					t.Fatalf("engine: %v", err)
+				}
+				handler := NewHandler(nil, mockEngine, logger, getTestMetrics())
+				var acquisitions atomic.Int64
+				handler.clientAcquirer = func(*http.Request) (s3.Client, error) {
+					acquisitions.Add(1)
+					return mockClient, nil
+				}
+
+				router := mux.NewRouter()
+				handler.RegisterRoutes(router)
+
+				// Seed a source object carrying the class metadata.
+				mockClient.objects["src/"+class.name] = []byte("source bytes")
+				mockClient.metadata["src/"+class.name] = class.metadata
+
+				credential := Credential{
+					Policy: AuthorizationPolicy{
+						Buckets:     []string{"destination", "src"},
+						Permissions: config.ObjectPermissionReadWrite,
+					},
+				}
+				req := httptest.NewRequest(http.MethodPut, "/destination/key?partNumber=1&uploadId=upload", nil)
+				req.Header.Set("x-amz-copy-source", "src/"+class.name)
+				req = req.WithContext(context.WithValue(req.Context(), credentialKey, credential))
+
+				rec := httptest.NewRecorder()
+				router.ServeHTTP(rec, req)
+
+				if rec.Code == http.StatusForbidden {
+					t.Fatalf("in-scope %s source falsely denied: %s", class.name, rec.Body.String())
+				}
+				if got := acquisitions.Load(); got != 1 {
+					t.Fatalf("client acquisitions=%d want=1", got)
+				}
+				mockClient.locksMu.Lock()
+				headCount := mockClient.headObjectCallCount
+				mockClient.locksMu.Unlock()
+				if headCount < 1 {
+					t.Fatalf("classification HeadObject calls=%d want>=1 (authorization preempted classification)", headCount)
+				}
+			})
+		})
+	}
+}
+
+func TestHandleListBuckets_NoCredentialReturns403(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("backend should not be called when credential is missing")
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected status %d, got %d", http.StatusForbidden, w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "AccessDenied") {
+		t.Errorf("expected AccessDenied in response, got: %s", body)
+	}
+}
+
+// TestHandleListBuckets_DirectDenialsEmitSingleAuditEvent verifies that the
+// handler-level ListBuckets denials (missing principal, invalid permission)
+// emit exactly one bounded auth.authorization_denied audit event — matching
+// the middleware behaviour covered by TestAllFiveAuditReasons — with no
+// duplicates and no backend contact.
+func TestHandleListBuckets_DirectDenialsEmitSingleAuditEvent(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("backend should not be called when ListBuckets denies directly")
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	events := &mockAuditLogger{}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, events, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	t.Run("missing principal", func(t *testing.T) {
+		events.events = nil
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status=%d want=403", w.Code)
+		}
+		if len(events.events) != 1 {
+			t.Fatalf("audit events=%d want=1", len(events.events))
+		}
+		if events.events[0].eventType != string(audit.EventTypeAuthorizationDenied) {
+			t.Fatalf("event type=%q want=%q", events.events[0].eventType, audit.EventTypeAuthorizationDenied)
+		}
+		if events.events[0].reason != "unknown_operation" {
+			t.Fatalf("reason=%q want=unknown_operation", events.events[0].reason)
+		}
+	})
+
+	t.Run("invalid permission", func(t *testing.T) {
+		events.events = nil
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+			Policy: AuthorizationPolicy{Permissions: config.ObjectPermission("")},
+		}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status=%d want=403", w.Code)
+		}
+		if len(events.events) != 1 {
+			t.Fatalf("audit events=%d want=1", len(events.events))
+		}
+		if events.events[0].eventType != string(audit.EventTypeAuthorizationDenied) {
+			t.Fatalf("event type=%q want=%q", events.events[0].eventType, audit.EventTypeAuthorizationDenied)
+		}
+		if events.events[0].reason != "read_only" {
+			t.Fatalf("reason=%q want=read_only", events.events[0].reason)
+		}
+	})
+}
+
+func TestHandleListBuckets_ReadOnlyCredentialAllowed(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Buckets>
+    <Bucket><Name>ro-bucket</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Permissions: config.ObjectPermissionReadOnly,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "ro-bucket") {
+		t.Errorf("expected ro-bucket in response, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_BackendErrorReturns502(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: "http://127.0.0.1:1",
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected status %d, got %d", http.StatusBadGateway, w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "BadGateway") {
+		t.Errorf("expected BadGateway in response, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_BackendNon2xxProxiesThrough(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`<Error><Code>NoSuchBucket</Code></Error>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "NoSuchBucket") {
+		t.Errorf("expected NoSuchBucket in response, got: %s", body)
+	}
+}
+
+func TestHandleListBuckets_OversizedBackendResponseReturns502(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), (8<<20)+1))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected status %d, got %d", http.StatusBadGateway, w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "BadGateway") {
+		t.Errorf("expected BadGateway in response, got: %s", body)
+	}
+}
+
+// TestHandleListBuckets_StructuredXMLParsing verifies that the filtered
+// ListBuckets response preserves namespace, owner, creation dates, bucket
+// count, and order.
+func TestHandleListBuckets_StructuredXMLParsing(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner><ID>owner-id-123</ID><DisplayName>OwnerName</DisplayName></Owner>
+  <Buckets>
+    <Bucket><Name>alpha-bucket</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+    <Bucket><Name>beta-bucket</Name><CreationDate>2024-06-15T12:30:45.000Z</CreationDate></Bucket>
+    <Bucket><Name>gamma-bucket</Name><CreationDate>2024-12-31T23:59:59.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	// Scope allows alpha and gamma only; beta should be filtered out.
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{"alpha-bucket", "gamma-bucket"},
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Parse the response XML structurally
+	type Bucket struct {
+		XMLName      xml.Name `xml:"Bucket"`
+		Name         string   `xml:"Name"`
+		CreationDate string   `xml:"CreationDate"`
+	}
+	type Owner struct {
+		ID          string `xml:"ID"`
+		DisplayName string `xml:"DisplayName"`
+	}
+	type ListAllMyBucketsResult struct {
+		XMLName xml.Name `xml:"ListAllMyBucketsResult"`
+		Owner   Owner    `xml:"Owner"`
+		Buckets struct {
+			Bucket []Bucket `xml:"Bucket"`
+		} `xml:"Buckets"`
+	}
+
+	var result ListAllMyBucketsResult
+	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("failed to parse response XML: %v\nbody: %s", err, w.Body.String())
+	}
+
+	// Verify XML root name and namespace preservation
+	if result.XMLName.Local != "ListAllMyBucketsResult" {
+		t.Errorf("XMLName.Local=%q want=ListAllMyBucketsResult", result.XMLName.Local)
+	}
+	if result.XMLName.Space != "http://s3.amazonaws.com/doc/2006-03-01/" {
+		t.Errorf("XMLName.Space=%q want=http://s3.amazonaws.com/doc/2006-03-01/", result.XMLName.Space)
+	}
+
+	// Verify namespace and owner preservation
+	if result.Owner.ID != "owner-id-123" {
+		t.Errorf("owner ID=%q want=owner-id-123", result.Owner.ID)
+	}
+	if result.Owner.DisplayName != "OwnerName" {
+		t.Errorf("owner DisplayName=%q want=OwnerName", result.Owner.DisplayName)
+	}
+
+	// Verify exact bucket count and order
+	if len(result.Buckets.Bucket) != 2 {
+		t.Fatalf("bucket count=%d want=2", len(result.Buckets.Bucket))
+	}
+	if result.Buckets.Bucket[0].Name != "alpha-bucket" {
+		t.Errorf("first bucket=%q want=alpha-bucket", result.Buckets.Bucket[0].Name)
+	}
+	if result.Buckets.Bucket[0].CreationDate != "2024-01-01T00:00:00.000Z" {
+		t.Errorf("first bucket date=%q want=2024-01-01T00:00:00.000Z", result.Buckets.Bucket[0].CreationDate)
+	}
+	if result.Buckets.Bucket[1].Name != "gamma-bucket" {
+		t.Errorf("second bucket=%q want=gamma-bucket", result.Buckets.Bucket[1].Name)
+	}
+	if result.Buckets.Bucket[1].CreationDate != "2024-12-31T23:59:59.000Z" {
+		t.Errorf("second bucket date=%q want=2024-12-31T23:59:59.000Z", result.Buckets.Bucket[1].CreationDate)
+	}
+}
+
+// TestHandleListBuckets_EmptyScopeReturnsStructurallyEmptyBuckets verifies
+// that a deny-all credential returns HTTP 200 with an empty <Buckets> element.
+func TestHandleListBuckets_EmptyScopeReturnsStructurallyEmptyBuckets(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner><ID>owner-id</ID><DisplayName>Owner</DisplayName></Owner>
+  <Buckets>
+    <Bucket><Name>some-bucket</Name><CreationDate>2024-01-01T00:00:00.000Z</CreationDate></Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	cfg := &config.Config{
+		Backend: config.BackendConfig{
+			Endpoint: backend.URL,
+			UseSSL:   false,
+		},
+	}
+	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
+		Policy: AuthorizationPolicy{
+			Buckets:     []string{}, // explicit deny-all
+			Permissions: config.ObjectPermissionReadWrite,
+		},
+	}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify structurally empty Buckets element
+	if !strings.Contains(w.Body.String(), "<Buckets/>") && !strings.Contains(w.Body.String(), "<Buckets></Buckets>") {
+		t.Errorf("expected empty <Buckets/> element, got: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "some-bucket") {
+		t.Errorf("expected no buckets in filtered response, got: %s", w.Body.String())
+	}
 }
 
 // Ensure the mpu import is used (avoids unused-import compile error if all

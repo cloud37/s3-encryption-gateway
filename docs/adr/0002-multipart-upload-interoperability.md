@@ -194,7 +194,7 @@ func handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request) error
 ### Authentication & Authorization
 - **Upload ID Validation**: Opaque upload IDs prevent enumeration attacks
 - **Part ETag Verification**: Validates ETag format and prevents manipulation
-- **Access Control**: Leverages backend provider's access control
+- **Access Control**: Enforced by the gateway's per-credential `AuthorizationMiddleware` (V1.0-AUTH-2) before any backend-capable handler runs; the backend provider's access control is not a caller-authorization boundary because all callers share the gateway's backend identity (ADR 0012)
 
 ### Data Integrity
 - **Part Ordering**: Enforces correct part number sequencing

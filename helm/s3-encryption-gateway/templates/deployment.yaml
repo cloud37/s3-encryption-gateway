@@ -79,6 +79,22 @@ spec:
         {{- range $i, $cred := .Values.config.auth.credentials }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" (printf "GW_CRED_%d_ACCESS_KEY" $i) "value" $cred.accessKey.value "valueFrom" $cred.accessKey.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" (printf "GW_CRED_%d_SECRET_KEY" $i) "value" $cred.secretKey.value "valueFrom" $cred.secretKey.valueFrom) | nindent 8 }}
+        {{- if hasKey $cred "buckets" }}
+        - name: {{ printf "GW_CRED_%d_BUCKETS" $i }}
+          value: {{ join "," $cred.buckets | quote }}
+        {{- end }}
+        {{- if $cred.permissions }}
+        - name: {{ printf "GW_CRED_%d_PERMISSIONS" $i }}
+          value: {{ $cred.permissions | quote }}
+        {{- end }}
+        {{- if $cred.bucketPermissions }}
+        - name: {{ printf "GW_CRED_%d_BUCKET_PERMISSIONS" $i }}
+          value: {{ join "," $cred.bucketPermissions | quote }}
+        {{- end }}
+        {{- if hasKey $cred "label" }}
+        - name: {{ printf "GW_CRED_%d_LABEL" $i }}
+          value: {{ $cred.label | quote }}
+        {{- end }}
         {{- end }}
         {{- end }}
         {{- if or .Values.config.backend.provider.value .Values.config.backend.provider.valueFrom }}

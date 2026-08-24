@@ -4,6 +4,10 @@
 
 The S3 Encryption Gateway is designed for containerized deployment in Kubernetes environments. This document outlines the containerization and orchestration strategy, including all Phase 4 production features.
 
+## Credential Authorization
+
+Gateway credentials can be limited to exact buckets and trailing-prefix scopes. Omit `buckets` to retain unrestricted access, or set `buckets: []` to deny all access. Set `permissions: ro` for read-only object access; `rw` is the default. Bucket lifecycle permissions require explicit `bucket_permissions: [create, delete]` grants. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
+
 ## Docker Container Design
 
 ### Multi-Stage Build Strategy
@@ -279,11 +283,11 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: gateway-credentials
-data:
+stringData:
   credentials.yaml: |
     - access_key: "AKIAIOSFODNN7EXAMPLE"
       secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-      proxied_bucket: "my-bucket"
+      buckets: ["my-bucket"]
       label: "sync-from-vault"
     - access_key: "AKIAI44QH8DHBEXAMPLE"
       secret_key: "abc123/7MDENG/bPxRfiCYEXAMPLEKEY"

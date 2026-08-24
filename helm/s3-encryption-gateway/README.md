@@ -113,14 +113,22 @@ config:
 | `config.backend.provider` | Provider hint string (optional) | `""` |
 | `config.backend.useSSL` | Use SSL for backend connection | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
-| `config.backend.useClientCredentials` | Forward client-supplied credentials to the backend | `"false"` |
+Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it for unrestricted access or use `[]` for deny-all. `permissions` is `ro` or `rw`, while `bucketPermissions` explicitly grants `create` and `delete`.
 
-**Note on `useClientCredentials`**: When set to `"true"`, the gateway extracts credentials from client requests instead of using configured backend credentials. In this mode:
-- `config.backend.accessKey` and `config.backend.secretKey` are **NOT required** and will be excluded from the deployment
-- Clients must provide credentials via **query parameters only** (`?AWSAccessKeyId=...&AWSSecretAccessKey=...`)
-- **AWS Signature V4 (Authorization header) is NOT supported** — the signature includes the Host header, which prevents forwarding requests to the backend
-- Requests without valid credentials will fail with `AccessDenied`
-- Useful for providers like Hetzner that don't support per-bucket access keys
+#### Credential Migration and Reload
+
+Existing credentials remain unrestricted and read-write when `buckets` and
+`permissions` are omitted. To migrate safely, first add explicit bucket scopes,
+then use `ro` for readers and grant `create` or `delete` only where required.
+Exact bucket names and non-empty trailing-prefix patterns such as `tenant-*`
+are supported; other wildcard forms are rejected.
+
+Credential policy files and the main configuration file can be reloaded with
+`SIGHUP` when the deployment is configured to watch them. A failed reload keeps
+the previous complete policy snapshot. Helm-provided environment variables are
+process environment, so changing a Secret or Helm value requires a pod restart;
+it is not a live environment reload. Roll out credential changes atomically and
+verify the rendered environment before removing old access.
 
 #### Encryption Configuration
 
@@ -932,32 +940,13 @@ config:
           key: encryption-password
 ```
 
-### Client Credentials Mode
+### Backend Identity
 
-Forward client-provided credentials to the backend (e.g. for Hetzner):
-
-```yaml
-config:
-  proxiedBucket:
-    value: "my-bucket"
-  backend:
-    endpoint:
-      value: "https://your-bucket.your-region.your-objectstorage.com"
-    region:
-      value: "nbg1"
-    useClientCredentials:
-      value: "true"
-    # accessKey and secretKey are NOT required when useClientCredentials is true
-  encryption:
-    password:
-      valueFrom:
-        secretKeyRef:
-          name: s3-encryption-gateway-secrets
-          key: encryption-password
-```
-
-Clients must include credentials via **query parameters only**: `?AWSAccessKeyId=...&AWSSecretAccessKey=...`.
-AWS Signature V4 (`Authorization` header) is **not supported** in this mode.
+The gateway authenticates to the backend S3 provider using its own credentials
+(`config.backend.accessKey` / `config.backend.secretKey`). Caller credentials
+are validated at the gateway and are **never forwarded** to the backend (ADR-0012).
+Each `auth.credentials` entry controls client access independently of the
+backend identity.
 
 ### With Pod Lifecycle Hooks (Progressive Delivery)
 

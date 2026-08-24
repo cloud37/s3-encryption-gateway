@@ -292,12 +292,8 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			listener.Close()
 			t.Fatalf("harness.StartGateway: create credential store: %v", credErr)
 		}
+		httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, nil)(httpHandler)
 		httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, nil, cfg.Auth.AllowLegacySignatureV2)(httpHandler)
-	}
-
-	// Wire bucket validation middleware if proxied_bucket is configured.
-	if cfg.ProxiedBucket != "" {
-		httpHandler = middleware.BucketValidationMiddleware(cfg.ProxiedBucket, logger)(httpHandler)
 	}
 
 	// HTTP server.
