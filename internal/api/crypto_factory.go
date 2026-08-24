@@ -225,12 +225,13 @@ func buildCosmianOptions(kmCfg *config.KeyManagerConfig) (crypto.CosmianKMIPOpti
 	}
 
 	return crypto.CosmianKMIPOptions{
-		Endpoint:       kmCfg.Cosmian.Endpoint,
-		Keys:           keyRefs,
-		TLSConfig:      tlsCfg,
-		Timeout:        kmCfg.Cosmian.Timeout,
-		Provider:       "cosmian-kmip",
-		DualReadWindow: kmCfg.DualReadWindow,
+		Endpoint:                        kmCfg.Cosmian.Endpoint,
+		Keys:                            keyRefs,
+		TLSConfig:                       tlsCfg,
+		Timeout:                         kmCfg.Cosmian.Timeout,
+		Provider:                        "cosmian-kmip",
+		DualReadWindow:                  kmCfg.DualReadWindow,
+		InsecureAllowPlaintextTransport: kmCfg.Cosmian.InsecureAllowPlaintextTransport,
 	}, nil
 }
 

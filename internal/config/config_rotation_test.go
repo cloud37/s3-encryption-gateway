@@ -82,7 +82,7 @@ encryption:
       enabled: true
       grace_window: 72h
     cosmian:
-      endpoint: "http://localhost:9998/kmip/2_1"
+      endpoint: "https://localhost:9998/kmip/2_1"
       keys:
         - id: "key-1"
           version: 1
@@ -175,4 +175,3 @@ func createTempConfigFile(t *testing.T, content string) string {
 
 	return tmpFile.Name()
 }
-

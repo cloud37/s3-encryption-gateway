@@ -973,6 +973,24 @@ func TestValkeyConfig_Validate_AllowLegacyPlaintextWarns(t *testing.T) {
 		"warning should advise disabling after migration")
 }
 
+func TestCosmianConfig_Validate_HTTPRequiresExplicitOptIn(t *testing.T) {
+	cfg := minValidConfig()
+	cfg.Encryption.KeyManager.Enabled = true
+	cfg.Encryption.KeyManager.Provider = "cosmian"
+	cfg.Encryption.KeyManager.Cosmian.Endpoint = "http://kms.example.com/kmip/2_1"
+	cfg.Encryption.KeyManager.Cosmian.Keys = []CosmianKeyReference{{ID: "key-1", Version: 1}}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "insecure_allow_plaintext_transport") {
+		t.Fatalf("Validate() error = %v, want plaintext transport opt-in error", err)
+	}
+
+	cfg.Encryption.KeyManager.Cosmian.InsecureAllowPlaintextTransport = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with plaintext transport opt-in: %v", err)
+	}
+}
+
 // TestAdminProfilingConfig_Validate_NegativeBlockRate verifies that a negative
 // block_rate is rejected.
 func TestAdminProfilingConfig_Validate_NegativeBlockRate(t *testing.T) {
@@ -1929,6 +1947,7 @@ func TestLoadFromEnv_KeyManagerConfig(t *testing.T) {
 	t.Setenv("COSMIAN_KMS_CLIENT_KEY", "/tls/client.key")
 	t.Setenv("COSMIAN_KMS_CA_CERT", "/tls/ca.pem")
 	t.Setenv("COSMIAN_KMS_INSECURE_SKIP_VERIFY", "true")
+	t.Setenv("COSMIAN_KMS_INSECURE_ALLOW_PLAINTEXT_TRANSPORT", "true")
 	t.Setenv("COSMIAN_KMS_KEYS", "key-abc:1,key-def:2")
 
 	cfg := &Config{}
@@ -1951,6 +1970,9 @@ func TestLoadFromEnv_KeyManagerConfig(t *testing.T) {
 	}
 	if len(cfg.Encryption.KeyManager.Cosmian.Keys) != 2 {
 		t.Errorf("Cosmian.Keys: want 2, got %d", len(cfg.Encryption.KeyManager.Cosmian.Keys))
+	}
+	if !cfg.Encryption.KeyManager.Cosmian.InsecureAllowPlaintextTransport {
+		t.Error("Cosmian.InsecureAllowPlaintextTransport: want true")
 	}
 }
 

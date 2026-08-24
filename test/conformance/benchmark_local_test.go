@@ -338,6 +338,7 @@ func allBenchConfigs(t *testing.T, kmsInst *provider.CosmianKMSInstance) []bench
 					Keys: []crypto.KMIPKeyReference{
 						{ID: kmsInst.KeyID, Version: 1},
 					},
+					InsecureAllowPlaintextTransport: true,
 				})
 				if err != nil {
 					t.Fatalf("NewCosmianKMIPManager: %v", err)
@@ -360,6 +361,7 @@ func allBenchConfigs(t *testing.T, kmsInst *provider.CosmianKMSInstance) []bench
 					Keys: []crypto.KMIPKeyReference{
 						{ID: kmsInst.KeyID, Version: 1},
 					},
+					InsecureAllowPlaintextTransport: true,
 				})
 				if err != nil {
 					t.Fatalf("NewCosmianKMIPManager: %v", err)
@@ -381,6 +383,7 @@ func allBenchConfigs(t *testing.T, kmsInst *provider.CosmianKMSInstance) []bench
 					Keys: []crypto.KMIPKeyReference{
 						{ID: kmsInst.KeyID, Version: 1},
 					},
+					InsecureAllowPlaintextTransport: true,
 				})
 				if err != nil {
 					t.Fatalf("NewCosmianKMIPManager: %v", err)

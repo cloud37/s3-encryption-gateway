@@ -23,12 +23,13 @@ type KMIPKeyReference struct {
 
 // CosmianKMIPOptions encapsulates the configuration required to connect to a KMIP-compatible KMS.
 type CosmianKMIPOptions struct {
-	Endpoint       string
-	Keys           []KMIPKeyReference
-	TLSConfig      *tls.Config
-	Timeout        time.Duration
-	Provider       string
-	DualReadWindow int
+	Endpoint                        string
+	Keys                            []KMIPKeyReference
+	TLSConfig                       *tls.Config
+	Timeout                         time.Duration
+	Provider                        string
+	DualReadWindow                  int
+	InsecureAllowPlaintextTransport bool
 }
 
 type cosmianKeyState struct {
@@ -105,12 +106,13 @@ func prepareCosmianKeyState(opts CosmianKMIPOptions) (*cosmianKeyState, error) {
 
 	return &cosmianKeyState{
 		opts: CosmianKMIPOptions{
-			Endpoint:       opts.Endpoint,
-			Keys:           slices.Clone(keys),
-			TLSConfig:      tlsCfg,
-			Timeout:        timeout,
-			Provider:       provider,
-			DualReadWindow: opts.DualReadWindow,
+			Endpoint:                        opts.Endpoint,
+			Keys:                            slices.Clone(keys),
+			TLSConfig:                       tlsCfg,
+			Timeout:                         timeout,
+			Provider:                        provider,
+			DualReadWindow:                  opts.DualReadWindow,
+			InsecureAllowPlaintextTransport: opts.InsecureAllowPlaintextTransport,
 		},
 		keyLookup:     keyLookup,
 		versionLookup: versionLookup,

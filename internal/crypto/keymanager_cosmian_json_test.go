@@ -296,8 +296,7 @@ func TestNewCosmianKMIPJSONManager_EmptyPath(t *testing.T) {
 	}
 }
 
-func TestNewCosmianKMIPJSONManager_HTTPScheme(t *testing.T) {
-	// HTTP (not HTTPS) should work too.
+func TestNewCosmianKMIPJSONManager_HTTPRequiresExplicitOptIn(t *testing.T) {
 	state := &cosmianKeyState{
 		opts: CosmianKMIPOptions{
 			Endpoint: "http://kms.example.com/kmip/2_1",
@@ -305,12 +304,13 @@ func TestNewCosmianKMIPJSONManager_HTTPScheme(t *testing.T) {
 		},
 		timeout: 5_000_000_000,
 	}
-	m, err := newCosmianKMIPJSONManager(state)
-	if err != nil {
-		t.Fatalf("newCosmianKMIPJSONManager (http): %v", err)
+	if _, err := newCosmianKMIPJSONManager(state); err == nil {
+		t.Fatal("expected HTTP endpoint to require explicit plaintext transport opt-in")
 	}
-	if m == nil {
-		t.Fatal("expected non-nil manager")
+
+	state.opts.InsecureAllowPlaintextTransport = true
+	if _, err := newCosmianKMIPJSONManager(state); err != nil {
+		t.Fatalf("newCosmianKMIPJSONManager (HTTP with opt-in): %v", err)
 	}
 }
 
@@ -320,8 +320,9 @@ func makeTestJSONManager(t *testing.T) *cosmianKMIPJSONManager {
 	t.Helper()
 	state := &cosmianKeyState{
 		opts: CosmianKMIPOptions{
-			Endpoint: "http://kms.test.example.com/kmip/2_1",
-			Provider: "cosmian-kmip-json",
+			Endpoint:                        "http://kms.test.example.com/kmip/2_1",
+			Provider:                        "cosmian-kmip-json",
+			InsecureAllowPlaintextTransport: true,
 			Keys: []KMIPKeyReference{
 				{ID: "key-1", Version: 1},
 			},
@@ -373,7 +374,7 @@ func TestCosmianKMIPJSON_ActiveKeyVersion(t *testing.T) {
 
 func TestCosmianKMIPJSON_ActiveKeyVersion_NoKeys(t *testing.T) {
 	state := &cosmianKeyState{
-		opts:    CosmianKMIPOptions{Endpoint: "http://kms.test.example.com"},
+		opts:    CosmianKMIPOptions{Endpoint: "https://kms.test.example.com"},
 		timeout: 5_000_000_000,
 	}
 	m, err := newCosmianKMIPJSONManager(state)
@@ -417,7 +418,7 @@ func TestCosmianKMIPJSON_WrapKey_EmptyPlaintext(t *testing.T) {
 
 func TestCosmianKMIPJSON_HealthCheck_NoKeys(t *testing.T) {
 	state := &cosmianKeyState{
-		opts:    CosmianKMIPOptions{Endpoint: "http://kms.test.example.com"},
+		opts:    CosmianKMIPOptions{Endpoint: "https://kms.test.example.com"},
 		timeout: 5_000_000_000,
 	}
 	m, err := newCosmianKMIPJSONManager(state)
@@ -462,8 +463,9 @@ func makeJSONManagerWithServer(t *testing.T, handler http.HandlerFunc) (*cosmian
 
 	state := &cosmianKeyState{
 		opts: CosmianKMIPOptions{
-			Endpoint: srv.URL + "/kmip/2_1",
-			Provider: "cosmian-kmip-json",
+			Endpoint:                        srv.URL + "/kmip/2_1",
+			Provider:                        "cosmian-kmip-json",
+			InsecureAllowPlaintextTransport: true,
 			Keys: []KMIPKeyReference{
 				{ID: "key-1", Version: 1},
 			},

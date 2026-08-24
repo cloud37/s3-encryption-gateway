@@ -42,6 +42,8 @@ func testKMSIntegration(t *testing.T, inst provider.Instance) {
 		},
 		// Generous timeout for a cold container.
 		Timeout: 0, // uses default (5 s)
+		// The test fixture is an HTTP-only local development container.
+		InsecureAllowPlaintextTransport: true,
 	})
 	if err != nil {
 		t.Fatalf("NewCosmianKMIPManager: %v", err)

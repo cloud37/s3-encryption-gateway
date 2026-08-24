@@ -40,6 +40,14 @@ func newCosmianKMIPJSONManager(state *cosmianKeyState) (KeyManager, error) {
 	if u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("kms: Cosmian HTTP endpoint must include scheme and host: %s", state.opts.Endpoint)
 	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		if !strings.EqualFold(u.Scheme, "http") {
+			return nil, fmt.Errorf("kms: Cosmian HTTP endpoint must use https or http: %s", state.opts.Endpoint)
+		}
+		if !state.opts.InsecureAllowPlaintextTransport {
+			return nil, errors.New("kms: Cosmian HTTP endpoint requires insecure_allow_plaintext_transport=true because plaintext DEKs are transmitted without TLS")
+		}
+	}
 	if u.Path == "" || u.Path == "/" {
 		u.Path = "/kmip/2_1"
 	}

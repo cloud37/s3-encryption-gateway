@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -473,13 +474,14 @@ type DEKCacheConfig struct {
 
 // CosmianConfig captures settings for the Cosmian KMIP integration.
 type CosmianConfig struct {
-	Endpoint           string                `yaml:"endpoint" env:"COSMIAN_KMS_ENDPOINT"`
-	Timeout            time.Duration         `yaml:"timeout" env:"COSMIAN_KMS_TIMEOUT"`
-	Keys               []CosmianKeyReference `yaml:"keys"`
-	ClientCert         string                `yaml:"client_cert" env:"COSMIAN_KMS_CLIENT_CERT"`
-	ClientKey          string                `yaml:"client_key" env:"COSMIAN_KMS_CLIENT_KEY"`
-	CACert             string                `yaml:"ca_cert" env:"COSMIAN_KMS_CA_CERT"`
-	InsecureSkipVerify bool                  `yaml:"insecure_skip_verify" env:"COSMIAN_KMS_INSECURE_SKIP_VERIFY"`
+	Endpoint                        string                `yaml:"endpoint" env:"COSMIAN_KMS_ENDPOINT"`
+	Timeout                         time.Duration         `yaml:"timeout" env:"COSMIAN_KMS_TIMEOUT"`
+	Keys                            []CosmianKeyReference `yaml:"keys"`
+	ClientCert                      string                `yaml:"client_cert" env:"COSMIAN_KMS_CLIENT_CERT"`
+	ClientKey                       string                `yaml:"client_key" env:"COSMIAN_KMS_CLIENT_KEY"`
+	CACert                          string                `yaml:"ca_cert" env:"COSMIAN_KMS_CA_CERT"`
+	InsecureSkipVerify              bool                  `yaml:"insecure_skip_verify" env:"COSMIAN_KMS_INSECURE_SKIP_VERIFY"`
+	InsecureAllowPlaintextTransport bool                  `yaml:"insecure_allow_plaintext_transport" env:"COSMIAN_KMS_INSECURE_ALLOW_PLAINTEXT_TRANSPORT"`
 }
 
 // CosmianKeyReference maps wrapping key identifiers to metadata versions.
@@ -1324,6 +1326,9 @@ func loadFromEnv(config *Config) error {
 	if v := os.Getenv("COSMIAN_KMS_INSECURE_SKIP_VERIFY"); v != "" {
 		config.Encryption.KeyManager.Cosmian.InsecureSkipVerify = v == "true" || v == "1"
 	}
+	if v := os.Getenv("COSMIAN_KMS_INSECURE_ALLOW_PLAINTEXT_TRANSPORT"); v != "" {
+		config.Encryption.KeyManager.Cosmian.InsecureAllowPlaintextTransport = v == "true" || v == "1"
+	}
 	if v := os.Getenv("COSMIAN_KMS_KEYS"); v != "" {
 		config.Encryption.KeyManager.Cosmian.Keys = parseCosmianKeyRefs(v)
 	}
@@ -2077,6 +2082,12 @@ func (c *Config) Validate() error {
 			}
 			if len(c.Encryption.KeyManager.Cosmian.Keys) == 0 {
 				return fmt.Errorf("encryption.key_manager.cosmian.keys must include at least one entry")
+			}
+			if endpoint, err := url.Parse(c.Encryption.KeyManager.Cosmian.Endpoint); err == nil && strings.EqualFold(endpoint.Scheme, "http") {
+				if !c.Encryption.KeyManager.Cosmian.InsecureAllowPlaintextTransport {
+					return fmt.Errorf("encryption.key_manager.cosmian.endpoint must use HTTPS; set insecure_allow_plaintext_transport=true only for trusted development endpoints")
+				}
+				slog.Warn("encryption.key_manager.cosmian.insecure_allow_plaintext_transport is true - plaintext DEKs are transmitted without TLS; use only for trusted development endpoints")
 			}
 		case "memory":
 			// No mandatory fields; master_key_source is optional (auto-generate if empty)
