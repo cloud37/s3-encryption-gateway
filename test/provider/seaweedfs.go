@@ -24,12 +24,17 @@ package provider
 // Skip env var: GATEWAY_TEST_SKIP_SEAWEEDFS=1
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -172,5 +177,52 @@ func (p *seaweedfsProvider) Start(ctx context.Context, t *testing.T) Instance {
 		ProviderName: p.Name(),
 	}
 	createBucketS3(ctx, t, inst)
+	waitForSeaweedFSWrite(ctx, t, inst)
 	return inst
+}
+
+// SeaweedFS can accept HTTP requests and bucket creation before its first
+// volume is writable. Probe the data path so conformance tests do not race
+// volume initialization.
+func waitForSeaweedFSWrite(ctx context.Context, t *testing.T, inst Instance) {
+	t.Helper()
+
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(inst.Region),
+		awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(inst.AccessKey, inst.SecretKey, ""),
+		),
+	)
+	if err != nil {
+		t.Fatalf("seaweedfs write readiness: load config: %v", err)
+	}
+
+	svc := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(inst.Endpoint)
+		o.UsePathStyle = true
+	})
+	const key = ".conformance-ready"
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, err = svc.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(inst.Bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader(nil),
+		})
+		if err == nil {
+			_, _ = svc.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(inst.Bucket),
+				Key:    aws.String(key),
+			})
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("seaweedfs write readiness: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("seaweedfs write readiness: %v", ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }

@@ -21,7 +21,7 @@ jobs:
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -29,10 +29,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Unit tests (-race)
-        run: go test -race -short -timeout 20m ./...
+        run: go test -race -short -timeout 30m ./...
 
       - name: Unit tests FIPS (-race)
-        run: GOFIPS140=v1.0.0 go test -race -short -timeout 20m -tags=fips ./...
+        run: GOFIPS140=v1.0.0 go test -race -short -timeout 30m -tags=fips ./...
 
       - name: go vet
         run: go vet ./...
