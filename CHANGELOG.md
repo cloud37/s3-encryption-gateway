@@ -4,19 +4,6 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
-
-### Security
-
-- **V1.0-SEC-44 SigV2 hardening:** SigV2 is now disabled by default. Existing
-  clients must explicitly set `auth.allow_legacy_signature_v2: true` (or
-  `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`) while migrating to SigV4. Enabled
-  SigV2 requests now authenticate routing-sensitive S3 subresources.
-
-- **V1.0-SEC-43 non-streaming SigV4 payload integrity:** concrete signed
-  payloads are hashed and verified before downstream dispatch; mismatches are
-  rejected atomically while `UNSIGNED-PAYLOAD` remains compatible.
-
 ## [0.12.0-rc1] — 2026-08-23
 
 ### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
@@ -25,6 +12,15 @@ This is a release candidate for validation in isolated, non-production
 environments only. Do **not** upgrade a productive environment to this version:
 state-v2 encrypted MPU writers cannot be rolled back to pre-0.12.0 releases.
 Wait for the stable 0.12.0 release before scheduling a production upgrade.
+
+### ⚠️ SigV2 Clients Will Fail Authentication By Default ⚠️
+
+**Upgrading breaks existing SigV2 clients unless you explicitly opt in to the
+legacy signature scheme.** Before upgrading, migrate clients to SigV4 or set
+`auth.allow_legacy_signature_v2: true` (or
+`AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`). This opt-in is temporary; enabled SigV2
+requests now also authenticate routing-sensitive S3 subresources and clients
+with incorrect SigV2 canonicalization can fail authentication.
 
 ### ⚠️ Upgrade Instructions ⚠️
 
@@ -56,6 +52,15 @@ See [`docs/MIGRATION.md`](docs/MIGRATION.md) for the required coordinated
 upgrade and rollback procedures.
 
 ### Security
+
+- **V1.0-SEC-44 SigV2 hardening:** SigV2 is now disabled by default. Existing
+  clients must explicitly opt in while migrating to SigV4; see the SigV2
+  compatibility warning above. Enabled SigV2 requests now authenticate
+  routing-sensitive S3 subresources.
+
+- **V1.0-SEC-43 non-streaming SigV4 payload integrity:** concrete signed
+  payloads are hashed and verified before downstream dispatch; mismatches are
+  rejected atomically while `UNSIGNED-PAYLOAD` remains compatible.
 
 - **V1.0-SEC-42 object location binding:** New writes bind ciphertext to their
   gateway bucket/key location; legacy objects remain readable, but backend-
