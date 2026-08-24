@@ -1,0 +1,38 @@
+templates:
+  - deployment.yaml
+release:
+  name: s3eg-auth-version
+  namespace: default
+values:
+  - ../values.yaml
+tests:
+  - it: should disable legacy SigV2 by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AUTH_ALLOW_LEGACY_SIGNATURE_V2
+            value: "false"
+  - it: should enable legacy SigV2 when explicitly requested
+    set:
+      config.auth.allowLegacySignatureV2.value: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AUTH_ALLOW_LEGACY_SIGNATURE_V2
+            value: "true"
+  - it: should render AUTH_ALLOW_LEGACY_SIGNATURE_V2 from valueFrom
+    set:
+      config.auth.allowLegacySignatureV2.value: ""
+      config.auth.allowLegacySignatureV2.valueFrom.secretKeyRef.name: legacy-auth
+      config.auth.allowLegacySignatureV2.valueFrom.secretKeyRef.key: enabled
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AUTH_ALLOW_LEGACY_SIGNATURE_V2
+            valueFrom:
+              secretKeyRef:
+                name: legacy-auth
+                key: enabled

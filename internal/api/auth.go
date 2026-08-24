@@ -38,6 +38,20 @@ var (
 	ErrStreamingSpool           = errors.New("AWS-chunked spool I/O failed")
 )
 
+var sigV2CanonicalResourceParams = map[string]struct{}{
+	"acl": {}, "analytics": {}, "cors": {}, "delete": {},
+	"encryption": {}, "intelligent-tiering": {}, "inventory": {},
+	"legal-hold": {}, "lifecycle": {}, "location": {}, "logging": {},
+	"notification": {}, "object-lock": {}, "partNumber": {}, "policy": {},
+	"replication": {}, "requestPayment": {}, "response-cache-control": {},
+	"response-content-disposition": {}, "response-content-encoding": {},
+	"response-content-language": {}, "response-content-type": {},
+	"response-expires": {}, "restore": {}, "retention": {}, "select": {},
+	"select-type": {}, "tagging": {}, "torrent": {}, "uploadId": {},
+	"uploads": {}, "versionId": {}, "versioning": {}, "versions": {},
+	"website": {},
+}
+
 func classifyStreamingPayloadMode(value string) (streamingPayloadMode, error) {
 	switch value {
 	case "STREAMING-AWS4-HMAC-SHA256-PAYLOAD":
@@ -376,7 +390,10 @@ func ValidateSignatureV2(r *http.Request, secretKey string, clockSkew time.Durat
 			}
 		}
 		// Build string-to-sign
-		stringToSign := buildV2StringToSign(r)
+		stringToSign, err := buildV2StringToSign(r)
+		if err != nil {
+			return err
+		}
 		expectedSig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secretKey), []byte(stringToSign)))
 		if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
 			return ErrSignatureMismatch
@@ -409,7 +426,10 @@ func ValidateSignatureV2(r *http.Request, secretKey string, clockSkew time.Durat
 		if skew > clockSkew {
 			return fmt.Errorf("request timestamp outside clock skew window")
 		}
-		stringToSign := buildV2StringToSign(r)
+		stringToSign, err := buildV2StringToSign(r)
+		if err != nil {
+			return err
+		}
 		expectedSig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secretKey), []byte(stringToSign)))
 		if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
 			return ErrSignatureMismatch
@@ -421,7 +441,7 @@ func ValidateSignatureV2(r *http.Request, secretKey string, clockSkew time.Durat
 }
 
 // buildV2StringToSign builds the AWS SigV2 string-to-sign.
-func buildV2StringToSign(r *http.Request) string {
+func buildV2StringToSign(r *http.Request) (string, error) {
 	var buf strings.Builder
 	buf.WriteString(r.Method)
 	buf.WriteByte('\n')
@@ -460,12 +480,46 @@ func buildV2StringToSign(r *http.Request) string {
 		buf.WriteByte('\n')
 	}
 	// CanonicalizedResource
-	resource := r.URL.Path
+	resource, err := buildV2CanonicalizedResource(r)
+	if err != nil {
+		return "", err
+	}
+	buf.WriteString(resource)
+	return buf.String(), nil
+}
+
+func buildV2CanonicalizedResource(r *http.Request) (string, error) {
+	resource := r.URL.EscapedPath()
 	if resource == "" {
 		resource = "/"
 	}
-	buf.WriteString(resource)
-	return buf.String()
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return "", fmt.Errorf("invalid SigV2 query: %w", err)
+	}
+	names := make([]string, 0)
+	for name, vals := range values {
+		if _, ok := sigV2CanonicalResourceParams[name]; !ok {
+			continue
+		}
+		if len(vals) > 1 {
+			return "", fmt.Errorf("duplicate SigV2 subresource parameter %q", name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for i, name := range names {
+		if i == 0 {
+			resource += "?"
+		} else {
+			resource += "&"
+		}
+		resource += name
+		if values[name][0] != "" {
+			resource += "=" + values[name][0]
+		}
+	}
+	return resource, nil
 }
 
 // hmacSHA1 computes HMAC-SHA1.

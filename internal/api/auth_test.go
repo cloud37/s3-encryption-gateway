@@ -787,13 +787,308 @@ func TestValidateSignatureV2_HeaderAuth(t *testing.T) {
 	req := httptest.NewRequest("GET", "/bucket/key", nil)
 	req.Header.Set("Date", time.Now().UTC().Format(time.RFC1123))
 
-	stringToSign := buildV2StringToSign(req)
+	stringToSign, err := buildV2StringToSign(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secretKey), []byte(stringToSign)))
 	req.Header.Set("Authorization", "AWS "+accessKey+":"+sig)
 
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV2() expected nil for valid header auth, got: %v", err)
+	}
+}
+
+func TestBuildV2CanonicalizedResource(t *testing.T) {
+	tests := []struct{ target, want string }{
+		{"/bucket/key", "/bucket/key"},
+		{"/bucket/key?acl", "/bucket/key?acl"},
+		{"/bucket/key?uploadId=u%2B1&partNumber=2", "/bucket/key?partNumber=2&uploadId=u+1"},
+		{"/bucket?prefix=a&delete=", "/bucket?delete"},
+		{"/bucket/key?response-content-type=text%2Fplain", "/bucket/key?response-content-type=text/plain"},
+		{"/bucket/a%2Fb?versionId=v1", "/bucket/a%2Fb?versionId=v1"},
+	}
+	for _, tt := range tests {
+		r := httptest.NewRequest("GET", tt.target, nil)
+		got, err := buildV2CanonicalizedResource(r)
+		if err != nil || got != tt.want {
+			t.Errorf("%s: got %q, err %v; want %q", tt.target, got, err, tt.want)
+		}
+	}
+}
+
+func TestBuildV2CanonicalizedResource_AllSupportedParameters(t *testing.T) {
+	keys := []string{"acl", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory", "legal-hold", "lifecycle", "location", "logging", "notification", "object-lock", "partNumber", "policy", "replication", "requestPayment", "response-cache-control", "response-content-disposition", "response-content-encoding", "response-content-language", "response-content-type", "response-expires", "restore", "retention", "select", "select-type", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning", "versions", "website"}
+	q := url.Values{}
+	for _, key := range keys {
+		q.Set(key, "x")
+	}
+	r := httptest.NewRequest("GET", "/bucket?"+q.Encode(), nil)
+	got, err := buildV2CanonicalizedResource(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		if !strings.Contains(got, key+"=x") {
+			t.Errorf("resource missing %s: %s", key, got)
+		}
+	}
+}
+
+func TestBuildV2CanonicalizedResource_DuplicateSignedParameterRejected(t *testing.T) {
+	r := httptest.NewRequest("GET", "/bucket?acl&acl=", nil)
+	if _, err := buildV2CanonicalizedResource(r); err == nil {
+		t.Fatal("expected duplicate parameter error")
+	}
+}
+
+func TestBuildV2CanonicalizedResource_MalformedQueryRejected(t *testing.T) {
+	r := httptest.NewRequest("GET", "/bucket?acl=%zz", nil)
+	if _, err := buildV2CanonicalizedResource(r); err == nil {
+		t.Fatal("expected malformed query error")
+	}
+	r = httptest.NewRequest("GET", "/bucket?prefix=%zz", nil)
+	if _, err := buildV2CanonicalizedResource(r); err == nil {
+		t.Fatal("expected malformed unsigned query error")
+	}
+}
+
+func signLiteralV2(t *testing.T, method, date, resource, secret string) string {
+	t.Helper()
+	return base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secret), []byte(method+"\n\n\n"+date+"\n"+resource)))
+}
+
+func TestHMACSHA1_SigV2StandardVector(t *testing.T) {
+	// AWS SigV2 documentation canonical-resource example. The expected value is
+	// a fixed external vector, not calculated by a test signing helper.
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	const stringToSign = "GET\n\n\nTue, 27 Mar 2007 19:36:42 +0000\n/johnsmith/?acl"
+	const want = "3dBygG1T3GB6MRYKugIZofqZcO4="
+
+	got := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secret), []byte(stringToSign)))
+	if got != want {
+		t.Fatalf("SigV2 standard-vector HMAC = %q, want %q", got, want)
+	}
+}
+
+func TestValidateSignatureV2_HeaderAuth_SubresourceMutationRejected(t *testing.T) {
+	const secret = "literal-secret"
+	date := time.Now().UTC().Format(time.RFC1123)
+	req := httptest.NewRequest("GET", "/bucket/key?acl", nil)
+	req.Header.Set("Date", date)
+	req.Header.Set("Authorization", "AWS AKIA:"+signLiteralV2(t, "GET", date, "/bucket/key?acl", secret))
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); err != nil {
+		t.Fatal(err)
+	}
+	req.URL.RawQuery = ""
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); !errors.Is(err, ErrSignatureMismatch) {
+		t.Fatalf("mutation error = %v", err)
+	}
+}
+
+func TestValidateSignatureV2_QueryParam_SubresourceMutationRejected(t *testing.T) {
+	const secret = "literal-secret"
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	q := url.Values{"AWSAccessKeyId": {"AKIA"}, "Expires": {expires}, "acl": {""}}
+	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	q.Set("Signature", signLiteralV2(t, "GET", expires, "/bucket/key?acl", secret))
+	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); err != nil {
+		t.Fatal(err)
+	}
+	q.Del("acl")
+	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); !errors.Is(err, ErrSignatureMismatch) {
+		t.Fatalf("mutation error = %v", err)
+	}
+}
+
+func TestValidateSignatureV2_QueryParam_SubresourceValueMutationRejected(t *testing.T) {
+	const secret = "literal-secret"
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	q := url.Values{"AWSAccessKeyId": {"AKIA"}, "Expires": {expires}, "versionId": {"one"}}
+	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	q.Set("Signature", signLiteralV2(t, "GET", expires, "/bucket/key?versionId=one", secret))
+	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	q.Set("versionId", "two")
+	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); !errors.Is(err, ErrSignatureMismatch) {
+		t.Fatalf("mutation error = %v", err)
+	}
+}
+
+func TestValidateSignatureV2_QueryParam_UnsignedListFilterRemainsCompatible(t *testing.T) {
+	const secret = "literal-secret"
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	q := url.Values{"AWSAccessKeyId": {"AKIA"}, "Expires": {expires}, "prefix": {"one"}}
+	req := httptest.NewRequest("GET", "/bucket?"+q.Encode(), nil)
+	q.Set("Signature", signLiteralV2(t, "GET", expires, "/bucket", secret))
+	q.Set("prefix", "two")
+	req = httptest.NewRequest("GET", "/bucket?"+q.Encode(), nil)
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateSignatureV2_QueryParam_ResponseOverrideSigned(t *testing.T) {
+	const secret = "literal-secret"
+	expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	q := url.Values{"AWSAccessKeyId": {"AKIA"}, "Expires": {expires}, "response-content-type": {"text/plain"}}
+	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	q.Set("Signature", signLiteralV2(t, "GET", expires, "/bucket/key?response-content-type=text/plain", secret))
+	q.Set("response-content-type", "text/html")
+	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+	if err := ValidateSignatureV2(req, secret, defaultClockSkew); !errors.Is(err, ErrSignatureMismatch) {
+		t.Fatalf("mutation error = %v", err)
+	}
+}
+
+func TestValidateSignatureV2_HeaderAuth_AllSignedSubresources(t *testing.T) {
+	keys := []string{"acl", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory", "legal-hold", "lifecycle", "location", "logging", "notification", "object-lock", "partNumber", "policy", "replication", "requestPayment", "response-cache-control", "response-content-disposition", "response-content-encoding", "response-content-language", "response-content-type", "response-expires", "restore", "retention", "select", "select-type", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning", "versions", "website"}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			date := time.Now().UTC().Format(time.RFC1123)
+			for _, representation := range []string{key, key + "=value"} {
+				req := httptest.NewRequest("GET", "/bucket/key?"+representation, nil)
+				req.Header.Set("Date", date)
+				req.Header.Set("Authorization", "AWS AKIA:"+signLiteralV2(t, "GET", date, "/bucket/key?"+representation, "literal-secret"))
+				if err := ValidateSignatureV2(req, "literal-secret", defaultClockSkew); err != nil {
+					t.Fatal(err)
+				}
+				for _, mutation := range []string{"remove", "add", "substitute", "value"} {
+					query := representation
+					switch mutation {
+					case "remove":
+						query = ""
+					case "add":
+						added := "uploads"
+						if key == added {
+							added = "acl"
+						}
+						query += "&" + added
+					case "substitute":
+						replacement := "acl"
+						if key == replacement {
+							replacement = "uploads"
+						}
+						query = replacement
+					case "value":
+						query = key + "=changed"
+					}
+					bad := httptest.NewRequest("GET", "/bucket/key?"+query, nil)
+					bad.Header.Set("Date", date)
+					bad.Header.Set("Authorization", "AWS AKIA:"+signLiteralV2(t, "GET", date, "/bucket/key?"+representation, "literal-secret"))
+					if err := ValidateSignatureV2(bad, "literal-secret", defaultClockSkew); !errors.Is(err, ErrSignatureMismatch) {
+						t.Fatalf("%s %s mutation: %v", representation, mutation, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestValidateSignatureV2_QueryParam_AllSignedSubresources(t *testing.T) {
+	keys := []string{"acl", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory", "legal-hold", "lifecycle", "location", "logging", "notification", "object-lock", "partNumber", "policy", "replication", "requestPayment", "response-cache-control", "response-content-disposition", "response-content-encoding", "response-content-language", "response-content-type", "response-expires", "restore", "retention", "select", "select-type", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning", "versions", "website"}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			expires := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+			for _, representation := range []string{key, key + "=value"} {
+				q := url.Values{"AWSAccessKeyId": {"AKIA"}, "Expires": {expires}}
+				if representation == key {
+					q[key] = []string{""}
+				} else {
+					q[key] = []string{"value"}
+				}
+				q.Set("Signature", signLiteralV2(t, "GET", expires, "/bucket/key?"+representation, "literal-secret"))
+				req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
+				if err := ValidateSignatureV2(req, "literal-secret", defaultClockSkew); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, representation := range []string{key, key + "=value"} {
+				q := url.Values{"AWSAccessKeyId": {"AKIA"}, "Expires": {expires}}
+				if representation == key {
+					q[key] = []string{""}
+				} else {
+					q[key] = []string{"value"}
+				}
+				q.Set("Signature", signLiteralV2(t, "GET", expires, "/bucket/key?"+representation, "literal-secret"))
+				for _, mutation := range []string{"remove", "add", "substitute", "value"} {
+					mutated := url.Values{}
+					for name, values := range q {
+						mutated[name] = append([]string(nil), values...)
+					}
+					switch mutation {
+					case "remove":
+						mutated.Del(key)
+					case "add":
+						added := "uploads"
+						if key == added {
+							added = "acl"
+						}
+						mutated.Set(added, "other")
+					case "substitute":
+						mutated.Del(key)
+						replacement := "acl"
+						if key == replacement {
+							replacement = "uploads"
+						}
+						mutated.Set(replacement, "other")
+					case "value":
+						mutated.Set(key, "changed")
+					}
+					bad := httptest.NewRequest("GET", "/bucket/key?"+mutated.Encode(), nil)
+					if err := ValidateSignatureV2(bad, "literal-secret", defaultClockSkew); !errors.Is(err, ErrSignatureMismatch) {
+						t.Fatalf("%s %s mutation: %v", representation, mutation, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func FuzzBuildV2CanonicalizedResource(f *testing.F) {
+	f.Add("/bucket/key", "acl&versionId=v1")
+	f.Add("/bucket/a%2Fb", "prefix=x&delete")
+	f.Fuzz(func(t *testing.T, path, query string) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.URL.Path = path
+		req.URL.RawPath = path
+		req.URL.RawQuery = query
+		beforePath, beforeRawPath, beforeQuery := req.URL.Path, req.URL.RawPath, req.URL.RawQuery
+		resource, err := buildV2CanonicalizedResource(req)
+		if err != nil {
+			return
+		}
+		if req.URL.Path != beforePath || req.URL.RawPath != beforeRawPath || req.URL.RawQuery != beforeQuery {
+			t.Fatal("request mutated")
+		}
+		seen := map[string]bool{}
+		parts := strings.SplitN(resource, "?", 2)
+		if len(parts) == 1 {
+			return
+		}
+		for _, part := range strings.Split(parts[1], "&") {
+			name := strings.SplitN(part, "=", 2)[0]
+			if _, ok := sigV2CanonicalResourceParams[name]; ok {
+				if seen[name] {
+					t.Fatalf("duplicate signed key %q", name)
+				}
+				seen[name] = true
+			}
+		}
+	})
+}
+
+func TestBuildV2CanonicalizedResource_QueryNamesAreCaseSensitive(t *testing.T) {
+	r := httptest.NewRequest("GET", "/bucket?ACL&acl", nil)
+	got, err := buildV2CanonicalizedResource(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/bucket?acl" {
+		t.Fatalf("got %q, want only exact-case acl", got)
 	}
 }
 
@@ -809,12 +1104,15 @@ func TestValidateSignatureV2_QueryParam(t *testing.T) {
 	q.Set("Expires", expires)
 
 	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
-	stringToSign := buildV2StringToSign(req)
+	stringToSign, err := buildV2StringToSign(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secretKey), []byte(stringToSign)))
 	q.Set("Signature", sig)
 
 	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV2() expected nil for valid query-param auth, got: %v", err)
 	}
@@ -824,11 +1122,12 @@ func TestValidateSignatureV2_QueryParam(t *testing.T) {
 // ErrSignatureMismatch.
 func TestValidateSignatureV2_BadSignature(t *testing.T) {
 	secretKey := "correct-secret"
+	var err error
 	req := httptest.NewRequest("GET", "/bucket/key", nil)
 	req.Header.Set("Date", time.Now().UTC().Format(time.RFC1123))
 	req.Header.Set("Authorization", "AWS AKIATEST:badsignature")
 
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV2() expected error for bad signature, got nil")
 	}
@@ -841,12 +1140,13 @@ func TestValidateSignatureV2_BadSignature(t *testing.T) {
 // request with a Date more than 5 minutes in the past is rejected.
 func TestValidateSignatureV2_ClockSkew_Past(t *testing.T) {
 	secretKey := "test-secret"
+	var err error
 	req := httptest.NewRequest("GET", "/bucket/key", nil)
 	// Timestamp 20 minutes in the past
 	req.Header.Set("Date", time.Now().UTC().Add(-20*time.Minute).Format(time.RFC1123))
 	req.Header.Set("Authorization", "AWS AKIATEST:badsignature")
 
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV2() expected error for old timestamp, got nil")
 	}
@@ -859,12 +1159,13 @@ func TestValidateSignatureV2_ClockSkew_Past(t *testing.T) {
 // request with a Date more than 5 minutes in the future is rejected.
 func TestValidateSignatureV2_ClockSkew_Future(t *testing.T) {
 	secretKey := "test-secret"
+	var err error
 	req := httptest.NewRequest("GET", "/bucket/key", nil)
 	// Timestamp 20 minutes in the future
 	req.Header.Set("Date", time.Now().UTC().Add(20*time.Minute).Format(time.RFC1123))
 	req.Header.Set("Authorization", "AWS AKIATEST:badsignature")
 
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV2() expected error for future timestamp, got nil")
 	}
@@ -882,11 +1183,14 @@ func TestValidateSignatureV2_ClockSkew_WithinWindow(t *testing.T) {
 	// Timestamp 2 minutes in the past — comfortably within the skew window
 	req.Header.Set("Date", time.Now().UTC().Add(-2*time.Minute).Format(time.RFC1123))
 
-	stringToSign := buildV2StringToSign(req)
+	stringToSign, err := buildV2StringToSign(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secretKey), []byte(stringToSign)))
 	req.Header.Set("Authorization", "AWS "+accessKey+":"+sig)
 
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV2() expected nil for timestamp within skew window, got: %v", err)
 	}
@@ -896,6 +1200,7 @@ func TestValidateSignatureV2_ClockSkew_WithinWindow(t *testing.T) {
 // request with an Expires timestamp in the past is rejected.
 func TestValidateSignatureV2_QueryParam_Expired(t *testing.T) {
 	secretKey := "test-secret"
+	var err error
 	// Expires 1 hour ago
 	expires := strconv.FormatInt(time.Now().Add(-1*time.Hour).Unix(), 10)
 	q := url.Values{}
@@ -904,7 +1209,7 @@ func TestValidateSignatureV2_QueryParam_Expired(t *testing.T) {
 	q.Set("Signature", "badsignature")
 
 	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV2() expected error for expired request, got nil")
 	}
@@ -918,6 +1223,7 @@ func TestValidateSignatureV2_QueryParam_Expired(t *testing.T) {
 func TestValidateSignatureV2_QueryParam_ValidFuture(t *testing.T) {
 	secretKey := "test-secret-key"
 	accessKey := "AKIATEST"
+	var err error
 	// Expires 1 hour from now
 	expires := strconv.FormatInt(time.Now().Add(1*time.Hour).Unix(), 10)
 	q := url.Values{}
@@ -925,12 +1231,15 @@ func TestValidateSignatureV2_QueryParam_ValidFuture(t *testing.T) {
 	q.Set("Expires", expires)
 
 	req := httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
-	stringToSign := buildV2StringToSign(req)
+	stringToSign, err := buildV2StringToSign(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secretKey), []byte(stringToSign)))
 	q.Set("Signature", sig)
 
 	req = httptest.NewRequest("GET", "/bucket/key?"+q.Encode(), nil)
-	err := ValidateSignatureV2(req, secretKey, defaultClockSkew)
+	err = ValidateSignatureV2(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV2() expected nil for valid future Expires, got: %v", err)
 	}

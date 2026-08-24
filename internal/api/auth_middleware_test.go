@@ -103,6 +103,58 @@ func TestAuthMiddleware_SigV2_Valid(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_SigV2_SubresourceSubstitutionRejected(t *testing.T) {
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	called := false
+	h := AuthMiddleware(testCredentialStore(), time.Minute, logrus.New(), nil, true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) }))
+	date := time.Now().UTC().Format(time.RFC1123)
+	req := httptest.NewRequest("GET", "/bucket/key?acl", nil)
+	req.Header.Set("Date", date)
+	// The signature covers the literal /bucket/key?acl canonical resource.
+	stringToSign := "GET\n\n\n" + date + "\n/bucket/key?acl"
+	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secret), []byte(stringToSign)))
+	req.Header.Set("Authorization", "AWS AKIAIOSFODNN7EXAMPLE:"+sig)
+	req.URL.RawQuery = "versioning"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || called || !strings.Contains(rec.Body.String(), "SignatureDoesNotMatch") {
+		t.Fatalf("status=%d called=%v, want forbidden and no downstream call", rec.Code, called)
+	}
+}
+
+func TestAuthMiddleware_SigV2_MultipartUploadIDMutationRejected(t *testing.T) {
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	called := false
+	h := AuthMiddleware(testCredentialStore(), time.Minute, logrus.New(), nil, true)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	date := time.Now().UTC().Format(time.RFC1123)
+	req := httptest.NewRequest("POST", "/bucket/key?uploadId=one", nil)
+	req.Header.Set("Date", date)
+	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secret), []byte("POST\n\n\n"+date+"\n/bucket/key?uploadId=one")))
+	req.Header.Set("Authorization", "AWS AKIAIOSFODNN7EXAMPLE:"+sig)
+	req.URL.RawQuery = "uploadId=two"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || called || !strings.Contains(rec.Body.String(), "SignatureDoesNotMatch") {
+		t.Fatalf("status=%d called=%v", rec.Code, called)
+	}
+}
+
+func TestAuthMiddleware_SigV2_ValidSignedSubresourceAccepted(t *testing.T) {
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	called := false
+	h := AuthMiddleware(testCredentialStore(), time.Minute, logrus.New(), nil, true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) }))
+	date := time.Now().UTC().Format(time.RFC1123)
+	req := httptest.NewRequest("GET", "/bucket/key?acl", nil)
+	req.Header.Set("Date", date)
+	sig := base64.StdEncoding.EncodeToString(hmacSHA1([]byte(secret), []byte("GET\n\n\n"+date+"\n/bucket/key?acl")))
+	req.Header.Set("Authorization", "AWS AKIAIOSFODNN7EXAMPLE:"+sig)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status=%d called=%v", rec.Code, called)
+	}
+}
+
 func TestAuthMiddleware_SigV2_BadSignature(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)

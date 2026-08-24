@@ -168,6 +168,11 @@ config:
   auth:
     clockSkewTolerance:
       value: "5m"
+    # SigV2 is deprecated and disabled by default. Set to "true" only for
+    # clients that cannot yet migrate to SigV4.
+    allowLegacySignatureV2:
+      value: "false"
+      valueFrom: {}
     # Gateway credential store — at least one entry required.
     # Every inbound S3 request must present one of these access keys
     # with a valid AWS Signature (V2 or V4).

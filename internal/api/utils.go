@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -189,30 +190,22 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 	proxyReq.Header.Del("X-Amz-Security-Token")
 
 	if proxyReq.URL != nil {
-		q := proxyReq.URL.Query()
-		presignedParams := []string{
-			"X-Amz-Signature",
-			"X-Amz-Credential",
-			"X-Amz-Date",
-			"X-Amz-Expires",
-			"X-Amz-SignedHeaders",
-			"X-Amz-Algorithm",
-			"X-Amz-Security-Token",
+		presignedParams := map[string]struct{}{
+			// SigV2 query authentication must not reach the backend alongside the
+			// gateway's SigV4 Authorization header.
+			"AWSAccessKeyId":       {},
+			"Expires":              {},
+			"Signature":            {},
+			"Date":                 {},
+			"X-Amz-Signature":      {},
+			"X-Amz-Credential":     {},
+			"X-Amz-Date":           {},
+			"X-Amz-Expires":        {},
+			"X-Amz-SignedHeaders":  {},
+			"X-Amz-Algorithm":      {},
+			"X-Amz-Security-Token": {},
 		}
-		hadPresigned := false
-		for _, p := range presignedParams {
-			if q.Has(p) {
-				hadPresigned = true
-				q.Del(p)
-			}
-		}
-		// Only re-encode when presigned params were actually removed.
-		// Unconditional re-encoding changes the raw format (e.g.
-		// "tagging" becomes "tagging=") which breaks some S3 backends'
-		// query string expectations for value-less parameters.
-		if hadPresigned {
-			proxyReq.URL.RawQuery = q.Encode()
-		}
+		proxyReq.URL.RawQuery = stripClientAuthQuery(proxyReq.URL.RawQuery, presignedParams)
 	}
 
 	if len(bodyBytes) > 0 {
@@ -237,6 +230,14 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 		if err := signer.SignHTTP(r.Context(), credsVal, proxyReq, payloadHash, "s3", region, time.Now()); err != nil {
 			return nil, fmt.Errorf("failed to sign backend request: %w", err)
 		}
+		// The AWS signer normalizes bare query selectors to `key=`. Restore the
+		// wire form because several S3-compatible backends distinguish `?tagging`
+		// from `?tagging=` while signing canonicalizes them equivalently.
+		proxyReq.URL.RawQuery = stripClientAuthQuery(r.URL.RawQuery, map[string]struct{}{
+			"AWSAccessKeyId": {}, "Expires": {}, "Signature": {}, "Date": {},
+			"X-Amz-Signature": {}, "X-Amz-Credential": {}, "X-Amz-Date": {},
+			"X-Amz-Expires": {}, "X-Amz-SignedHeaders": {}, "X-Amz-Algorithm": {}, "X-Amz-Security-Token": {},
+		})
 	}
 
 	transport := &http.Transport{
@@ -252,6 +253,24 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("backend request failed: %w", err)
 	}
 	return resp, nil
+}
+
+// stripClientAuthQuery removes client authentication fields without changing
+// remaining query tokens, including bare S3 subresource selectors.
+func stripClientAuthQuery(rawQuery string, authParams map[string]struct{}) string {
+	parts := strings.Split(rawQuery, "&")
+	kept := parts[:0]
+	for _, part := range parts {
+		name, _, _ := strings.Cut(part, "=")
+		decodedName, err := url.QueryUnescape(name)
+		if err == nil {
+			if _, remove := authParams[decodedName]; remove {
+				continue
+			}
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, "&")
 }
 
 // handlePassthrough is a generic passthrough wrapper that forwards a request to

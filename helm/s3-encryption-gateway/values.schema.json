@@ -863,6 +863,10 @@
               "allOf": [{ "$ref": "#/$defs/configValue" }],
               "description": "Maximum acceptable clock skew for signature validation (e.g. 5m)."
             },
+            "allowLegacySignatureV2": {
+              "allOf": [{ "$ref": "#/$defs/configValue" }],
+              "description": "Opt in to deprecated SigV2 authentication; defaults to false."
+            },
             "existingCredentialsSecret": {
               "type": "object",
               "description": "Reference an existing Kubernetes Secret containing the full credentials list (YAML/JSON). When set, the inline credentials list is ignored.",

@@ -61,6 +61,63 @@ auth:
 	// Provider is now optional, just for reference
 }
 
+func TestLoadConfig_AllowLegacySignatureV2_DefaultDisabled(t *testing.T) {
+	cfg := loadMinimalConfigForSigV2Test(t, "")
+	if cfg.Auth.AllowLegacySignatureV2 {
+		t.Fatal("SigV2 must be disabled by default")
+	}
+}
+
+func TestLoadConfig_AllowLegacySignatureV2_YAMLOptIn(t *testing.T) {
+	cfg := loadMinimalConfigForSigV2Test(t, "  allow_legacy_signature_v2: true\n")
+	if !cfg.Auth.AllowLegacySignatureV2 {
+		t.Fatal("YAML opt-in was not applied")
+	}
+}
+
+func TestLoadConfig_AllowLegacySignatureV2_EnvOverride(t *testing.T) {
+	t.Setenv("AUTH_ALLOW_LEGACY_SIGNATURE_V2", "true")
+	cfg := loadMinimalConfigForSigV2Test(t, "")
+	if !cfg.Auth.AllowLegacySignatureV2 {
+		t.Fatal("environment opt-in was not applied")
+	}
+}
+
+func TestLoadConfig_AllowLegacySignatureV2_EnvFalseOverridesYAMLTrue(t *testing.T) {
+	t.Setenv("AUTH_ALLOW_LEGACY_SIGNATURE_V2", "false")
+	cfg := loadMinimalConfigForSigV2Test(t, "  allow_legacy_signature_v2: true\n")
+	if cfg.Auth.AllowLegacySignatureV2 {
+		t.Fatal("environment false must override YAML true")
+	}
+}
+
+func TestLoadConfig_AllowLegacySignatureV2_InvalidEnvRejected(t *testing.T) {
+	t.Setenv("AUTH_ALLOW_LEGACY_SIGNATURE_V2", "maybe")
+	_, err := loadMinimalConfigForSigV2TestErr(t, "")
+	if err == nil || !strings.Contains(err.Error(), "AUTH_ALLOW_LEGACY_SIGNATURE_V2") {
+		t.Fatalf("expected invalid env error, got %v", err)
+	}
+}
+
+func loadMinimalConfigForSigV2Test(t *testing.T, extra string) *Config {
+	cfg, err := loadMinimalConfigForSigV2TestErr(t, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func loadMinimalConfigForSigV2TestErr(t *testing.T, extra string) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "backend:\n  access_key: test\n  secret_key: secret\nencryption:\n  password: password\nauth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\n" + extra
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return LoadConfig(path)
+}
+
 func TestLoadConfig_EnvOverrides(t *testing.T) {
 	os.Setenv("LISTEN_ADDR", ":9090")
 	os.Setenv("LOG_LEVEL", "debug")

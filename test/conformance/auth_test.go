@@ -46,7 +46,7 @@ func testSEC40_Auth_SigV2PresignedGET_RedactsAccessLog(t *testing.T, inst provid
 		t.Fatalf("create SigV2 request: %v", err)
 	}
 	req.Host = req.URL.Host
-	stringToSign := fmt.Sprintf("GET\n\n\n%s\n%s", q.Get("Expires"), req.URL.Path)
+	stringToSign := fmt.Sprintf("GET\n\n\n%s\n%s?response-content-type=text/plain", q.Get("Expires"), req.URL.EscapedPath())
 	h := hmac.New(sha1.New, []byte(testSecretKey))
 	_, _ = h.Write([]byte(stringToSign))
 	q.Set("Signature", base64.StdEncoding.EncodeToString(h.Sum(nil)))
@@ -65,6 +65,221 @@ func testSEC40_Auth_SigV2PresignedGET_RedactsAccessLog(t *testing.T, inst provid
 	if !strings.Contains(logs.String(), "response-content-type=text%2Fplain") {
 		t.Fatal("benign response-content-type query value missing from access log")
 	}
+}
+
+func sigV2PresignedRequest(t *testing.T, method, target string, body io.Reader) *http.Request {
+	t.Helper()
+	expires := fmt.Sprint(time.Now().Add(time.Hour).Unix())
+	parsed, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	resource := parsed.EscapedPath()
+	if resource == "" {
+		resource = "/"
+	}
+	keys := make([]string, 0)
+	for key := range query {
+		if sigV2TestResourceKey(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for i, key := range keys {
+		if i == 0 {
+			resource += "?"
+		} else {
+			resource += "&"
+		}
+		resource += key
+		if query.Get(key) != "" {
+			resource += "=" + query.Get(key)
+		}
+	}
+	q := query
+	q.Set("AWSAccessKeyId", testAccessKey)
+	q.Set("Expires", expires)
+	parsed.RawQuery = q.Encode()
+	req, err := http.NewRequest(method, parsed.String(), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method == "PUT" {
+		req.Header.Set("Content-Type", "application/xml")
+	}
+	contentType := req.Header.Get("Content-Type")
+	// SigV2 lines are method, Content-MD5, Content-Type, Date, headers, resource.
+	stringToSign := method + "\n\n" + contentType + "\n" + expires + "\n" + resource
+	h := hmac.New(sha1.New, []byte(testSecretKey))
+	_, _ = h.Write([]byte(stringToSign))
+	q.Set("Signature", base64.StdEncoding.EncodeToString(h.Sum(nil)))
+	req.URL.RawQuery = q.Encode()
+	return req
+}
+
+func sigV2TestResourceKey(key string) bool {
+	for _, allowed := range []string{"acl", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory", "legal-hold", "lifecycle", "location", "logging", "notification", "object-lock", "partNumber", "policy", "replication", "requestPayment", "response-cache-control", "response-content-disposition", "response-content-encoding", "response-content-language", "response-content-type", "response-expires", "restore", "retention", "select", "select-type", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning", "versions", "website"} {
+		if key == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func testSEC44_Auth_SigV2PresignedSubresourceAccepted(t *testing.T, inst provider.Instance) {
+	gw := harness.StartGateway(t, inst, harness.WithAuth(config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey}), harness.WithConfigMutator(func(cfg *config.Config) { cfg.Auth.AllowLegacySignatureV2 = true }))
+	key := uniqueKey(t)
+	t.Cleanup(func() { deleteSigned(t, gw, inst.Bucket, key, testAccessKey, testSecretKey) })
+	putSigned(t, gw, inst.Bucket, key, []byte("data"), testAccessKey, testSecretKey)
+	body := strings.NewReader(`<Tagging><TagSet><Tag><Key>sec44</Key><Value>ok</Value></Tag></TagSet></Tagging>`)
+	req := sigV2PresignedRequest(t, "PUT", objectURL(gw, inst.Bucket, key)+"?tagging", body)
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		failure, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, failure)
+	}
+	check := sigV2PresignedRequest(t, "GET", objectURL(gw, inst.Bucket, key)+"?tagging", nil)
+	checked, err := gw.HTTPClient().Do(check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checked.Body.Close()
+	data, _ := io.ReadAll(checked.Body)
+	if checked.StatusCode != http.StatusOK || !bytes.Contains(data, []byte("sec44")) {
+		t.Fatalf("tagging state not persisted: %d %s", checked.StatusCode, data)
+	}
+}
+
+func testSEC44_Auth_SigV2PresignedSubresourceSubstitutionRejected(t *testing.T, inst provider.Instance) {
+	gw := harness.StartGateway(t, inst, harness.WithAuth(config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey}), harness.WithConfigMutator(func(cfg *config.Config) { cfg.Auth.AllowLegacySignatureV2 = true }))
+	key := uniqueKey(t)
+	t.Cleanup(func() { deleteSigned(t, gw, inst.Bucket, key, testAccessKey, testSecretKey) })
+	putSigned(t, gw, inst.Bucket, key, []byte("data"), testAccessKey, testSecretKey)
+	baseline := sigV2PresignedRequest(t, "PUT", objectURL(gw, inst.Bucket, key)+"?tagging", strings.NewReader(`<Tagging><TagSet><Tag><Key>baseline</Key><Value>keep</Value></Tag></TagSet></Tagging>`))
+	resp, err := gw.HTTPClient().Do(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		failure, _ := io.ReadAll(resp.Body)
+		t.Fatalf("baseline tagging status %d: %s", resp.StatusCode, failure)
+	}
+	req := sigV2PresignedRequest(t, "PUT", objectURL(gw, inst.Bucket, key)+"?tagging", strings.NewReader(`<Tagging><TagSet><Tag><Key>forged</Key><Value>bad</Value></Tag></TagSet></Tagging>`))
+	values := req.URL.Query()
+	values.Del("tagging")
+	values.Set("acl", "")
+	req.URL.RawQuery = values.Encode()
+	resp, err = gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status %d, want forbidden", resp.StatusCode)
+	}
+	errorBody, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(errorBody), "SignatureDoesNotMatch") {
+		t.Fatal("missing SignatureDoesNotMatch")
+	}
+	state := sigV2PresignedRequest(t, "GET", objectURL(gw, inst.Bucket, key)+"?tagging", nil)
+	checked, err := gw.HTTPClient().Do(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checked.Body.Close()
+	data, _ := io.ReadAll(checked.Body)
+	if checked.StatusCode != http.StatusOK {
+		t.Fatalf("tagging GET status %d: %s", checked.StatusCode, data)
+	}
+	if !bytes.Contains(data, []byte("baseline")) || bytes.Contains(data, []byte("forged")) {
+		t.Fatalf("tagging changed: %s", data)
+	}
+}
+
+func testSEC44_Auth_SigV2HeaderSubresourceAccepted(t *testing.T, inst provider.Instance) {
+	gw := harness.StartGateway(t, inst, harness.WithAuth(config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey}), harness.WithConfigMutator(func(cfg *config.Config) { cfg.Auth.AllowLegacySignatureV2 = true }))
+	key := uniqueKey(t)
+	t.Cleanup(func() { deleteSigned(t, gw, inst.Bucket, key, testAccessKey, testSecretKey) })
+	putSigned(t, gw, inst.Bucket, key, []byte("data"), testAccessKey, testSecretKey)
+	req, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, key)+"?acl", nil)
+	req.Header.Set("x-amz-acl", "public-read")
+	date := time.Now().UTC().Format(time.RFC1123)
+	req.Header.Set("Date", date)
+	s := "PUT\n\n\n" + date + "\nx-amz-acl:public-read\n" + req.URL.EscapedPath() + "?acl"
+	h := hmac.New(sha1.New, []byte(testSecretKey))
+	_, _ = h.Write([]byte(s))
+	req.Header.Set("Authorization", "AWS "+testAccessKey+":"+base64.StdEncoding.EncodeToString(h.Sum(nil)))
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	acl := signedACLGet(t, gw, inst.Bucket, key)
+	if !bytes.Contains(acl, []byte("public-read")) {
+		t.Fatal("signed ACL operation did not persist state")
+	}
+}
+
+func testSEC44_Auth_SigV2HeaderSubresourceSubstitutionRejected(t *testing.T, inst provider.Instance) {
+	gw := harness.StartGateway(t, inst, harness.WithAuth(config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey}), harness.WithConfigMutator(func(cfg *config.Config) { cfg.Auth.AllowLegacySignatureV2 = true }))
+	key := uniqueKey(t)
+	t.Cleanup(func() { deleteSigned(t, gw, inst.Bucket, key, testAccessKey, testSecretKey) })
+	putSigned(t, gw, inst.Bucket, key, []byte("data"), testAccessKey, testSecretKey)
+	baseline := signedACLGet(t, gw, inst.Bucket, key)
+	req, _ := http.NewRequest("PUT", objectURL(gw, inst.Bucket, key)+"?acl", nil)
+	req.Header.Set("x-amz-acl", "public-read")
+	date := time.Now().UTC().Format(time.RFC1123)
+	req.Header.Set("Date", date)
+	s := "PUT\n\n\n" + date + "\nx-amz-acl:public-read\n" + req.URL.EscapedPath() + "?acl"
+	h := hmac.New(sha1.New, []byte(testSecretKey))
+	_, _ = h.Write([]byte(s))
+	req.Header.Set("Authorization", "AWS "+testAccessKey+":"+base64.StdEncoding.EncodeToString(h.Sum(nil)))
+	req.URL.RawQuery = "versionId=one"
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	errorBody, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(errorBody), "SignatureDoesNotMatch") {
+		t.Fatal("missing SignatureDoesNotMatch")
+	}
+	after := signedACLGet(t, gw, inst.Bucket, key)
+	if !bytes.Equal(baseline, after) {
+		t.Fatalf("ACL state changed: before=%s after=%s", baseline, after)
+	}
+}
+
+func signedACLGet(t *testing.T, gw *harness.Gateway, bucket, key string) []byte {
+	t.Helper()
+	req, _ := http.NewRequest("GET", objectURL(gw, bucket, key)+"?acl", nil)
+	date := time.Now().UTC().Format(time.RFC1123)
+	req.Header.Set("Date", date)
+	h := hmac.New(sha1.New, []byte(testSecretKey))
+	_, _ = h.Write([]byte("GET\n\n\n" + date + "\n" + req.URL.EscapedPath() + "?acl"))
+	req.Header.Set("Authorization", "AWS "+testAccessKey+":"+base64.StdEncoding.EncodeToString(h.Sum(nil)))
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ACL get status %d: %s", resp.StatusCode, data)
+	}
+	return data
 }
 
 const (

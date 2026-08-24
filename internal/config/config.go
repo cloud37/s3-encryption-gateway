@@ -739,9 +739,8 @@ type AuthConfig struct {
 	// Signature Version 2 (HMAC-SHA1) requests. SigV2 is deprecated and
 	// uses weaker HMAC-SHA1 signing; it also exposes the secret key in URL
 	// query parameters when used with presigned-URL style auth.
-	// Operators who can guarantee all clients use SigV4 should set this to
-	// false to enforce a V4-only policy.
-	// Default: true (backward-compatible).
+	// Operators with clients that still require SigV2 must explicitly opt in.
+	// Default: false (SigV4-only policy).
 	AllowLegacySignatureV2 bool `yaml:"allow_legacy_signature_v2" env:"AUTH_ALLOW_LEGACY_SIGNATURE_V2"`
 
 	// Credentials holds the gateway-managed credential store.
@@ -979,7 +978,7 @@ func LoadConfig(path string) (*Config, error) {
 		},
 		Auth: AuthConfig{
 			ClockSkewTolerance:     5 * time.Minute,
-			AllowLegacySignatureV2: true,
+			AllowLegacySignatureV2: false,
 		},
 		Admin: AdminConfig{
 			Enabled:        false,
@@ -1649,6 +1648,13 @@ func loadFromEnv(config *Config) error {
 		if d, err := time.ParseDuration(v); err == nil {
 			config.Auth.ClockSkewTolerance = d
 		}
+	}
+	if v, ok := os.LookupEnv("AUTH_ALLOW_LEGACY_SIGNATURE_V2"); ok {
+		allow, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid AUTH_ALLOW_LEGACY_SIGNATURE_V2: %w", err)
+		}
+		config.Auth.AllowLegacySignatureV2 = allow
 	}
 	// Resolve credential secrets from environment variables (V1.0-AUTH-1)
 	for i := range config.Auth.Credentials {

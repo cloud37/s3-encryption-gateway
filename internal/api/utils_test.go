@@ -542,6 +542,42 @@ func TestHandlePassthrough_StripsClientAuthAndReSigns(t *testing.T) {
 	}
 }
 
+func TestHandlePassthrough_StripsSigV2QueryAuthAndPreservesBareSubresource(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		for _, name := range []string{"AWSAccessKeyId", "Expires", "Signature", "Date"} {
+			if q.Has(name) {
+				t.Errorf("backend received client SigV2 parameter %q", name)
+			}
+		}
+		if r.URL.RawQuery != "tagging" {
+			t.Errorf("RawQuery = %q, want bare tagging selector", r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") == "" {
+			t.Error("backend received no gateway authorization")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	h := &Handler{
+		config: &config.Config{Backend: config.BackendConfig{
+			Endpoint: backend.URL, AccessKey: "backend-access-key", SecretKey: "backend-secret-key", Region: "us-east-1",
+		}},
+		logger:  logrus.New(),
+		metrics: getTestMetrics(),
+	}
+	h.logger.SetLevel(logrus.PanicLevel)
+	req := httptest.NewRequest("PUT", "/bucket/key?tagging&AWSAccessKeyId=client&Expires=1893456000&Signature=sig", strings.NewReader("body"))
+	req.Header.Set("Content-Type", "application/xml")
+
+	w := httptest.NewRecorder()
+	h.handlePassthrough(w, req, "PutObjectTagging", "bucket", "key")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestHandlePassthrough_NegativeContentLength_NoPanic verifies that a backend
 // response with ContentLength == -1 (chunked encoding, no Content-Length
 // header) does not trigger a Prometheus counter panic.

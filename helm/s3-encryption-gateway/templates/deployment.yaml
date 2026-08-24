@@ -68,9 +68,10 @@ spec:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_REGION" "value" .Values.config.backend.region.value "valueFrom" .Values.config.backend.region.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_ACCESS_KEY" "value" .Values.config.backend.accessKey.value "valueFrom" .Values.config.backend.accessKey.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_SECRET_KEY" "value" .Values.config.backend.secretKey.value "valueFrom" .Values.config.backend.secretKey.valueFrom) | nindent 8 }}
-        {{- if or .Values.config.auth.clockSkewTolerance.value .Values.config.auth.clockSkewTolerance.valueFrom }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "AUTH_CLOCK_SKEW_TOLERANCE" "value" .Values.config.auth.clockSkewTolerance.value "valueFrom" .Values.config.auth.clockSkewTolerance.valueFrom) | nindent 8 }}
-        {{- end }}
+         {{- if or .Values.config.auth.clockSkewTolerance.value .Values.config.auth.clockSkewTolerance.valueFrom }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "AUTH_CLOCK_SKEW_TOLERANCE" "value" .Values.config.auth.clockSkewTolerance.value "valueFrom" .Values.config.auth.clockSkewTolerance.valueFrom) | nindent 8 }}
+         {{- end }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "AUTH_ALLOW_LEGACY_SIGNATURE_V2" "value" .Values.config.auth.allowLegacySignatureV2.value "valueFrom" .Values.config.auth.allowLegacySignatureV2.valueFrom) | nindent 8 }}
         {{- if .Values.config.auth.existingCredentialsSecret }}
         - name: AUTH_CREDENTIALS_FILE
           value: "/etc/s3-gateway/auth-credentials/{{ .Values.config.auth.existingCredentialsSecret.key }}"
