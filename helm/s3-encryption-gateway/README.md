@@ -818,6 +818,12 @@ which is enabled by default whenever Valkey is configured.
 #### Development / staging (in-cluster Valkey subchart)
 
 ```yaml
+config:
+  auth:
+    # Deprecated SigV2 is disabled by default. Set true only during migration.
+    allowLegacySignatureV2:
+      value: "false"
+
 valkey:
   enabled: true                  # auto-wires VALKEY_ADDR → <release>-valkey:6379
   architecture: standalone

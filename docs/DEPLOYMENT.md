@@ -186,7 +186,21 @@ data:
 
 ## Configuring Gateway Credentials
 
-The gateway requires every incoming request to present valid AWS Signature V4 or V2 credentials. These are configured in the `auth.credentials` list and are **separate** from the backend S3 credentials.
+The gateway requires every incoming request to present valid AWS Signature V4 credentials. Legacy Signature V2 is disabled by default and must be explicitly enabled only for a temporary client migration. Gateway credentials are configured in the `auth.credentials` list and are **separate** from the backend S3 credentials.
+
+### Legacy SigV2 Migration
+
+Before upgrading, identify SigV2 clients and any outstanding SigV2 presigned URLs. Migrate them to SigV4 where possible; existing SigV2 presigned URLs require the temporary opt-in until they expire. SigV2 canonicalizes supported S3 subresources, so clients must include those selectors when signing.
+
+For a YAML configuration, use:
+
+```yaml
+auth:
+  # Deprecated: remove after all clients use SigV4.
+  allow_legacy_signature_v2: true
+```
+
+For an environment-based deployment, set `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`. Invalid environment values cause startup configuration loading to fail.
 
 ### `auth.credentials` Config Block (Helm Chart)
 
@@ -195,6 +209,9 @@ In the Helm chart, each credential entry supports both inline `value` and `value
 ```yaml
 config:
   auth:
+    # Legacy SigV2 is disabled by default. Set true only during migration.
+    allowLegacySignatureV2:
+      value: "false"
     credentials:
       - accessKey:
           value: ""               # fallback only when valueFrom is absent

@@ -609,7 +609,7 @@ docker run -p 8080:8080 \
 
 Runs PBKDF2-SHA256 600k on every request. No key infrastructure needed — just a single password — but throughput is **50× lower** than envelope encryption.
 
-> **Authentication is required.** As of v0.8, every request must include valid AWS Signature V4 or V2 credentials matching an entry in `auth.credentials`. Unauthenticated requests will receive `AccessDenied`.
+> **Authentication is required.** As of v0.8, every request must include valid AWS Signature V4 credentials matching an entry in `auth.credentials`. Deprecated SigV2 requires explicit temporary opt-in during migration. Unauthenticated requests will receive `AccessDenied`.
 
 Point any S3 client at the gateway instead of directly at S3:
 
@@ -742,6 +742,10 @@ listen_addr: ":8080"
 log_level: "info"
 
 auth:
+  # SigV4 is the default and required signing mode. SigV2 is deprecated,
+  # disabled by default, and canonicalizes supported S3 subresources when enabled.
+  # Temporarily opt in with allow_legacy_signature_v2: true while migrating.
+  allow_legacy_signature_v2: false
   credentials:
     - access_key: "YOUR_GATEWAY_ACCESS_KEY"
       secret_key: "YOUR_GATEWAY_SECRET_KEY"

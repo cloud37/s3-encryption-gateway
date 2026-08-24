@@ -8,6 +8,10 @@ auth:
   # Default: 5m (matching AWS SigV4 specification).
   clock_skew_tolerance: "5m"
 
+  # SigV2 is deprecated and disabled by default. Set true only while migrating
+  # clients to SigV4: allow_legacy_signature_v2: true
+  allow_legacy_signature_v2: false
+
   # Gateway credential store — REQUIRED.
   # Every inbound S3 request must present one of these access keys with
   # a valid AWS Signature (V2 or V4). Requests with no credentials or

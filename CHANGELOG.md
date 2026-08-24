@@ -8,11 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **V1.0-SEC-44 SigV2 hardening:** SigV2 is now disabled by default. Existing
+  clients must explicitly set `auth.allow_legacy_signature_v2: true` (or
+  `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`) while migrating to SigV4. Enabled
+  SigV2 requests now authenticate routing-sensitive S3 subresources.
+
 - **V1.0-SEC-43 non-streaming SigV4 payload integrity:** concrete signed
   payloads are hashed and verified before downstream dispatch; mismatches are
   rejected atomically while `UNSIGNED-PAYLOAD` remains compatible.
 
 ## [0.12.0-rc1] — 2026-08-23
+
+### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
+
+This is a release candidate for validation in isolated, non-production
+environments only. Do **not** upgrade a productive environment to this version:
+state-v2 encrypted MPU writers cannot be rolled back to pre-0.12.0 releases.
+Wait for the stable 0.12.0 release before scheduling a production upgrade.
 
 ### ⚠️ Upgrade Instructions ⚠️
 
