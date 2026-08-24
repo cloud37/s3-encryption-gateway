@@ -130,3 +130,10 @@ documented in `SECURITY.md`. AWS CLI and SDK-style signed multi-chunk uploads
 are verified atomically before storage. Signed trailers and all four supported
 checksum trailers are verified before storage; unknown or ambiguous modes are
 rejected rather than decoded as plaintext.
+
+Header-authenticated non-streaming SigV4 requests may provide a concrete
+lowercase SHA-256 `X-Amz-Content-Sha256` value. The gateway hashes and spools
+that body before dispatch, rejects body changes with `SignatureDoesNotMatch`,
+and replays the verified bytes with the exact content length. Requests using
+`UNSIGNED-PAYLOAD` remain compatible and intentionally do not receive this
+preflight integrity guarantee.

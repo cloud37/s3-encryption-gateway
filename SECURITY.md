@@ -70,6 +70,18 @@ The S3 Encryption Gateway is designed with the following properties:
 - **Key zeroization**: Plaintext DEKs and derived keys are zeroed from memory immediately after use.
 - **Constant-time comparisons**: All security-sensitive byte comparisons use `crypto/subtle`.
 
+### SigV4 signed-payload preflight
+
+Header-authenticated SigV4 requests with a concrete lowercase SHA-256
+`X-Amz-Content-Sha256` value are hashed before routing, encryption, backend
+access, cache updates, or multipart state mutation. The gateway streams the
+body into a mode-0600 temporary file, compares the digest in constant time,
+and only then publishes the replayable body to downstream handlers. Mismatches
+are rejected atomically and temporary files are removed on success, failure,
+cancellation, and downstream return. `UNSIGNED-PAYLOAD` explicitly declines
+this integrity check and remains supported; AWS-chunked modes retain their
+existing V1.0-SEC-41 verification path without double spooling.
+
 For the full security architecture, see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) and [`docs/ENCRYPTION_DESIGN.md`](docs/ENCRYPTION_DESIGN.md).
 # SigV4 streaming uploads
 

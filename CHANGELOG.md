@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **V1.0-SEC-43 non-streaming SigV4 payload integrity:** concrete signed
+  payloads are hashed and verified before downstream dispatch; mismatches are
+  rejected atomically while `UNSIGNED-PAYLOAD` remains compatible.
+
 ## [0.12.0-rc1] — 2026-08-23
 
 ### ⚠️ Upgrade Instructions ⚠️
