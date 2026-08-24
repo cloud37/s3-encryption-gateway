@@ -24,8 +24,9 @@ not use a rolling mix of pre-0.12.0 and 0.12.0 writers.
    upgrade. Do not combine the scale-down with the image upgrade or run state-v1
    and state-v2 writers together. On the second Helm upgrade, set
    `config.multipartState.valkey.stateV2Writer.enabled=true`. Helm supplies the
-   fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value to every replica. The
-   first state-v2 writer atomically initializes Valkey `mpu:writer-version`;
+   `VALKEY_MPU_STATE_V2_WRITER=true` to every replica; the gateway derives the
+   fixed internal protocol capability. The first state-v2 writer atomically
+   initializes Valkey `mpu:writer-version`;
    later replicas verify it. Drain or abort state-v2 MPUs before rollback.
 4. Inventory KDF parameters before lowering decrypt limits, then deploy the new
    limit uniformly across all replicas.
@@ -63,8 +64,9 @@ upgrade and rollback procedures.
   a version-1 writer. Helm upgrades must first scale the old deployment to one
   replica and wait for that rollout to complete, then upgrade the image with
   `config.multipartState.valkey.stateV2Writer.enabled=true`. Helm supplies the
-  fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value. The first state-v2 writer
-  atomically initializes `mpu:writer-version`; later replicas verify it.
+  `VALKEY_MPU_STATE_V2_WRITER=true`; the gateway derives the fixed internal
+  protocol capability. The first state-v2 writer atomically initializes
+  `mpu:writer-version`; later replicas verify it.
   Readiness remains `503` for a missing or incompatible capability. See
   `docs/RUNBOOK.md`.
 

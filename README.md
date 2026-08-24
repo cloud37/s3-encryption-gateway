@@ -153,6 +153,9 @@ multipart_state:
       key_file:  "/etc/gateway/valkey-client-key.pem"
     ttl_seconds: 604800  # 7 days — refreshed on every UploadPart
     pool_size: 16
+    # Required for state-v2 writers in v0.12.0; the gateway derives the
+    # internal capability automatically.
+    state_v2_writer: true
 ```
 
 ```yaml

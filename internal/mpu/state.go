@@ -372,6 +372,7 @@ const (
 	writerCapabilityKey  = "mpu:writer-version"
 	writerPresencePrefix = "mpu:writer:"
 	writerPresenceTTL    = 15 * time.Second
+	stateV2Capability    = "state-v2"
 )
 
 // ValkeyStateStore implements StateStore backed by Valkey (via go-redis/v9).
@@ -475,7 +476,7 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, keyManage
 		keyManager:           keyManager,
 		encryptState:         encryptState,
 		allowLegacyPlaintext: cfg.AllowLegacyPlaintextState,
-		writerCapability:     cfg.WriterCapability,
+		writerCapability:     stateV2WriterCapability(cfg.StateV2Writer),
 		writerPresenceID:     randomWriterPresenceID(),
 	}
 
@@ -491,6 +492,13 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, keyManage
 		return nil, fmt.Errorf("%w: %v", ErrStateUnavailable, err)
 	}
 	return s, nil
+}
+
+func stateV2WriterCapability(enabled bool) string {
+	if enabled {
+		return stateV2Capability
+	}
+	return ""
 }
 
 // stateKeyWrappedKey is the Valkey key for the wrapped state DEK.

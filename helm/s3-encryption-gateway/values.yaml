@@ -595,11 +595,11 @@ config:
       # before TTL expiry reaps it. Default (inside the gateway) is 604800 (7d).
       ttlSeconds:
         value: ""
-      # stateV2Writer enables the state-v2 encrypted MPU writer. Helm renders
-      # the fixed protocol capability "state-v2" on every replica; the first
-      # state-v2 writer records it atomically in Valkey and later replicas
-      # verify it. Before a v0.12 upgrade, scale the gateway to one replica and
-      # drain or abort in-flight encrypted MPUs.
+      # stateV2Writer enables the state-v2 encrypted MPU writer. The gateway
+      # derives its fixed internal protocol capability; operators never provide
+      # it. The first state-v2 writer records it atomically in Valkey and later
+      # replicas verify it. Before a v0.12 upgrade, scale the gateway to one
+      # replica and drain or abort in-flight encrypted MPUs.
       stateV2Writer:
         enabled: false
 

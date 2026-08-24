@@ -151,6 +151,7 @@ auth:
 	t.Setenv("VALKEY_TTL_SECONDS", "86400")
 	t.Setenv("VALKEY_POOL_SIZE", "32")
 	t.Setenv("VALKEY_HEALTH_CHECK_INTERVAL", "17s")
+	t.Setenv("VALKEY_MPU_STATE_V2_WRITER", "true")
 
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
@@ -186,6 +187,9 @@ auth:
 	}
 	if cfg.MultipartState.Valkey.PoolSize != 32 {
 		t.Errorf("expected PoolSize 32, got %d", cfg.MultipartState.Valkey.PoolSize)
+	}
+	if !cfg.MultipartState.Valkey.StateV2Writer {
+		t.Error("expected StateV2Writer=true, got false")
 	}
 }
 

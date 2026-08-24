@@ -339,6 +339,7 @@ IV prefix, part metadata) in a Valkey (Redis-compatible) store.
 - **VALKEY_TLS_KEY_FILE**: Path to client key (for mTLS)
 - **VALKEY_INSECURE_ALLOW_PLAINTEXT**: Allow non-TLS Valkey connection
 - **VALKEY_TTL_SECONDS**: TTL for in-flight upload state in seconds (default: 604800 = 7 days)
+- **VALKEY_MPU_STATE_V2_WRITER**: Enable the v0.12 state-v2 encrypted-MPU writer. The gateway manages its internal Valkey capability automatically.
 
 > ⚠️ **WARNING:** `VALKEY_INSECURE_ALLOW_PLAINTEXT=true` exposes WrappedDEKs
 > and all multipart-upload metadata on the network in plaintext. The DEK
@@ -356,6 +357,7 @@ VALKEY_ADDR: "valkey.internal:6379"
 VALKEY_TLS_ENABLED: "true"
 VALKEY_TLS_CA_FILE: "/etc/gateway/valkey-ca.pem"
 VALKEY_TTL_SECONDS: "604800"
+VALKEY_MPU_STATE_V2_WRITER: "true"
 ```
 
 For Helm deployments, the chart can deploy an in-cluster Valkey subchart

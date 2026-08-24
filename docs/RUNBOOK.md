@@ -480,10 +480,11 @@ Before deploying a binary containing MPU state version 2:
    before its replacement starts.
 4. Enable `config.multipartState.valkey.stateV2Writer.enabled: true` in the
    second Helm upgrade. The chart sets the fixed
-   `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value in every state-v2 replica. The
-   first state-v2 writer atomically initializes `mpu:writer-version`; later
-   replicas verify it. An incompatible stored value keeps `mpu_writer` readiness
-   false. The new-replica heartbeats are supplementary checks, not proof that
+   `VALKEY_MPU_STATE_V2_WRITER=true` value in every state-v2 replica. The
+   gateway derives the internal protocol capability. The first state-v2 writer
+   atomically initializes `mpu:writer-version`; later replicas verify it. An
+   incompatible stored value keeps `mpu_writer` readiness false. The new-replica
+   heartbeats are supplementary checks, not proof that
    legacy writers are absent. Confirm
    `gateway_mpu_legacy_inflight` is zero or has an owner-approved abort plan.
 5. Monitor `gateway_mpu_part_claims_total` by result. A rise in `mismatch` or

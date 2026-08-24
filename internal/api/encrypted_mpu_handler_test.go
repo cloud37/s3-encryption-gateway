@@ -438,12 +438,12 @@ encrypt_multipart_uploads: true
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,
 		PoolSize:               2,
-		WriterCapability:       "test-deployment",
+		StateV2Writer:          true,
 	}, nil, "")
 	if err != nil {
 		t.Fatalf("valkey store: %v", err)
 	}
-	_ = mr.Set("mpu:writer-version", "test-deployment")
+	_ = mr.Set("mpu:writer-version", "state-v2")
 	handler.WithMPUStateStore(store)
 	t.Cleanup(func() { _ = store.Close() })
 
@@ -900,7 +900,7 @@ encrypt_multipart_uploads: true
 		InsecureAllowPlaintext: true,
 		TLS:                    config.ValkeyTLSConfig{Enabled: false},
 		TTLSeconds:             3600,
-		WriterCapability:       "test-deployment",
+		StateV2Writer:          true,
 		DialTimeout:            2 * time.Second,
 		ReadTimeout:            1 * time.Second,
 		WriteTimeout:           1 * time.Second,

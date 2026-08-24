@@ -23,9 +23,10 @@ Plan a coordinated upgrade rather than a rolling mix of old and new writers.
    --reuse-values --set replicaCount=1`, then wait for `kubectl rollout status
    deployment/DEPLOYMENT`. Only then upgrade the image and set
    `config.multipartState.valkey.stateV2Writer.enabled=true`. The chart renders
-   the fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value and terminates that
-   single old writer before starting the state-v2 replacement, which atomically
-   initializes `mpu:writer-version`. Do not run version-1 and version-2 MPU
+   `VALKEY_MPU_STATE_V2_WRITER=true`; the gateway derives the internal
+   capability and terminates that single old writer before starting the state-v2
+   replacement, which atomically initializes `mpu:writer-version`. Do not run
+   version-1 and version-2 MPU
    writers together, and drain or abort version-2 encrypted MPUs before
    rollback.
 4. Inventory KDF parameters before lowering decrypt limits. Rewrite objects or

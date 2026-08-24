@@ -330,8 +330,9 @@ Use the built-in Valkey subchart for development or point at an external cluster
 
 > **v0.12 encrypted-MPU rollout:** Enable
 > `config.multipartState.valkey.stateV2Writer.enabled: true` on the second Helm
-> upgrade. Helm renders the fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value
-> for every replica. Before that upgrade, complete a separate scale-down to one
+> upgrade. Helm renders `VALKEY_MPU_STATE_V2_WRITER=true` for every replica; the
+> gateway derives the fixed internal protocol capability. Before that upgrade,
+> complete a separate scale-down to one
 > old replica with `helm upgrade RELEASE CHART --reuse-values --set
 > replicaCount=1`, then wait for `kubectl rollout status
 > deployment/DEPLOYMENT`. Do not combine this scale-down with the image upgrade.

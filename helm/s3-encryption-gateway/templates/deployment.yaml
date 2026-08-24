@@ -293,8 +293,8 @@ spec:
           value: {{ .Values.config.multipartState.valkey.ttlSeconds.value | quote }}
         {{- end }}
         {{- if .Values.config.multipartState.valkey.stateV2Writer.enabled }}
-        - name: VALKEY_MPU_WRITER_CAPABILITY
-          value: "state-v2"
+        - name: VALKEY_MPU_STATE_V2_WRITER
+          value: "true"
         {{- end }}
         {{- if .Values.config.multipartState.valkey.allowLegacyPlaintextState.value }}
         - name: VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE

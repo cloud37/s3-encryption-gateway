@@ -870,10 +870,10 @@ type ValkeyConfig struct {
 	// migration from a pre-encryption deployment. Defaults to false (fail-closed).
 	// V1.0-SEC-30.
 	AllowLegacyPlaintextState bool `yaml:"allow_legacy_plaintext_state" env:"VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE"`
-	// WriterCapability is the deployment-scoped value shared by all replicas
-	// during a coordinated MPU writer rollout. Empty disables MPU write
-	// readiness rather than allowing an unknown writer to become ready.
-	WriterCapability string `yaml:"writer_capability" env:"VALKEY_MPU_WRITER_CAPABILITY"`
+	// StateV2Writer enables the state-v2 encrypted MPU writer. The gateway maps
+	// this opt-in to its fixed internal protocol capability so operators never
+	// need to coordinate an arbitrary string across replicas.
+	StateV2Writer bool `yaml:"state_v2_writer" env:"VALKEY_MPU_STATE_V2_WRITER"`
 }
 
 // ValkeyTLSConfig holds TLS settings for the Valkey connection.
@@ -1792,6 +1792,9 @@ func loadFromEnv(config *Config) error {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			config.MultipartState.Valkey.PoolSize = n
 		}
+	}
+	if v := os.Getenv("VALKEY_MPU_STATE_V2_WRITER"); v != "" {
+		config.MultipartState.Valkey.StateV2Writer = v == "true" || v == "1"
 	}
 	// V1.0-CRYPTO-2 — at-rest encryption for Valkey multipart state.
 	if v := os.Getenv("VALKEY_ENCRYPTION_PASSWORD_ENV"); v != "" {

@@ -1250,7 +1250,7 @@
                     "enabled": {
                       "type": "boolean",
                       "default": false,
-                      "description": "Enable the state-v2 encrypted-MPU writer. Helm renders the fixed protocol capability VALKEY_MPU_WRITER_CAPABILITY=state-v2. The first state-v2 writer atomically initializes Valkey mpu:writer-version; later replicas verify it. Before upgrading, scale the gateway to one replica and drain or abort legacy in-flight MPUs."
+                      "description": "Enable the state-v2 encrypted-MPU writer. Helm renders VALKEY_MPU_STATE_V2_WRITER=true; the gateway derives its fixed internal protocol capability. The first state-v2 writer atomically initializes Valkey mpu:writer-version; later replicas verify it. Before upgrading, scale the gateway to one replica and drain or abort legacy in-flight MPUs."
                     }
                   }
                 },

@@ -17,18 +17,18 @@ tests:
       - equal:
           path: spec.strategy.rollingUpdate.maxUnavailable
           value: 1
-  - it: renders the fixed state-v2 writer capability when enabled
+  - it: enables the state-v2 writer when configured
     set:
       config.multipartState.valkey.stateV2Writer.enabled: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
-            name: VALKEY_MPU_WRITER_CAPABILITY
-            value: state-v2
-  - it: omits the writer capability by default
+            name: VALKEY_MPU_STATE_V2_WRITER
+            value: "true"
+  - it: omits the state-v2 writer opt-in by default
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
-            name: VALKEY_MPU_WRITER_CAPABILITY
+            name: VALKEY_MPU_STATE_V2_WRITER
