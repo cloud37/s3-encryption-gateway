@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -202,13 +203,32 @@ func waitForSeaweedFSWrite(ctx context.Context, t *testing.T, inst Instance) {
 		o.UsePathStyle = true
 	})
 	const key = ".conformance-ready"
+	payload := []byte("ready")
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		_, err = svc.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(inst.Bucket),
 			Key:    aws.String(key),
-			Body:   bytes.NewReader(nil),
+			Body:   bytes.NewReader(payload),
 		})
+		if err == nil {
+			var out *s3.GetObjectOutput
+			out, err = svc.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(inst.Bucket),
+				Key:    aws.String(key),
+			})
+			if err == nil {
+				var got []byte
+				got, err = io.ReadAll(out.Body)
+				closeErr := out.Body.Close()
+				if err == nil {
+					err = closeErr
+				}
+				if err == nil && !bytes.Equal(got, payload) {
+					err = fmt.Errorf("read-back mismatch: got %q", got)
+				}
+			}
+		}
 		if err == nil {
 			_, _ = svc.DeleteObject(ctx, &s3.DeleteObjectInput{
 				Bucket: aws.String(inst.Bucket),
