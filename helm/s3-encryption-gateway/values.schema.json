@@ -1243,6 +1243,17 @@
                   "allOf": [{ "$ref": "#/$defs/configValue" }],
                   "description": "TTL in seconds for in-flight MPU state records (default gateway-internal: 604800 = 7 days)."
                 },
+                "stateV2Writer": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Enable the state-v2 encrypted-MPU writer. Helm renders the fixed protocol capability VALKEY_MPU_WRITER_CAPABILITY=state-v2. The first state-v2 writer atomically initializes Valkey mpu:writer-version; later replicas verify it. Before upgrading, scale the gateway to one replica and drain or abort legacy in-flight MPUs."
+                    }
+                  }
+                },
                 "encryptionPassword": {
                   "allOf": [{ "$ref": "#/$defs/configValue" }],
                   "description": "Dedicated password for AES-256-GCM at-rest encryption of UploadState blobs in Valkey (V1.0-CRYPTO-2). When set (value or valueFrom), VALKEY_ENCRYPT_STATE is automatically enabled. If unset, falls back to deriving the key from the main ENCRYPTION_PASSWORD with a distinct HKDF salt."

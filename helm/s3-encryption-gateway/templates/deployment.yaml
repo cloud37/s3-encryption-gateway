@@ -5,6 +5,13 @@ metadata:
   labels:
     {{- include "s3-encryption-gateway.labels" . | nindent 4 }}
 spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # With replicaCount: 1 this terminates the old writer before starting its
+      # replacement, preventing a mixed state-v1/state-v2 writer rollout.
+      maxSurge: 0
+      maxUnavailable: 1
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -284,6 +291,10 @@ spec:
         {{- if .Values.config.multipartState.valkey.ttlSeconds.value }}
         - name: VALKEY_TTL_SECONDS
           value: {{ .Values.config.multipartState.valkey.ttlSeconds.value | quote }}
+        {{- end }}
+        {{- if .Values.config.multipartState.valkey.stateV2Writer.enabled }}
+        - name: VALKEY_MPU_WRITER_CAPABILITY
+          value: "state-v2"
         {{- end }}
         {{- if .Values.config.multipartState.valkey.allowLegacyPlaintextState.value }}
         - name: VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE

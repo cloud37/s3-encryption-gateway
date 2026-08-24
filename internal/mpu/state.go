@@ -367,8 +367,8 @@ const (
 	fieldStateVersion = "state_version"
 	fieldPhase        = "phase"
 	fieldRevision     = "revision"
-	// writerCapabilityKey is an operator-controlled activation gate. It must be
-	// written only after legacy MPU writers have been drained.
+	// writerCapabilityKey records the capability selected by the first state-v2
+	// writer. SETNX makes initial activation atomic across replicas.
 	writerCapabilityKey  = "mpu:writer-version"
 	writerPresencePrefix = "mpu:writer:"
 	writerPresenceTTL    = 15 * time.Second
@@ -1299,12 +1299,20 @@ func (s *ValkeyStateStore) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// WriterCapabilityReady verifies the operator-controlled activation gate and
-// supplementary new-writer heartbeats. Legacy binaries cannot publish a
-// heartbeat, so the gate must remain unset until those writers are drained.
+// WriterCapabilityReady atomically initializes the activation gate for the
+// first state-v2 writer, then verifies it and supplementary writer heartbeats.
+// Legacy binaries cannot publish heartbeats, so coordinated upgrades must stop
+// them before the first state-v2 writer starts.
 func (s *ValkeyStateStore) WriterCapabilityReady(ctx context.Context) error {
 	if s.writerCapability == "" {
 		return fmt.Errorf("%w: MPU writer capability is not configured", ErrStateUnavailable)
+	}
+	activated, err := s.client.SetNX(ctx, writerCapabilityKey, s.writerCapability, 0).Result()
+	if err != nil {
+		return wrapRedisErr(err)
+	}
+	if activated {
+		logrus.WithField("capability", s.writerCapability).Info("initialized MPU writer capability")
 	}
 	version, err := s.client.Get(ctx, writerCapabilityKey).Result()
 	if err != nil {

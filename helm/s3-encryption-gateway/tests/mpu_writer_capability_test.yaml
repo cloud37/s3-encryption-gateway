@@ -1,0 +1,34 @@
+templates:
+  - deployment.yaml
+release:
+  name: s3eg-test
+  namespace: default
+values:
+  - ../values.yaml
+tests:
+  - it: prevents old and replacement writers overlapping for a single-replica rollout
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: RollingUpdate
+      - equal:
+          path: spec.strategy.rollingUpdate.maxSurge
+          value: 0
+      - equal:
+          path: spec.strategy.rollingUpdate.maxUnavailable
+          value: 1
+  - it: renders the fixed state-v2 writer capability when enabled
+    set:
+      config.multipartState.valkey.stateV2Writer.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VALKEY_MPU_WRITER_CAPABILITY
+            value: state-v2
+  - it: omits the writer capability by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VALKEY_MPU_WRITER_CAPABILITY

@@ -175,9 +175,10 @@ func TestValkeyStateStore_WriterCapabilityReady(t *testing.T) {
 		t.Fatal("missing capability must fail closed")
 	}
 	s.writerCapability = "deploy-a"
-	if err := s.WriterCapabilityReady(ctx); err == nil {
-		t.Fatal("absent capability must fail closed")
-	}
+	require.NoError(t, s.WriterCapabilityReady(ctx))
+	version, err := mr.Get(writerCapabilityKey)
+	require.NoError(t, err)
+	require.Equal(t, "deploy-a", version)
 	_ = mr.Set("mpu:writer-version", "deploy-b")
 	if err := s.WriterCapabilityReady(ctx); err == nil {
 		t.Fatal("mismatched capability must fail")
@@ -191,7 +192,7 @@ func TestValkeyStateStore_WriterCapabilityReady(t *testing.T) {
 func TestValkeyStateStore_LegacyWriterDrainGate(t *testing.T) {
 	s, mr := newTestStore(t)
 	s.writerCapability = "deploy-a"
-	// Legacy binaries never publish writer-presence keys; activation is explicit.
+	// A pre-existing incompatible activation gate still prevents readiness.
 	require.NoError(t, mr.Set(writerCapabilityKey, "legacy-writers-active"))
 	require.ErrorIs(t, s.WriterCapabilityReady(context.Background()), ErrInvalidStateVersion)
 	require.NoError(t, mr.Set(writerCapabilityKey, "deploy-a"))

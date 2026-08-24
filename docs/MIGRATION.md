@@ -7,6 +7,38 @@
 
 ## Overview
 
+## 0.12.0 upgrade notice
+
+This release changes encryption write formats and deployment prerequisites.
+Plan a coordinated upgrade rather than a rolling mix of old and new writers.
+
+1. Ensure build and runtime environments use Go 1.27.0 or later.
+2. Before enabling chunked v2 writers, drain v1-only readers. Once v2 objects
+   exist, retain a v2-capable release for rollback; rewrite v1 objects with
+   GET-through-gateway -> PUT-through-gateway when authenticated completeness
+   is required.
+3. Before deploying the encrypted MPU state-v2 writer, complete a separate
+   scale-down to exactly one old replica and drain or abort in-flight encrypted
+   MPUs. For Helm-managed deployments, first run `helm upgrade RELEASE CHART
+   --reuse-values --set replicaCount=1`, then wait for `kubectl rollout status
+   deployment/DEPLOYMENT`. Only then upgrade the image and set
+   `config.multipartState.valkey.stateV2Writer.enabled=true`. The chart renders
+   the fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value and terminates that
+   single old writer before starting the state-v2 replacement, which atomically
+   initializes `mpu:writer-version`. Do not run version-1 and version-2 MPU
+   writers together, and drain or abort version-2 encrypted MPUs before
+   rollback.
+4. Inventory KDF parameters before lowering decrypt limits. Rewrite objects or
+   retain limits that cover them; deploy a new lower limit uniformly to every
+   replica, never as a mixed-limit fleet.
+5. Do not use backend-native moves, copies, or renames for objects written by
+   this release. Move encrypted objects through gateway `CopyObject` or a
+   GET-through-gateway -> PUT-through-gateway rewrite so their location binding
+   is regenerated.
+
+The detailed procedures below remain the authoritative instructions for each
+change.
+
 ### SEC-39 KDF limit rollout
 
 Before lowering decrypt limits, inventory `x-amz-meta-encryption-kdf-params` with

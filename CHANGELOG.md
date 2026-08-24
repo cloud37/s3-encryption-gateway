@@ -1,32 +1,48 @@
 # Changelog
 
-## Unreleased
-
-- Security: bound metadata and password-envelope KDF costs with configurable decrypt limits.
-- Security (V1.0-SEC-40): always redact SigV2 and SigV4 presigned signatures from access logs and traces.
-- Security (V1.0-SEC-41): verify AWS SigV4 streaming chunks and trailers into an atomic bounded-memory spool; reject unknown modes and malformed framing.
-
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-- Encrypted multipart uploads now immutably claim the first content submitted
-  for each part number. Identical retries remain safe and return the original
-  ETag; changed replacements return HTTP 409 and require aborting the upload.
-  Completed-object manifest and ciphertext formats remain compatible.
-- Encrypted `UploadPartCopy` destinations apply the same immutable claim and
-  identical-retry behavior. Changed replacements and legacy in-flight state
-  return `409 OperationAborted`; operators must drain or abort encrypted MPUs
-  before coordinated rollout and before rollback to a version-1 writer.
+## [0.12.0-rc1] — 2026-08-23
+
+### ⚠️ Upgrade Instructions ⚠️
+
+This release changes encryption write formats and deployment prerequisites. Do
+not use a rolling mix of pre-0.12.0 and 0.12.0 writers.
+
+1. Use Go 1.27.0 or later for build and runtime environments.
+2. Drain v1-only readers before enabling chunked-v2 writers. Once v2 objects
+   exist, roll back only to a v2-capable release; rewrite v1 objects through the
+   gateway when authenticated completeness is required.
+3. Before deploying the state-v2 writer, drain or abort in-flight encrypted
+   MPUs and complete a separate scale-down to one old replica:
+   `helm upgrade RELEASE CHART --reuse-values --set replicaCount=1`. Wait for
+   `kubectl rollout status deployment/DEPLOYMENT` to succeed before the image
+   upgrade. Do not combine the scale-down with the image upgrade or run state-v1
+   and state-v2 writers together. On the second Helm upgrade, set
+   `config.multipartState.valkey.stateV2Writer.enabled=true`. Helm supplies the
+   fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value to every replica. The
+   first state-v2 writer atomically initializes Valkey `mpu:writer-version`;
+   later replicas verify it. Drain or abort state-v2 MPUs before rollback.
+4. Inventory KDF parameters before lowering decrypt limits, then deploy the new
+   limit uniformly across all replicas.
+5. Do not backend-move, copy, or rename objects written by this release. Use
+   gateway `CopyObject` or GET-through-gateway -> PUT-through-gateway so the
+   location binding is regenerated.
+
+See [`docs/MIGRATION.md`](docs/MIGRATION.md) for the required coordinated
+upgrade and rollback procedures.
 
 ### Security
 
 - **V1.0-SEC-42 object location binding:** New writes bind ciphertext to their
   gateway bucket/key location; legacy objects remain readable, but backend-
   native moves fail authentication. Use gateway `CopyObject` or
-  GET-through-gateway -> PUT-through-gateway rewriting for migration.
+  GET-through-gateway -> PUT-through-gateway rewriting for migration. See
+  `docs/MIGRATION.md`.
 
 - **V1.0-SEC-37 authenticated chunked completeness:** New chunked v2 objects
   authenticate their exact data-chunk count and plaintext size with a terminal
@@ -36,6 +52,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   discovery tooling is required. Deployments must drain v1-only readers before
   enabling v2 writers; once v2 objects exist, rollback is allowed only to a
   release that understands v2.
+
+- **V1.0-SEC-38 nonce-safe encrypted multipart uploads:** Encrypted multipart
+  uploads now immutably claim the first content submitted for each part number.
+  Identical `UploadPart` and `UploadPartCopy` retries remain safe and return
+  the original ETag; changed replacements return `409 OperationAborted` and
+  require aborting the upload. Completed-object manifest and ciphertext formats
+  remain compatible. Legacy in-flight encrypted MPUs are abort-only after a
+  coordinated rollout; drain or abort them before deploying or rolling back to
+  a version-1 writer. Helm upgrades must first scale the old deployment to one
+  replica and wait for that rollout to complete, then upgrade the image with
+  `config.multipartState.valkey.stateV2Writer.enabled=true`. Helm supplies the
+  fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value. The first state-v2 writer
+  atomically initializes `mpu:writer-version`; later replicas verify it.
+  Readiness remains `503` for a missing or incompatible capability. See
+  `docs/RUNBOOK.md`.
+
+- **V1.0-SEC-39 bounded KDF decrypt costs:** Password-envelope and metadata KDF
+  parameters are validated against hard bounds and configurable operational
+  decrypt limits at every decrypt boundary. The defaults preserve supported
+  data (`PBKDF2 <= 2,000,000`, Argon2id `time <= 10`, `memory <= 65,536 KiB`,
+  `threads <= 255`); lowering a limit can make existing objects unreadable.
+  Inventory and rewrite above-limit objects, then roll limits out uniformly as
+  documented in `docs/MIGRATION.md`.
+
+- **V1.0-SEC-40 presigned-signature redaction:** Access logs and tracing always
+  redact SigV2 and SigV4 presigned signatures.
+
+- **V1.0-SEC-41 SigV4 streaming payload verification:** Supported AWS SigV4
+  streaming payload modes now verify the seed, every chunk and terminal
+  signature, trailers, and trailer checksums before backend clients or object
+  state are mutated. Decoded verified payloads are atomically spooled with
+  bounded memory; malformed framing and unsupported modes are rejected.
+
+- **Security scan integer-boundary hardening:** Protocol and metadata-derived
+  numeric values are now range-checked before narrowing conversions across
+  chunked ranges, MPU state, streaming payloads, and trailer checksums. CRC-32
+  checksums now use canonical big-endian encoding.
+
+### Added
+
+- Configurable KDF decrypt limits in YAML, environment variables, and Helm:
+  `encryption.kdf.decrypt_limits.pbkdf2.max_iterations` and
+  `encryption.kdf.decrypt_limits.argon2id.{max_time,max_memory,max_threads}`.
+
+- **`gateway_kms_reauth_total`** counter, labelled by provider, auth method and
+  outcome. Token recovery was previously silent. The first sample is the startup
+  login; a sustained rate above that means tokens are dying early.
+
+- **KMS outage and token-revocation regression tests.** `mockBaoServer` now
+  models a whole-server outage (every path 5xxs, login included) and per-token
+  expiry, covering recovery after an outage, recovery from a revoked token while
+  the server is healthy, and re-login coalescing under concurrent load.
 
 ### Fixed
 
@@ -84,16 +152,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not successes, so it holds when the login itself is what is failing. `token`
   auth is exempt; the operator owns that credential's lifecycle.
 
-### Added
+### Changed
 
-- **`gateway_kms_reauth_total`** counter, labelled by provider, auth method and
-  outcome. Token recovery was previously silent. The first sample is the startup
-  login; a sustained rate above that means tokens are dying early.
+- The project now requires Go 1.27.0; builder images use Go 1.27.
 
-- **KMS outage and token-revocation regression tests.** `mockBaoServer` now
-  models a whole-server outage (every path 5xxs, login included) and per-token
-  expiry, covering recovery after an outage, recovery from a revoked token while
-  the server is healthy, and re-login coalescing under concurrent load.
+- Unit-test and FIPS unit-test CI commands now use a 20-minute Go test timeout,
+  with a 45-minute GitHub Actions job limit, matching the project's test target
+  and preventing the default job timeout from terminating the suite.
+
+- `make security-scan` now runs `govulncheck` through the module toolchain,
+  ensuring it uses the Go version declared by `go.mod`.
+
+- HSM-tagged test and vet jobs are disabled because the PKCS#11 provider remains
+  a non-functional skeleton. They will return when a supported provider fixture
+  is available.
+
+### Dependencies
+
+- Updated the AWS SDK for Go v2 module family and Smithy dependencies.
+- Updated `github.com/minio/minio-go/v7` to v7.3.0,
+  `github.com/sirupsen/logrus` to v1.10.1,
+  `github.com/stretchr/testify` to v1.12.1, and `golang.org/x/crypto` to v0.55.0.
+- Updated Helm used in CI to v4.2.4.
 
 ## [0.11.10] — 2026-08-11
 

@@ -323,9 +323,24 @@ Use the built-in Valkey subchart for development or point at an external cluster
 | `config.multipartState.valkey.tls.keyFile` | Client key file for Valkey mTLS | `""` |
 | `config.multipartState.valkey.insecureAllowPlaintext` | Allow plaintext Valkey (development only) | `""` |
 | `config.multipartState.valkey.ttlSeconds` | TTL for in-flight MPU state records in Valkey (default: `604800` = 7 days) | `""` |
+| `config.multipartState.valkey.stateV2Writer.enabled` | Enable the fixed `state-v2` encrypted-MPU writer capability required after the v0.12 rollout | `false` |
 | `config.multipartState.valkey.encryptionPassword` | Dedicated password for Valkey at-rest encryption (V1.0-CRYPTO-2). Provide via `.value` (plaintext) or `.valueFrom` (secret ref). When set, `VALKEY_ENCRYPT_STATE` is automatically `"true"` | `""` |
 
 > **CRYPTO-2 note:** When `encryptionPassword` is set (either `.value` or `.valueFrom`), the gateway automatically enables at-rest encryption (`VALKEY_ENCRYPT_STATE=true`). If unset, the gateway falls back to the main `ENCRYPTION_PASSWORD` with a distinct HKDF salt.
+
+> **v0.12 encrypted-MPU rollout:** Enable
+> `config.multipartState.valkey.stateV2Writer.enabled: true` on the second Helm
+> upgrade. Helm renders the fixed `VALKEY_MPU_WRITER_CAPABILITY=state-v2` value
+> for every replica. Before that upgrade, complete a separate scale-down to one
+> old replica with `helm upgrade RELEASE CHART --reuse-values --set
+> replicaCount=1`, then wait for `kubectl rollout status
+> deployment/DEPLOYMENT`. Do not combine this scale-down with the image upgrade.
+> Drain or abort all in-flight encrypted MPUs before the second upgrade. The
+> chart uses `maxSurge: 0` and `maxUnavailable: 1`, so this single old writer is
+> terminated before its v0.12 replacement starts. That first state-v2 writer
+> atomically initializes Valkey `mpu:writer-version`; later replicas verify the
+> same value. Do not use this upgrade path with multiple old replicas, because
+> legacy writers cannot be detected by the new release.
 
 **ListObjects size cache (`config.listSizeTranslate.*`)** — V1.0-S3-3. Reuses the
 Valkey instance above; no separate deployment. All fields use the
