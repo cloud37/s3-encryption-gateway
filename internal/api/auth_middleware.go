@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
@@ -173,6 +174,25 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			}
 			if signingContext != nil {
 				defer signingContext.Close()
+				r = r.WithContext(context.WithValue(r.Context(), v4SigningContextKey{}, signingContext))
+			}
+			if signingContext != nil && signingContext.verifyPayload {
+				spool, verifyErr := verifyAndSpoolV4Payload(r, signingContext)
+				if verifyErr != nil {
+					auditErr := ErrStreamingSpool
+					if errors.Is(verifyErr, ErrSignatureMismatch) {
+						auditErr = ErrSignatureMismatch
+					} else if errors.Is(verifyErr, ErrStreamingCanceled) {
+						auditErr = ErrStreamingCanceled
+					}
+					emitAuthFailure(creds.AccessKey, auditErr)
+					writeStreamingPayloadError(w, r.URL.Path, verifyErr)
+					return
+				}
+				defer spool.Close()
+				r.Body = spool
+				r.ContentLength = spool.DecodedLength()
+				r.Header.Set("Content-Length", strconv.FormatInt(spool.DecodedLength(), 10))
 				r = r.WithContext(context.WithValue(r.Context(), v4SigningContextKey{}, signingContext))
 			}
 

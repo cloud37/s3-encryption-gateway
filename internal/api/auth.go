@@ -78,13 +78,15 @@ func validateStreamingRequestHeaders(r *http.Request, mode streamingPayloadMode)
 }
 
 type V4SigningContext struct {
-	timestamp       string
-	credentialScope string
-	signingKey      []byte
-	seedSignature   [32]byte
-	mode            streamingPayloadMode
-	closed          bool
-	closeMu         sync.Mutex
+	timestamp           string
+	credentialScope     string
+	signingKey          []byte
+	seedSignature       [32]byte
+	mode                streamingPayloadMode
+	expectedPayloadHash [sha256.Size]byte
+	verifyPayload       bool
+	closed              bool
+	closeMu             sync.Mutex
 }
 
 func (c *V4SigningContext) Close() {
@@ -102,6 +104,10 @@ func (c *V4SigningContext) Close() {
 	for i := range c.seedSignature {
 		c.seedSignature[i] = 0
 	}
+	for i := range c.expectedPayloadHash {
+		c.expectedPayloadHash[i] = 0
+	}
+	c.verifyPayload = false
 	c.signingKey = nil
 	c.closed = true
 }
@@ -308,6 +314,16 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 	ctx := &V4SigningContext{timestamp: timestamp, credentialScope: credentialScope, mode: mode}
 	copy(ctx.seedSignature[:], calculated)
 	ctx.signingKey = deriveSignatureKey(secretKey, date, region, service)
+	if !isPresigned && mode == streamingNone {
+		payloadHash := r.Header.Get("X-Amz-Content-Sha256")
+		if len(payloadHash) == sha256.Size*2 {
+			decodedHash, decodeErr := hex.DecodeString(payloadHash)
+			if decodeErr == nil && len(decodedHash) == sha256.Size {
+				copy(ctx.expectedPayloadHash[:], decodedHash)
+				ctx.verifyPayload = true
+			}
+		}
+	}
 	return ctx, nil
 }
 

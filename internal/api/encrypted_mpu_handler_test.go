@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -1631,6 +1632,100 @@ func TestHandleUploadPart_InvalidStreamingBody_NoBackendOrStateCommit(t *testing
 				})
 			}
 		})
+	}
+}
+
+func TestHandleUploadPart_ConcretePayloadHashMismatch_NoBackendOrStateMutation(t *testing.T) {
+	h, base, mr := newMPUTestHandler(t, "sec43-mpu-*")
+	client := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = client
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, httptest.NewRequest("POST", "/bucket/key?uploads=", nil))
+	uploadID := extractUploadID(t, create.Body.String())
+	beforeState, _ := h.mpuStateStore.Get(context.Background(), uploadID)
+	beforeKeys := mr.Keys()
+	beforeTTL := map[string]time.Duration{}
+	for _, k := range beforeKeys {
+		beforeTTL[k] = mr.TTL(k)
+	}
+	beforeCalls := client.uploadPartCalls
+	beforeParts := len(base.parts)
+	original := []byte("original part")
+	req := signedConcreteRequest(t, original)
+	req.URL.Path = "/bucket/key"
+	req.URL.RawQuery = "partNumber=1&uploadId=" + url.QueryEscape(uploadID)
+	req.Body = io.NopCloser(strings.NewReader("tampered part"))
+	resignV4Request(t, req, fmt.Sprintf("%x", sha256.Sum256(original)))
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SignatureDoesNotMatch") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	state, err := h.mpuStateStore.Get(context.Background(), uploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Parts) != 0 {
+		t.Fatalf("part state mutated: %+v", state.Parts)
+	}
+	if client.uploadPartCalls != beforeCalls || len(base.parts) != beforeParts {
+		t.Fatal("backend part mutation")
+	}
+	if fmt.Sprint(beforeKeys) != fmt.Sprint(mr.Keys()) {
+		t.Fatal("redis keys changed")
+	}
+	for _, k := range beforeKeys {
+		if beforeTTL[k] != mr.TTL(k) {
+			t.Fatalf("redis mutation %s", k)
+		}
+	}
+	if fmt.Sprintf("%+v", state) != fmt.Sprintf("%+v", beforeState) {
+		t.Fatal("state mutation")
+	}
+}
+
+func TestHandleCompleteMultipartUpload_ConcretePayloadHashMismatch_NoManifestBackendOrStateMutation(t *testing.T) {
+	h, base, mr := newMPUTestHandler(t, "sec43-complete-*")
+	client := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = client
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, httptest.NewRequest("POST", "/bucket/key?uploads=", nil))
+	uploadID := extractUploadID(t, create.Body.String())
+	beforeState, _ := h.mpuStateStore.Get(context.Background(), uploadID)
+	beforeKeys := mr.Keys()
+	beforeTTL := map[string]time.Duration{}
+	for _, k := range beforeKeys {
+		beforeTTL[k] = mr.TTL(k)
+	}
+	beforeCalls, beforeParts := client.completeCalls, len(base.parts)
+	beforeObjects := len(base.objects)
+	original := []byte("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>etag</ETag></Part></CompleteMultipartUpload>")
+	req := signedConcreteRequest(t, original)
+	req.Method = http.MethodPost
+	req.URL.Path = "/bucket/key"
+	req.URL.RawQuery = "uploadId=" + url.QueryEscape(uploadID)
+	req.Body = io.NopCloser(strings.NewReader("<CompleteMultipartUpload></CompleteMultipartUpload>"))
+	resignV4Request(t, req, fmt.Sprintf("%x", sha256.Sum256(original)))
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SignatureDoesNotMatch") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	afterState, _ := h.mpuStateStore.Get(context.Background(), uploadID)
+	if fmt.Sprintf("%+v", afterState) != fmt.Sprintf("%+v", beforeState) || client.completeCalls != beforeCalls || len(base.parts) != beforeParts || len(base.objects) != beforeObjects {
+		t.Fatal("complete mutation")
+	}
+	if fmt.Sprint(beforeKeys) != fmt.Sprint(mr.Keys()) {
+		t.Fatal("redis keys changed")
+	}
+	for _, k := range beforeKeys {
+		if beforeTTL[k] != mr.TTL(k) {
+			t.Fatalf("redis mutation %s", k)
+		}
 	}
 }
 

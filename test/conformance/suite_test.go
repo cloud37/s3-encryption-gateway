@@ -83,6 +83,11 @@ func TestConformance(t *testing.T) {
 				{"SEC42_CopyObject_RebindsDestination", 0, testSEC42_CopyObject_RebindsDestination},
 				{"SEC42_MigrationRewrite_LegacyObjectBindsDestination", 0, testSEC42_MigrationRewrite_LegacyObjectBindsDestination},
 				{"SEC42_KeyManagerBackendRelocationFailsClosed", 0, testSEC42_KeyManagerBackendRelocationFailsClosed},
+				{"SEC43_SigV4ConcretePayload_PutObjectRoundTrip", 0, testSEC43_SigV4ConcretePayload_PutObjectRoundTrip},
+				{"SEC43_SigV4ConcretePayload_TamperedPutRejectedWithoutObject", 0, testSEC43_SigV4ConcretePayload_TamperedPutRejectedWithoutObject},
+				{"SEC43_SigV4ConcretePayload_TamperedUploadPartRejected", provider.CapMultipartUpload, testSEC43_SigV4ConcretePayload_TamperedUploadPartRejected},
+				{"SEC43_SigV4ConcretePayload_TamperedDeleteObjectsRejectedWithoutDeletion", provider.CapBatchDelete, testSEC43_SigV4ConcretePayload_TamperedDeleteObjectsRejectedWithoutDeletion},
+				{"SEC43_SigV4ConcretePayload_TamperedTaggingRejectedWithoutMutation", provider.CapObjectTagging, testSEC43_SigV4ConcretePayload_TamperedTaggingRejectedWithoutMutation},
 
 				// Multipart operations.
 				{"Multipart_Basic", provider.CapMultipartUpload, testMultipartBasic},

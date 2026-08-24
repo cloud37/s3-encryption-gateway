@@ -18,8 +18,10 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,6 +117,34 @@ func TestHandlePutObjectRetention_ValidXML_Succeeds(t *testing.T) {
 	}
 	if got := mockClient.retentions["b/k"]; got == nil || got.Mode != "GOVERNANCE" {
 		t.Fatalf("retention not recorded, got=%+v", got)
+	}
+}
+
+func TestObjectLockMutations_ConcretePayloadHashMismatch_NoBackendCalls(t *testing.T) {
+	_, client, router := newLockTestHandler(t)
+	cases := []struct{ query, original, mutated string }{
+		{"retention", `<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>`, `<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>`},
+		{"legal-hold", `<LegalHold><Status>ON</Status></LegalHold>`, `<LegalHold><Status>OFF</Status></LegalHold>`},
+		{"object-lock", `<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>`, `<ObjectLockConfiguration><ObjectLockEnabled>Disabled</ObjectLockEnabled></ObjectLockConfiguration>`},
+	}
+	beforeRetention, beforeHold, beforeConfig := client.putRetentionCalls, client.putLegalHoldCalls, client.putLockConfigCalls
+	for _, tc := range cases {
+		req := signedConcreteRequest(t, []byte(tc.original))
+		req.URL.Path = "/b/k"
+		req.URL.RawQuery = tc.query
+		req.Body = io.NopCloser(strings.NewReader(tc.mutated))
+		resignV4Request(t, req, fmt.Sprintf("%x", sha256.Sum256([]byte(tc.original))))
+		w := httptest.NewRecorder()
+		sec41AuthedRouter(router).ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SignatureDoesNotMatch") {
+			t.Fatalf("%s: status=%d body=%s", tc.query, w.Code, w.Body)
+		}
+		if client.putRetentionCalls != beforeRetention || client.putLegalHoldCalls != beforeHold || client.putLockConfigCalls != beforeConfig {
+			t.Fatal("object-lock backend invocation occurred")
+		}
+	}
+	if len(client.retentions) != 0 || len(client.legalHolds) != 0 || len(client.lockConfigs) != 0 {
+		t.Fatal("object-lock mutation occurred")
 	}
 }
 

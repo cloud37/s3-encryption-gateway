@@ -295,6 +295,81 @@ func TestValidateSignatureV4_Valid(t *testing.T) {
 	}
 }
 
+func TestValidateSignatureV4_ConcretePayloadHashCapturedOnlyAfterSignatureVerification(t *testing.T) {
+	body := []byte("signed payload")
+	req := signedConcreteRequest(t, body)
+	ctx, err := ValidateSignatureV4(req, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", defaultClockSkew)
+	wantHash := sha256Sum(body)
+	if err != nil || ctx == nil || !ctx.verifyPayload || !hmac.Equal(ctx.expectedPayloadHash[:], wantHash[:]) {
+		t.Fatalf("valid concrete payload context = %#v, err = %v", ctx, err)
+	}
+	ctx.Close()
+	req.Header.Set("Authorization", strings.Replace(req.Header.Get("Authorization"), "Signature=", "Signature=0", 1))
+	ctx, err = ValidateSignatureV4(req, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", defaultClockSkew)
+	if err == nil || ctx != nil {
+		t.Fatalf("failed validation returned context: %#v, err %v", ctx, err)
+	}
+}
+
+func sha256Sum(data []byte) [sha256.Size]byte { return sha256.Sum256(data) }
+
+func TestValidateSignatureV4_UnsignedPayloadHasNoExpectedDigest(t *testing.T) {
+	req := signedConcreteRequest(t, nil)
+	req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+	// Re-sign the changed canonical claim.
+	req = signedConcreteRequest(t, nil)
+	req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+	// The shared helper signs concrete payloads; construct the valid unsigned case
+	// using the existing middleware test vector instead of accepting a bad claim.
+	canonical, _ := createCanonicalRequest(req, false, []string{"host", "x-amz-content-sha256", "x-amz-date"})
+	date := req.Header.Get("X-Amz-Date")[:8]
+	scope := date + "/us-east-1/s3/aws4_request"
+	key := getSignatureKey("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", date, "us-east-1", "s3")
+	req.Header.Set("Authorization", fmt.Sprintf("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/%s, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=%s", scope, hex.EncodeToString(sign(key, []byte(createStringToSign(req.Header.Get("X-Amz-Date"), scope, canonical))))))
+	ctx, err := ValidateSignatureV4(req, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", defaultClockSkew)
+	if err != nil || ctx == nil || ctx.verifyPayload || ctx.expectedPayloadHash != [sha256.Size]byte{} {
+		t.Fatalf("unsigned context = %#v, err %v", ctx, err)
+	}
+}
+
+func TestValidateSignatureV4_StreamingPayloadHasNoOrdinaryExpectedDigest(t *testing.T) {
+	req := signedConcreteRequest(t, []byte("chunk"))
+	// Streaming mode is classified after signature validation; this test only
+	// needs to prove the resulting context does not select ordinary hashing.
+	req.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+	canonical, _ := createCanonicalRequest(req, false, []string{"host", "x-amz-content-sha256", "x-amz-date"})
+	date, timestamp := req.Header.Get("X-Amz-Date")[:8], req.Header.Get("X-Amz-Date")
+	scope := date + "/us-east-1/s3/aws4_request"
+	key := getSignatureKey("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", date, "us-east-1", "s3")
+	req.Header.Set("Authorization", fmt.Sprintf("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/%s, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=%s", scope, hex.EncodeToString(sign(key, []byte(createStringToSign(timestamp, scope, canonical))))))
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("X-Amz-Decoded-Content-Length", "5")
+	ctx, err := ValidateSignatureV4(req, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", defaultClockSkew)
+	if err != nil || ctx == nil || ctx.verifyPayload || ctx.expectedPayloadHash != [sha256.Size]byte{} {
+		t.Fatalf("streaming context = %#v, err %v", ctx, err)
+	}
+}
+
+func TestValidateSignatureV4_UppercasePayloadHashRejectedAsNonConcrete(t *testing.T) {
+	req := signedConcreteRequest(t, []byte("body"))
+	upper := strings.ToUpper(req.Header.Get("X-Amz-Content-Sha256"))
+	req.Header.Set("X-Amz-Content-Sha256", upper)
+	resignV4Request(t, req, upper)
+	ctx, err := ValidateSignatureV4(req, "wJalrXUtnFEMI/K7MDENG/bPxrfiCYEXAMPLEKEY", defaultClockSkew)
+	if err == nil || ctx != nil {
+		t.Fatalf("uppercase hash result context=%#v err=%v", ctx, err)
+	}
+}
+
+func TestV4SigningContext_CloseZeroizesPayloadDigest(t *testing.T) {
+	c := &V4SigningContext{verifyPayload: true, expectedPayloadHash: sha256.Sum256([]byte("secret")), signingKey: []byte("key"), seedSignature: sha256.Sum256([]byte("seed"))}
+	c.Close()
+	c.Close()
+	if c.verifyPayload || c.expectedPayloadHash != [sha256.Size]byte{} || c.signingKey != nil || c.seedSignature != [sha256.Size]byte{} {
+		t.Fatalf("context not zeroized: %#v", c)
+	}
+}
+
 // TestValidateSignatureV4_ClockSkew_Past verifies that a header-auth request
 // with a timestamp more than 5 minutes in the past is rejected.
 func TestValidateSignatureV4_ClockSkew_Past(t *testing.T) {

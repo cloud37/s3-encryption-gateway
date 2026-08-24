@@ -2,6 +2,9 @@ package api
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,21 +24,23 @@ type verifiedAWSBody interface {
 // streamingSpoolOps is package-private so failure injection can exercise the
 // real temporary-file path without replacing the verifier with a fake.
 var streamingSpoolOps = struct {
-	createTemp func(string, string) (*os.File, error)
-	remove     func(string) error
-	chmod      func(*os.File, os.FileMode) error
-	close      func(*os.File) error
-	read       func(*os.File, []byte) (int, error)
-	write      func(*os.File, []byte) (int, error)
-	seek       func(*os.File, int64, int) (int64, error)
+	createTemp      func(string, string) (*os.File, error)
+	remove          func(string) error
+	chmod           func(*os.File, os.FileMode) error
+	close           func(*os.File) error
+	read            func(*os.File, []byte) (int, error)
+	readRequestBody func(io.Reader, []byte) (int, error)
+	write           func(*os.File, []byte) (int, error)
+	seek            func(*os.File, int64, int) (int64, error)
 }{
-	createTemp: os.CreateTemp,
-	remove:     os.Remove,
-	chmod:      func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) },
-	close:      func(f *os.File) error { return f.Close() },
-	read:       func(f *os.File, p []byte) (int, error) { return f.Read(p) },
-	write:      func(f *os.File, p []byte) (int, error) { return f.Write(p) },
-	seek:       func(f *os.File, offset int64, whence int) (int64, error) { return f.Seek(offset, whence) },
+	createTemp:      os.CreateTemp,
+	remove:          os.Remove,
+	chmod:           func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) },
+	close:           func(f *os.File) error { return f.Close() },
+	read:            func(f *os.File, p []byte) (int, error) { return f.Read(p) },
+	readRequestBody: func(r io.Reader, p []byte) (int, error) { return r.Read(p) },
+	write:           func(f *os.File, p []byte) (int, error) { return f.Write(p) },
+	seek:            func(f *os.File, offset int64, whence int) (int64, error) { return f.Seek(offset, whence) },
 }
 
 type verifiedAWSFile struct {
@@ -139,6 +144,64 @@ func verifyAndSpoolAWSBody(r *http.Request, signing *V4SigningContext) (verified
 	if _, err := streamingSpoolOps.seek(f, 0, io.SeekStart); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("%w: %v", ErrStreamingSpool, err)
+	}
+	return &verifiedAWSFile{File: f, length: length, path: path}, nil
+}
+
+func verifyAndSpoolV4Payload(r *http.Request, signing *V4SigningContext) (verifiedAWSBody, error) {
+	if r == nil || signing == nil || !signing.verifyPayload {
+		return nil, errors.New("invalid concrete SigV4 payload verification request")
+	}
+	defer r.Body.Close()
+	f, err := streamingSpoolOps.createTemp("", "s3gw-aws-body-*")
+	if err != nil {
+		return nil, fmt.Errorf("%w: create temporary body: %v", ErrStreamingSpool, err)
+	}
+	path := f.Name()
+	cleanup := func() {
+		_ = streamingSpoolOps.close(f)
+		_ = streamingSpoolOps.remove(path)
+	}
+	if err := streamingSpoolOps.chmod(f, 0600); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("%w: chmod temporary body: %v", ErrStreamingSpool, err)
+	}
+	hash := sha256.New()
+	buf := make([]byte, 32*1024)
+	var length int64
+	for {
+		if err := r.Context().Err(); err != nil {
+			cleanup()
+			return nil, ErrStreamingCanceled
+		}
+		n, readErr := streamingSpoolOps.readRequestBody(r.Body, buf)
+		if n > 0 {
+			written, writeErr := streamingSpoolOps.write(f, buf[:n])
+			if written != n || writeErr != nil {
+				cleanup()
+				return nil, fmt.Errorf("%w: write temporary body", ErrStreamingSpool)
+			}
+			if _, hashErr := hash.Write(buf[:n]); hashErr != nil {
+				cleanup()
+				return nil, fmt.Errorf("%w: hash request body", ErrStreamingSpool)
+			}
+			length += int64(n)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			cleanup()
+			return nil, fmt.Errorf("%w: read request body", ErrStreamingSpool)
+		}
+	}
+	if !hmac.Equal(hash.Sum(nil), signing.expectedPayloadHash[:]) {
+		cleanup()
+		return nil, ErrSignatureMismatch
+	}
+	if _, err := streamingSpoolOps.seek(f, 0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("%w: seek temporary body", ErrStreamingSpool)
 	}
 	return &verifiedAWSFile{File: f, length: length, path: path}, nil
 }

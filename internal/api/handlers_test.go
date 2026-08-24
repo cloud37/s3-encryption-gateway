@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -65,13 +66,16 @@ type mockS3Client struct {
 
 	// Object-Lock recording (V0.6-S3-2). Readers MUST hold mu; writers
 	// hold mu for write.
-	locksMu          sync.Mutex
-	lastPutLock      *s3.ObjectLockInput
-	lastCopyLock     *s3.ObjectLockInput
-	lastCompleteLock *s3.ObjectLockInput
-	retentions       map[string]*s3.RetentionConfig
-	legalHolds       map[string]string
-	lockConfigs      map[string]*s3.ObjectLockConfiguration
+	locksMu            sync.Mutex
+	lastPutLock        *s3.ObjectLockInput
+	lastCopyLock       *s3.ObjectLockInput
+	lastCompleteLock   *s3.ObjectLockInput
+	retentions         map[string]*s3.RetentionConfig
+	legalHolds         map[string]string
+	lockConfigs        map[string]*s3.ObjectLockConfiguration
+	putRetentionCalls  int
+	putLegalHoldCalls  int
+	putLockConfigCalls int
 
 	// ACL recording (V1.0-S3-1). Protected by locksMu.
 	lastCannedACL        string
@@ -86,8 +90,10 @@ type mockS3Client struct {
 	lastMPUGrantWriteACP string
 	lastMPUMetadata      map[string]string
 
-	headObjectCallCount int
-	putObjectCallCount  int
+	headObjectCallCount    int
+	putObjectCallCount     int
+	deleteObjectsCallCount int
+	deleteObjectCallCount  int
 }
 
 func newMockS3Client() *mockS3Client {
@@ -170,6 +176,7 @@ func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versio
 }
 
 func (m *mockS3Client) DeleteObject(ctx context.Context, bucket, key string, versionID *string) error {
+	m.deleteObjectCallCount++
 	if err := m.errors[bucket+"/"+key+"/delete"]; err != nil {
 		return err
 	}
@@ -389,6 +396,7 @@ func (m *mockS3Client) UploadPartCopy(ctx context.Context, dstBucket, dstKey, up
 }
 
 func (m *mockS3Client) DeleteObjects(ctx context.Context, bucket string, keys []s3.ObjectIdentifier) ([]s3.DeletedObject, []s3.ErrorObject, error) {
+	m.deleteObjectsCallCount++
 	deleted := []s3.DeletedObject{}
 	errObjects := []s3.ErrorObject{}
 
@@ -594,6 +602,75 @@ func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
 				t.Fatalf("invalid signed trailer mutated backend: calls=%d objects=%d metadata=%d", client.putObjectCallCount, len(client.objects), len(client.metadata))
 			}
 		})
+	}
+}
+
+func TestHandlePutObject_ConcretePayloadHashMismatch_NoBackendEncryptionOrCacheMutation(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	require.NoError(t, err)
+	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	beforeObjects := len(client.objects)
+	beforeMetadata := len(client.metadata)
+	beforePuts := client.putObjectCallCount
+	req := signedConcreteRequest(t, []byte("original"))
+	req.URL.Path = "/bucket/sec43-put"
+	req.Body = io.NopCloser(strings.NewReader("tampered"))
+	resignV4Request(t, req, fmt.Sprintf("%x", sha256.Sum256([]byte("original"))))
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SignatureDoesNotMatch") || client.putObjectCallCount != beforePuts || len(client.objects) != beforeObjects || len(client.metadata) != beforeMetadata {
+		t.Fatalf("status=%d body=%s calls=%d objects=%d", w.Code, w.Body, client.putObjectCallCount, len(client.objects))
+	}
+}
+
+func TestHandleDeleteObjects_ConcretePayloadHashMismatch_NoBackendCalls(t *testing.T) {
+	client := newMockS3Client()
+	h := NewHandler(client, nil, logrus.New(), getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	client.objects["bucket/victim"] = []byte("keep")
+	client.metadata["bucket/victim"] = map[string]string{}
+	beforeObjects := append([]byte(nil), client.objects["bucket/victim"]...)
+	beforeDeletes := client.deleteObjectsCallCount
+	beforeDeleteObjects := client.deleteObjectCallCount
+	original := []byte("<Delete><Object><Key>victim</Key></Object></Delete>")
+	req := signedConcreteRequest(t, original)
+	req.Method = http.MethodPost
+	req.URL.Path = "/bucket"
+	req.URL.RawQuery = "delete"
+	req.Body = io.NopCloser(strings.NewReader("<Delete><Object><Key>other</Key></Object></Delete>"))
+	resignV4Request(t, req, fmt.Sprintf("%x", sha256.Sum256(original)))
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SignatureDoesNotMatch") || client.deleteObjectsCallCount != beforeDeletes || client.deleteObjectCallCount != beforeDeleteObjects || !bytes.Equal(client.objects["bucket/victim"], beforeObjects) {
+		t.Fatalf("status=%d body=%s calls=%d", w.Code, w.Body, client.deleteObjectsCallCount)
+	}
+}
+
+func TestPassthroughMutation_ConcretePayloadHashMismatch_NoBackendRequest(t *testing.T) {
+	backendCalls := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { backendCalls++; w.WriteHeader(http.StatusOK) }))
+	defer backend.Close()
+	client := newMockS3Client()
+	cfg := &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}
+	h := NewHandlerWithFeatures(client, nil, logrus.New(), getTestMetrics(), nil, nil, nil, cfg, nil)
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	beforeCalls := backendCalls
+	original := []byte("<Tagging><TagSet></TagSet></Tagging>")
+	req := signedConcreteRequest(t, original)
+	req.Method = http.MethodPut
+	req.URL.Path = "/bucket/key"
+	req.URL.RawQuery = "tagging"
+	req.Body = io.NopCloser(strings.NewReader("<Tagging><TagSet><Tag/></TagSet></Tagging>"))
+	resignV4Request(t, req, fmt.Sprintf("%x", sha256.Sum256(original)))
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "SignatureDoesNotMatch") || backendCalls != beforeCalls {
+		t.Fatalf("status=%d body=%s backend calls=%d want=%d", w.Code, w.Body, backendCalls, beforeCalls)
 	}
 }
 
@@ -1986,6 +2063,7 @@ func TestHandler_HandleCreateBucket(t *testing.T) {
 // Object Lock mock methods (V0.6-S3-2). These record and recall state
 // so unit tests can assert round-trips.
 func (m *mockS3Client) PutObjectRetention(ctx context.Context, bucket, key string, versionID *string, retention *s3.RetentionConfig) error {
+	m.putRetentionCalls++
 	if err := m.errors[bucket+"/"+key+"/put_retention"]; err != nil {
 		return err
 	}
@@ -2014,6 +2092,7 @@ func (m *mockS3Client) GetObjectRetention(ctx context.Context, bucket, key strin
 }
 
 func (m *mockS3Client) PutObjectLegalHold(ctx context.Context, bucket, key string, versionID *string, status string) error {
+	m.putLegalHoldCalls++
 	if err := m.errors[bucket+"/"+key+"/put_legal_hold"]; err != nil {
 		return err
 	}
@@ -2033,6 +2112,7 @@ func (m *mockS3Client) GetObjectLegalHold(ctx context.Context, bucket, key strin
 }
 
 func (m *mockS3Client) PutObjectLockConfiguration(ctx context.Context, bucket string, config *s3.ObjectLockConfiguration) error {
+	m.putLockConfigCalls++
 	if err := m.errors[bucket+"/put_lock_config"]; err != nil {
 		return err
 	}
