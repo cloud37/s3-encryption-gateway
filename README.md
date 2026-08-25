@@ -6,6 +6,12 @@ A Helm chart for deploying the S3 Encryption Gateway - a transparent proxy that 
 
 The S3 Encryption Gateway sits between S3 clients and backend storage providers, encrypting/decrypting data transparently while maintaining full S3 API compatibility. This Helm chart simplifies deployment to Kubernetes clusters.
 
+Bucket creation is disabled by default. Set `config.allowBucketCreation.value`
+to `"true"` only with matching credential scope and an explicit create grant.
+`rw` does not infer management access. Delete is independently granted with
+`delete`; backend IAM must permit the operation. Authorized CreateBucket
+requests preserve LocationConstraint bytes and backend responses.
+
 ## Repository
 
 This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
@@ -113,14 +119,22 @@ config:
 | `config.backend.provider` | Provider hint string (optional) | `""` |
 | `config.backend.useSSL` | Use SSL for backend connection | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
-| `config.backend.useClientCredentials` | Forward client-supplied credentials to the backend | `"false"` |
+Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it for unrestricted access or use `[]` for deny-all. `permissions` is `ro` or `rw`, while `bucketPermissions` explicitly grants `create` and `delete`.
 
-**Note on `useClientCredentials`**: When set to `"true"`, the gateway extracts credentials from client requests instead of using configured backend credentials. In this mode:
-- `config.backend.accessKey` and `config.backend.secretKey` are **NOT required** and will be excluded from the deployment
-- Clients must provide credentials via **query parameters only** (`?AWSAccessKeyId=...&AWSSecretAccessKey=...`)
-- **AWS Signature V4 (Authorization header) is NOT supported** — the signature includes the Host header, which prevents forwarding requests to the backend
-- Requests without valid credentials will fail with `AccessDenied`
-- Useful for providers like Hetzner that don't support per-bucket access keys
+#### Credential Migration and Reload
+
+Existing credentials remain unrestricted and read-write when `buckets` and
+`permissions` are omitted. To migrate safely, first add explicit bucket scopes,
+then use `ro` for readers and grant `create` or `delete` only where required.
+Exact bucket names and non-empty trailing-prefix patterns such as `tenant-*`
+are supported; other wildcard forms are rejected.
+
+Credential policy files and the main configuration file can be reloaded with
+`SIGHUP` when the deployment is configured to watch them. A failed reload keeps
+the previous complete policy snapshot. Helm-provided environment variables are
+process environment, so changing a Secret or Helm value requires a pod restart;
+it is not a live environment reload. Roll out credential changes atomically and
+verify the rendered environment before removing old access.
 
 #### Encryption Configuration
 
@@ -258,7 +272,9 @@ config:
         value: "1"
       cosmian:
         endpoint:
-          value: "http://cosmian-kms:9998/kmip/2_1"
+          value: "https://cosmian-kms:9998/kmip/2_1"
+        insecureAllowPlaintextTransport:
+          value: "false"
         timeout:
           value: "10s"
         keys:
@@ -283,7 +299,8 @@ config:
 ```
 
 **Cosmian Protocol Selection**:
-- **JSON/HTTP (Recommended)**: Full URL `http://host:9998/kmip/2_1`; no client certificates needed for HTTP
+- **JSON/HTTPS (Recommended)**: Full URL `https://host:9998/kmip/2_1`
+- **JSON/HTTP (Development only)**: Set `insecureAllowPlaintextTransport.value: "true"` explicitly. HTTP transmits plaintext DEKs and is rejected by default.
 - **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS)
 
 #### Valkey (Multipart Upload State + ListObjects Size Cache)
@@ -323,9 +340,25 @@ Use the built-in Valkey subchart for development or point at an external cluster
 | `config.multipartState.valkey.tls.keyFile` | Client key file for Valkey mTLS | `""` |
 | `config.multipartState.valkey.insecureAllowPlaintext` | Allow plaintext Valkey (development only) | `""` |
 | `config.multipartState.valkey.ttlSeconds` | TTL for in-flight MPU state records in Valkey (default: `604800` = 7 days) | `""` |
+| `config.multipartState.valkey.stateV2Writer.enabled.value` | Enable the fixed `state-v2` encrypted-MPU writer capability required after the v0.12 rollout | `""` |
 | `config.multipartState.valkey.encryptionPassword` | Dedicated password for Valkey at-rest encryption (V1.0-CRYPTO-2). Provide via `.value` (plaintext) or `.valueFrom` (secret ref). When set, `VALKEY_ENCRYPT_STATE` is automatically `"true"` | `""` |
 
 > **CRYPTO-2 note:** When `encryptionPassword` is set (either `.value` or `.valueFrom`), the gateway automatically enables at-rest encryption (`VALKEY_ENCRYPT_STATE=true`). If unset, the gateway falls back to the main `ENCRYPTION_PASSWORD` with a distinct HKDF salt.
+
+> **v0.12 encrypted-MPU rollout:** Enable
+> `config.multipartState.valkey.stateV2Writer.enabled.value: "true"` on the second Helm
+> upgrade. Helm renders `VALKEY_MPU_STATE_V2_WRITER=true` for every replica; the
+> gateway derives the fixed internal protocol capability. Before that upgrade,
+> complete a separate scale-down to one
+> old replica with `helm upgrade RELEASE CHART --reuse-values --set
+> replicaCount=1`, then wait for `kubectl rollout status
+> deployment/DEPLOYMENT`. Do not combine this scale-down with the image upgrade.
+> Drain or abort all in-flight encrypted MPUs before the second upgrade. The
+> chart uses `maxSurge: 0` and `maxUnavailable: 1`, so this single old writer is
+> terminated before its v0.12 replacement starts. That first state-v2 writer
+> atomically initializes Valkey `mpu:writer-version`; later replicas verify the
+> same value. Do not use this upgrade path with multiple old replicas, because
+> legacy writers cannot be detected by the new release.
 
 **ListObjects size cache (`config.listSizeTranslate.*`)** — V1.0-S3-3. Reuses the
 Valkey instance above; no separate deployment. All fields use the
@@ -756,8 +789,10 @@ config:
         value: "1"
       cosmian:
         endpoint:
-          # JSON/HTTP (recommended): full URL or base URL with auto-appended /kmip/2_1
-          value: "http://cosmian-kms:9998/kmip/2_1"
+          # JSON/HTTPS (recommended): full URL or base URL with auto-appended /kmip/2_1
+          value: "https://cosmian-kms:9998/kmip/2_1"
+        insecureAllowPlaintextTransport:
+          value: "false"
         timeout:
           value: "10s"
         keys:
@@ -797,6 +832,12 @@ which is enabled by default whenever Valkey is configured.
 #### Development / staging (in-cluster Valkey subchart)
 
 ```yaml
+config:
+  auth:
+    # Deprecated SigV2 is disabled by default. Set true only during migration.
+    allowLegacySignatureV2:
+      value: "false"
+
 valkey:
   enabled: true                  # auto-wires VALKEY_ADDR → <release>-valkey:6379
   architecture: standalone
@@ -905,32 +946,13 @@ config:
           key: encryption-password
 ```
 
-### Client Credentials Mode
+### Backend Identity
 
-Forward client-provided credentials to the backend (e.g. for Hetzner):
-
-```yaml
-config:
-  proxiedBucket:
-    value: "my-bucket"
-  backend:
-    endpoint:
-      value: "https://your-bucket.your-region.your-objectstorage.com"
-    region:
-      value: "nbg1"
-    useClientCredentials:
-      value: "true"
-    # accessKey and secretKey are NOT required when useClientCredentials is true
-  encryption:
-    password:
-      valueFrom:
-        secretKeyRef:
-          name: s3-encryption-gateway-secrets
-          key: encryption-password
-```
-
-Clients must include credentials via **query parameters only**: `?AWSAccessKeyId=...&AWSSecretAccessKey=...`.
-AWS Signature V4 (`Authorization` header) is **not supported** in this mode.
+The gateway authenticates to the backend S3 provider using its own credentials
+(`config.backend.accessKey` / `config.backend.secretKey`). Caller credentials
+are validated at the gateway and are **never forwarded** to the backend (ADR-0012).
+Each `auth.credentials` entry controls client access independently of the
+backend identity.
 
 ### With Pod Lifecycle Hooks (Progressive Delivery)
 
