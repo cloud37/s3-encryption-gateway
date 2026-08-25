@@ -333,7 +333,11 @@ func TestConformance(t *testing.T) {
 				{"Compat_MinIOPy", provider.CapSDKMinIOPy, testCompatSmoke_MinIOPy},
 
 				// V1.0-S3-2 S3 API feature parity
-				{"S3Compat_DeleteBucket", 0, testS3Compat_DeleteBucket},
+				{"BucketManagement_CreateBucket_EnabledAuthorized", provider.CapBucketManagement, testBucketManagementCreateBucketEnabledAuthorized},
+				{"BucketManagement_CreateBucket_DefaultDisabled", 0, testBucketManagementCreateBucketDefaultDisabled},
+				{"BucketManagement_CreateBucket_OutOfScope", 0, testBucketManagementCreateBucketOutOfScope},
+				{"BucketManagement_CreateBucket_LocationConstraint", provider.CapBucketManagement, testBucketManagementCreateBucketLocationConstraint},
+				{"BucketManagement_DeleteBucket_Authorized", provider.CapBucketManagement, testBucketManagementDeleteBucketAuthorized},
 				{"S3Compat_ListBuckets", 0, testS3Compat_ListBuckets},
 				{"S3Compat_GetBucketLocation", 0, testS3Compat_GetBucketLocation},
 				{"S3Compat_GetBucketVersioning", provider.CapVersioning, testS3Compat_GetBucketVersioning},

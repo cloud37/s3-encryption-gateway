@@ -48,7 +48,8 @@ type options struct {
 	// See WithBackendTransport and FaultyRoundTripper.
 	backendTransport http.RoundTripper
 	// authCredentials holds credentials configured via WithAuth.
-	authCredentials []config.GatewayCredential
+	authCredentials     []config.GatewayCredential
+	allowBucketCreation bool
 
 	// adminEnabled, when true, starts an admin listener alongside the gateway.
 	// The bearer token is adminToken (plain inline — test-only). The admin
@@ -63,6 +64,16 @@ type options struct {
 	// blobs (V1.0-CRYPTO-3). When set, the gateway engine will encrypt
 	// encryption/compression metadata values in S3 object headers.
 	metadataEncryptionKey []byte
+}
+
+// WithBucketCreation enables the gateway's global bucket creation gate.
+func WithBucketCreation(enabled bool) Option {
+	return func(o *options) { o.allowBucketCreation = enabled }
+}
+
+// WithBucketManagementCredentials configures explicit lifecycle credentials.
+func WithBucketManagementCredentials(credentials ...config.GatewayCredential) Option {
+	return func(o *options) { o.authCredentials = credentials }
 }
 
 // WithAccessLogCapture directs gateway access logs to a test-owned writer.

@@ -87,8 +87,9 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 
 	// Build the config from the provider instance.
 	cfg := &config.Config{
-		ListenAddr: "127.0.0.1:0",
-		LogLevel:   o.logLevel,
+		ListenAddr:          "127.0.0.1:0",
+		LogLevel:            o.logLevel,
+		AllowBucketCreation: o.allowBucketCreation,
 		Backend: config.BackendConfig{
 			Endpoint:     inst.Endpoint,
 			Region:       inst.Region,

@@ -59,6 +59,8 @@ const (
 	CapObjectACL
 	// CapBucketEncryption indicates support for PutBucketEncryption / GetBucketEncryption.
 	CapBucketEncryption
+	// CapBucketManagement indicates gateway-facing create/delete bucket tests.
+	CapBucketManagement
 
 	// V1.0-COMPAT-1 — SDK/Tool compatibility matrix capability bits.
 
@@ -135,6 +137,7 @@ var capNames = []struct {
 	{CapBucketACL, "BucketACL"},
 	{CapObjectACL, "ObjectACL"},
 	{CapBucketEncryption, "BucketEncryption"},
+	{CapBucketManagement, "BucketManagement"},
 	{CapSizeTranslation, "SizeTranslation"},
 
 	// V1.0-COMPAT-1 — SDK/Tool compatibility matrix.
