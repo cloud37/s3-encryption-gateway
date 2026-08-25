@@ -1,5 +1,18 @@
 # S3 Encryption Gateway
 
+## Authorized Bucket Management
+
+Bucket creation is disabled by default. To enable it, operators must set
+`allow_bucket_creation: true` (or `ALLOW_BUCKET_CREATION=true`) and the
+authenticated credential must both match the target bucket scope and explicitly
+include `bucket_permissions: [create]`. `rw` never grants bucket management.
+DeleteBucket is independently controlled by scope plus
+`bucket_permissions: [delete]`; it has no global enable switch. The gateway
+forwards authorized CreateBucket bodies, including LocationConstraint, raw to
+the backend, whose IAM permissions remain required. File configuration changes
+hot-reload safely; environment and Helm values are process-start settings and
+require restart when changed.
+
 ![GitHub Release](https://img.shields.io/github/v/release/cloud37/s3-encryption-gateway)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)](https://artifacthub.io/packages/helm/s3-encryption-gateway/s3-encryption-gateway)

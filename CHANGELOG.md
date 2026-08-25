@@ -117,6 +117,10 @@ upgrade and rollback procedures.
 
 ### Added
 
+- Optional, default-disabled authorized `CreateBucket` passthrough with a global
+  gate and scoped explicit `create` permission, plus independently scoped
+  explicit `DeleteBucket` permission; `rw` does not imply bucket management access.
+
 - Configurable KDF decrypt limits in YAML, environment variables, and Helm:
   `encryption.kdf.decrypt_limits.pbkdf2.max_iterations` and
   `encryption.kdf.decrypt_limits.argon2id.{max_time,max_memory,max_threads}`.
@@ -2886,3 +2890,8 @@ unless noted.
 - Add strict SigV4 streaming-chain verification, checksum trailers, bounded
   atomic spooling, and fail-closed rejection of malformed or unknown streaming
   payload modes.
+## Unreleased
+
+- Add opt-in, explicitly authorized CreateBucket and DeleteBucket passthrough
+  with generic name validation, bounded request bodies, and raw backend
+  LocationConstraint/response semantics.

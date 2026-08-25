@@ -264,6 +264,11 @@ type S3Response struct {
 - **Per-credential bucket scope**: Each credential can be restricted to exact bucket names and trailing-`*` prefixes. An omitted `buckets` list means unrestricted; an explicit empty list `[]` denies all buckets.
 - **Object permissions**: `ro` permits reads only; `rw` permits reads and mutations. Both default to `rw` when omitted.
 - **Bucket permissions**: Explicit grants `create` and `delete` are required for CreateBucket and DeleteBucket. `rw` does not imply either.
+
+CreateBucket is disabled by default and requires the global gate, credential
+scope, and explicit create grant. Authorized requests preserve the raw
+LocationConstraint body and backend response. DeleteBucket is independently
+authorized by scope and explicit delete grant; backend IAM remains authoritative.
 - **Global intersection**: If `PROXIED_BUCKET` is set, the effective scope is the credential's buckets intersected with the proxied bucket name.
 - **Copy operations**: Both the source bucket and destination bucket must be within the credential's scope, and destination mutations require `rw`.
 - **ListBuckets**: Responses are filtered to only buckets the credential is authorized to access.

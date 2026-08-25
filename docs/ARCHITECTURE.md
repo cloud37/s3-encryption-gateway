@@ -318,3 +318,10 @@ type CompressionConfig struct {
 - Security audit recommendations
 
 **Status**: Complete. All production features implemented.
+### Bucket lifecycle authorization
+
+The gateway authorizes bucket lifecycle operations before any backend access.
+Authorized CreateBucket is a bounded raw signed passthrough preserving the
+request body and backend response, including LocationConstraint. The global
+creation gate, credential scope, and explicit create grant are independent;
+DeleteBucket uses scope plus an explicit delete grant.

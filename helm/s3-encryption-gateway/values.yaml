@@ -136,6 +136,11 @@ ingress:
 #   - From ConfigMap: valueFrom: { configMapKeyRef: { name: "my-configmap", key: "my-key" } }
 
 config:
+
+  # Bucket creation is disabled unless explicitly enabled and granted per credential.
+  allowBucketCreation:
+    value: "false"
+    valueFrom: {}
   # Basic server configuration
   listenAddr:
     value: ":8080"

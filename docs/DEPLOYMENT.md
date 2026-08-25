@@ -980,3 +980,12 @@ Set `METRICS_ENABLE_BUCKET_LABEL=true` when per-bucket dashboards are needed.
 The setting applies to the S3 client metric families
 `s3_client_requests_total` and `s3_client_bytes_total`; the default `false`
 collapses bucket labels to `*`.
+### Bucket management safety
+
+CreateBucket requires all three controls: `ALLOW_BUCKET_CREATION=true`, a
+credential bucket scope match (also narrowed by `PROXIED_BUCKET`), and an
+explicit `bucket_permissions: [create]` grant. DeleteBucket independently
+requires scope plus `bucket_permissions: [delete]`; object `rw` grants neither.
+The backend IAM identity must also be permitted to perform the operation.
+Creation is false by default. YAML file changes hot-reload; environment/Helm
+changes require a process restart.

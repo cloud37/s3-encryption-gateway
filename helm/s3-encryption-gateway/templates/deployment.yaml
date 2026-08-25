@@ -60,7 +60,8 @@ spec:
         {{- end }}
         env:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "LISTEN_ADDR" "value" .Values.config.listenAddr.value "valueFrom" .Values.config.listenAddr.valueFrom) | nindent 8 }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "LOG_LEVEL" "value" .Values.config.logLevel.value "valueFrom" .Values.config.logLevel.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "LOG_LEVEL" "value" .Values.config.logLevel.value "valueFrom" .Values.config.logLevel.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "ALLOW_BUCKET_CREATION" "value" .Values.config.allowBucketCreation.value "valueFrom" .Values.config.allowBucketCreation.valueFrom) | nindent 8 }}
         {{- if and .Values.config.proxiedBucket (or .Values.config.proxiedBucket.value .Values.config.proxiedBucket.valueFrom) }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "PROXIED_BUCKET" "value" (default "" .Values.config.proxiedBucket.value) "valueFrom" .Values.config.proxiedBucket.valueFrom) | nindent 8 }}
         {{- end }}

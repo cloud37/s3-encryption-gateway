@@ -844,6 +844,11 @@
           ]
         },
 
+        "allowBucketCreation": {
+          "allOf": [{ "$ref": "#/$defs/configValue" }],
+          "description": "Global gate for explicitly authorized bucket creation; defaults to false."
+        },
+
         "policies": {
           "allOf": [{ "$ref": "#/$defs/configValue" }],
           "description": "Path glob for policy YAML files (e.g. /etc/s3-gateway/policies/*.yaml)."

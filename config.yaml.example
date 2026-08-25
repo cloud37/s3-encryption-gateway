@@ -3,6 +3,10 @@ log_level: "info"
 # proxied_bucket: ""  # Optional: If set, the gateway will only proxy requests for this specific bucket
                       # Set via PROXIED_BUCKET env var
 
+# Bucket management is disabled by default. Enable only with explicit
+# bucket_permissions: [create] credentials.
+allow_bucket_creation: false
+
 auth:
   # Maximum acceptable clock skew for SigV4 timestamp validation.
   # Default: 5m (matching AWS SigV4 specification).

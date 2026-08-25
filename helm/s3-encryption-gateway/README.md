@@ -6,6 +6,12 @@ A Helm chart for deploying the S3 Encryption Gateway - a transparent proxy that 
 
 The S3 Encryption Gateway sits between S3 clients and backend storage providers, encrypting/decrypting data transparently while maintaining full S3 API compatibility. This Helm chart simplifies deployment to Kubernetes clusters.
 
+Bucket creation is disabled by default. Set `config.allowBucketCreation.value`
+to `"true"` only with matching credential scope and an explicit create grant.
+`rw` does not infer management access. Delete is independently granted with
+`delete`; backend IAM must permit the operation. Authorized CreateBucket
+requests preserve LocationConstraint bytes and backend responses.
+
 ## Repository
 
 This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**

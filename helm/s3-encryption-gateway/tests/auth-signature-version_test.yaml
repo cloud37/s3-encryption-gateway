@@ -6,6 +6,47 @@ release:
 values:
   - ../values.yaml
 tests:
+  - it: should default ALLOW_BUCKET_CREATION to false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ALLOW_BUCKET_CREATION
+            value: "false"
+  - it: should render ALLOW_BUCKET_CREATION when enabled
+    set:
+      config.allowBucketCreation.value: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ALLOW_BUCKET_CREATION
+            value: "true"
+  - it: should render explicit bucket management permissions
+    set:
+      config.auth.credentials:
+        - accessKey: { value: "management" }
+          secretKey: { value: "secret" }
+          bucketPermissions: [create, delete]
+      config.encryption.password.value: "test-password"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GW_CRED_0_BUCKET_PERMISSIONS
+            value: "create,delete"
+  - it: should not infer bucket permissions from rw
+    set:
+      config.auth.credentials:
+        - accessKey: { value: "management" }
+          secretKey: { value: "secret" }
+          permissions: "rw"
+      config.encryption.password.value: "test-password"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GW_CRED_0_BUCKET_PERMISSIONS
   - it: should disable legacy SigV2 by default
     asserts:
       - contains:
