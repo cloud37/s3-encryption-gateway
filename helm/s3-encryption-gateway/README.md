@@ -340,13 +340,13 @@ Use the built-in Valkey subchart for development or point at an external cluster
 | `config.multipartState.valkey.tls.keyFile` | Client key file for Valkey mTLS | `""` |
 | `config.multipartState.valkey.insecureAllowPlaintext` | Allow plaintext Valkey (development only) | `""` |
 | `config.multipartState.valkey.ttlSeconds` | TTL for in-flight MPU state records in Valkey (default: `604800` = 7 days) | `""` |
-| `config.multipartState.valkey.stateV2Writer.enabled` | Enable the fixed `state-v2` encrypted-MPU writer capability required after the v0.12 rollout | `false` |
+| `config.multipartState.valkey.stateV2Writer.enabled.value` | Enable the fixed `state-v2` encrypted-MPU writer capability required after the v0.12 rollout | `""` |
 | `config.multipartState.valkey.encryptionPassword` | Dedicated password for Valkey at-rest encryption (V1.0-CRYPTO-2). Provide via `.value` (plaintext) or `.valueFrom` (secret ref). When set, `VALKEY_ENCRYPT_STATE` is automatically `"true"` | `""` |
 
 > **CRYPTO-2 note:** When `encryptionPassword` is set (either `.value` or `.valueFrom`), the gateway automatically enables at-rest encryption (`VALKEY_ENCRYPT_STATE=true`). If unset, the gateway falls back to the main `ENCRYPTION_PASSWORD` with a distinct HKDF salt.
 
 > **v0.12 encrypted-MPU rollout:** Enable
-> `config.multipartState.valkey.stateV2Writer.enabled: true` on the second Helm
+> `config.multipartState.valkey.stateV2Writer.enabled.value: "true"` on the second Helm
 > upgrade. Helm renders `VALKEY_MPU_STATE_V2_WRITER=true` for every replica; the
 > gateway derives the fixed internal protocol capability. Before that upgrade,
 > complete a separate scale-down to one

@@ -478,7 +478,7 @@ Before deploying a binary containing MPU state version 2:
    because old writers can bypass immutable claims. The Helm chart uses
    `maxSurge: 0` and `maxUnavailable: 1`, so the single old writer terminates
    before its replacement starts.
-4. Enable `config.multipartState.valkey.stateV2Writer.enabled: true` in the
+4. Enable `config.multipartState.valkey.stateV2Writer.enabled.value: "true"` in the
    second Helm upgrade. The chart sets the fixed
    `VALKEY_MPU_STATE_V2_WRITER=true` value in every state-v2 replica. The
    gateway derives the internal protocol capability. The first state-v2 writer

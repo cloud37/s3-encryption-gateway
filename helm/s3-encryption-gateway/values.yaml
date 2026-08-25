@@ -618,7 +618,8 @@ config:
       # replicas verify it. Before a v0.12 upgrade, scale the gateway to one
       # replica and drain or abort in-flight encrypted MPUs.
       stateV2Writer:
-        enabled: false
+        enabled:
+          value: ""
 
       # ── At-rest encryption for MPU state (V1.0-CRYPTO-2) ─────────────────
       # State encryption uses a random DEK wrapped by the configured

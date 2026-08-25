@@ -19,7 +19,7 @@ tests:
           value: 1
   - it: enables the state-v2 writer when configured
     set:
-      config.multipartState.valkey.stateV2Writer.enabled: true
+      config.multipartState.valkey.stateV2Writer.enabled.value: "true"
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -27,6 +27,22 @@ tests:
             name: VALKEY_MPU_STATE_V2_WRITER
             value: "true"
   - it: omits the state-v2 writer opt-in by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VALKEY_MPU_STATE_V2_WRITER
+  - it: omits the state-v2 writer when explicitly disabled
+    set:
+      config.multipartState.valkey.stateV2Writer.enabled.value: "false"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VALKEY_MPU_STATE_V2_WRITER
+  - it: omits the state-v2 writer for unsupported truthy values
+    set:
+      config.multipartState.valkey.stateV2Writer.enabled.value: "1"
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env

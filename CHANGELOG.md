@@ -37,7 +37,8 @@ not use a rolling mix of pre-0.12.0 and 0.12.0 writers.
    `kubectl rollout status deployment/DEPLOYMENT` to succeed before the image
    upgrade. Do not combine the scale-down with the image upgrade or run state-v1
    and state-v2 writers together. On the second Helm upgrade, set
-   `config.multipartState.valkey.stateV2Writer.enabled=true`. Helm supplies the
+    `--set-string config.multipartState.valkey.stateV2Writer.enabled.value=true`.
+    Helm supplies the
    `VALKEY_MPU_STATE_V2_WRITER=true` to every replica; the gateway derives the
    fixed internal protocol capability. The first state-v2 writer atomically
    initializes Valkey `mpu:writer-version`;
@@ -86,7 +87,8 @@ upgrade and rollback procedures.
   coordinated rollout; drain or abort them before deploying or rolling back to
   a version-1 writer. Helm upgrades must first scale the old deployment to one
   replica and wait for that rollout to complete, then upgrade the image with
-  `config.multipartState.valkey.stateV2Writer.enabled=true`. Helm supplies the
+   `--set-string config.multipartState.valkey.stateV2Writer.enabled.value=true`.
+   Helm supplies the
   `VALKEY_MPU_STATE_V2_WRITER=true`; the gateway derives the fixed internal
   protocol capability. The first state-v2 writer atomically initializes
   `mpu:writer-version`; later replicas verify it.

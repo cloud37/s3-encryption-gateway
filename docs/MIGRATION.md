@@ -22,7 +22,8 @@ Plan a coordinated upgrade rather than a rolling mix of old and new writers.
    MPUs. For Helm-managed deployments, first run `helm upgrade RELEASE CHART
    --reuse-values --set replicaCount=1`, then wait for `kubectl rollout status
    deployment/DEPLOYMENT`. Only then upgrade the image and set
-   `config.multipartState.valkey.stateV2Writer.enabled=true`. The chart renders
+    `--set-string config.multipartState.valkey.stateV2Writer.enabled.value=true`.
+    The chart renders
    `VALKEY_MPU_STATE_V2_WRITER=true`; the gateway derives the internal
    capability and terminates that single old writer before starting the state-v2
    replacement, which atomically initializes `mpu:writer-version`. Do not run

@@ -311,7 +311,7 @@ spec:
         - name: VALKEY_TTL_SECONDS
           value: {{ .Values.config.multipartState.valkey.ttlSeconds.value | quote }}
         {{- end }}
-        {{- if .Values.config.multipartState.valkey.stateV2Writer.enabled }}
+        {{- if eq .Values.config.multipartState.valkey.stateV2Writer.enabled.value "true" }}
         - name: VALKEY_MPU_STATE_V2_WRITER
           value: "true"
         {{- end }}
