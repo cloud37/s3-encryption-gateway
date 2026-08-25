@@ -279,7 +279,29 @@ func stripClientAuthQuery(rawQuery string, authParams map[string]struct{}) strin
 // copyProxyResponse and records a metric with the response status code. If an
 // audit logger is configured an audit event is emitted for every invocation.
 func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, operation, bucket, key string) {
+	h.handlePassthroughWithBodyLimit(w, r, operation, bucket, key, 0)
+}
+
+func (h *Handler) handlePassthroughWithBodyLimit(w http.ResponseWriter, r *http.Request, operation, bucket, key string, maxBody int64) {
 	start := time.Now()
+	if maxBody > 0 && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+		_ = r.Body.Close()
+		if err != nil || int64(len(body)) > maxBody {
+			(&S3Error{Code: "InvalidRequest", Message: "The request body is too large.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}).WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start), 0)
+			if h.auditLogger != nil {
+				err := fmt.Errorf("request body exceeds %d bytes", maxBody)
+				if operation == "CreateBucket" || operation == "DeleteBucket" {
+					h.auditManagement(r, operation, bucket, false, err)
+				} else {
+					h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), false, err, time.Since(start))
+				}
+			}
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
 
 	resp, err := h.forwardToBackend(r)
 	if err != nil {
@@ -303,7 +325,11 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		h.metrics.RecordS3Error(r.Context(), operation, bucket, s3Err.Code)
 		if h.auditLogger != nil {
-			h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), false, err, time.Since(start))
+			if operation == "CreateBucket" || operation == "DeleteBucket" {
+				h.auditManagement(r, operation, bucket, false, err)
+			} else {
+				h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), false, err, time.Since(start))
+			}
 		}
 		return
 	}
@@ -319,7 +345,11 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 		h.metrics.RecordS3Error(r.Context(), operation, bucket, "client_stream")
 	}
 	if h.auditLogger != nil {
-		h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), true, nil, time.Since(start))
+		if operation == "CreateBucket" || operation == "DeleteBucket" {
+			h.auditManagement(r, operation, bucket, true, nil)
+		} else {
+			h.auditLogger.LogAccess(operation, bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), true, nil, time.Since(start))
+		}
 	}
 }
 

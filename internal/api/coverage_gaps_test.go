@@ -1302,7 +1302,7 @@ func TestHandleCreateBucket_Response(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	// Accept any 2xx or 4xx response (bucket creation is pass-through to backend).
-	if w.Code < 200 || (w.Code >= 500 && w.Code != 503) {
+	if w.Code < 200 || (w.Code >= 500 && w.Code != 501 && w.Code != 503) {
 		t.Errorf("handleCreateBucket: unexpected status %d", w.Code)
 	}
 }

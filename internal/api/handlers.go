@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,18 +42,19 @@ type Handler struct {
 	// clientAcquirer, when non-nil, overrides client resolution in
 	// getS3Client. It is a test seam for observing that authorization
 	// precedes backend client acquisition.
-	clientAcquirer   func(*http.Request) (s3.Client, error)
-	encryptionEngine crypto.EncryptionEngine
-	logger           *logrus.Logger
-	metrics          *metrics.Metrics
-	keyManager       crypto.KeyManager
-	cache            cache.Cache
-	auditLogger      audit.Logger
-	config           *config.Config
-	policyManager    *config.PolicyManager
-	engineCache      *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
-	mpuStateStore    mpu.StateStore  // nil when encrypted MPU is not configured
-	sizeCache        sizecache.SizeCache
+	clientAcquirer      func(*http.Request) (s3.Client, error)
+	encryptionEngine    crypto.EncryptionEngine
+	logger              *logrus.Logger
+	metrics             *metrics.Metrics
+	keyManager          crypto.KeyManager
+	cache               cache.Cache
+	auditLogger         audit.Logger
+	config              *config.Config
+	allowBucketCreation atomic.Bool
+	policyManager       *config.PolicyManager
+	engineCache         *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
+	mpuStateStore       mpu.StateStore  // nil when encrypted MPU is not configured
+	sizeCache           sizecache.SizeCache
 	// Test seams for API metadata classification failures. Nil uses production
 	// implementations; keeping these private avoids changing the public API.
 	apiMetadataExpander    func(map[string]string) (map[string]string, error)
@@ -90,6 +92,9 @@ func NewHandlerWithFeatures(
 		config:           config,
 		policyManager:    policyManager,
 	}
+	if config != nil {
+		h.allowBucketCreation.Store(config.AllowBucketCreation)
+	}
 	// Create client factory for per-request credential support.
 	// V0.6-PERF-2: inject metrics so the factory can emit retry counters.
 	if config != nil {
@@ -101,6 +106,12 @@ func NewHandlerWithFeatures(
 	}
 	return h
 }
+
+// SetAllowBucketCreation updates the reload-safe management gate.
+func (h *Handler) SetAllowBucketCreation(enabled bool) { h.allowBucketCreation.Store(enabled) }
+
+// AllowBucketCreation reports the current live management gate.
+func (h *Handler) AllowBucketCreation() bool { return h.allowBucketCreation.Load() }
 
 // WithMPUStateStore attaches an encrypted multipart state store to the handler.
 // When non-nil, buckets with EncryptMultipartUploads=true will use this store.
@@ -3179,104 +3190,26 @@ func (h *Handler) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 	h.logger.WithFields(logrus.Fields{
 		"bucket": bucket,
 	}).Debug("Handling bucket creation request")
-
-	// Check if we should return BucketAlreadyExists or NotImplemented
-	if h.config != nil && h.config.ProxiedBucket != "" {
-		// Gateway is configured to proxy a specific bucket
-		if h.config.ProxiedBucket == bucket {
-			// This is the specific bucket the gateway manages
-			h.logger.WithFields(logrus.Fields{
-				"bucket":        bucket,
-				"proxiedBucket": h.config.ProxiedBucket,
-			}).Debug("Bucket matches configured proxied bucket - returning BucketAlreadyExists")
-
-			s3Err := &S3Error{
-				Code:       "BucketAlreadyExists",
-				Message:    "The requested bucket name is not available. The bucket already exists.",
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusConflict,
-			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-			return
-		} else {
-			// Gateway is configured for a different bucket
-			h.logger.WithFields(logrus.Fields{
-				"bucket":        bucket,
-				"proxiedBucket": h.config.ProxiedBucket,
-			}).Debug("Bucket does not match configured proxied bucket - returning NotImplemented")
-
-			s3Err := &S3Error{
-				Code:       "NotImplemented",
-				Message:    "Bucket creation is not supported for this bucket.",
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusNotImplemented,
-			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-			return
-		}
-	}
-
-	// Gateway is not configured for a specific bucket (proxies all buckets)
-	// Check if the bucket actually exists in the backend
-	h.logger.WithFields(logrus.Fields{
-		"bucket": bucket,
-	}).Debug("Checking if bucket exists in backend")
-
-	s3Client, err := h.getS3Client(r)
-	if err != nil {
-		h.logger.WithError(err).WithFields(logrus.Fields{
-			"bucket": bucket,
-		}).Error("Failed to get S3 client to check bucket existence")
-
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to check bucket existence.",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
-		}
+	if !h.allowBucketCreation.Load() {
+		s3Err := &S3Error{Code: "NotImplemented", Message: "Bucket creation is not supported.", Resource: r.URL.Path, HTTPStatus: http.StatusNotImplemented}
 		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
 		return
 	}
-
-	// Try to list objects in the bucket to check if it exists
-	// Use a limit of 1 to minimize data transfer
-	opts := s3.ListOptions{
-		MaxKeys: 1,
-	}
-	_, err = s3Client.ListObjects(r.Context(), bucket, "", opts)
-	if err != nil {
-		// If listing fails, assume bucket doesn't exist and return NotImplemented
-		h.logger.WithError(err).WithFields(logrus.Fields{
-			"bucket": bucket,
-		}).Debug("Bucket does not exist or is not accessible - returning NotImplemented")
-
-		s3Err := &S3Error{
-			Code:       "NotImplemented",
-			Message:    "Bucket creation is not supported.",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusNotImplemented,
-		}
+	credential, authorized := CredentialFromContext(r)
+	if !authorized || !credential.AllowsBucket(bucket) || !credential.HasBucketPermission(config.BucketPermissionCreate) || (h.config != nil && h.config.ProxiedBucket != "" && h.config.ProxiedBucket != bucket) {
+		s3Err := &S3Error{Code: "AccessDenied", Message: "Access Denied", Resource: r.URL.Path, HTTPStatus: http.StatusForbidden}
 		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
 		return
 	}
-
-	// Bucket exists, return BucketAlreadyExists
-	h.logger.WithFields(logrus.Fields{
-		"bucket": bucket,
-	}).Debug("Bucket exists in backend - returning BucketAlreadyExists")
-
-	s3Err := &S3Error{
-		Code:       "BucketAlreadyExists",
-		Message:    "The requested bucket name is not available. The bucket already exists.",
-		Resource:   r.URL.Path,
-		HTTPStatus: http.StatusConflict,
+	if err := ValidateBucketName(bucket); err != nil {
+		s3Err := &S3Error{Code: "InvalidBucketName", Message: err.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
+		s3Err.WriteXML(w)
+		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
+		return
 	}
-	s3Err.WriteXML(w)
-	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+	h.handlePassthroughWithBodyLimit(w, r, "CreateBucket", bucket, "", 64<<10)
 }
 
 // applyRangeRequest applies a Range header request to data.
@@ -6247,6 +6180,13 @@ func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 // handleDeleteBucket handles DELETE /{bucket} — DeleteBucket.
 func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 	bucket := mux.Vars(r)["bucket"]
+	credential, authorized := CredentialFromContext(r)
+	if !authorized || !credential.AllowsBucket(bucket) || !credential.HasBucketPermission(config.BucketPermissionDelete) || (h.config != nil && h.config.ProxiedBucket != "" && h.config.ProxiedBucket != bucket) {
+		s3Err := &S3Error{Code: "AccessDenied", Message: "Access Denied", Resource: r.URL.Path, HTTPStatus: http.StatusForbidden}
+		s3Err.WriteXML(w)
+		h.auditManagement(r, "DeleteBucket", bucket, false, s3Err)
+		return
+	}
 	if h.policyManager != nil {
 		if policy := h.policyManager.GetPolicyForBucket(bucket); policy != nil {
 			h.logger.WithFields(logrus.Fields{
@@ -6256,6 +6196,13 @@ func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.handlePassthrough(w, r, "DeleteBucket", bucket, "")
+}
+
+func (h *Handler) auditManagement(r *http.Request, operation, bucket string, success bool, err error) {
+	if h.auditLogger == nil {
+		return
+	}
+	h.auditLogger.LogAccessWithMetadata(operation, bucket, "", getClientIP(r), r.UserAgent(), getRequestID(r), success, err, 0, map[string]interface{}{"credential_label": CredentialLabelFromContext(r), "result": map[bool]string{true: "allowed", false: "denied"}[success]})
 }
 
 // handleGetBucketLocation handles GET /{bucket}?location — GetBucketLocation.

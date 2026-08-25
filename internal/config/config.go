@@ -25,24 +25,25 @@ import (
 
 // Config holds the complete application configuration.
 type Config struct {
-	ListenAddr        string                  `yaml:"listen_addr" env:"LISTEN_ADDR"`
-	LogLevel          string                  `yaml:"log_level" env:"LOG_LEVEL"`
-	ProxiedBucket     string                  `yaml:"proxied_bucket" env:"PROXIED_BUCKET"` // If set, only this bucket will be accessible
-	Backend           BackendConfig           `yaml:"backend"`
-	Encryption        EncryptionConfig        `yaml:"encryption"`
-	Cache             CacheConfig             `yaml:"cache"`
-	Audit             AuditConfig             `yaml:"audit"`
-	TLS               TLSConfig               `yaml:"tls"`
-	Server            ServerConfig            `yaml:"server"`
-	RateLimit         RateLimitConfig         `yaml:"rate_limit"`
-	Tracing           TracingConfig           `yaml:"tracing"`
-	Metrics           MetricsConfig           `yaml:"metrics"`
-	Logging           LoggingConfig           `yaml:"logging"`
-	Admin             AdminConfig             `yaml:"admin"`
-	Auth              AuthConfig              `yaml:"auth"`
-	PolicyFiles       []string                `yaml:"policies" env:"POLICIES"`
-	MultipartState    MultipartStateConfig    `yaml:"multipart_state"`
-	ListSizeTranslate ListSizeTranslateConfig `yaml:"list_size_translate"`
+	ListenAddr          string                  `yaml:"listen_addr" env:"LISTEN_ADDR"`
+	LogLevel            string                  `yaml:"log_level" env:"LOG_LEVEL"`
+	ProxiedBucket       string                  `yaml:"proxied_bucket" env:"PROXIED_BUCKET"` // If set, only this bucket will be accessible
+	AllowBucketCreation bool                    `yaml:"allow_bucket_creation" env:"ALLOW_BUCKET_CREATION"`
+	Backend             BackendConfig           `yaml:"backend"`
+	Encryption          EncryptionConfig        `yaml:"encryption"`
+	Cache               CacheConfig             `yaml:"cache"`
+	Audit               AuditConfig             `yaml:"audit"`
+	TLS                 TLSConfig               `yaml:"tls"`
+	Server              ServerConfig            `yaml:"server"`
+	RateLimit           RateLimitConfig         `yaml:"rate_limit"`
+	Tracing             TracingConfig           `yaml:"tracing"`
+	Metrics             MetricsConfig           `yaml:"metrics"`
+	Logging             LoggingConfig           `yaml:"logging"`
+	Admin               AdminConfig             `yaml:"admin"`
+	Auth                AuthConfig              `yaml:"auth"`
+	PolicyFiles         []string                `yaml:"policies" env:"POLICIES"`
+	MultipartState      MultipartStateConfig    `yaml:"multipart_state"`
+	ListSizeTranslate   ListSizeTranslateConfig `yaml:"list_size_translate"`
 }
 
 // ResolvedCredentials returns a copy of the auth credentials with SecretKeyEnv
@@ -998,8 +999,9 @@ const (
 // LoadConfig loads configuration from a file and environment variables.
 func LoadConfig(path string) (*Config, error) {
 	config := &Config{
-		ListenAddr: ":8080",
-		LogLevel:   "info",
+		ListenAddr:          ":8080",
+		LogLevel:            "info",
+		AllowBucketCreation: false,
 		Encryption: EncryptionConfig{
 			KeyManager: KeyManagerConfig{
 				Provider:       "cosmian",
@@ -1174,6 +1176,9 @@ func loadFromEnv(config *Config) error {
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		config.LogLevel = v
+	}
+	if v := os.Getenv("ALLOW_BUCKET_CREATION"); v != "" {
+		config.AllowBucketCreation = v == "true" || v == "1"
 	}
 	if v := os.Getenv("BACKEND_ENDPOINT"); v != "" {
 		config.Backend.Endpoint = v

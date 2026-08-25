@@ -61,6 +61,32 @@ auth:
 	// Provider is now optional, just for reference
 }
 
+func TestDefaultConfig_AllowBucketCreationFalse(t *testing.T) {
+	cfg := loadMinimalConfigForSigV2Test(t, "")
+	if cfg.AllowBucketCreation {
+		t.Fatal("bucket creation defaults enabled")
+	}
+}
+
+func TestLoadFromEnv_AllowBucketCreation(t *testing.T) {
+	t.Setenv("ALLOW_BUCKET_CREATION", "true")
+	cfg := loadMinimalConfigForSigV2Test(t, "")
+	if !cfg.AllowBucketCreation {
+		t.Fatal("environment flag was not loaded")
+	}
+}
+
+func TestConfigReloader_AllowBucketCreationChange(t *testing.T) {
+	oldCfg := &Config{AllowBucketCreation: false}
+	newCfg := &Config{AllowBucketCreation: true}
+	r, err := NewConfigReloader("", oldCfg, logrus.New())
+	require.NoError(t, err)
+	defer r.Stop()
+	if err := r.validateReloadSafety(oldCfg, newCfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadConfig_AllowLegacySignatureV2_DefaultDisabled(t *testing.T) {
 	cfg := loadMinimalConfigForSigV2Test(t, "")
 	if cfg.Auth.AllowLegacySignatureV2 {

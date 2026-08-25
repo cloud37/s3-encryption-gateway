@@ -54,6 +54,11 @@ type ConfigChangeApplier struct {
 	config          *config.Config
 	policyManager   *config.PolicyManager
 	credentialStore api.CredentialStore
+	managementGate  interface{ SetAllowBucketCreation(bool) }
+}
+
+func (a *ConfigChangeApplier) SetManagementGate(g interface{ SetAllowBucketCreation(bool) }) {
+	a.managementGate = g
 }
 
 // NewConfigChangeApplier creates a new applier for configuration changes
@@ -86,6 +91,10 @@ func stringSlicesEqual(a, b []string) bool {
 // ApplyConfigChanges applies non-crypto configuration changes to running components
 func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Config) error {
 	changes := []string{}
+	if a.managementGate != nil && oldConfig.AllowBucketCreation != newConfig.AllowBucketCreation {
+		a.managementGate.SetAllowBucketCreation(newConfig.AllowBucketCreation)
+		changes = append(changes, fmt.Sprintf("allow_bucket_creation: %v -> %v", oldConfig.AllowBucketCreation, newConfig.AllowBucketCreation))
+	}
 	if a.credentialStore != nil {
 		credentials := newConfig.ResolvedCredentials()
 		defer func() {
@@ -853,6 +862,7 @@ func main() {
 		}
 
 		configApplier = NewConfigChangeApplier(logger, tracerProvider, rateLimiterPtr, objectCache, auditLogger, cfg, policyManager, credStore)
+		configApplier.SetManagementGate(handler)
 
 		// Create and start config reloader
 		var err error

@@ -42,6 +42,20 @@ func TestInitTracing_Stdout(t *testing.T) {
 	require.NotNil(t, tracer)
 }
 
+func TestConfigApplier_AllowBucketCreationUpdatesLiveHandler(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{AllowBucketCreation: true}
+	h := api.NewHandler(nil, nil, logrus.New(), nil)
+	a := NewConfigChangeApplier(logrus.New(), nil, nil, nil, nil, oldCfg, nil, nil)
+	a.SetManagementGate(h)
+	if err := a.ApplyConfigChanges(oldCfg, newCfg); err != nil {
+		t.Fatal(err)
+	}
+	if !h.AllowBucketCreation() {
+		t.Fatal("live management gate did not update")
+	}
+}
+
 func TestInitTracing_InvalidExporter(t *testing.T) {
 	logger := logrus.New()
 	cfg := config.TracingConfig{

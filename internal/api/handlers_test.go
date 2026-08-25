@@ -2153,20 +2153,20 @@ func TestHandler_HandleCreateBucket(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name:           "nil config manages all buckets",
-			bucket:         "test-bucket",
-			proxiedBucket:  "",                     // nil config case handled separately
-			setupMock:      func(*mockS3Client) {}, // no setup needed
-			expectedCode:   "BucketAlreadyExists",
-			expectedStatus: http.StatusConflict,
-		},
-		{
-			name:           "empty proxied bucket manages all buckets - bucket exists",
+			name:           "unauthenticated request is denied",
 			bucket:         "test-bucket",
 			proxiedBucket:  "",
-			setupMock:      func(*mockS3Client) {}, // no setup needed, bucket "exists"
-			expectedCode:   "BucketAlreadyExists",
-			expectedStatus: http.StatusConflict,
+			setupMock:      func(*mockS3Client) {},
+			expectedCode:   "AccessDenied",
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:           "unauthenticated request remains denied for empty proxy",
+			bucket:         "test-bucket",
+			proxiedBucket:  "",
+			setupMock:      func(*mockS3Client) {},
+			expectedCode:   "AccessDenied",
+			expectedStatus: http.StatusForbidden,
 		},
 		{
 			name:          "empty proxied bucket manages all buckets - bucket does not exist",
@@ -2176,24 +2176,24 @@ func TestHandler_HandleCreateBucket(t *testing.T) {
 				// Simulate bucket not existing by making ListObjects fail
 				m.errors["nonexistent-bucket/list"] = &mockAPIError{code: "NoSuchBucket", message: "The specified bucket does not exist"}
 			},
-			expectedCode:   "NotImplemented",
-			expectedStatus: http.StatusNotImplemented,
+			expectedCode:   "AccessDenied",
+			expectedStatus: http.StatusForbidden,
 		},
 		{
-			name:           "proxied bucket matches request",
+			name:           "unauthenticated matching proxy is denied",
 			bucket:         "specific-bucket",
 			proxiedBucket:  "specific-bucket",
 			setupMock:      func(*mockS3Client) {}, // no setup needed
-			expectedCode:   "BucketAlreadyExists",
-			expectedStatus: http.StatusConflict,
+			expectedCode:   "AccessDenied",
+			expectedStatus: http.StatusForbidden,
 		},
 		{
 			name:           "proxied bucket does not match request",
 			bucket:         "other-bucket",
 			proxiedBucket:  "specific-bucket",
 			setupMock:      func(*mockS3Client) {}, // no setup needed
-			expectedCode:   "NotImplemented",
-			expectedStatus: http.StatusNotImplemented,
+			expectedCode:   "AccessDenied",
+			expectedStatus: http.StatusForbidden,
 		},
 	}
 
@@ -2208,16 +2208,8 @@ func TestHandler_HandleCreateBucket(t *testing.T) {
 			tt.setupMock(mockClient)
 
 			var handler *Handler
-			if tt.name == "nil config manages all buckets" {
-				// Test nil config case
-				handler = NewHandler(mockClient, mockEngine, logger, getTestMetrics())
-			} else {
-				// Test with config
-				cfg := &config.Config{
-					ProxiedBucket: tt.proxiedBucket,
-				}
-				handler = NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
-			}
+			cfg := &config.Config{AllowBucketCreation: true, ProxiedBucket: tt.proxiedBucket}
+			handler = NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
 
 			router := mux.NewRouter()
 			handler.RegisterRoutes(router)
@@ -2704,6 +2696,8 @@ func TestHandleDeleteBucket(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	req := httptest.NewRequest("DELETE", "/test-bucket", nil)
+	req = mux.SetURLVars(req, map[string]string{"bucket": "test-bucket"})
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{Policy: AuthorizationPolicy{Buckets: []string{"test-bucket"}, BucketPermissions: []config.BucketPermission{config.BucketPermissionDelete}}}))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -2738,6 +2732,8 @@ func TestHandleDeleteBucket_WithPolicyManager(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	req := httptest.NewRequest("DELETE", "/test-bucket", nil)
+	req = mux.SetURLVars(req, map[string]string{"bucket": "test-bucket"})
+	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{Policy: AuthorizationPolicy{Buckets: []string{"test-bucket"}, BucketPermissions: []config.BucketPermission{config.BucketPermissionDelete}}}))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
