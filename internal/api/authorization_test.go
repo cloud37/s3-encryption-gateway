@@ -133,6 +133,8 @@ func TestClassifyAuthorizationOperation_FailClosedFixes(t *testing.T) {
 		want           authorizationOperation
 	}{
 		{http.MethodGet, "/bucket/key?partNumber=1", authorizationRead},
+		{http.MethodGet, "/bucket/key?response-content-type=text%2Fplain", authorizationRead},
+		{http.MethodGet, "/bucket/key?response-content-type=text%2Fplain&AWSAccessKeyId=key&Expires=1&Signature=signature", authorizationRead},
 		{http.MethodPut, "/bucket/key?partNumber=1&uploadId=u", authorizationWrite},
 		{http.MethodGet, "/bucket/key?restore", authorizationUnknown},
 		{http.MethodPut, "/bucket/key?uploadId=u", authorizationWrite},

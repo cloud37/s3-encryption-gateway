@@ -268,7 +268,10 @@ func classifyObjectAuthorizationOperation(r *http.Request, bucket string) (autho
 				if queryValueNonEmpty(query, key) {
 					return authorizationUnknown, bucket // Queries(key, "") requires empty
 				}
-			case "versionId", "partNumber":
+			case "versionId", "partNumber",
+				"response-cache-control", "response-content-disposition",
+				"response-content-encoding", "response-content-language",
+				"response-content-type", "response-expires":
 				// value-carrying parameters handled by handleGetObject
 			case "max-parts", "part-number-marker":
 				return authorizationUnknown, bucket // ListParts pagination without uploadId
