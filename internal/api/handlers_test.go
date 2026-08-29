@@ -3097,6 +3097,9 @@ func TestHandler_HeadObject_ReturnsDecryptedSize(t *testing.T) {
 	if headSize != originalSize {
 		t.Errorf("HeadObject Content-Length mismatch: expected decrypted size %d, got %d", originalSize, headSize)
 	}
+	if got, want := w.Header().Get("ETag"), `"`+encMeta[crypto.MetaOriginalETag]+`"`; got != want {
+		t.Errorf("HeadObject ETag = %q, want %q", got, want)
+	}
 }
 
 // TestHandler_GetObject_ReturnsDecryptedContentLength verifies that GetObject
@@ -3145,6 +3148,9 @@ func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
 	}
 	if getSize != originalSize {
 		t.Errorf("GetObject Content-Length mismatch: expected decrypted size %d, got %d", originalSize, getSize)
+	}
+	if got, want := w.Header().Get("ETag"), `"`+encMeta[crypto.MetaOriginalETag]+`"`; got != want {
+		t.Errorf("GetObject ETag = %q, want %q", got, want)
 	}
 
 	// Verify body is the original plaintext

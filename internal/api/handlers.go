@@ -709,6 +709,9 @@ func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Reque
 
 	// Update headers if we decrypted
 	if isEncrypted && decMetadata != nil {
+		if decMetadata["ETag"] != "" {
+			decMetadata["ETag"] = quoteETag(decMetadata["ETag"])
+		}
 		if cl, ok := decMetadata["Content-Length"]; ok {
 			w.Header().Set("Content-Length", cl)
 		}
@@ -1527,6 +1530,9 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			decMetadata["Content-Length"] = strconv.FormatInt(plaintextSize, 10)
 		}
 	}
+	if decMetadata["ETag"] != "" {
+		decMetadata["ETag"] = quoteETag(decMetadata["ETag"])
+	}
 
 	// For range optimization, we already have the exact range in decryptedReader
 	// For non-optimized ranges, we need to buffer and apply range
@@ -2255,6 +2261,15 @@ func isStandardMetadata(key string) bool {
 	return standardHeaders[key]
 }
 
+// quoteETag serializes an opaque stored ETag as an HTTP entity-tag. Older
+// encrypted objects may already contain quotes, so preserve that wire form.
+func quoteETag(etag string) string {
+	if etag == "" || (strings.HasPrefix(etag, "\"") && strings.HasSuffix(etag, "\"")) {
+		return etag
+	}
+	return "\"" + etag + "\""
+}
+
 // restoreEncryptedObjectHeaders maps standard object headers stored inside the
 // encrypted metadata envelope back to the S3 response header names.
 func restoreEncryptedObjectHeaders(dst, encryptedMetadata map[string]string) {
@@ -2568,8 +2583,8 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Restore original ETag if available
-	if originalETag, ok := metadata["x-amz-meta-encryption-original-etag"]; ok {
-		filteredMetadata["ETag"] = originalETag
+	if originalETag, ok := metadata[crypto.MetaOriginalETag]; ok {
+		filteredMetadata["ETag"] = quoteETag(originalETag)
 	}
 
 	// Set headers from filtered metadata

@@ -1179,7 +1179,8 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 		decMetadata["Content-Length"] = originalSize
 	}
 
-	// Restore original ETag if available
+	// Preserve the stored opaque ETag; the API response layer serializes it as
+	// an HTTP entity-tag when emitting a response.
 	if originalETag, ok := expandedMetadata[MetaOriginalETag]; ok {
 		decMetadata["ETag"] = originalETag
 	}

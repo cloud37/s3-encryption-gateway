@@ -50,6 +50,7 @@ func TestConformance(t *testing.T) {
 				{"PutGet", 0, testPutGet},
 				{"PutGet_LargeObject", 0, testPutGet_Large},
 				{"HeadObject", 0, testHeadObject},
+				{"EncryptedObject_ETagQuoted", 0, testEncryptedObjectETagQuoted},
 				{"ListObjects", 0, testListObjects},
 				{"ListObjectsV1_Pagination", 0, testListObjectsV1_Pagination},
 				{"ListObjectsV2_Pagination", 0, testListObjectsV2_Pagination},
