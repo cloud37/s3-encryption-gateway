@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- **Encrypted object ETag serialization (issue #272):** Restored ETags on
+  encrypted-object HEAD, full GET, ranged GET, cached GET, and SigV4-forwarded
+  GET responses are now returned as quoted HTTP entity-tags. Stored ETags remain
+  opaque, while response boundaries serialize them exactly once for S3 client
+  compatibility.
+
 ## [0.12.0-rc1] — 2026-08-23
 
 ### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
@@ -2892,8 +2902,3 @@ unless noted.
 - Add strict SigV4 streaming-chain verification, checksum trailers, bounded
   atomic spooling, and fail-closed rejection of malformed or unknown streaming
   payload modes.
-## Unreleased
-
-- Add opt-in, explicitly authorized CreateBucket and DeleteBucket passthrough
-  with generic name validation, bounded request bodies, and raw backend
-  LocationConstraint/response semantics.
