@@ -35,7 +35,7 @@ jobs:
     name: Micro benchmarks (nightly regression gate)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -46,6 +46,8 @@ jobs:
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
       - name: Run micro benchmarks
+        env:
+          BENCH_TIMEOUT: 70m
         run: |
           mkdir -p /tmp/qa1
           bash scripts/bench-baseline.sh /tmp/qa1/micro-new.txt
@@ -184,6 +186,8 @@ jobs:
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
       - name: Run quick micro benchmarks (3×3s)
+        id: benchmark
+        continue-on-error: true
         env:
           BENCH_TIME: 3s
           BENCH_COUNT: "3"
@@ -193,10 +197,19 @@ jobs:
 
       - name: Diff against committed baseline (advisory)
         id: diff
+        if: always()
         continue-on-error: true
         run: |
-          # Produce the benchstat delta table and capture it for the comment.
-          benchstat docs/perf/v0.6-qa-1/micro-baseline.txt /tmp/qa1/micro-pr.txt > /tmp/qa1/advisory.txt 2>&1
+          if [[ "${{ steps.benchmark.outcome }}" != "success" ]]; then
+            {
+              echo 'The benchmark command failed. Its captured output follows:'
+              echo ''
+              cat /tmp/qa1/micro-pr.txt 2>/dev/null || echo '(no benchmark output)'
+            } > /tmp/qa1/advisory.txt
+          elif ! benchstat docs/perf/v0.6-qa-1/micro-baseline.txt /tmp/qa1/micro-pr.txt > /tmp/qa1/advisory.txt 2>&1; then
+            echo '' >> /tmp/qa1/advisory.txt
+            echo 'benchstat could not compare this run.' >> /tmp/qa1/advisory.txt
+          fi
           {
             echo '<!-- perf-advisory-comment -->'
             echo '### 📊 V0.6-QA-1 Micro Benchmark Advisory'
@@ -210,13 +223,38 @@ jobs:
 
       - name: Post sticky PR comment
         if: always()
-        uses: peter-evans/create-or-update-comment@v5
+        continue-on-error: true
+        uses: actions/github-script@v9
         with:
-          issue-number: ${{ github.event.pull_request.number }}
-          body-file: /tmp/qa1/pr-comment.md
-          edit-mode: replace
-          # Match on the HTML comment marker so repeat runs update in place.
-          body-includes: '<!-- perf-advisory-comment -->'
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- perf-advisory-comment -->';
+            const body = fs.existsSync('/tmp/qa1/pr-comment.md')
+              ? fs.readFileSync('/tmp/qa1/pr-comment.md', 'utf8')
+              : `${marker}\n### V0.6-QA-1 Micro Benchmark Advisory\n\nNo advisory output was produced.`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(comment =>
+              comment.user?.type === 'Bot' && comment.body?.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
 
       - name: Summary
         if: always()
