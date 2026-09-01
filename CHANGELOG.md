@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## [0.12.0-rc2] — 2026-09-01
+
+### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
+
+This is a release candidate for validation in isolated, non-production
+environments only. Do **not** upgrade a productive environment to this version:
+state-v2 encrypted MPU writers cannot be rolled back to pre-0.12.0 releases.
+Wait for the stable 0.12.0 release before scheduling a production upgrade.
+
 ### Fixed
 
 - **Encrypted object ETag serialization (issue #272):** Restored ETags on
@@ -13,6 +22,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   GET responses are now returned as quoted HTTP entity-tags. Stored ETags remain
   opaque, while response boundaries serialize them exactly once for S3 client
   compatibility.
+- **Performance baseline CI:** Removed an invalid cumulative-allocation assertion
+  that was presented as a peak-heap check, allowed the full nightly benchmark
+  corpus enough time to finish, and made PR benchmark runs genuinely advisory.
+  Failed benchmark output is now included in the advisory comment, whose sticky
+  update no longer relies on an unsupported action input.
+
+### Security
+
+- **Tar extraction dependency (issue #274):** Upgraded
+  `github.com/moby/go-archive` from `v0.2.0` to `v0.3.0`, resolving
+  `GO-2026-6253` and restoring a passing `govulncheck` security gate.
+
+### Dependencies
+
+- Updated `github.com/aws/aws-sdk-go-v2` to v1.45.1.
+- Updated `github.com/aws/aws-sdk-go-v2/config` to v1.33.2.
+- Updated `github.com/aws/aws-sdk-go-v2/credentials` to v1.20.2.
+- Updated `github.com/aws/aws-sdk-go-v2/service/s3` to v1.110.0.
+- Updated `github.com/aws/smithy-go` to v1.28.1.
+- Updated `github.com/prometheus/client_model` to v0.6.3.
+- Updated `github.com/sirupsen/logrus` to v1.10.2.
+- Updated `go.opentelemetry.io/otel` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/exporters/stdout/stdouttrace` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/sdk` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/trace` to v1.46.0.
+- Updated `golang.org/x/perf` to revision `19be9d8e6c70`.
+
+### Documentation
+
+- Moved the existing authorized bucket-management guidance from the top of the
+  README into its configuration section.
 
 ## [0.12.0-rc1] — 2026-08-23
 
