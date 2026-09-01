@@ -18,7 +18,7 @@ require (
 	github.com/openbao/openbao/api/v2 v2.6.0
 	github.com/ovh/kmip-go v0.9.2
 	github.com/prometheus/client_golang v1.24.1
-	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/client_model v0.6.3
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/ryanuber/go-glob v1.0.0
 	github.com/sirupsen/logrus v1.10.1
@@ -149,6 +149,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/grpc v1.83.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 )
