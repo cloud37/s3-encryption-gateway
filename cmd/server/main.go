@@ -453,6 +453,9 @@ func main() {
 
 	// Initialize S3 backend client.
 	// V1.0-ECOSYS-1: use NewBackendClient which dispatches on cfg.Backend.Type.
+	if cfg.Backend.TLS.InsecureSkipVerify {
+		logger.Warn("backend.tls.insecure_skip_verify is true; backend certificate and hostname verification are disabled — use only for local development or diagnostics")
+	}
 	s3Client, err := s3.NewBackendClient(&cfg.Backend, s3.WithMetrics(m))
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to create S3 backend client")

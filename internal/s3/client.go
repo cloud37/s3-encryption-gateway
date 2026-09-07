@@ -298,6 +298,13 @@ func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (C
 		// not always return the x-amz-checksum-* headers the SDK expects.
 		awsconfig.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
 	}
+	if f.httpTransport == nil {
+		transport, err := newBackendHTTPTransport(f.baseConfig.TLS)
+		if err != nil {
+			return nil, fmt.Errorf("build backend HTTP transport: %w", err)
+		}
+		awsConfigOpts[0] = awsconfig.WithHTTPClient(&http.Client{Transport: transport})
+	}
 
 	// Install the gateway custom retryer or NopRetryer for mode=off.
 	// WithRetryer accepts a factory func so each request context gets a fresh

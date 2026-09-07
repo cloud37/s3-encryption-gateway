@@ -3,9 +3,14 @@ package config
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +21,42 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadConfig_BackendTLSEnvOverrides(t *testing.T) {
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	writeTestCA(t, ca)
+	t.Setenv("BACKEND_ACCESS_KEY", "key")
+	t.Setenv("BACKEND_SECRET_KEY", "secret")
+	t.Setenv("ENCRYPTION_PASSWORD", "password")
+	t.Setenv("BACKEND_TLS_CA_FILE", ca)
+	t.Setenv("BACKEND_TLS_INSECURE_SKIP_VERIFY", "true")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("auth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\n"), 0600))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, ca, cfg.Backend.TLS.CAFile)
+	assert.True(t, cfg.Backend.TLS.InsecureSkipVerify)
+}
+
+func TestLoadConfig_BackendTLSInvalidBool_ReturnsError(t *testing.T) {
+	t.Setenv("BACKEND_TLS_INSECURE_SKIP_VERIFY", "maybe")
+	_, err := LoadConfig("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BACKEND_TLS_INSECURE_SKIP_VERIFY")
+}
+
+func TestConfigValidate_BackendTLSRequiresHTTPS(t *testing.T) {
+	cfg := &Config{ListenAddr: ":8080", Auth: AuthConfig{Credentials: []GatewayCredential{{AccessKey: "a", SecretKey: "b"}}}, Backend: BackendConfig{AccessKey: "a", SecretKey: "b", Endpoint: "http://localhost:9000", TLS: BackendTLSConfig{InsecureSkipVerify: true}}}
+	assert.ErrorContains(t, cfg.Validate(), "HTTPS endpoint")
+}
+
+func writeTestCA(t *testing.T, path string) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	certDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"}, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}, &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"}, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}, &key.PublicKey, key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0600))
+}
 
 func TestLoadConfig_Defaults(t *testing.T) {
 	// Set minimal required environment variables for test

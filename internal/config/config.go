@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -112,13 +113,14 @@ type AzureConfig struct {
 }
 
 type BackendConfig struct {
-	Endpoint     string `yaml:"endpoint" env:"BACKEND_ENDPOINT"`
-	Region       string `yaml:"region" env:"BACKEND_REGION"`
-	AccessKey    string `yaml:"access_key" env:"BACKEND_ACCESS_KEY"`
-	SecretKey    string `yaml:"secret_key" env:"BACKEND_SECRET_KEY"`
-	Provider     string `yaml:"provider" env:"BACKEND_PROVIDER"` // aws, wasabi, hetzner, minio, digitalocean, backblaze, cloudflare, linode, scaleway, oracle, idrive
-	UseSSL       bool   `yaml:"use_ssl" env:"BACKEND_USE_SSL"`
-	UsePathStyle bool   `yaml:"use_path_style" env:"BACKEND_USE_PATH_STYLE"`
+	Endpoint     string           `yaml:"endpoint" env:"BACKEND_ENDPOINT"`
+	Region       string           `yaml:"region" env:"BACKEND_REGION"`
+	AccessKey    string           `yaml:"access_key" env:"BACKEND_ACCESS_KEY"`
+	SecretKey    string           `yaml:"secret_key" env:"BACKEND_SECRET_KEY"`
+	Provider     string           `yaml:"provider" env:"BACKEND_PROVIDER"` // aws, wasabi, hetzner, minio, digitalocean, backblaze, cloudflare, linode, scaleway, oracle, idrive
+	UseSSL       bool             `yaml:"use_ssl" env:"BACKEND_USE_SSL"`
+	UsePathStyle bool             `yaml:"use_path_style" env:"BACKEND_USE_PATH_STYLE"`
+	TLS          BackendTLSConfig `yaml:"tls"`
 	// Compatibility options for backends with metadata restrictions
 	FilterMetadataKeys []string `yaml:"filter_metadata_keys" env:"BACKEND_FILTER_METADATA_KEYS"` // Comma-separated list of metadata keys to filter out
 	// Type selects the backend transport: "s3" (default), "gcs", or "azure".
@@ -130,6 +132,14 @@ type BackendConfig struct {
 	// Retry governs the S3 backend retry policy (V0.6-PERF-2).
 	// All fields are optional; zero values fall back to the DefaultBackendRetry* constants.
 	Retry BackendRetryConfig `yaml:"retry"`
+}
+
+// BackendTLSConfig controls server authentication for HTTPS backend requests.
+// The zero value uses system roots and verifies certificate chains and hostnames.
+// CAFile augments system roots; InsecureSkipVerify is an unsafe diagnostic escape hatch.
+type BackendTLSConfig struct {
+	CAFile             string `yaml:"ca_file" env:"BACKEND_TLS_CA_FILE"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify" env:"BACKEND_TLS_INSECURE_SKIP_VERIFY"`
 }
 
 // BackendRetryConfig governs retries emitted by the S3 backend client.
@@ -1202,6 +1212,16 @@ func loadFromEnv(config *Config) error {
 		}
 		config.Backend.UseSSL = useSSL
 	}
+	if v := os.Getenv("BACKEND_TLS_CA_FILE"); v != "" {
+		config.Backend.TLS.CAFile = v
+	}
+	if v, ok := os.LookupEnv("BACKEND_TLS_INSECURE_SKIP_VERIFY"); ok {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid BACKEND_TLS_INSECURE_SKIP_VERIFY %q: %w", v, err)
+		}
+		config.Backend.TLS.InsecureSkipVerify = parsed
+	}
 	if v := os.Getenv("BACKEND_USE_PATH_STYLE"); v != "" {
 		config.Backend.UsePathStyle = v == "true" || v == "1"
 	}
@@ -2099,6 +2119,9 @@ func (c *Config) Validate() error {
 	if c.Backend.SecretKey == "" {
 		return fmt.Errorf("backend.secret_key is required")
 	}
+	if err := validateBackendTLS(c.Backend); err != nil {
+		return err
+	}
 
 	// Validate backend type
 	switch c.Backend.Type {
@@ -2532,6 +2555,51 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+func validateBackendTLS(backend BackendConfig) error {
+	if backend.TLS.CAFile == "" && !backend.TLS.InsecureSkipVerify {
+		return nil
+	}
+	if backend.Endpoint != "" {
+		u, err := url.Parse(backend.Endpoint)
+		if err != nil {
+			return fmt.Errorf("invalid backend endpoint for TLS settings: %w", err)
+		}
+		scheme := strings.ToLower(u.Scheme)
+		if scheme == "" {
+			if backend.UseSSL {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+		}
+		if scheme != "https" {
+			return fmt.Errorf("backend TLS settings require an HTTPS endpoint")
+		}
+	}
+	if backend.TLS.CAFile == "" {
+		return nil
+	}
+	info, err := os.Stat(backend.TLS.CAFile)
+	if err != nil {
+		return fmt.Errorf("invalid backend.tls.ca_file %q: %w", backend.TLS.CAFile, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("invalid backend.tls.ca_file %q: not a regular file", backend.TLS.CAFile)
+	}
+	pem, err := os.ReadFile(backend.TLS.CAFile)
+	if err != nil {
+		return fmt.Errorf("invalid backend.tls.ca_file %q: %w", backend.TLS.CAFile, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if len(pem) == 0 || !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("invalid backend.tls.ca_file %q: no certificates found", backend.TLS.CAFile)
+	}
 	return nil
 }
 

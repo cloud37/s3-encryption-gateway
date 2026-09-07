@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 )
@@ -1654,6 +1656,182 @@ func TestS3Client_PutObject_SetsContentMD5(t *testing.T) {
 	if gotContentMD5 != wantMD5 {
 		t.Errorf("Content-MD5 = %q, want %q", gotContentMD5, wantMD5)
 	}
+}
+
+func TestS3Client_GetObject_MapsResponseMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "4")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Disposition", "inline")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("ETag", `"etag"`)
+		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		w.Header().Set("x-amz-version-id", "v1")
+		w.Header().Set("x-amz-meta-custom", "value")
+		w.Header().Set("x-amz-object-lock-mode", "GOVERNANCE")
+		w.Header().Set("x-amz-object-lock-retain-until-date", "2030-01-02T03:04:05Z")
+		w.Header().Set("x-amz-object-lock-legal-hold", "ON")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data"))
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	version := "v1"
+	rangeHeader := "bytes=0-3"
+	body, metadata, err := client.GetObject(context.Background(), "bucket", "key", &version, &rangeHeader)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	for key, want := range map[string]string{
+		"x-amz-meta-custom": "value", "x-amz-version-id": "v1", "Content-Length": "4",
+		"Content-Type": "text/plain", "Cache-Control": "max-age=60", "Content-Disposition": "inline",
+		"Content-Encoding": "gzip", "Accept-Ranges": "bytes", "ETag": `"etag"`,
+		"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-legal-hold": "ON",
+	} {
+		if metadata[key] != want {
+			t.Errorf("metadata[%q] = %q, want %q", key, metadata[key], want)
+		}
+	}
+	if metadata["Last-Modified"] == "" || metadata["x-amz-object-lock-retain-until-date"] == "" {
+		t.Error("expected time-valued response metadata")
+	}
+}
+
+func TestS3Client_HeadObject_MapsResponseMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "9")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Content-Disposition", "attachment")
+		w.Header().Set("ETag", `"head-etag"`)
+		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		w.Header().Set("x-amz-version-id", "head-v1")
+		w.Header().Set("x-amz-meta-custom", "head-value")
+		w.Header().Set("x-amz-object-lock-mode", "COMPLIANCE")
+		w.Header().Set("x-amz-object-lock-retain-until-date", "2031-02-03T04:05:06Z")
+		w.Header().Set("x-amz-object-lock-legal-hold", "OFF")
+		w.WriteHeader(http.StatusOK)
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	metadata, err := client.HeadObject(context.Background(), "bucket", "key", aws.String("head-v1"))
+	require.NoError(t, err)
+	require.Equal(t, "head-value", metadata["x-amz-meta-custom"])
+	require.Equal(t, "head-v1", metadata["x-amz-version-id"])
+	require.Equal(t, "9", metadata["Content-Length"])
+	require.Equal(t, "COMPLIANCE", metadata["x-amz-object-lock-mode"])
+	require.Equal(t, "OFF", metadata["x-amz-object-lock-legal-hold"])
+	require.NotEmpty(t, metadata["Last-Modified"])
+}
+
+func TestS3Client_ListObjects_MapsOptionsAndPrefixes(t *testing.T) {
+	var gotQuery url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>one</Key><Size>12</Size><ETag>"one-etag"</ETag><LastModified>2024-01-02T03:04:05Z</LastModified></Contents><CommonPrefixes><Prefix>folder/</Prefix></CommonPrefixes></ListBucketResult>`)
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	result, err := client.ListObjects(context.Background(), "bucket", "pre", ListOptions{Delimiter: "/", ContinuationToken: "token", StartAfter: "after", MaxKeys: 10})
+	require.NoError(t, err)
+	require.True(t, result.IsTruncated)
+	require.Equal(t, "next", result.NextContinuationToken)
+	require.Len(t, result.Objects, 1)
+	require.Equal(t, "one", result.Objects[0].Key)
+	require.Equal(t, int64(12), result.Objects[0].Size)
+	require.Equal(t, []string{"folder/"}, result.CommonPrefixes)
+	require.Equal(t, "pre", gotQuery.Get("prefix"))
+	require.Equal(t, "/", gotQuery.Get("delimiter"))
+	require.Equal(t, "token", gotQuery.Get("continuation-token"))
+	require.Equal(t, "after", gotQuery.Get("start-after"))
+	require.Equal(t, "10", gotQuery.Get("max-keys"))
+}
+
+func TestS3Client_BackendErrorsAreWrapped(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "backend failure")
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	ctx := context.Background()
+	if _, err := client.PutObject(ctx, "bucket", "key", bytes.NewReader([]byte("data")), nil, nil, "", nil, "", "", "", "", ""); err == nil {
+		t.Error("PutObject should return backend error")
+	}
+	if _, _, err := client.GetObject(ctx, "bucket", "key", nil, nil); err == nil {
+		t.Error("GetObject should return backend error")
+	}
+	if err := client.DeleteObject(ctx, "bucket", "key", nil); err == nil {
+		t.Error("DeleteObject should return backend error")
+	}
+	if _, err := client.HeadObject(ctx, "bucket", "key", nil); err == nil {
+		t.Error("HeadObject should return backend error")
+	}
+	if _, err := client.ListObjects(ctx, "bucket", "", ListOptions{}); err == nil {
+		t.Error("ListObjects should return backend error")
+	}
+	if _, err := client.CreateMultipartUpload(ctx, "bucket", "key", nil, "", "", "", "", ""); err == nil {
+		t.Error("CreateMultipartUpload should return backend error")
+	}
+	if _, err := client.UploadPart(ctx, "bucket", "key", "upload", 1, bytes.NewReader([]byte("part")), nil); err == nil {
+		t.Error("UploadPart should return backend error")
+	}
+	if _, err := client.CompleteMultipartUpload(ctx, "bucket", "key", "upload", nil, nil); err == nil {
+		t.Error("CompleteMultipartUpload should return backend error")
+	}
+	if err := client.AbortMultipartUpload(ctx, "bucket", "key", "upload"); err == nil {
+		t.Error("AbortMultipartUpload should return backend error")
+	}
+}
+
+func TestS3Client_CopyOperations_IncludeTLSRelevantRequestOptions(t *testing.T) {
+	var copySource, copyRange string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		copySource = r.Header.Get("x-amz-copy-source")
+		copyRange = r.Header.Get("x-amz-copy-source-range")
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("partNumber") != "" {
+			_, _ = io.WriteString(w, `<CopyPartResult><ETag>unquoted</ETag><LastModified>2024-01-02T03:04:05Z</LastModified></CopyPartResult>`)
+		} else {
+			_, _ = io.WriteString(w, `<CopyObjectResult><ETag>"copy-etag"</ETag><LastModified>2024-01-02T03:04:05Z</LastModified></CopyObjectResult>`)
+		}
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	version := "version-1"
+	retain := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	etag, metadata, err := client.CopyObject(context.Background(), "dst", "key", "src", "source", &version, map[string]string{"x-amz-meta-a": "b"}, &ObjectLockInput{Mode: "GOVERNANCE", RetainUntilDate: &retain, LegalHoldStatus: "ON"})
+	require.NoError(t, err)
+	require.Equal(t, "copy-etag", etag)
+	require.Equal(t, "copy-etag", metadata["ETag"])
+	require.Contains(t, copySource, "versionId=version-1")
+
+	part, err := client.UploadPartCopy(context.Background(), "dst", "key", "upload", 1, "src", "source", nil, &CopyPartRange{First: 2, Last: 9})
+	require.NoError(t, err)
+	require.Equal(t, `"unquoted"`, part.ETag)
+	require.Equal(t, "bytes=2-9", copyRange)
+}
+
+func TestS3Client_CreateMultipartUpload_PreservesHeadersAndMetadata(t *testing.T) {
+	var got http.Header
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<InitiateMultipartUploadResult><UploadId>upload-options</UploadId></InitiateMultipartUploadResult>`)
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	uploadID, err := client.CreateMultipartUpload(context.Background(), "bucket", "key", map[string]string{
+		"Content-Type": "text/plain", "Cache-Control": "no-cache", "Content-Disposition": "inline", "x-amz-meta-custom": "value",
+	}, "public-read", "full-control", "read", "read-acp", "write")
+	require.NoError(t, err)
+	require.Equal(t, "upload-options", uploadID)
+	require.Equal(t, "text/plain", got.Get("Content-Type"))
+	require.Equal(t, "no-cache", got.Get("Cache-Control"))
+	require.Equal(t, "inline", got.Get("Content-Disposition"))
+	require.Equal(t, "value", got.Get("X-Amz-Meta-Custom"))
 }
 
 // md5sum is a test helper returning the raw MD5 digest of b.

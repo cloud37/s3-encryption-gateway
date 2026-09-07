@@ -2,7 +2,6 @@ package s3
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -39,29 +38,18 @@ func NewProxyClient(cfg *config.BackendConfig) (*ProxyClient, error) {
 		return nil, fmt.Errorf("invalid backend endpoint: %w", err)
 	}
 
+	transport, err := newBackendHTTPTransport(cfg.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("build backend HTTP transport: %w", err)
+	}
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.ResponseHeaderTimeout = 10 * time.Second
+	transport.MaxIdleConnsPerHost = 10
 	return &ProxyClient{
 		backendURL: backendURL,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-			Transport: &http.Transport{
-				// V1.0-SEC-F6: Enforce minimum TLS 1.2 and restricted cipher
-				// suites consistent with the main S3 client and Cosmian KMS
-				// client. The bare &http.Client{} default uses Go's
-				// http.DefaultTransport which has no cipher restrictions.
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-					CipherSuites: []uint16{
-						tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-						tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-						tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-						tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-					},
-					CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
-				},
-				IdleConnTimeout:       90 * time.Second,
-				ResponseHeaderTimeout: 10 * time.Second,
-				MaxIdleConnsPerHost:   10,
-			},
+			Timeout:   60 * time.Second,
+			Transport: transport,
 		},
 		config: cfg,
 	}, nil
