@@ -22,7 +22,7 @@ func newBackendHTTPTransport(cfg config.BackendTLSConfig) (*http.Transport, erro
 		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
 		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-	}, CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256}, InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec -- explicit diagnostic configuration
+	}, CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256}, InsecureSkipVerify: cfg.InsecureSkipVerify} // #nosec G402 -- explicit operator-controlled diagnostic configuration; startup emits a warning
 	if cfg.CAFile != "" {
 		info, err := os.Stat(cfg.CAFile)
 		if err != nil {
