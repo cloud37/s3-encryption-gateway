@@ -72,6 +72,9 @@ func newRangeDecryptReader(
 	if manifest.Version != int(ChunkedFormatV1) && manifest.Version != int(ChunkedFormatV2) {
 		return nil, fmt.Errorf("%w: %d", ErrUnsupportedChunkedVersion, manifest.Version)
 	}
+	if err := validateChunkSize(manifest.ChunkSize); err != nil {
+		return nil, err
+	}
 	plaintextSize := int64(-1)
 	if len(plaintextSizes) > 0 {
 		plaintextSize = plaintextSizes[0]

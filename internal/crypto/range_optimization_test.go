@@ -8,6 +8,70 @@ import (
 	"testing"
 )
 
+func TestValidateChunkSize_EnforcesFormatBounds(t *testing.T) {
+	for _, size := range []int{MinChunkSize - 1, 0, -1, MaxChunkSize + 1, int(^uint(0) >> 1)} {
+		if err := validateChunkSize(size); err == nil {
+			t.Errorf("validateChunkSize(%d) unexpectedly succeeded", size)
+		}
+	}
+	for _, size := range []int{MinChunkSize, MaxChunkSize} {
+		if err := validateChunkSize(size); err != nil {
+			t.Errorf("validateChunkSize(%d) failed: %v", size, err)
+		}
+		if _, err := ChunkedDataChunkCount(1, size); err != nil {
+			t.Errorf("ChunkedDataChunkCount(%d) failed: %v", size, err)
+		}
+		if _, err := ChunkedCiphertextSize(1, size, ChunkedFormatV1); err != nil {
+			t.Errorf("ChunkedCiphertextSize(%d) failed: %v", size, err)
+		}
+		if _, _, err := ChunkedPlaintextSize(int64(size+tagSize), size, ChunkedFormatV1); err != nil {
+			t.Errorf("ChunkedPlaintextSize(%d) failed: %v", size, err)
+		}
+		if _, _, err := ChunkedEncryptedDataRange(0, 0, size, ChunkedFormatV1); err != nil {
+			t.Errorf("ChunkedEncryptedDataRange(%d) failed: %v", size, err)
+		}
+	}
+	for _, size := range []int{MinChunkSize - 1, MaxChunkSize + 1} {
+		if _, err := ChunkedDataChunkCount(1, size); err == nil {
+			t.Errorf("ChunkedDataChunkCount(%d) unexpectedly succeeded", size)
+		}
+		if _, err := ChunkedCiphertextSize(1, size, ChunkedFormatV1); err == nil {
+			t.Errorf("ChunkedCiphertextSize(%d) unexpectedly succeeded", size)
+		}
+		if _, _, err := ChunkedPlaintextSize(int64(size+tagSize), size, ChunkedFormatV1); err == nil {
+			t.Errorf("ChunkedPlaintextSize(%d) unexpectedly succeeded", size)
+		}
+		if _, _, err := ChunkedEncryptedDataRange(0, 0, size, ChunkedFormatV1); err == nil {
+			t.Errorf("ChunkedEncryptedDataRange(%d) unexpectedly succeeded", size)
+		}
+		if _, _, err := ChunkedEncryptedDataRangeForPlaintextSize(0, 0, 1, size, ChunkedFormatV1); err == nil {
+			t.Errorf("ChunkedEncryptedDataRangeForPlaintextSize(%d) unexpectedly succeeded", size)
+		}
+		encoded, encodeErr := encodeManifest(&ChunkManifest{Version: int(ChunkedFormatV1), ChunkSize: size, ChunkCount: 1})
+		if encodeErr != nil {
+			t.Fatalf("encode invalid manifest: %v", encodeErr)
+		}
+		metadata := map[string]string{MetaManifest: encoded, MetaChunkedFormat: "true", MetaChunkCount: "1", MetaChunkSize: fmt.Sprint(size), MetaOriginalSize: "1"}
+		if _, _, err := CalculateEncryptedRangeForPlaintextRange(metadata, 0, 0); err == nil {
+			t.Errorf("CalculateEncryptedRangeForPlaintextRange(%d) unexpectedly succeeded", size)
+		}
+	}
+}
+
+func TestChunkedPlaintextSize_ZeroDataStillValidatesChunkSize(t *testing.T) {
+	for _, version := range []uint8{ChunkedFormatV1, ChunkedFormatV2} {
+		var ciphertextSize int64
+		if version == ChunkedFormatV2 {
+			ciphertextSize = ChunkedTerminalSize
+		}
+		for _, chunkSize := range []int{MinChunkSize - 1, MaxChunkSize + 1} {
+			if _, _, err := ChunkedPlaintextSize(ciphertextSize, chunkSize, version); err == nil {
+				t.Errorf("version %d accepted invalid chunk size %d for zero data", version, chunkSize)
+			}
+		}
+	}
+}
+
 func TestCalculateChunkRangeFromPlaintext(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -397,7 +461,7 @@ func TestGetPlaintextSizeFromMetadata_ExactPrecedenceAndMalformedManifest(t *tes
 		{"malformed content length falls back original", map[string]string{MetaManifest: encoded, "Content-Length": "bad", MetaOriginalSize: "8"}, 0, true},
 		{"invalid manifest version", map[string]string{MetaManifest: encodeBase64([]byte(`{"v":9,"cs":65536,"cc":1}`)), MetaOriginalSize: "8"}, 0, true},
 		{"malformed manifest content", map[string]string{MetaManifest: "%%%", MetaOriginalSize: "8"}, 0, true},
-		{"invalid original falls back count size", map[string]string{MetaOriginalSize: "bad", MetaChunkCount: "2", MetaChunkSize: "4"}, 8, false},
+		{"invalid original rejects noncanonical count size", map[string]string{MetaOriginalSize: "bad", MetaChunkCount: "2", MetaChunkSize: "4"}, 0, true},
 		{"malformed count and size no fallback", map[string]string{MetaOriginalSize: "bad", MetaChunkCount: "bad", MetaChunkSize: "bad"}, 0, true},
 		{"nil metadata", nil, 0, true},
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -97,6 +99,7 @@ type mockS3Client struct {
 	deleteObjectsCallCount int
 	deleteObjectCallCount  int
 	getObjectCallCount     int
+	bodyReadCount          atomic.Int64
 }
 
 func newMockS3Client() *mockS3Client {
@@ -355,8 +358,20 @@ func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versio
 			}
 		}
 	}
-	return io.NopCloser(bytes.NewReader(data)), meta, nil
+	return &bodyCountingReadCloser{Reader: bytes.NewReader(data), reads: &m.bodyReadCount}, meta, nil
 }
+
+type bodyCountingReadCloser struct {
+	io.Reader
+	reads *atomic.Int64
+}
+
+func (r *bodyCountingReadCloser) Read(p []byte) (int, error) {
+	r.reads.Add(1)
+	return r.Reader.Read(p)
+}
+
+func (r *bodyCountingReadCloser) Close() error { return nil }
 
 func (m *mockS3Client) DeleteObject(ctx context.Context, bucket, key string, versionID *string) error {
 	m.deleteObjectCallCount++
@@ -1190,6 +1205,66 @@ func TestHandler_HandleGetObject(t *testing.T) {
 
 	if w.Body.String() != "test data" {
 		t.Errorf("expected body 'test data', got %q", w.Body.String())
+	}
+}
+
+func TestGetObject_InvalidManifestChunkSizeFailsBeforeCiphertextRead(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockClient := newMockS3Client()
+	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, crypto.DefaultChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "bad-manifest"}, bytes.NewReader([]byte("ciphertext body")), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := io.ReadAll(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]interface{}
+	raw, err := base64.RawURLEncoding.DecodeString(metadata[crypto.MetaManifest])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest["cs"] = float64(crypto.MaxChunkSize + 1)
+	raw, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata[crypto.MetaManifest] = base64.RawURLEncoding.EncodeToString(raw)
+	metadata[crypto.MetaChunkSize] = strconv.Itoa(crypto.MaxChunkSize + 1)
+	metadata[crypto.MetaChunkedFormat] = "true"
+	metadata[crypto.MetaEncrypted] = "true"
+	if _, err := mockClient.PutObject(context.Background(), "test-bucket", "bad-manifest", bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest("GET", "/test-bucket/bad-manifest", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want %d body=%s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "<Code>InternalError</Code>") {
+		t.Fatalf("response missing opaque InternalError code: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "<Message>Object integrity check failed</Message>") {
+		t.Fatalf("response missing established opaque integrity message: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), strconv.Itoa(crypto.MaxChunkSize+1)) {
+		t.Fatalf("response leaked supplied chunk size: %s", w.Body.String())
+	}
+	if got := mockClient.bodyReadCount.Load(); got != 0 {
+		t.Fatalf("ciphertext body was read %d times", got)
 	}
 }
 

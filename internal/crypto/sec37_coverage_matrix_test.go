@@ -36,10 +36,10 @@ func TestSEC37_Coverage_ConstructorAndTerminalMatrix(t *testing.T) {
 	if _, _, err := newChunkedEncryptReaderWithContext(context.Background(), bytes.NewReader([]byte("v2")), data, terminal, iv, MinChunkSize, ChunkedFormatV2, nil); err == nil {
 		t.Fatal("generic current v2 writer accepted an unbound stream")
 	}
-	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, nil, &ChunkManifest{Version: 1, BaseIV: encodeBase64(iv)}, nil); err != nil {
+	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, nil, &ChunkManifest{Version: 1, ChunkSize: MinChunkSize, BaseIV: encodeBase64(iv)}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, terminal, &ChunkManifest{Version: 2, BaseIV: encodeBase64(iv)}, nil); err == nil {
+	if _, err := newChunkedDecryptReaderWithContext(context.Background(), bytes.NewReader(nil), data, terminal, &ChunkManifest{Version: 2, ChunkSize: MinChunkSize, BaseIV: encodeBase64(iv)}, nil); err == nil {
 		t.Fatal("generic current v2 reader accepted an unbound stream")
 	}
 	for _, v := range []int{0, 3, 255} {

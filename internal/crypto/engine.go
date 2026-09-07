@@ -2012,6 +2012,17 @@ func (e *engine) decryptRange(ctx context.Context, object ObjectContext, reader 
 		return nil, nil, fmt.Errorf("failed to expand metadata: %w", err)
 	}
 
+	// Validate a clear manifest before decrypting protected metadata. If the
+	// manifest is not available outside the protected blob, fail closed rather
+	// than using attacker-controlled metadata to reach decryption or I/O.
+	manifestForRange, manifestErr := loadManifestFromMetadata(expandedMetadata)
+	if manifestErr != nil {
+		return nil, nil, fmt.Errorf("failed to load manifest: %w", manifestErr)
+	}
+	if err := validateChunkSize(manifestForRange.ChunkSize); err != nil {
+		return nil, nil, fmt.Errorf("invalid chunked manifest")
+	}
+
 	// V1.0-CRYPTO-3: decrypt encrypted metadata blob if metadata key is configured.
 	if e.metadataKey != nil {
 		blobKey := MetaEncryptedMetadata
@@ -2038,11 +2049,14 @@ func (e *engine) decryptRange(ctx context.Context, object ObjectContext, reader 
 		return nil, nil, fmt.Errorf("range optimization only supported for chunked format")
 	}
 
-	// Load manifest before deriving the size so the version-aware model can
-	// use the explicit chunk size and the writer's terminal overhead.
-	manifestForRange, manifestErr := loadManifestFromMetadata(expandedMetadata)
+	// Load the post-decryption manifest so protected metadata remains the
+	// source of the actual encryption parameters after the clear preflight.
+	manifestForRange, manifestErr = loadManifestFromMetadata(expandedMetadata)
 	if manifestErr != nil {
 		return nil, nil, fmt.Errorf("failed to load manifest: %w", manifestErr)
+	}
+	if err := validateChunkSize(manifestForRange.ChunkSize); err != nil {
+		return nil, nil, fmt.Errorf("invalid chunked manifest")
 	}
 	if expandedMetadata[MetaObjectFormatVersion] == "chunked-v2" {
 		if manifestForRange.Version != int(ChunkedFormatV2) {
@@ -2068,10 +2082,6 @@ func (e *engine) decryptRange(ctx context.Context, object ObjectContext, reader 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get plaintext size: %w", err)
 	}
-	if manifestForRange.ChunkSize <= 0 {
-		return nil, nil, fmt.Errorf("invalid chunk size")
-	}
-
 	// Validate range (similar to HTTP range validation)
 	if plaintextStart < 0 || plaintextStart >= plaintextSize || plaintextEnd < plaintextStart || plaintextEnd >= plaintextSize {
 		return nil, nil, fmt.Errorf("range not satisfiable: %d-%d (size: %d)", plaintextStart, plaintextEnd, plaintextSize)

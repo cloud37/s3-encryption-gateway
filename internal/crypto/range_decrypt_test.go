@@ -83,6 +83,105 @@ func TestRangeDecryptReader_Basic(t *testing.T) {
 	}
 }
 
+func TestDecryptRange_RejectsOutOfRangeManifestBeforeSourceRead(t *testing.T) {
+	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("plaintext")), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(encrypted); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, optimized := range []bool{false, true} {
+		for _, size := range []int{MinChunkSize - 1, MaxChunkSize + 1} {
+			manifest, err := loadManifestFromMetadata(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.ChunkSize = size
+			encoded, err := encodeManifest(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			caseMetadata := make(map[string]string, len(metadata)+1)
+			for key, value := range metadata {
+				caseMetadata[key] = value
+			}
+			caseMetadata[MetaManifest] = encoded
+			caseMetadata[MetaChunkSize] = fmt.Sprint(size)
+			source := &chunkedCountingReader{}
+			var rangeReader io.Reader
+			if optimized {
+				rangeReader, _, err = engine.(interface {
+					DecryptRangeOptimized(context.Context, ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error)
+				}).DecryptRangeOptimized(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, source, caseMetadata, 0, 1)
+			} else {
+				rangeReader, _, err = engine.(interface {
+					DecryptRange(context.Context, ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error)
+				}).DecryptRange(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, source, caseMetadata, 0, 1)
+			}
+			if err == nil || rangeReader != nil {
+				t.Fatalf("optimized=%v chunk size %d unexpectedly accepted", optimized, size)
+			}
+			if source.reads != 0 {
+				t.Fatalf("optimized=%v chunk size %d caused %d source reads", optimized, size, source.reads)
+			}
+		}
+	}
+}
+
+func TestDecryptRange_ProtectedMetadataValidatesManifestBeforeMetadataDecrypt(t *testing.T) {
+	encryptionEngine, err := NewEngineWithOpts(
+		[]byte("protected-range-password"),
+		WithChunking(true),
+		WithChunkSize(DefaultChunkSize),
+		WithMetadataKey(bytes.Repeat([]byte{0x42}, 32)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, metadata, err := encryptionEngine.Encrypt(
+		context.Background(),
+		ObjectContext{Bucket: "test-bucket", Key: "test-key"},
+		bytes.NewReader([]byte("protected range")),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := &ChunkManifest{Version: int(ChunkedFormatV1), ChunkSize: MaxChunkSize + 1}
+	metadata[MetaManifest], err = encodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make metadata decryption fail if the preflight is bypassed. The clear
+	// manifest must win, while the source must remain untouched.
+	metadata[MetaEncryptedMetadata] = "%%%"
+	source := &chunkedCountingReader{}
+	_, _, err = encryptionEngine.DecryptRange(
+		context.Background(),
+		ObjectContext{Bucket: "test-bucket", Key: "test-key"},
+		source,
+		metadata,
+		0,
+		1,
+	)
+	if err == nil || err.Error() != "invalid chunked manifest" {
+		t.Fatalf("error = %v, want invalid chunked manifest", err)
+	}
+	if source.reads != 0 {
+		t.Fatalf("invalid protected manifest caused %d source reads", source.reads)
+	}
+}
+
 func TestRangeDecryptReader_EdgeCases(t *testing.T) {
 	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024)
 	if err != nil {

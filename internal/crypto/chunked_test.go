@@ -63,6 +63,50 @@ func TestChunkedEncryptDecrypt_SmallData(t *testing.T) {
 	}
 }
 
+type chunkedCountingReader struct{ reads int }
+
+func (r *chunkedCountingReader) Read(p []byte) (int, error) {
+	r.reads++
+	return 0, io.EOF
+}
+
+func TestNewChunkedDecryptReader_RejectsOutOfRangeManifestChunkSizeBeforeRead(t *testing.T) {
+	for _, size := range []int{-1, 0, MinChunkSize - 1, MaxChunkSize + 1} {
+		source := &chunkedCountingReader{}
+		manifest := &ChunkManifest{Version: int(ChunkedFormatV1), ChunkSize: size}
+		_, err := newChunkedDecryptReaderForVersion(context.Background(), source, nil, manifest, nil, nil)
+		if err == nil {
+			t.Errorf("chunk size %d unexpectedly accepted", size)
+		}
+		if source.reads != 0 {
+			t.Errorf("chunk size %d caused %d source reads", size, source.reads)
+		}
+	}
+}
+
+func TestNewChunkedDecryptReader_AcceptsManifestChunkSizeBounds(t *testing.T) {
+	block, err := aes.NewCipher(bytes.Repeat([]byte{1}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []int{int(ChunkedFormatV1), int(ChunkedFormatV2)} {
+		for _, size := range []int{MinChunkSize, MaxChunkSize} {
+			manifest := &ChunkManifest{Version: version, ChunkSize: size, BaseIV: encodeBase64(bytes.Repeat([]byte{2}, aead.NonceSize()))}
+			var terminal cipher.AEAD
+			if version == int(ChunkedFormatV2) {
+				terminal = aead
+			}
+			if _, err := newChunkedDecryptReaderForVersion(context.Background(), bytes.NewReader(nil), aead, manifest, nil, terminal); err != nil {
+				t.Errorf("version %d chunk size %d rejected: %v", version, size, err)
+			}
+		}
+	}
+}
+
 func TestChunkedEncryptDecrypt_LargeData(t *testing.T) {
 	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
@@ -587,7 +631,7 @@ func TestChunkedDecrypt_LegacyXOR(t *testing.T) {
 	// Manifest without IVDerivation simulates a pre-v1.0 object.
 	manifest := &ChunkManifest{
 		Version:    1,
-		ChunkSize:  len(plaintext),
+		ChunkSize:  MinChunkSize,
 		ChunkCount: 1,
 		BaseIV:     encodeBase64(baseIV),
 	}
@@ -638,7 +682,7 @@ func TestChunkedDecrypt_HKDFFlagCannotUseXOR(t *testing.T) {
 	// Manifest WITHOUT the HKDF flag forces the decrypt reader to use XOR.
 	manifest := &ChunkManifest{
 		Version:      1,
-		ChunkSize:    len(plaintext),
+		ChunkSize:    MinChunkSize,
 		ChunkCount:   1,
 		BaseIV:       encodeBase64(baseIV),
 		IVDerivation: "", // forces legacy XOR path

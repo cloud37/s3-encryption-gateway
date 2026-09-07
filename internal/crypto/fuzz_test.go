@@ -1,9 +1,28 @@
 package crypto
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 )
+
+func FuzzChunkManifestChunkSizeValidation(f *testing.F) {
+	for _, size := range []int{MinChunkSize, MaxChunkSize, 0, -1, MaxChunkSize + 1} {
+		f.Add(size)
+	}
+	f.Fuzz(func(t *testing.T, size int) {
+		manifest := &ChunkManifest{Version: int(ChunkedFormatV1), ChunkSize: size, BaseIV: encodeBase64(bytes.Repeat([]byte{1}, nonceSize))}
+		_, err := newChunkedDecryptReaderForVersion(context.Background(), bytes.NewReader(nil), nil, manifest, nil, nil)
+		valid := size >= MinChunkSize && size <= MaxChunkSize
+		if valid && err != nil {
+			t.Fatalf("valid size %d rejected: %v", size, err)
+		}
+		if !valid && err == nil {
+			t.Fatalf("invalid size %d accepted", size)
+		}
+	})
+}
 
 // FuzzMetadataCompaction fuzzes the metadata compaction and expansion logic.
 func FuzzMetadataCompaction(f *testing.F) {

@@ -20,7 +20,7 @@ func validateChunkSize(chunkSize int) error {
 	if chunkSize > math.MaxInt-tagSize {
 		return fmt.Errorf("invalid chunk size: %d", chunkSize)
 	}
-	if chunkSize <= 0 {
+	if chunkSize < MinChunkSize || chunkSize > MaxChunkSize {
 		return fmt.Errorf("invalid chunk size: %d", chunkSize)
 	}
 	return nil
@@ -74,6 +74,9 @@ func ChunkedPlaintextSize(ciphertextSize int64, chunkSize int, version uint8) (i
 	if err := validateChunkedVersion(version); err != nil {
 		return 0, 0, err
 	}
+	if err := validateChunkSize(chunkSize); err != nil {
+		return 0, 0, err
+	}
 	if ciphertextSize < 0 {
 		return 0, 0, fmt.Errorf("negative ciphertext size")
 	}
@@ -87,9 +90,6 @@ func ChunkedPlaintextSize(ciphertextSize int64, chunkSize int, version uint8) (i
 	dataSize := ciphertextSize - overhead
 	if dataSize == 0 {
 		return 0, 0, nil
-	}
-	if err := validateChunkSize(chunkSize); err != nil {
-		return 0, 0, err
 	}
 	if version == ChunkedFormatV2 && dataSize < int64(tagSize) {
 		return 0, 0, fmt.Errorf("non-canonical chunked ciphertext size")
@@ -367,7 +367,12 @@ func GetPlaintextSizeFromMetadata(metadata map[string]string) (int64, error) {
 		if sizeText, sizeOK := metadata[MetaChunkSize]; sizeOK {
 			count, countErr := strconv.ParseUint(countText, 10, 64)
 			chunkSize, sizeErr := strconv.ParseUint(sizeText, 10, 64)
-			if countErr == nil && sizeErr == nil && count > 0 && chunkSize > 0 && count <= uint64(math.MaxInt64)/chunkSize {
+			if countErr == nil && sizeErr == nil && count > 0 && chunkSize <= uint64(math.MaxInt) {
+				if err := validateChunkSize(int(chunkSize)); err != nil {
+					return 0, err
+				}
+			}
+			if countErr == nil && sizeErr == nil && count > 0 && chunkSize > 0 && chunkSize <= uint64(math.MaxInt) && count <= uint64(math.MaxInt64)/chunkSize {
 				size := count * chunkSize
 				return int64(size), nil // #nosec G115 -- size was bounded by MaxInt64 above
 			}

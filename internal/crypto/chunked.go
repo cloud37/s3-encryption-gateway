@@ -356,6 +356,9 @@ func newChunkedDecryptReaderForVersion(ctx context.Context, source io.Reader, ae
 	if err := validateChunkedVersion(version); err != nil {
 		return nil, err
 	}
+	if err := validateChunkSize(manifest.ChunkSize); err != nil {
+		return nil, err
+	}
 	baseIV, err := decodeBase64(manifest.BaseIV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base IV: %w", err)
