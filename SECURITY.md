@@ -69,6 +69,10 @@ The S3 Encryption Gateway is designed with the following properties:
 - **FIPS profile**: Build with `-tags=fips` to restrict all cryptographic operations to FIPS-140 approved algorithms (AES-256-GCM, HKDF-SHA256, PBKDF2-HMAC-SHA256).
 - **Key zeroization**: Plaintext DEKs and derived keys are zeroed from memory immediately after use.
 - **Constant-time comparisons**: All security-sensitive byte comparisons use `crypto/subtle`.
+- **Manifest resource validation**: Untrusted chunk-manifest resource parameters
+  are checked against the wire-format bounds before arithmetic, allocation, or
+  ciphertext authentication. Invalid metadata fails through the existing
+  opaque S3 error surface without revealing supplied values.
 
 ### SigV4 signed-payload preflight
 
