@@ -152,3 +152,15 @@ backend:
 | GCS | Google Cloud customers | `gcs` |
 | Azure Blob | Azure customers | `azure` |
 | Any S3-compatible store | Hetzner, Wasabi, Backblaze, DigitalOcean, etc. | `s3` |
+# Backend TLS trust
+
+HTTPS backend connections use the system trust store by default. To trust a
+private issuing CA, mount its PEM file and configure `backend.tls.ca_file` (or
+`BACKEND_TLS_CA_FILE`). The file is appended to system roots and hostname
+verification remains enabled; restart the gateway after changing it.
+
+`backend.tls.insecure_skip_verify` / `BACKEND_TLS_INSECURE_SKIP_VERIFY` is an
+explicit diagnostic escape hatch. It disables certificate-chain and hostname
+verification while retaining encryption, emits a startup warning, and must not
+be used in production. These settings do not make a plaintext
+`use_ssl: false` connection secure.

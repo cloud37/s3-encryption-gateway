@@ -83,6 +83,10 @@ backend:
   # Selects the scheme only when endpoint omits one; explicit http:// or
   # https:// endpoints always take precedence.
   use_ssl: true
+  # Optional: append a mounted private CA while retaining hostname verification.
+  # tls:
+  #   ca_file: /etc/s3eg/backend-ca/ca.pem
+  #   insecure_skip_verify: false # diagnostics only; do not use in production
   # backend.type selects the storage transport implementation.
   # Supported values: "s3" (default), "gcs", "azure".
   # See docs/BACKENDS.md for per-backend caveats.

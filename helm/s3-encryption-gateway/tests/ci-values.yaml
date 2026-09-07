@@ -26,6 +26,13 @@ config:
       value: "true"
     usePathStyle:
       value: "false"
+    tls:
+      caFile:
+        value: "/etc/s3eg/ca.pem"
+        valueFrom: {}
+      insecureSkipVerify:
+        value: "false"
+        valueFrom: {}
   encryption:
     password:
       value: "test-password-123456"

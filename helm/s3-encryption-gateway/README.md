@@ -1322,3 +1322,11 @@ MIT License — see [LICENSE](https://github.com/cloud37/s3-encryption-gateway/b
 routes and `s3_client_bytes_total{bucket,direction}` counts application-body
 bytes at the client boundary. Set `metrics.enableBucketLabel: true` to retain
 bucket labels; disabled mode uses `*` to bound cardinality.
+# Backend TLS
+
+Set `config.backend.tls.caFile.value` to the path of a mounted PEM private CA
+to augment system roots. Use `valueFrom` for secret/config-map references.
+`config.backend.tls.insecureSkipVerify.value` defaults to `"false"`; enabling
+it is unsafe and intended only for local diagnostics. Mount the CA with the
+chart's `extraVolumes` and `extraVolumeMounts`, then restart the gateway after
+changes.

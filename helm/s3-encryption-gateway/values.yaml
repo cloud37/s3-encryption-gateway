@@ -245,6 +245,13 @@ config:
       value: "true"
     usePathStyle:
       value: "false"
+    tls:
+      caFile:
+        value: ""
+        valueFrom: {}
+      insecureSkipVerify:
+        value: "false"
+        valueFrom: {}
     type:
       value: ""
       # valueFrom:

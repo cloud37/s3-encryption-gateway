@@ -102,7 +102,11 @@ spec:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_PROVIDER" "value" .Values.config.backend.provider.value "valueFrom" .Values.config.backend.provider.valueFrom) | nindent 8 }}
         {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_SSL" "value" .Values.config.backend.useSSL.value "valueFrom" .Values.config.backend.useSSL.valueFrom) | nindent 8 }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_PATH_STYLE" "value" .Values.config.backend.usePathStyle.value "valueFrom" .Values.config.backend.usePathStyle.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_PATH_STYLE" "value" .Values.config.backend.usePathStyle.value "valueFrom" .Values.config.backend.usePathStyle.valueFrom) | nindent 8 }}
+         {{- if or .Values.config.backend.tls.caFile.value .Values.config.backend.tls.caFile.valueFrom }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_TLS_CA_FILE" "value" .Values.config.backend.tls.caFile.value "valueFrom" .Values.config.backend.tls.caFile.valueFrom) | nindent 8 }}
+         {{- end }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_TLS_INSECURE_SKIP_VERIFY" "value" .Values.config.backend.tls.insecureSkipVerify.value "valueFrom" .Values.config.backend.tls.insecureSkipVerify.valueFrom) | nindent 8 }}
         {{- if or .Values.config.backend.type.value .Values.config.backend.type.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_TYPE" "value" .Values.config.backend.type.value "valueFrom" .Values.config.backend.type.valueFrom) | nindent 8 }}
         {{- end }}

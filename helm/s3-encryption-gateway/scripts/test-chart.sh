@@ -31,6 +31,25 @@ else
   exit 1
 fi
 
+# Test 1b: backend TLS direct and valueFrom environment rendering.
+echo ""
+echo "Test 1b: backend TLS direct and valueFrom rendering"
+TLS_DIRECT=$(helm template test "$CHART_DIR" \
+  --set config.backend.tls.caFile.value=/etc/s3eg/ca.pem \
+  --set-string config.backend.tls.insecureSkipVerify.value=false)
+grep -q 'name: BACKEND_TLS_CA_FILE' <<<"$TLS_DIRECT" || { echo "✗ BACKEND_TLS_CA_FILE missing"; exit 1; }
+grep -q 'name: BACKEND_TLS_INSECURE_SKIP_VERIFY' <<<"$TLS_DIRECT" || { echo "✗ BACKEND_TLS_INSECURE_SKIP_VERIFY missing"; exit 1; }
+if grep -q '/etc/s3eg/ca.pem' <<<"$TLS_DIRECT"; then echo "✓ direct CA path rendered"; else echo "✗ direct CA path missing"; exit 1; fi
+if grep -q 'BEGIN CERTIFICATE' <<<"$TLS_DIRECT"; then echo "✗ CA contents must not render"; exit 1; else echo "✓ CA contents not rendered"; fi
+TLS_FROM=$(helm template test "$CHART_DIR" \
+  --set config.backend.tls.caFile.value= \
+  --set config.backend.tls.caFile.valueFrom.secretKeyRef.name=backend-ca \
+  --set config.backend.tls.caFile.valueFrom.secretKeyRef.key=ca.pem \
+  --set-string config.backend.tls.insecureSkipVerify.value=true)
+grep -q 'name: BACKEND_TLS_CA_FILE' <<<"$TLS_FROM" || { echo "✗ valueFrom CA env missing"; exit 1; }
+grep -q 'name: BACKEND_TLS_INSECURE_SKIP_VERIFY' <<<"$TLS_FROM" || { echo "✗ valueFrom skip env missing"; exit 1; }
+echo "✓ direct and valueFrom TLS env names rendered"
+
 if helm template test "$CHART_DIR" \
   --set config.backend.accessKey.value=test-access-key \
   --set config.backend.secretKey.value=test-secret-key \

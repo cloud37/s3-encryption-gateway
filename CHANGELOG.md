@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+- Add backend TLS custom-CA trust configuration and an explicitly unsafe
+  `insecure_skip_verify` diagnostic option for HTTPS backends.
+
 ### Added
 
 - Helm charts are now published as signed, digest-addressable OCI artifacts to
