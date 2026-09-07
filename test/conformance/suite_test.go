@@ -48,6 +48,9 @@ func TestConformance(t *testing.T) {
 			}{
 				// Core object operations — run on every provider.
 				{"BackendConnection_SchemeLessHTTP", 0, testBackendSchemeLessHTTPRoundTrip},
+				{"BackendTLS_CustomCARoundTrip", provider.CapBackendTLSFixture, testBackendTLSCustomCARoundTrip},
+				{"BackendTLS_InsecureSkipVerifyRoundTrip", provider.CapBackendTLSFixture, testBackendTLSInsecureSkipVerifyRoundTrip},
+				{"BackendTLS_UntrustedCertificateRejected", provider.CapBackendTLSFixture, testBackendTLSUntrustedCertificateRejected},
 				{"PutGet", 0, testPutGet},
 				{"PutGet_LargeObject", 0, testPutGet_Large},
 				{"HeadObject", 0, testHeadObject},

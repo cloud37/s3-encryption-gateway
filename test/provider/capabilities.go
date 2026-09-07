@@ -108,7 +108,8 @@ const (
 	// works with this provider. Like CapKMSIntegration, requires Docker so the
 	// in-process gateway and the OpenBao container share the same network.
 	// Disable with GATEWAY_TEST_SKIP_OPENBAO=1.
-	CapOpenBaoKMS Capabilities = 1 << 28
+	CapOpenBaoKMS        Capabilities = 1 << 28
+	CapBackendTLSFixture Capabilities = 1 << 29
 
 	// Next available: 1 << 29
 )
@@ -149,6 +150,7 @@ var capNames = []struct {
 	{CapSDKMinIOPy, "SDKMinIOPy"},
 	{CapCLIRestic, "CLIRestic"},
 	{CapOpenBaoKMS, "OpenBaoKMS"},
+	{CapBackendTLSFixture, "BackendTLSFixture"},
 }
 
 // String returns a human-readable description of the capabilities bitmap.

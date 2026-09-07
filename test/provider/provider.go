@@ -41,6 +41,7 @@ type Provider interface {
 // Instance holds the live connection details for one backend started by
 // Provider.Start. All fields are populated before Start returns.
 type Instance struct {
+	BackendTLS *TLSFixture
 	// Endpoint is the HTTP(S) endpoint, e.g. "http://127.0.0.1:9000".
 	Endpoint string
 	// Region is the S3 region, e.g. "us-east-1".
@@ -57,6 +58,14 @@ type Instance struct {
 	Raw interface{}
 	// ProviderName is the Name() of the provider that produced this instance.
 	ProviderName string
+}
+
+type TLSFixture struct {
+	Endpoint  string
+	CAFile    string
+	Bucket    string
+	AccessKey string
+	SecretKey string
 }
 
 // CleanupPolicy controls whether the conformance suite deletes objects after tests.

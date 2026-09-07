@@ -2,8 +2,19 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	tc "github.com/testcontainers/testcontainers-go"
-	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 func init() {
@@ -22,7 +33,7 @@ func init() {
 	}
 }
 
-type minioProvider struct{}
+type minioProvider struct{ tlsReady bool }
 
 func (p *minioProvider) Name() string { return "minio" }
 
@@ -31,7 +42,7 @@ func (p *minioProvider) Capabilities() Capabilities {
 	// BucketEncryption are omitted because the default MinIO test container
 	// does not enable these features (canned ACLs, KMS, Content-MD5 signing).
 	// The gateway's passthrough for these operations is verified by unit tests.
-	return CapMultipartUpload |
+	caps := CapMultipartUpload |
 		CapMultipartCopy |
 		CapObjectTagging |
 		CapInlinePutTagging |
@@ -50,12 +61,16 @@ func (p *minioProvider) Capabilities() Capabilities {
 		CapCLIRclone |
 		CapSDKMinIOPy |
 		CapCLIRestic
+	if p.tlsReady {
+		caps |= CapBackendTLSFixture
+	}
+	return caps
 }
 
 func (p *minioProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }
 
 func (p *minioProvider) BackendConfig(inst Instance) config.BackendConfig {
-	return config.BackendConfig{
+	cfg := config.BackendConfig{
 		Endpoint:     inst.Endpoint,
 		Region:       inst.Region,
 		AccessKey:    inst.AccessKey,
@@ -64,41 +79,150 @@ func (p *minioProvider) BackendConfig(inst Instance) config.BackendConfig {
 		UseSSL:       false,
 		UsePathStyle: true,
 	}
+	if inst.BackendTLS != nil {
+		cfg.Endpoint = inst.BackendTLS.Endpoint
+		cfg.UseSSL = true
+		cfg.TLS = config.BackendTLSConfig{CAFile: inst.BackendTLS.CAFile}
+	}
+	return cfg
+}
+
+func minioTLSMaterial(host string) (string, string, string, error) {
+	now := time.Now()
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", "", err
+	}
+	ca := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "gateway test CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+	if err != nil {
+		return "", "", "", err
+	}
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", "", err
+	}
+	server := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: host}, DNSNames: []string{"localhost"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	if ip := net.ParseIP(host); ip != nil {
+		server.IPAddresses = []net.IP{ip, net.ParseIP("127.0.0.1")}
+	} else {
+		server.DNSNames = append(server.DNSNames, host)
+	}
+	serverDER, err := x509.CreateCertificate(rand.Reader, server, ca, &serverKey.PublicKey, caKey)
+	if err != nil {
+		return "", "", "", err
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		return "", "", "", err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	return string(caPEM), string(certPEM), string(keyPEM), nil
 }
 
 func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 	t.Helper()
+	// Keep the ordinary provider fixture plaintext for the existing conformance
+	// matrix. The TLS fixture below is deliberately independent.
+	plain, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
+		ContainerRequest: tc.ContainerRequest{
+			Image: "minio/minio:RELEASE.2024-11-07T00-52-20Z", ExposedPorts: []string{"9000/tcp"},
+			Cmd:        []string{"server", "/data"},
+			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp"),
+			Env:        map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
+		}, Started: true,
+	})
+	if err != nil {
+		t.Skipf("minio provider: failed to start HTTP fixture (Docker unavailable?): %v", err)
+		return Instance{}
+	}
+	t.Cleanup(func() { _ = plain.Terminate(context.Background()) })
+	plainHost, err := plain.Host(ctx)
+	if err != nil {
+		t.Skipf("minio provider: resolve HTTP host: %v", err)
+		return Instance{}
+	}
+	plainPort, err := plain.MappedPort(ctx, "9000/tcp")
+	if err != nil {
+		t.Skipf("minio provider: resolve HTTP port: %v", err)
+		return Instance{}
+	}
+	plainInst := Instance{Endpoint: fmt.Sprintf("http://%s:%s", plainHost, plainPort.Port()), Region: "us-east-1", AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: fmt.Sprintf("conf-%s-%d", p.Name(), time.Now().UnixNano()), ProviderName: p.Name()}
+	createBucketS3(ctx, t, plainInst)
 
-	c, err := tcminio.Run(ctx,
-		"minio/minio:RELEASE.2024-11-07T00-52-20Z",
-		tc.WithEnv(map[string]string{
-			"MINIO_ROOT_USER":     "minioadmin",
-			"MINIO_ROOT_PASSWORD": "minioadmin",
-		}),
-	)
+	dockerProvider, err := tc.NewDockerProvider()
+	if err != nil {
+		t.Skipf("minio backend TLS fixture: resolve Docker host: %v", err)
+		return Instance{}
+	}
+	defer dockerProvider.Close()
+	host, err := dockerProvider.DaemonHost(ctx)
+	if err != nil {
+		t.Skipf("minio backend TLS fixture: resolve Docker host: %v", err)
+		return Instance{}
+	}
+	caPEM, certPEM, keyPEM, err := minioTLSMaterial(host)
+	if err != nil {
+		t.Skipf("minio backend TLS fixture: generate certificate: %v", err)
+		return Instance{}
+	}
+	c, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
+		ContainerRequest: tc.ContainerRequest{
+			Image: "minio/minio:RELEASE.2024-11-07T00-52-20Z", ExposedPorts: []string{"9000/tcp"},
+			Cmd:        []string{"server", "/data"},
+			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}),
+			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/root/.minio/certs/public.crt", FileMode: 0600}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/root/.minio/certs/private.key", FileMode: 0600}},
+			Env: map[string]string{
+				"MINIO_ROOT_USER":     "minioadmin",
+				"MINIO_ROOT_PASSWORD": "minioadmin",
+			},
+		}, Started: true,
+	})
 	if err != nil {
 		t.Skipf("minio provider: failed to start container (Docker unavailable?): %v", err)
 		return Instance{}
 	}
 	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 
-	endpoint, err := c.ConnectionString(ctx)
+	port, err := c.MappedPort(ctx, "9000/tcp")
 	if err != nil {
-		t.Fatalf("minio provider: failed to get connection string: %v", err)
+		t.Skipf("minio backend TLS fixture: resolve mapped port: %v", err)
+		return Instance{}
 	}
-	endpoint = "http://" + endpoint
+	// Keep the provider's normal endpoint plaintext so existing conformance
+	// cases do not accidentally opt into the TLS fixture. The optional fixture
+	// carries the HTTPS endpoint separately.
+	address := fmt.Sprintf("%s:%s", host, port.Port())
+	tlsEndpoint := "https://" + address
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, []byte(caPEM), 0600); err != nil {
+		t.Skipf("minio backend TLS fixture: write CA: %v", err)
+		return Instance{}
+	}
 
-	bucket := fmt.Sprintf("conf-%s-%d", p.Name(), time.Now().UnixNano())
-	inst := Instance{
-		Endpoint:     endpoint,
+	tlsInst := Instance{
+		Endpoint:     tlsEndpoint,
 		Region:       "us-east-1",
 		AccessKey:    "minioadmin",
 		SecretKey:    "minioadmin",
-		Bucket:       bucket,
+		Bucket:       fmt.Sprintf("conf-%s-tls-%d", p.Name(), time.Now().UnixNano()),
 		ProviderName: p.Name(),
+		BackendTLS:   &TLSFixture{Endpoint: tlsEndpoint, CAFile: caFile},
 	}
-	createBucketS3(ctx, t, inst)
-	return inst
+	// Only advertise the capability after the trusted TLS data path and bucket
+	// initialization have succeeded. Starting a container alone is insufficient.
+	if err := createBucketS3TLS(ctx, tlsInst); err != nil {
+		t.Skipf("minio backend TLS fixture: initialize bucket through trusted TLS client: %v", err)
+		return Instance{}
+	}
+	p.tlsReady = true
+	tlsInst.BackendTLS.Bucket = tlsInst.Bucket
+	tlsInst.BackendTLS.AccessKey = tlsInst.AccessKey
+	tlsInst.BackendTLS.SecretKey = tlsInst.SecretKey
+	plainInst.BackendTLS = tlsInst.BackendTLS
+	return plainInst
 }
 
 // createBucketS3 creates the bucket named in inst.Bucket using the AWS SDK v2.
@@ -106,15 +230,33 @@ func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 // pre-create their test bucket.
 func createBucketS3(ctx context.Context, t *testing.T, inst Instance) {
 	t.Helper()
+	if err := createBucketS3TLS(ctx, inst); err != nil {
+		t.Fatalf("createBucketS3: %v", err)
+	}
+}
 
-	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+func createBucketS3TLS(ctx context.Context, inst Instance) error {
+
+	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(inst.Region),
-		awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(inst.AccessKey, inst.SecretKey, ""),
-		),
-	)
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(inst.AccessKey, inst.SecretKey, "")),
+	}
+	if inst.BackendTLS != nil {
+		roots := x509.NewCertPool()
+		data, err := os.ReadFile(inst.BackendTLS.CAFile)
+		if err != nil {
+			return fmt.Errorf("read CA: %w", err)
+		}
+		if !roots.AppendCertsFromPEM(data) {
+			return fmt.Errorf("invalid CA")
+		}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(&http.Client{Transport: tr}))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
-		t.Fatalf("createBucketS3: load config: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	svc := s3.NewFromConfig(cfg, func(o *s3.Options) {
@@ -126,6 +268,7 @@ func createBucketS3(ctx context.Context, t *testing.T, inst Instance) {
 		Bucket: aws.String(inst.Bucket),
 	})
 	if err != nil {
-		t.Fatalf("createBucketS3: create bucket %q: %v", inst.Bucket, err)
+		return fmt.Errorf("create bucket %q: %w", inst.Bucket, err)
 	}
+	return nil
 }
