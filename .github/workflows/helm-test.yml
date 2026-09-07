@@ -285,13 +285,29 @@ jobs:
       - name: Package chart
         run: |
           set -euo pipefail
-          mkdir -p /tmp/opencode/helm-test
-          helm package helm/s3-encryption-gateway --destination /tmp/opencode/helm-test
-          ARCHIVE=/tmp/opencode/helm-test/s3-encryption-gateway-$(awk '$1 == "version:" {print $2}' helm/s3-encryption-gateway/Chart.yaml).tgz
-          test -f "${ARCHIVE}"
-          test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "name" {print $2; exit}')" = "$(awk '$1 == "name:" {print $2}' helm/s3-encryption-gateway/Chart.yaml)"
-          test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "version" {print $2; exit}')" = "$(awk '$1 == "version:" {print $2}' helm/s3-encryption-gateway/Chart.yaml)"
-          helm show chart "${ARCHIVE}"
+          output_dir="${RUNNER_TEMP}/helm-test"
+          mkdir -p "${output_dir}"
+
+          helm package helm/s3-encryption-gateway \
+            --destination "${output_dir}"
+
+          archive="$(find "${output_dir}" -maxdepth 1 -type f \
+            -name 's3-encryption-gateway-*.tgz' -print -quit)"
+          test -n "${archive}"
+          test -f "${archive}"
+
+          expected_name="$(awk '$1 == "name:" {print $2; exit}' \
+            helm/s3-encryption-gateway/Chart.yaml)"
+          expected_version="$(awk '$1 == "version:" {print $2; exit}' \
+            helm/s3-encryption-gateway/Chart.yaml)"
+          actual_name="$(helm show chart "${archive}" | \
+            awk -F': ' '$1 == "name" {print $2; exit}')"
+          actual_version="$(helm show chart "${archive}" | \
+            awk -F': ' '$1 == "version" {print $2; exit}')"
+
+          test "${actual_name}" = "${expected_name}"
+          test "${actual_version}" = "${expected_version}"
+          helm show chart "${archive}"
 
   artifact-hub-check:
     name: Artifact Hub metadata check

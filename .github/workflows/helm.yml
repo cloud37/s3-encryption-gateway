@@ -119,7 +119,7 @@ jobs:
           CHART_VERSION: ${{ steps.version_check.outputs.chart_version }}
         run: |
           set -euo pipefail
-          OCI_DIR=/tmp/opencode/helm-oci
+          OCI_DIR="${RUNNER_TEMP}/helm-oci"
           CHART_NAME=s3-encryption-gateway
           mkdir -p "${OCI_DIR}"
           helm package helm/s3-encryption-gateway --destination "${OCI_DIR}"
@@ -316,13 +316,15 @@ jobs:
         run: |
           set -euo pipefail
           OCI_REF=oci://ghcr.io/cloud37/s3-encryption-gateway
-          rm -f /tmp/opencode/s3-encryption-gateway-*.tgz
-          helm pull "${OCI_REF}@${CHART_DIGEST}" --destination /tmp/opencode
-          OCI_ARCHIVE=$(find /tmp/opencode -maxdepth 1 -name 's3-encryption-gateway-*.tgz' -print -quit)
+          OCI_DIR="${RUNNER_TEMP}/helm-oci-verify"
+          mkdir -p "${OCI_DIR}"
+          helm pull "${OCI_REF}@${CHART_DIGEST}" --destination "${OCI_DIR}"
+          OCI_ARCHIVE=$(find "${OCI_DIR}" -maxdepth 1 -name 's3-encryption-gateway-*.tgz' -print -quit)
           test -f "${OCI_ARCHIVE}"
-          helm show chart "${OCI_ARCHIVE}" > /tmp/opencode/oci-chart-metadata.yaml
-          test "$(awk -F': ' '$1 == "name" {print $2; exit}' /tmp/opencode/oci-chart-metadata.yaml)" = s3-encryption-gateway
-          test "$(awk -F': ' '$1 == "version" {print $2; exit}' /tmp/opencode/oci-chart-metadata.yaml)" = "${CHART_VERSION}"
+          metadata="${OCI_DIR}/oci-chart-metadata.yaml"
+          helm show chart "${OCI_ARCHIVE}" > "${metadata}"
+          test "$(awk -F': ' '$1 == "name" {print $2; exit}' "${metadata}")" = s3-encryption-gateway
+          test "$(awk -F': ' '$1 == "version" {print $2; exit}' "${metadata}")" = "${CHART_VERSION}"
           {
             echo '### Signed OCI Helm chart'
             echo
