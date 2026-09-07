@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Security
+
+- **Encrypted chunk manifest bounds (V1.0-SEC-45):** Reject out-of-range
+  chunk sizes before range arithmetic, allocation, source reads, or
+  authentication, preventing malformed metadata from causing attacker-sized
+  resource use.
+
 - Add backend TLS custom-CA trust configuration and an explicitly unsafe
   `insecure_skip_verify` diagnostic option for HTTPS backends.
 
