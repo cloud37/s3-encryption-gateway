@@ -146,7 +146,7 @@ config:
 | `config.backend.accessKey` | Backend access key (use valueFrom) | `""` |
 | `config.backend.secretKey` | Backend secret key (use valueFrom) | `""` |
 | `config.backend.provider` | Provider hint string (optional) | `""` |
-| `config.backend.useSSL` | Use SSL for backend connection | `"true"` |
+| `config.backend.useSSL` | Selects HTTPS for scheme-less backend endpoints; explicit `http://` or `https://` endpoint schemes take precedence | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
 Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it for unrestricted access or use `[]` for deny-all. `permissions` is `ro` or `rw`, while `bucketPermissions` explicitly grants `create` and `delete`.
 

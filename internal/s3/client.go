@@ -329,7 +329,7 @@ func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (C
 
 	// Set custom endpoint if provided (for any S3-compatible provider)
 	if f.baseConfig.Endpoint != "" {
-		endpoint := normalizeEndpoint(f.baseConfig.Endpoint)
+		endpoint := normalizeEndpoint(f.baseConfig.Endpoint, f.baseConfig.UseSSL)
 
 		// Validate endpoint URL
 		if err := validateEndpoint(endpoint); err != nil {
@@ -404,12 +404,16 @@ func NewBackendClient(cfg *config.BackendConfig, opts ...ClientFactoryOption) (C
 }
 
 // normalizeEndpoint normalizes the endpoint URL.
-func normalizeEndpoint(endpoint string) string {
+func normalizeEndpoint(endpoint string, useSSL bool) string {
 	endpoint = strings.TrimSpace(endpoint)
 
-	// Add https:// if no scheme provided
+	// Add the configured scheme if no scheme provided; explicit schemes win.
 	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
-		endpoint = "https://" + endpoint
+		scheme := "https://"
+		if !useSSL {
+			scheme = "http://"
+		}
+		endpoint = scheme + endpoint
 	}
 
 	// Remove trailing slash

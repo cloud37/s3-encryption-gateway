@@ -80,6 +80,8 @@ backend:
   access_key: ""  # Set via BACKEND_ACCESS_KEY env var
   secret_key: ""   # Set via BACKEND_SECRET_KEY env var
   provider: ""  # Optional: provider name for reference (any S3-compatible API endpoint works)
+  # Selects the scheme only when endpoint omits one; explicit http:// or
+  # https:// endpoints always take precedence.
   use_ssl: true
   # backend.type selects the storage transport implementation.
   # Supported values: "s3" (default), "gcs", "azure".

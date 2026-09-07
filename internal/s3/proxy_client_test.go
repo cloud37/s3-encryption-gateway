@@ -98,17 +98,30 @@ func TestNewProxyClient_TLSConfig(t *testing.T) {
 
 // TestNewProxyClient_NoScheme verifies that a URL without a scheme is
 // auto-prefixed with https://.
-func TestNewProxyClient_NoScheme(t *testing.T) {
-	cfg := &config.BackendConfig{Endpoint: "s3.example.com"}
-	pc, err := NewProxyClient(cfg)
-	if err != nil {
-		t.Fatalf("NewProxyClient() error: %v", err)
+func TestNewProxyClient_NoSchemeHonorsUseSSL(t *testing.T) {
+	for _, tc := range []struct {
+		useSSL bool
+		scheme string
+	}{{true, "https"}, {false, "http"}} {
+		pc, err := NewProxyClient(&config.BackendConfig{Endpoint: "s3.example.com", UseSSL: tc.useSSL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pc.backendURL.Scheme != tc.scheme {
+			t.Errorf("UseSSL=%v: scheme=%q, want %q", tc.useSSL, pc.backendURL.Scheme, tc.scheme)
+		}
 	}
-	if pc == nil {
-		t.Fatal("NewProxyClient() returned nil client without error")
-	}
-	if pc.backendURL.Scheme != "https" {
-		t.Errorf("expected scheme=https, got %q", pc.backendURL.Scheme)
+}
+
+func TestNewProxyClient_ExplicitSchemeTakesPrecedence(t *testing.T) {
+	for _, endpoint := range []string{"http://s3.example.com", "https://s3.example.com"} {
+		pc, err := NewProxyClient(&config.BackendConfig{Endpoint: endpoint, UseSSL: false})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pc.backendURL.String() != endpoint {
+			t.Errorf("got %q, want %q", pc.backendURL, endpoint)
+		}
 	}
 }
 
@@ -496,7 +509,7 @@ func TestNormalizeEndpoint_Table(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := normalizeEndpoint(tc.input)
+		got := normalizeEndpoint(tc.input, true)
 		if got != tc.want {
 			t.Errorf("normalizeEndpoint(%q) = %q, want %q", tc.input, got, tc.want)
 		}

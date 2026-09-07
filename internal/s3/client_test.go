@@ -24,7 +24,7 @@ import (
 
 // mockClient is a mock implementation for testing.
 type mockClient struct {
-	objects map[string][]byte
+	objects  map[string][]byte
 	metadata map[string]map[string]string
 }
 
@@ -95,7 +95,7 @@ func TestMockClient_PutGet(t *testing.T) {
 	data := []byte("test data")
 	metadata := map[string]string{"content-type": "text/plain"}
 
-    _, err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), metadata, nil, "", nil, "", "", "", "", "")
+	_, err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), metadata, nil, "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject failed: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestMockClient_DeleteObject(t *testing.T) {
 	key := "test-key"
 	data := []byte("test data")
 
-    _, err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", "")
+	_, err := mock.PutObject(ctx, bucket, key, bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("PutObject failed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestClientFactory_GetClientWithCredentials(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client, err := factory.GetClientWithCredentials(tt.accessKey, tt.secretKey)
-			
+
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetClientWithCredentials() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -733,9 +733,9 @@ func TestS3Client_DeleteObjects_Success(t *testing.T) {
 // TestConvertMetadata verifies that convertMetadata strips the x-amz-meta- prefix.
 func TestConvertMetadata(t *testing.T) {
 	input := map[string]string{
-		"x-amz-meta-encrypted":  "true",
-		"x-amz-meta-algorithm":  "AES256-GCM",
-		"Content-Type":          "application/octet-stream",
+		"x-amz-meta-encrypted": "true",
+		"x-amz-meta-algorithm": "AES256-GCM",
+		"Content-Type":         "application/octet-stream",
 	}
 	got := convertMetadata(input)
 	if got["encrypted"] != "true" {
@@ -1102,7 +1102,6 @@ func TestS3Client_PutObject_WithContentLength(t *testing.T) {
 	}
 }
 
-
 // TestS3Client_PutObject_WithACL verifies that the ACL header is sent to the
 // backend as a PUT request header. The SDK encodes the canned ACL in the
 // request; we verify the backend receives it.
@@ -1190,7 +1189,7 @@ func TestS3Client_ListObjects_WithMarker(t *testing.T) {
 	client := buildTestS3Client(t, transport)
 
 	_, err := client.ListObjects(context.Background(), "test-bucket", "prefix/", ListOptions{
-		MaxKeys:            10,
+		MaxKeys:           10,
 		ContinuationToken: "token123",
 		Delimiter:         "/",
 	})
@@ -1379,23 +1378,42 @@ func TestS3Client_ValidateEndpoint_EdgeCases(t *testing.T) {
 	}
 }
 
-
-func TestNormalizeEndpoint(t *testing.T) {
+func TestNormalizeEndpoint_UseSSLAndExplicitSchemePrecedence(t *testing.T) {
 	tests := []struct {
 		input    string
+		useSSL   bool
 		expected string
 	}{
-		{"https://s3.amazonaws.com", "https://s3.amazonaws.com"},
-		{"http://localhost:9000", "http://localhost:9000"},
-		{"storage.googleapis.com", "https://storage.googleapis.com"},
-		{"s3.amazonaws.com/", "https://s3.amazonaws.com"},
-		{"  https://example.com  ", "https://example.com"},
+		{"https://s3.amazonaws.com", false, "https://s3.amazonaws.com"},
+		{"http://localhost:9000", true, "http://localhost:9000"},
+		{"storage.googleapis.com", true, "https://storage.googleapis.com"},
+		{"rustfs:9000", false, "http://rustfs:9000"},
+		{"s3.amazonaws.com/", false, "http://s3.amazonaws.com"},
+		{"  https://example.com  ", false, "https://example.com"},
 		// Empty string produces "https:/" due to scheme injection + TrimSuffix; not a realistic input.
 	}
 	for _, tt := range tests {
-		got := normalizeEndpoint(tt.input)
+		got := normalizeEndpoint(tt.input, tt.useSSL)
 		if got != tt.expected {
 			t.Errorf("normalizeEndpoint(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestNewClientFactory_SchemeLessEndpointHonorsUseSSL(t *testing.T) {
+	for _, useSSL := range []bool{true, false} {
+		cfg := &config.BackendConfig{Endpoint: "rustfs:9000", UseSSL: useSSL, AccessKey: "key", SecretKey: "secret"}
+		client, err := NewClientFactory(cfg).GetClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved := client.(*s3Client).client.Options().BaseEndpoint
+		want := "http://rustfs:9000"
+		if useSSL {
+			want = "https://rustfs:9000"
+		}
+		if resolved == nil || *resolved != want {
+			t.Fatalf("UseSSL=%v: endpoint=%v, want %q", useSSL, resolved, want)
 		}
 	}
 }
@@ -1409,11 +1427,11 @@ func TestNewBackendClient_GCS_NormalisesEndpoint(t *testing.T) {
 
 	// Test 1: Dispatch to GCS with explicit endpoint succeeds.
 	cfg := &config.BackendConfig{
-		Type:       config.BackendTypeGCS,
-		Endpoint:   server.URL,
-		AccessKey:  "test-access-key",
-		SecretKey:  "test-secret-key",
-		Region:     "us-east-1",
+		Type:      config.BackendTypeGCS,
+		Endpoint:  server.URL,
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Region:    "us-east-1",
 	}
 	client, err := NewBackendClient(cfg)
 	if err != nil {
@@ -1429,12 +1447,12 @@ func TestNewBackendClient_GCS_NormalisesEndpoint(t *testing.T) {
 
 	// Test 2: Dispatch to GCS with empty endpoint uses default.
 	cfg2 := &config.BackendConfig{
-		Type:       config.BackendTypeGCS,
-		Endpoint:   "", // empty — should default to https://storage.googleapis.com
-		AccessKey:  "test-access-key",
-		SecretKey:  "test-secret-key",
-		Region:     "us-east-1",
-		UseSSL:     true,
+		Type:      config.BackendTypeGCS,
+		Endpoint:  "", // empty — should default to https://storage.googleapis.com
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Region:    "us-east-1",
+		UseSSL:    true,
 	}
 	// The client will be constructed pointing at the default GCS endpoint,
 	// so we just verify no error during construction.
@@ -1447,11 +1465,11 @@ func TestNewBackendClient_GCS_NormalisesEndpoint(t *testing.T) {
 
 	// Test 3: Empty type defaults to S3.
 	cfg3 := &config.BackendConfig{
-		Type:       "",
-		Endpoint:   server.URL,
-		AccessKey:  "test-access-key",
-		SecretKey:  "test-secret-key",
-		Region:     "us-east-1",
+		Type:      "",
+		Endpoint:  server.URL,
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Region:    "us-east-1",
 	}
 	client3, err := NewBackendClient(cfg3)
 	if err != nil {
@@ -1463,11 +1481,11 @@ func TestNewBackendClient_GCS_NormalisesEndpoint(t *testing.T) {
 
 	// Test 4: Explicit S3 type works.
 	cfg4 := &config.BackendConfig{
-		Type:       config.BackendTypeS3,
-		Endpoint:   server.URL,
-		AccessKey:  "test-access-key",
-		SecretKey:  "test-secret-key",
-		Region:     "us-east-1",
+		Type:      config.BackendTypeS3,
+		Endpoint:  server.URL,
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Region:    "us-east-1",
 	}
 	client4, err := NewBackendClient(cfg4)
 	if err != nil {
@@ -1485,11 +1503,11 @@ func TestNewBackendClient_Azure_Dispatch(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.BackendConfig{
-		Type:       config.BackendTypeAzure,
-		Endpoint:   server.URL,
-		AccessKey:  "test-access-key",
-		SecretKey:  "test-secret-key",
-		Region:     "us-east-1",
+		Type:      config.BackendTypeAzure,
+		Endpoint:  server.URL,
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Region:    "us-east-1",
 	}
 	client, err := NewBackendClient(cfg)
 	if err != nil {

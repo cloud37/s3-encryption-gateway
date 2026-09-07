@@ -1195,6 +1195,13 @@ func loadFromEnv(config *Config) error {
 	if v := os.Getenv("BACKEND_PROVIDER"); v != "" {
 		config.Backend.Provider = v
 	}
+	if v, ok := os.LookupEnv("BACKEND_USE_SSL"); ok {
+		useSSL, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid BACKEND_USE_SSL %q: %w", v, err)
+		}
+		config.Backend.UseSSL = useSSL
+	}
 	if v := os.Getenv("BACKEND_USE_PATH_STYLE"); v != "" {
 		config.Backend.UsePathStyle = v == "true" || v == "1"
 	}

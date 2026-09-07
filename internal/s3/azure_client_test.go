@@ -165,7 +165,6 @@ func TestAzureClient_HeadObject_BlobNotFound_MapsToNoSuchKey(t *testing.T) {
 	}
 }
 
-
 func TestAzureClient_PutObject_NilMetadata_Succeeds(t *testing.T) {
 	var capturedMeta map[string]string
 	mock := &azureMockClient{
@@ -232,7 +231,6 @@ func TestAzureClient_HeadObject_NonAzureError_PassesThrough(t *testing.T) {
 		t.Errorf("expected non-NoSuchKey error, got NoSuchKey: %v", err)
 	}
 }
-
 
 func TestAzureClient_DelegatedMethods_PassThrough(t *testing.T) {
 	// Verify that delegation methods pass through to the inner client.
@@ -339,7 +337,7 @@ func TestNormalizeEndpoint_Realistic(t *testing.T) {
 		{"s3.amazonaws.com/", "https://s3.amazonaws.com"},
 	}
 	for _, tt := range tests {
-		got := normalizeEndpoint(tt.input)
+		got := normalizeEndpoint(tt.input, true)
 		if got != tt.expected {
 			t.Errorf("normalizeEndpoint(%q) = %q, want %q", tt.input, got, tt.expected)
 		}

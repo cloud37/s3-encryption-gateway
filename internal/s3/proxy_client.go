@@ -30,18 +30,13 @@ func NewProxyClient(cfg *config.BackendConfig) (*ProxyClient, error) {
 		return nil, fmt.Errorf("backend endpoint is required")
 	}
 
+	endpoint = normalizeEndpoint(endpoint, cfg.UseSSL)
 	backendURL, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid backend endpoint: %w", err)
 	}
-
-	// Normalize endpoint
-	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
-		endpoint = "https://" + endpoint
-		backendURL, err = url.Parse(endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse normalized endpoint: %w", err)
-		}
+	if err := validateEndpoint(endpoint); err != nil {
+		return nil, fmt.Errorf("invalid backend endpoint: %w", err)
 	}
 
 	return &ProxyClient{

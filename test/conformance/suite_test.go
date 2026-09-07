@@ -47,6 +47,7 @@ func TestConformance(t *testing.T) {
 				fn   func(*testing.T, provider.Instance)
 			}{
 				// Core object operations — run on every provider.
+				{"BackendConnection_SchemeLessHTTP", 0, testBackendSchemeLessHTTPRoundTrip},
 				{"PutGet", 0, testPutGet},
 				{"PutGet_LargeObject", 0, testPutGet_Large},
 				{"HeadObject", 0, testHeadObject},

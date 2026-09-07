@@ -125,6 +125,57 @@ func TestLoadConfig_AllowLegacySignatureV2_InvalidEnvRejected(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_BackendUseSSLEnvOverride(t *testing.T) {
+	cases := []struct {
+		name, env, yaml string
+		want            bool
+	}{
+		{"unset default", "", "", true}, {"false default", "false", "", false},
+		{"false yaml true", "false", "  use_ssl: true\n", false},
+		{"true yaml false", "true", "  use_ssl: false\n", true}, {"parse bool", "1", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env == "" {
+				os.Unsetenv("BACKEND_USE_SSL")
+			} else {
+				t.Setenv("BACKEND_USE_SSL", tc.env)
+			}
+			cfg := loadBackendUseSSLConfig(t, tc.yaml)
+			if cfg.Backend.UseSSL != tc.want {
+				t.Fatalf("UseSSL = %v, want %v", cfg.Backend.UseSSL, tc.want)
+			}
+		})
+	}
+}
+
+func loadBackendUseSSLConfig(t *testing.T, backendExtra string) *Config {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "backend:\n  access_key: test\n  secret_key: secret\n" + backendExtra + "encryption:\n  password: password\nauth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestLoadConfig_BackendUseSSLInvalid_ReturnsError(t *testing.T) {
+	for _, value := range []string{"", "maybe"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("BACKEND_USE_SSL", value)
+			_, err := loadMinimalConfigForSigV2TestErr(t, "")
+			if err == nil || !strings.Contains(err.Error(), "invalid BACKEND_USE_SSL") {
+				t.Fatalf("expected variable-specific error, got %v", err)
+			}
+		})
+	}
+}
+
 func loadMinimalConfigForSigV2Test(t *testing.T, extra string) *Config {
 	cfg, err := loadMinimalConfigForSigV2TestErr(t, extra)
 	if err != nil {

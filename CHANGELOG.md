@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Helm charts are now published as signed, digest-addressable OCI artifacts to
   GHCR, while the existing GitHub Pages chart repository remains supported.
+
+### Fixed
+
+- **Backend SSL configuration (issue #284):** `BACKEND_USE_SSL` now strictly
+  overrides YAML configuration and controls the scheme for scheme-less backend
+  endpoints in both SDK and proxy clients; explicit endpoint schemes remain
+  authoritative.
+
 ## [0.12.0-rc2] — 2026-09-01
 
 ### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
