@@ -7,12 +7,16 @@ on:
       - master
     paths:
       - 'helm/**'
+      - '.github/workflows/helm.yml'
+      - '.github/workflows/helm-test.yml'
   pull_request:
     branches:
       - main
       - master
     paths:
       - 'helm/**'
+      - '.github/workflows/helm.yml'
+      - '.github/workflows/helm-test.yml'
 
 permissions:
   contents: read
@@ -24,6 +28,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Validate GitHub Actions workflows
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/repo" \
+            -w /repo \
+            rhysd/actionlint:1.7.7 .github/workflows/helm.yml
+
+      - name: Run Helm workflow structural regression test
+        run: go test ./internal/ci -run '^TestHelmWorkflow_OCIPublishIsReleaseOnly$' -count=1
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -270,9 +284,14 @@ jobs:
 
       - name: Package chart
         run: |
-          cd helm
-          helm package s3-encryption-gateway
-          ls -la *.tgz
+          set -euo pipefail
+          mkdir -p /tmp/opencode/helm-test
+          helm package helm/s3-encryption-gateway --destination /tmp/opencode/helm-test
+          ARCHIVE=/tmp/opencode/helm-test/s3-encryption-gateway-$(awk '$1 == "version:" {print $2}' helm/s3-encryption-gateway/Chart.yaml).tgz
+          test -f "${ARCHIVE}"
+          test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "name" {print $2; exit}')" = "$(awk '$1 == "name:" {print $2}' helm/s3-encryption-gateway/Chart.yaml)"
+          test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "version" {print $2; exit}')" = "$(awk '$1 == "version:" {print $2}' helm/s3-encryption-gateway/Chart.yaml)"
+          helm show chart "${ARCHIVE}"
 
   artifact-hub-check:
     name: Artifact Hub metadata check

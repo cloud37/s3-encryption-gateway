@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- Helm charts are now published as signed, digest-addressable OCI artifacts to
+  GHCR, while the existing GitHub Pages chart repository remains supported.
 ## [0.12.0-rc2] — 2026-09-01
 
 ### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️

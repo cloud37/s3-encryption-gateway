@@ -56,6 +56,7 @@ jobs:
     permissions:
       contents: write
       pages: write
+      packages: write
       id-token: write
     steps:
       - name: Checkout
@@ -104,6 +105,39 @@ jobs:
             CHANGELOG.md \
             "${{ steps.version_check.outputs.chart_version }}" \
             > /tmp/release-notes.md
+
+      - name: Log in to GHCR for Helm
+        if: steps.version_check.outputs.already_released == 'false'
+        run: |
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+
+      - name: Package and publish OCI chart
+        id: oci_chart
+        if: steps.version_check.outputs.already_released == 'false'
+        env:
+          CHART_VERSION: ${{ steps.version_check.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          OCI_DIR=/tmp/opencode/helm-oci
+          CHART_NAME=s3-encryption-gateway
+          mkdir -p "${OCI_DIR}"
+          helm package helm/s3-encryption-gateway --destination "${OCI_DIR}"
+          ARCHIVE="${OCI_DIR}/${CHART_NAME}-${CHART_VERSION}.tgz"
+          test -f "${ARCHIVE}"
+          test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "name" {print $2; exit}')" = "${CHART_NAME}"
+          test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "version" {print $2; exit}')" = "${CHART_VERSION}"
+          PUSH_OUTPUT=$(mktemp)
+          helm push "${ARCHIVE}" oci://ghcr.io/cloud37 2>&1 | tee "${PUSH_OUTPUT}"
+          DIGEST=$(grep -Eo 'sha256:[0-9a-fA-F]{64}' "${PUSH_OUTPUT}" | tail -n1 || true)
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "ERROR: helm push did not return a valid manifest digest" >&2
+            exit 1
+          fi
+          CHART_REF="ghcr.io/cloud37/${CHART_NAME}@${DIGEST}"
+          echo "chart_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "chart_ref=${CHART_REF}" >> "$GITHUB_OUTPUT"
+          echo "Published ${CHART_REF}"
 
       - name: Run chart-releaser
         if: steps.version_check.outputs.already_released == 'false'
@@ -260,6 +294,41 @@ jobs:
       - name: Install cosign
         if: steps.version_check.outputs.already_released == 'false'
         uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign and verify OCI chart with cosign
+        if: steps.version_check.outputs.already_released == 'false'
+        env:
+          CHART_REF: ${{ steps.oci_chart.outputs.chart_ref }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${CHART_REF}"
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main|master)$' \
+            "${CHART_REF}"
+
+      - name: Verify OCI chart metadata and summarize digest
+        if: steps.version_check.outputs.already_released == 'false'
+        env:
+          CHART_VERSION: ${{ steps.version_check.outputs.chart_version }}
+          CHART_DIGEST: ${{ steps.oci_chart.outputs.chart_digest }}
+          CHART_REF: ${{ steps.oci_chart.outputs.chart_ref }}
+        run: |
+          set -euo pipefail
+          OCI_REF=oci://ghcr.io/cloud37/s3-encryption-gateway
+          rm -f /tmp/opencode/s3-encryption-gateway-*.tgz
+          helm pull "${OCI_REF}@${CHART_DIGEST}" --destination /tmp/opencode
+          OCI_ARCHIVE=$(find /tmp/opencode -maxdepth 1 -name 's3-encryption-gateway-*.tgz' -print -quit)
+          test -f "${OCI_ARCHIVE}"
+          helm show chart "${OCI_ARCHIVE}" > /tmp/opencode/oci-chart-metadata.yaml
+          test "$(awk -F': ' '$1 == "name" {print $2; exit}' /tmp/opencode/oci-chart-metadata.yaml)" = s3-encryption-gateway
+          test "$(awk -F': ' '$1 == "version" {print $2; exit}' /tmp/opencode/oci-chart-metadata.yaml)" = "${CHART_VERSION}"
+          {
+            echo '### Signed OCI Helm chart'
+            echo
+            echo "- Digest-qualified reference: \`${CHART_REF}\`"
+            echo "- Chart version: \`${CHART_VERSION}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sign and attest image with cosign (keyless OIDC)
         if: steps.version_check.outputs.already_released == 'false'

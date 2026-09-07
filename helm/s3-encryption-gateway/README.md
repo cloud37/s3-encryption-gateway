@@ -25,6 +25,35 @@ This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 
 ## Installation
 
+### OCI registry (GHCR)
+
+Signed OCI releases are published at `ghcr.io/cloud37/s3-encryption-gateway`.
+Install a specific chart version with:
+
+```bash
+helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway \
+  --version 0.12.0-rc2
+```
+
+For strongest artifact pinning, install by the immutable manifest digest:
+
+```bash
+helm install my-gateway \
+  oci://ghcr.io/cloud37/s3-encryption-gateway@sha256:<manifest-digest>
+```
+
+Verify the digest-qualified chart with the GitHub Actions keyless identity
+before installation (replace `<manifest-digest>` with the release digest):
+
+```bash
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main|master)$' \
+  ghcr.io/cloud37/s3-encryption-gateway@sha256:<manifest-digest>
+```
+
+### Classic GitHub Pages repository
+
 ### Add the Helm repository
 
 ```bash
