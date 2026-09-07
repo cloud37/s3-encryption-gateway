@@ -172,7 +172,7 @@ func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 		ContainerRequest: tc.ContainerRequest{
 			Image: "minio/minio:RELEASE.2024-11-07T00-52-20Z", ExposedPorts: []string{"9000/tcp"},
 			Cmd:        []string{"server", "/data"},
-			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}),
+			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}), // #nosec G402 -- test-only health probe for the generated self-signed fixture
 			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/root/.minio/certs/public.crt", FileMode: 0600}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/root/.minio/certs/private.key", FileMode: 0600}},
 			Env: map[string]string{
 				"MINIO_ROOT_USER":     "minioadmin",
