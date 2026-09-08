@@ -1,5 +1,16 @@
 # ADR 0009: Encrypted Multipart Uploads with Per-Upload DEK and Finalization Manifest
 
+## Routing-state safety update (V1.0-SEC-46)
+
+Valkey stores a routing record for every new MPU, including plaintext opt-out
+uploads. The record snapshots the creation-time policy, so policy reloads
+cannot change an in-flight upload's mode. All MPU operations consult this
+record; missing state fails closed with `NoSuchUpload`, while transient store
+errors return `ServiceUnavailable` before backend/source access. Legacy
+untracked plaintext migration requires temporary
+`MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true`, followed by draining or aborting
+legacy uploads and disabling the option.
+
 ## Status
 Proposed
 

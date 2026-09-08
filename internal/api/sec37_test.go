@@ -726,6 +726,12 @@ func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsInvalidTrailerBeforeUploadPart
 	clientCounter := &sec37CountingMPUClient{mpuMockS3Client: client}
 	handler.s3Client = clientCounter
 	handler.mpuStateStore = stateStore
+	// This test exercises source preflight, so model a tracked encrypted
+	// destination rather than an untracked legacy upload.
+	state := &mpu.UploadState{UploadID: "encrypted-upload", Bucket: "sec37-mpu-bucket", Key: "destination", PolicySnapshot: mpu.PolicySnapshot{EncryptMultipartUploads: true}, WrappedDEK: "{}", IVPrefixHex: "000000000000000000000000", BindingID: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 16))}
+	if err := stateStore.Create(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPut, "/sec37-mpu-bucket/destination?partNumber=1&uploadId=encrypted-upload", nil)
 	req.Header.Set("x-amz-copy-source", "/sec37-mpu-bucket/copy-source")
 	w := httptest.NewRecorder()
@@ -757,6 +763,10 @@ func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsUnknownManifestVersion(t *test
 	unknownSEC37Manifest(t, client.metadata["sec37-unknown-mpu-bucket/copy-source"])
 	clientCounter := &sec37CountingMPUClient{mpuMockS3Client: client}
 	handler.s3Client = clientCounter
+	state := &mpu.UploadState{UploadID: "encrypted-upload", Bucket: "sec37-unknown-mpu-bucket", Key: "destination", PolicySnapshot: mpu.PolicySnapshot{EncryptMultipartUploads: true}, WrappedDEK: "{}", IVPrefixHex: "000000000000000000000000", BindingID: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 16))}
+	if err := handler.mpuStateStore.Create(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	req := httptest.NewRequest(http.MethodPut, "/sec37-unknown-mpu-bucket/destination?partNumber=1&uploadId=encrypted-upload", nil)

@@ -34,6 +34,24 @@ func TestMPU_PartClaim_LegacyStateRequiresAbort(t *testing.T) {
 	requireStatus(t, aw, http.StatusNoContent)
 }
 
+func TestCompleteMultipartUpload_MissingTrackedStateReturnsNoSuchUploadWithoutBackendCall(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "missing-complete-*")
+	c := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = c
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	id, _ := sec38CreateUpload(t, h, "missing-complete-bucket", "obj")
+	part := sec38UploadPart(t, r, "missing-complete-bucket", "obj", id, 1, []byte("part"))
+	etag := part.Header().Get("ETag")
+	require.NoError(t, h.mpuStateStore.Delete(context.Background(), id))
+	w := httptest.NewRecorder()
+	body := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, etag)
+	r.ServeHTTP(w, httptest.NewRequest("POST", "/missing-complete-bucket/obj?uploadId="+id, strings.NewReader(body)))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "NoSuchUpload")
+	require.Equal(t, 0, c.completeCalls)
+}
+
 func TestMPU_Complete_LegacyEncryptedStateRejected(t *testing.T) {
 	h, _, mr := newMPUTestHandler(t, "legacy-complete-*")
 	r := mux.NewRouter()

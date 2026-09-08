@@ -1385,11 +1385,8 @@ func TestMPU_Issue8_ReadyzReflectsValkeyHealth(t *testing.T) {
 	}
 }
 
-// TestMPU_Issue5_NotFound_IsPlaintext verifies the benign case: when Get
-// returns ErrUploadNotFound (i.e. the upload was never registered in Valkey —
-// a plaintext MPU), the handler takes the plaintext branch, NOT a 5xx.
-func TestMPU_Issue5_NotFound_IsPlaintext(t *testing.T) {
-	handler, _, _ := newMPUTestHandler(t, "nf5-*")
+func TestUploadPart_MissingTrackedStateReturnsNoSuchUploadWithoutBackendCall(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "nf5-*")
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
@@ -1406,12 +1403,62 @@ func TestMPU_Issue5_NotFound_IsPlaintext(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// Expect 200 — Get returns ErrUploadNotFound, the handler falls through to
-	// the plaintext MPU path. The backend mock accepts the part without
-	// complaint because no real backend uploadID validation happens in the mock.
-	if w.Code != http.StatusOK {
-		t.Errorf("UploadPart with ErrUploadNotFound should fall through to plaintext path (200); got %d body=%s",
-			w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected NoSuchUpload, got %d body=%s", w.Code, w.Body.String())
+	}
+	if len(mockClient.parts) != 0 {
+		t.Fatalf("backend received UploadPart despite missing state: %d calls", len(mockClient.parts))
+	}
+}
+
+func TestAbortMultipartUpload_UnregisteredUploadReturnsNoSuchUploadWithoutBackendCall(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "abort-missing-*")
+	client := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = client
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("DELETE", "/abort-missing-bucket/obj?uploadId=never-registered", nil))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "NoSuchUpload")
+	require.Equal(t, 0, client.abortCalls)
+}
+
+func TestAbortMultipartUpload_PlaintextTrackedStateDeletedAfterSuccess(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "abort-plain-route-*")
+	client := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = client
+	store := &lifecycleFailureStore{StateStore: h.mpuStateStore}
+	h.mpuStateStore = store
+	state := &mpu.UploadState{UploadID: "plain-abort", Bucket: "abort-plain-route-bucket", Key: "obj", PolicySnapshot: mpu.PolicySnapshot{EncryptMultipartUploads: false}}
+	require.NoError(t, store.Create(context.Background(), state))
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("DELETE", "/abort-plain-route-bucket/obj?uploadId=plain-abort", nil))
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Equal(t, 1, client.abortCalls)
+	require.Equal(t, 1, store.deleteCalls)
+
+	state.UploadID = "plain-abort-failed"
+	require.NoError(t, store.Create(context.Background(), state))
+	client.abortErr = errors.New("abort failed")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("DELETE", "/abort-plain-route-bucket/obj?uploadId=plain-abort-failed", nil))
+	require.NotEqual(t, http.StatusNoContent, w.Code)
+	require.Equal(t, 1, store.deleteCalls)
+}
+
+func TestMPURoutingRecord_PolicyFlipPreservesCreationMode(t *testing.T) {
+	h, _, _ := newMPUTestHandler(t, "policy-flip-*")
+	for _, encrypted := range []bool{false, true} {
+		id := fmt.Sprintf("policy-flip-%t", encrypted)
+		state := &mpu.UploadState{UploadID: id, Bucket: "b", Key: "k", BindingID: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 16)), PolicySnapshot: mpu.PolicySnapshot{EncryptMultipartUploads: encrypted}}
+		require.NoError(t, h.mpuStateStore.Create(context.Background(), state))
+		got, err := h.uploadState(context.Background(), id)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(t, encrypted, got.PolicySnapshot.EncryptMultipartUploads)
 	}
 }
 
@@ -1515,13 +1562,11 @@ func TestHandleUploadPart_AWSChunkedPlaintext(t *testing.T) {
 	req.Header.Set("x-amz-decoded-content-length", strconv.Itoa(len(plaintext)))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected NoSuchUpload, got %d: %s", w.Code, w.Body.String())
 	}
-
-	partKey := "chunked-plain-bucket|test-key|unregistered|1"
-	if got := string(mockClient.parts[partKey]); got != string(plaintext) {
-		t.Fatalf("stored plaintext = %q, want %q", got, plaintext)
+	if len(mockClient.parts) != 0 {
+		t.Fatalf("backend received missing-state chunked part")
 	}
 }
 

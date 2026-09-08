@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
 )
@@ -97,10 +98,12 @@ func TestSEC38_CopyHandler_ValidationAndPreflightErrors(t *testing.T) {
 	})
 	t.Run("source too large", func(t *testing.T) {
 		h, base, _ := newMPUTestHandler(t, "branch-*")
+		id, _ := sec38CreateUpload(t, h, "b", "k")
 		base.metadata["src/key"] = map[string]string{"Content-Length": fmt.Sprint(maxCopySourceSizeBytes + 1)}
 		base.objects["src/key"] = []byte("source")
 		w := httptest.NewRecorder()
-		r := sec38Request(http.MethodPut, "/b/k?partNumber=1&uploadId=u", nil)
+		r := sec38Request(http.MethodPut, "/b/k?partNumber=1&uploadId="+id, nil)
+		r = mux.SetURLVars(r, map[string]string{"bucket": "b", "key": "k", "uploadId": id, "partNumber": "1"})
 		r.Header.Set("x-amz-copy-source", "src/key")
 		h.handleUploadPartCopy(w, r)
 		require.Equal(t, http.StatusBadRequest, w.Code)
@@ -109,7 +112,7 @@ func TestSEC38_CopyHandler_ValidationAndPreflightErrors(t *testing.T) {
 		h, _, _ := newMPUTestHandler(t, "branch-*")
 		w := httptest.NewRecorder()
 		h.handleUploadPartCopy(w, sec38Request(http.MethodPut, "/b/k?partNumber=1&uploadId=u", nil))
-		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Equal(t, http.StatusNotFound, w.Code)
 	})
 	t.Run("state unavailable", func(t *testing.T) {
 		h, base, _ := newMPUTestHandler(t, "branch-*")
@@ -124,11 +127,41 @@ func TestSEC38_CopyHandler_ValidationAndPreflightErrors(t *testing.T) {
 	})
 }
 
-func TestSEC38_UploadStateEncrypted_InfrastructureBranches(t *testing.T) {
-	h, _, _ := newMPUTestHandler(t, "branch-*")
-	h.mpuStateStore = nil
-	state, encrypted, err := h.uploadStateEncrypted(context.Background(), "u")
-	require.NoError(t, err)
-	require.Nil(t, state)
-	require.False(t, encrypted)
+func TestSEC46_UploadStateAndMissingStateResponses(t *testing.T) {
+	t.Run("no store", func(t *testing.T) {
+		h, _, _ := newMPUTestHandler(t, "state-branches-*")
+		h.mpuStateStore = nil
+		state, err := h.uploadState(context.Background(), "u")
+		require.NoError(t, err)
+		require.Nil(t, state)
+	})
+	t.Run("not found and compatibility", func(t *testing.T) {
+		h, _, _ := newMPUTestHandler(t, "state-branches-*")
+		h.mpuStateStore = &failOnGetStateStore{StateStore: h.mpuStateStore, getErr: mpu.ErrUploadNotFound}
+		_, err := h.uploadState(context.Background(), "u")
+		require.ErrorIs(t, err, mpu.ErrUploadNotFound)
+		h.SetAllowUntrackedPlaintextUploads(true)
+		state, err := h.uploadState(context.Background(), "u")
+		require.NoError(t, err)
+		require.Nil(t, state)
+	})
+	t.Run("transient error", func(t *testing.T) {
+		h, _, _ := newMPUTestHandler(t, "state-branches-*")
+		want := errors.New("store unavailable")
+		h.mpuStateStore = &failOnGetStateStore{StateStore: h.mpuStateStore, getErr: want}
+		_, err := h.uploadState(context.Background(), "u")
+		require.ErrorIs(t, err, want)
+	})
+	t.Run("write response branches", func(t *testing.T) {
+		h, _, _ := newMPUTestHandler(t, "state-branches-*")
+		r := httptest.NewRequest(http.MethodPut, "/b/k", nil)
+		w := httptest.NewRecorder()
+		require.False(t, h.writeMissingMPUState(w, r, nil))
+		w = httptest.NewRecorder()
+		require.True(t, h.writeMissingMPUState(w, r, mpu.ErrUploadNotFound))
+		require.Equal(t, http.StatusNotFound, w.Code)
+		w = httptest.NewRecorder()
+		require.True(t, h.writeMissingMPUState(w, r, errors.New("down")))
+		require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	})
 }

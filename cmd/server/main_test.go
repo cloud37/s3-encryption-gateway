@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -460,6 +461,40 @@ func TestConfigReloader_CredentialAdditionBecomesActive(t *testing.T) {
 		return err == nil && cred.SecretKey == "secret2" &&
 			cred.AllowsBucket("tenant-a") && cred.AllowsBucket("shared-x") && !cred.AllowsBucket("other")
 	})
+}
+
+func TestConfigChangeApplier_ReloadsMPULegacyRoutingGate(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeMPUReloadConfig := func(enabled bool) {
+		value := "false"
+		if enabled {
+			value = "true"
+		}
+		require.NoError(t, os.WriteFile(configPath, []byte("log_level: info\nbackend:\n  access_key: backend\n  secret_key: secret\nencryption:\n  password: password\nauth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\nmultipart_state:\n  allow_untracked_plaintext_uploads: "+value+"\n"), 0o644))
+	}
+	writeMPUReloadConfig(false)
+	oldCfg, err := config.LoadConfig(configPath)
+	require.NoError(t, err)
+	gate := &reloadMPURoutingGate{}
+	applier := NewConfigChangeApplier(logrus.New(), nil, nil, nil, nil, oldCfg, nil, nil)
+	applier.SetMPURoutingGate(gate)
+	reloader, err := config.NewConfigReloader(configPath, oldCfg, logrus.New())
+	require.NoError(t, err)
+	reloader.SetOnReloadCallback(applier.ApplyConfigChanges)
+	go reloader.Start()
+	t.Cleanup(reloader.Stop)
+	time.Sleep(100 * time.Millisecond)
+
+	writeMPUReloadConfig(true)
+	waitForCondition(t, 5*time.Second, "legacy MPU routing gate enabling", func() bool { return gate.enabled.Load() })
+	writeMPUReloadConfig(false)
+	waitForCondition(t, 5*time.Second, "legacy MPU routing gate disabling", func() bool { return !gate.enabled.Load() })
+}
+
+type reloadMPURoutingGate struct{ enabled atomic.Bool }
+
+func (g *reloadMPURoutingGate) SetAllowUntrackedPlaintextUploads(enabled bool) {
+	g.enabled.Store(enabled)
 }
 
 func TestConfigReloader_CredentialRemovalBecomesInactive(t *testing.T) {

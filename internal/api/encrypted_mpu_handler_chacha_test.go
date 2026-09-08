@@ -17,6 +17,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
 )
 
 // TestMPU_InitAlgorithm_ThreadsPreferredAlgorithm verifies that
@@ -99,6 +100,18 @@ encrypt_multipart_uploads: true
 	if state.Algorithm != crypto.AlgorithmChaCha20Poly1305 {
 		t.Errorf("UploadState.Algorithm = %q, want %q", state.Algorithm, crypto.AlgorithmChaCha20Poly1305)
 	}
+}
+
+func TestMPU_InitEncryptionState_RejectsInvalidPrerequisites(t *testing.T) {
+	h, _, _ := newMPUTestHandler(t, "init-coverage-*")
+	err := h.initMPUEncryptionState(context.Background(), "u", "b", "k", [16]byte{})
+	require.ErrorContains(t, err, "zero MPU binding ID")
+
+	h.keyManager = nil
+	var binding [16]byte
+	binding[0] = 1
+	err = h.initMPUEncryptionState(context.Background(), "u", "b", "k", binding)
+	require.ErrorContains(t, err, "require a KeyManager")
 }
 
 // TestMPU_ChaCha20Poly1305_EndToEnd verifies a full upload → complete → GET

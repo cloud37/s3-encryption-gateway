@@ -387,6 +387,25 @@ func TestUploadPartCopy_EncryptedMPU_IdenticalRetry(t *testing.T) {
 	require.Equal(t, calls, client.uploads)
 }
 
+func TestUploadPartCopy_MissingTrackedStateReturnsNoSuchUploadBeforeSourceRead(t *testing.T) {
+	h, base, _ := newMPUTestHandler(t, "missing-copy-*")
+	c := &sec38CountingClient{mpuMockS3Client: base}
+	h.s3Client = c
+	base.objects["src/object"] = []byte("source")
+	base.metadata["src/object"] = map[string]string{}
+	r := mux.NewRouter()
+	h.RegisterRoutes(r)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/missing-copy-bucket/dest?partNumber=1&uploadId=missing", nil)
+	req.Header.Set("x-amz-copy-source", "src/object")
+	r.ServeHTTP(w, req)
+	require.Equal(t, 404, w.Code)
+	require.Contains(t, w.Body.String(), "NoSuchUpload")
+	require.Equal(t, 0, c.sourceHeadCalls)
+	require.Equal(t, 0, c.sourceGetCalls)
+	require.Equal(t, 0, c.uploadPartCalls)
+}
+
 func TestUploadPartCopy_EncryptedMPU_ChangedSourceRejected(t *testing.T) {
 	h, base, uploadID := setupStrategyMPU(t)
 	base.objects["src/plain"], base.metadata["src/plain"] = []byte("first source"), map[string]string{}

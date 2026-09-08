@@ -110,7 +110,8 @@ type SelectedPart struct {
 	ETag       string `json:"etag"`
 }
 
-// UploadState holds the encryption state for an in-flight multipart upload.
+// UploadState holds the routing state for an in-flight multipart upload. Plaintext
+// uploads have a durable routing record too, but must not contain crypto fields.
 type UploadState struct {
 	UploadID  string `json:"upload_id"`
 	Bucket    string `json:"bucket"`
@@ -160,6 +161,18 @@ func (s *UploadState) BindingIDBytes() ([16]byte, bool, error) {
 // PolicySnapshot captures the policy fields that affect multipart encryption.
 type PolicySnapshot struct {
 	EncryptMultipartUploads bool `json:"encrypt_mpu"`
+}
+
+// ValidateEncryptedCryptoMaterial prevents a plaintext routing record from
+// entering an encrypted MPU crypto path.
+func (s *UploadState) ValidateEncryptedCryptoMaterial() error {
+	if s == nil || !s.PolicySnapshot.EncryptMultipartUploads {
+		return fmt.Errorf("mpu: plaintext routing record cannot be used for crypto operations")
+	}
+	if s.WrappedDEK == "" || s.IVPrefixHex == "" {
+		return fmt.Errorf("mpu: encrypted state is missing crypto material")
+	}
+	return nil
 }
 
 // StateStore is the persistence interface for in-flight multipart upload state.
@@ -702,8 +715,10 @@ func (s *ValkeyStateStore) Create(ctx context.Context, state *UploadState) error
 	if state == nil {
 		return fmt.Errorf("mpu: nil upload state")
 	}
-	if _, _, err := state.BindingIDBytes(); err != nil {
-		return err
+	if state.PolicySnapshot.EncryptMultipartUploads {
+		if _, _, err := state.BindingIDBytes(); err != nil {
+			return err
+		}
 	}
 	// Creation is a schema boundary. Do not allow callers to smuggle lifecycle
 	// controls into authenticated metadata that the Lua create script replaces.
@@ -1174,8 +1189,10 @@ func (s *ValkeyStateStore) Get(ctx context.Context, uploadID string) (*UploadSta
 	if err := json.Unmarshal(metaBytes, &state); err != nil {
 		return nil, fmt.Errorf("mpu: unmarshal state: %w", err)
 	}
-	if _, _, err := state.BindingIDBytes(); err != nil {
-		return nil, err
+	if state.PolicySnapshot.EncryptMultipartUploads {
+		if _, _, err := state.BindingIDBytes(); err != nil {
+			return nil, err
+		}
 	}
 	// Legacy state remains readable so handlers can return the abort-only
 	// OperationAborted contract. For authenticated non-legacy metadata, every

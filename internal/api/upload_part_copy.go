@@ -149,6 +149,19 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	destinationState, destinationStateErr := h.uploadState(ctx, uploadID)
+	if destinationStateErr != nil {
+		if h.writeMissingMPUState(w, r, destinationStateErr) {
+			return
+		}
+	}
+	destinationEncrypted := destinationState != nil && destinationState.PolicySnapshot.EncryptMultipartUploads
+	if destinationEncrypted {
+		if identityErr := validateMPURouteIdentity(destinationState, bucket, key); identityErr != nil {
+			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+			return
+		}
+	}
 
 	// Parse x-amz-copy-source header.
 	copySource := r.Header.Get("x-amz-copy-source")
@@ -276,20 +289,6 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		h.metrics.RecordUploadPartCopy(sourceClass.Class.String(), "error", 0, time.Since(start))
 		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
-	}
-
-	// Encrypted MPU routing is based on durable upload state, not live policy.
-	// This check must precede policy-drift handling below.
-	destinationState, destinationEncrypted, destinationStateErr := h.uploadStateEncrypted(ctx, uploadID)
-	if destinationStateErr != nil {
-		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
-		return
-	}
-	if destinationEncrypted {
-		if identityErr := validateMPURouteIdentity(destinationState, bucket, key); identityErr != nil {
-			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
-			return
-		}
 	}
 
 	// Destination-policy / source-mode mismatch hard-refusal:

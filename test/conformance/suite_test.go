@@ -173,6 +173,8 @@ func TestConformance(t *testing.T) {
 				{"SEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag},
 				{"SEC38_EncryptedMPU_ChangedPartReplacementRejected", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_ChangedPartReplacementRejected},
 				{"SEC38_EncryptedMPU_CompleteSelectedSubset", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_CompleteSelectedSubset},
+				{"SEC46_PlaintextAndEncryptedMPUModePersistence", provider.CapMultipartUpload, testSEC46_PlaintextAndEncryptedMPUModePersistence},
+				{"SEC46_StateLossRejectsPartAndComplete", provider.CapMultipartUpload, testSEC46_StateLossRejectsPartAndComplete},
 				{"SEC38_NonfatalMPUNegativeHelpers", provider.CapMultipartUpload, testSEC38_NonfatalMPUNegativeHelpers},
 				{"SEC38_EncryptedMPU_UploadPartCopyReplacementRejected", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyReplacementRejected},
 				{"SEC38_EncryptedMPU_UploadPartCopyIdenticalRetry", provider.CapEncryptedMPU | provider.CapMultipartCopy, testSEC38_EncryptedMPU_UploadPartCopyIdenticalRetry},
@@ -320,6 +322,7 @@ func TestConformance(t *testing.T) {
 				{"Authorization_BucketLifecycleGrants", 0, testAuthorization_BucketLifecycleGrants},
 				{"Authorization_OperationPermissionMatrix", 0, testAuthorization_OperationPermissionMatrix},
 				{"Authorization_UnknownOperationsFailClosed", 0, testAuthorization_UnknownOperationsFailClosed},
+				{"SEC47_BucketConfigurationAuthorization", provider.CapBucketPolicy | provider.CapBucketLifecycle, testSEC47_BucketConfigurationAuthorization},
 
 				// Issue #232: Valkey health gauge transitions for single and HA gateways.
 				{"MPU_ValkeyHealth_SingleAndHA", provider.CapEncryptedMPU, testMPUValkeyHealthSingleAndHA},

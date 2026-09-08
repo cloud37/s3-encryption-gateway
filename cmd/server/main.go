@@ -55,10 +55,15 @@ type ConfigChangeApplier struct {
 	policyManager   *config.PolicyManager
 	credentialStore api.CredentialStore
 	managementGate  interface{ SetAllowBucketCreation(bool) }
+	mpuRoutingGate  interface{ SetAllowUntrackedPlaintextUploads(bool) }
 }
 
 func (a *ConfigChangeApplier) SetManagementGate(g interface{ SetAllowBucketCreation(bool) }) {
 	a.managementGate = g
+}
+
+func (a *ConfigChangeApplier) SetMPURoutingGate(g interface{ SetAllowUntrackedPlaintextUploads(bool) }) {
+	a.mpuRoutingGate = g
 }
 
 // NewConfigChangeApplier creates a new applier for configuration changes
@@ -94,6 +99,10 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 	if a.managementGate != nil && oldConfig.AllowBucketCreation != newConfig.AllowBucketCreation {
 		a.managementGate.SetAllowBucketCreation(newConfig.AllowBucketCreation)
 		changes = append(changes, fmt.Sprintf("allow_bucket_creation: %v -> %v", oldConfig.AllowBucketCreation, newConfig.AllowBucketCreation))
+	}
+	if a.mpuRoutingGate != nil && oldConfig.MultipartState.AllowUntrackedPlaintextUploads != newConfig.MultipartState.AllowUntrackedPlaintextUploads {
+		a.mpuRoutingGate.SetAllowUntrackedPlaintextUploads(newConfig.MultipartState.AllowUntrackedPlaintextUploads)
+		changes = append(changes, fmt.Sprintf("multipart_state.allow_untracked_plaintext_uploads: %v -> %v", oldConfig.MultipartState.AllowUntrackedPlaintextUploads, newConfig.MultipartState.AllowUntrackedPlaintextUploads))
 	}
 	if a.credentialStore != nil {
 		credentials := newConfig.ResolvedCredentials()
@@ -866,6 +875,7 @@ func main() {
 
 		configApplier = NewConfigChangeApplier(logger, tracerProvider, rateLimiterPtr, objectCache, auditLogger, cfg, policyManager, credStore)
 		configApplier.SetManagementGate(handler)
+		configApplier.SetMPURoutingGate(handler)
 
 		// Create and start config reloader
 		var err error

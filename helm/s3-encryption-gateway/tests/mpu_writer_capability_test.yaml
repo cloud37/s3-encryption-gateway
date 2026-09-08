@@ -48,3 +48,18 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: VALKEY_MPU_STATE_V2_WRITER
+  - it: omits legacy untracked plaintext compatibility by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS
+  - it: renders legacy untracked plaintext compatibility explicitly
+    set:
+      config.multipartState.allowUntrackedPlaintextUploads.value: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS
+            value: "true"

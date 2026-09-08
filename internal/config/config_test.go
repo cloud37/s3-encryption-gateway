@@ -22,6 +22,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAllowUntrackedPlaintextUploads_DefaultFalse(t *testing.T) {
+	cfg := &Config{}
+	assert.False(t, cfg.MultipartState.AllowUntrackedPlaintextUploads)
+}
+
+func TestAllowUntrackedPlaintextUploads_EnvAndWarning(t *testing.T) {
+	t.Setenv("MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS", "true")
+	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
+	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
+	t.Setenv("ENCRYPTION_PASSWORD", "test-password")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("auth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\n"), 0600))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.MultipartState.AllowUntrackedPlaintextUploads)
+
+	var warnings bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&warnings, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	require.NoError(t, cfg.Validate())
+	assert.Contains(t, warnings.String(), "allow_untracked_plaintext_uploads")
+}
+
 func TestLoadConfig_BackendTLSEnvOverrides(t *testing.T) {
 	ca := filepath.Join(t.TempDir(), "ca.pem")
 	writeTestCA(t, ca)
@@ -860,6 +884,24 @@ func TestConfig_Validate_CredentialBucketPermissions(t *testing.T) {
 	}
 	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", BucketPermissions: []BucketPermission{BucketPermissionCreate, BucketPermissionDelete}}}, true); err != nil {
 		t.Fatalf("valid bucket permissions rejected: %v", err)
+	}
+}
+
+func TestConfig_Validate_CredentialManagePermission(t *testing.T) {
+	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", BucketPermissions: []BucketPermission{BucketPermissionManage}}}, true); err != nil {
+		t.Fatalf("manage permission rejected: %v", err)
+	}
+}
+
+func TestLoadFromEnv_CredentialManagePermission(t *testing.T) {
+	t.Setenv("GW_CRED_0_ACCESS_KEY", "manage-ak")
+	t.Setenv("GW_CRED_0_SECRET_KEY", "manage-sk")
+	t.Setenv("GW_CRED_0_BUCKETS", "bucket")
+	t.Setenv("GW_CRED_0_BUCKET_PERMISSIONS", "manage")
+	cfg := &Config{}
+	loadFromEnv(cfg)
+	if len(cfg.Auth.Credentials) != 1 || len(cfg.Auth.Credentials[0].BucketPermissions) != 1 || cfg.Auth.Credentials[0].BucketPermissions[0] != BucketPermissionManage {
+		t.Fatalf("manage grant not preserved: %+v", cfg.Auth.Credentials)
 	}
 }
 

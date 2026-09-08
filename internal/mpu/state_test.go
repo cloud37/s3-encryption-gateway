@@ -584,6 +584,49 @@ func TestStateStore_RoundTrip(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUploadNotFound)
 }
 
+func TestStateStore_PlaintextRoutingRecordRoundTrip(t *testing.T) {
+	s, _ := newTestStore(t)
+	state := &UploadState{UploadID: "plain-route", Bucket: "b", Key: "k",
+		PolicySnapshot: PolicySnapshot{EncryptMultipartUploads: false}, CreatedAt: time.Now().UTC()}
+	require.NoError(t, s.Create(context.Background(), state))
+	got, err := s.Get(context.Background(), state.UploadID)
+	require.NoError(t, err)
+	assert.False(t, got.PolicySnapshot.EncryptMultipartUploads)
+	assert.Empty(t, got.WrappedDEK)
+	assert.Empty(t, got.BindingID)
+	assert.Empty(t, got.IVPrefixHex)
+}
+
+func TestStateStore_PlaintextRoutingRecordRejectsCryptoOperations(t *testing.T) {
+	state := &UploadState{PolicySnapshot: PolicySnapshot{EncryptMultipartUploads: false}}
+	_, present, err := state.BindingIDBytes()
+	require.NoError(t, err)
+	assert.False(t, present)
+	assert.Empty(t, state.WrappedDEK)
+	assert.Empty(t, state.BindingID)
+	require.Error(t, state.ValidateEncryptedCryptoMaterial())
+}
+
+func TestUploadState_ValidateEncryptedCryptoMaterialBranches(t *testing.T) {
+	cases := []struct {
+		name    string
+		state   *UploadState
+		wantErr string
+	}{
+		{"nil", nil, "plaintext routing record"},
+		{"plaintext", &UploadState{}, "plaintext routing record"},
+		{"missing material", &UploadState{PolicySnapshot: PolicySnapshot{EncryptMultipartUploads: true}}, "missing crypto material"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.state.ValidateEncryptedCryptoMaterial()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+	require.NoError(t, (&UploadState{PolicySnapshot: PolicySnapshot{EncryptMultipartUploads: true}, WrappedDEK: "dek", IVPrefixHex: "iv"}).ValidateEncryptedCryptoMaterial())
+}
+
 // TestStateStore_TTLRefresh verifies that ReservePart refreshes the expiry.
 func TestStateStore_TTLRefresh(t *testing.T) {
 	s, mr := newTestStore(t)

@@ -70,6 +70,56 @@ func testSEC38_EncryptedMPU_CompleteSelectedSubset(t *testing.T, inst provider.I
 	}
 }
 
+// testSEC46_PlaintextAndEncryptedMPUModePersistence verifies that creation-time
+// routing survives independently configured policy modes.
+func testSEC46_PlaintextAndEncryptedMPUModePersistence(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	plainVK := provider.StartValkey(ctx, t)
+	plainGW := harness.StartGateway(t, inst, harness.WithValkeyAddr(plainVK.Addr))
+	plainKey := uniqueKey(t)
+	plainID := initiateMultipartUpload(t, plainGW, inst.Bucket, plainKey)
+	plainData := []byte("plaintext tracked MPU")
+	plainETag := uploadPart(t, plainGW, inst.Bucket, plainKey, plainID, 1, plainData)
+	completeMultipartUpload(t, plainGW, inst.Bucket, plainKey, plainID, []mpuPart{{1, plainETag}})
+	if got := get(t, plainGW, inst.Bucket, plainKey); !bytes.Equal(got, plainData) {
+		t.Fatalf("plaintext MPU round-trip mismatch")
+	}
+
+	encVK := provider.StartValkey(ctx, t)
+	encGW := harness.StartGateway(t, inst, harness.WithValkeyAddr(encVK.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	encKey := uniqueKey(t)
+	encID := initiateMultipartUpload(t, encGW, inst.Bucket, encKey)
+	encData := []byte("encrypted tracked MPU")
+	encETag := uploadPart(t, encGW, inst.Bucket, encKey, encID, 1, encData)
+	completeMultipartUpload(t, encGW, inst.Bucket, encKey, encID, []mpuPart{{1, encETag}})
+	if got := get(t, encGW, inst.Bucket, encKey); !bytes.Equal(got, encData) {
+		t.Fatalf("encrypted MPU round-trip mismatch")
+	}
+}
+
+// testSEC46_StateLossRejectsPartAndComplete proves state loss cannot downgrade
+// either operation to the backend-native plaintext path.
+func testSEC46_StateLossRejectsPartAndComplete(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	vk := provider.StartValkey(ctx, t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(vk.Addr), harness.WithEncryptedMPUForBucket(inst.Bucket))
+	key := uniqueKey(t)
+	id := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	if err := vk.Stop(ctx); err != nil {
+		t.Fatalf("stop state store: %v", err)
+	}
+	status, body := uploadPartStatus(t, gw, inst.Bucket, key, id, 1, []byte("must reject"))
+	if status != http.StatusNotFound && status != http.StatusServiceUnavailable {
+		t.Fatalf("state-loss part: status=%d body=%s", status, body)
+	}
+	completeStatus := completeMultipartUploadStatus(t, gw, inst.Bucket, key, id, []mpuPart{{1, "\"d41d8cd98f00b204e9800998ecf8427e\""}})
+	if completeStatus != http.StatusNotFound && completeStatus != http.StatusServiceUnavailable {
+		t.Fatalf("state-loss complete: status=%d", completeStatus)
+	}
+}
+
 // testEncryptedMPURoundTrip verifies that the encrypted multipart upload path
 // (ADR-0009 / V0.6-SEC-3) produces a correctly decryptable object.
 //
