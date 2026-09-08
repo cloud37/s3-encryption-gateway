@@ -1,5 +1,10 @@
 # S3 API Implementation Strategy
 
+Bucket configuration PUT/DELETE subresources require scoped
+`bucket_permissions: [manage]`; object `rw` and bucket `create`/`delete` grants
+remain independent. Raw configuration payloads are limited to 1 MiB before
+backend forwarding, while Object Lock retains its dedicated 100 KiB parser.
+
 ## Overview
 
 The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 API while transparently encrypting and decrypting object data. This document outlines the implementation strategy for S3 API compatibility.

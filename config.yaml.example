@@ -44,7 +44,7 @@ auth:
       # Omit buckets for unrestricted access; [] intentionally denies all.
       buckets: ["my-application", "shared-*"]
       permissions: "rw"          # "ro" permits reads only; defaults to "rw"
-      bucket_permissions: []      # explicit "create" and/or "delete" only
+      bucket_permissions: []      # explicit independent "create", "delete", and/or "manage" grants
 
   # To add multiple clients with separate credentials:
   #   - access_key: "service-account-key"

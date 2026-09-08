@@ -6,6 +6,23 @@ release:
 values:
   - ../values.yaml
 tests:
+- it: renders manage bucket permission exactly
+  set:
+    auth:
+      credentials:
+        - accessKey: manage-ak
+          secretKey: manage-sk
+          bucketPermissions: [manage]
+  asserts:
+    - equal:
+        path: spec.template.spec.containers[0].env[0].name
+        value: GW_CRED_0_ACCESS_KEY
+    - contains:
+        path: spec.template.spec.containers[0].env
+        content:
+          name: GW_CRED_0_BUCKET_PERMISSIONS
+          value: manage
+
   - it: should default ALLOW_BUCKET_CREATION to false
     asserts:
       - contains:

@@ -380,7 +380,7 @@ test-fuzz:
 test-comprehensive:
 	@echo "Running comprehensive test suite..."
 	@echo "1. Running tier-1 unit tests..."
-	@go test -count=1 -race -short ./...
+	@$(MAKE) test
 	@echo "2. Running conformance tests (local providers via Testcontainers)..."
 	@$(MAKE) test-conformance-local
 	@echo "3. Checking test isolation (Docker-only model)..."

@@ -10,7 +10,7 @@ Gateway credentials authenticate callers but backend credentials are shared. Bac
 
 ## Decision
 
-Each gateway credential may declare exact bucket names or non-empty trailing-prefix patterns such as `tenant-*`. Omitted `buckets` remains unrestricted for compatibility; an explicit empty list denies every bucket. Object permissions are `ro` or `rw`, defaulting to `rw`. Bucket creation and deletion require explicit `create` and `delete` grants and are not implied by `rw`.
+Each gateway credential may declare exact bucket names or non-empty trailing-prefix patterns such as `tenant-*`. Omitted `buckets` remains unrestricted for compatibility; an explicit empty list denies every bucket. Object permissions are `ro` or `rw`, defaulting to `rw`. Bucket creation and deletion require explicit `create` and `delete` grants and are not implied by `rw`; bucket configuration PUT/DELETE operations independently require the scoped `manage` grant.
 
 Authorization runs immediately after signature authentication and before backend-capable middleware or handlers. `PROXIED_BUCKET` intersects with, and never widens, a credential's policy. Copy operations require source-read and destination-write scope. ListBuckets filters the backend response and returns an empty inventory for a deny-all credential.
 
