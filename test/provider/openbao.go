@@ -21,9 +21,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// renovate: datasource=docker depName=quay.io/openbao/openbao versioning=docker
+const openBaoImage = "quay.io/openbao/openbao:2.5.5"
+
 const (
-	// openBaoImage is the official OpenBao container image.
-	openBaoImage = "quay.io/openbao/openbao:2.5.5"
 
 	// openBaoPort is the HTTP port the dev server listens on.
 	openBaoPort = "8200/tcp"

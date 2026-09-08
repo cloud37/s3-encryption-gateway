@@ -26,7 +26,7 @@ func TestSelfContained_AES_MinIO_EndToEnd(t *testing.T) {
 
 	// Start MinIO container
 	req := testcontainers.ContainerRequest{
-		Image:        "quay.io/minio/minio:latest",
+		Image:        minioImage,
 		ExposedPorts: []string{"9000/tcp"},
 		Env: map[string]string{
 			"MINIO_ROOT_USER":     "minioadmin",

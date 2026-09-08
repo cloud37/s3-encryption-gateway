@@ -36,7 +36,7 @@ func TestAudit_MinIO_InspectVerifyList_EndToEnd(t *testing.T) {
 
 	// ── Start MinIO ──────────────────────────────────────────────────────────
 	req := testcontainers.ContainerRequest{
-		Image:        "quay.io/minio/minio:latest",
+		Image:        minioImage,
 		ExposedPorts: []string{"9000/tcp"},
 		Env: map[string]string{
 			"MINIO_ROOT_USER":     "minioadmin",

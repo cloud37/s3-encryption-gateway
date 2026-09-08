@@ -150,7 +150,7 @@ cat "$log"
 exit 0`
 
 	req := tc.ContainerRequest{
-		Image:      "rclone/rclone:1.68",
+		Image:      rcloneImage,
 		Entrypoint: []string{},
 		Cmd:        []string{"/bin/sh", "-c", script},
 		Env: map[string]string{

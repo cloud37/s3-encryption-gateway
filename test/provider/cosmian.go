@@ -22,9 +22,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// renovate: datasource=docker depName=ghcr.io/cosmian/kms versioning=docker
+const cosmianKMSImage = "ghcr.io/cosmian/kms:5.22.0"
+
 const (
-	// cosmianKMSImage is the official Cosmian KMS container image.
-	cosmianKMSImage = "ghcr.io/cosmian/kms:5.22.0"
 
 	// cosmianKMSPort is the default HTTP port the KMS listens on.
 	cosmianKMSPort = "9998/tcp"
@@ -211,8 +212,8 @@ func cosmianExtractUniqueIdentifier(data []byte) (string, error) {
 
 	// Shape 1: top-level object with "value" array.
 	var obj struct {
-		Tag   string            `json:"tag"`
-		Value json.RawMessage   `json:"value"`
+		Tag   string          `json:"tag"`
+		Value json.RawMessage `json:"value"`
 	}
 	if err := json.Unmarshal(data, &obj); err == nil && obj.Tag != "" {
 		// Try to parse "value" as an array of nodes.
@@ -263,4 +264,3 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
-

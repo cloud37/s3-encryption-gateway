@@ -16,6 +16,9 @@ import (
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 )
 
+// renovate: datasource=docker depName=valkey/valkey versioning=docker
+const valkeyImage = "valkey/valkey:8.0-alpine"
+
 // ValkeyInstance holds the connection details for a running Valkey container.
 type ValkeyInstance struct {
 	// Addr is host:port, e.g. "127.0.0.1:6379".
@@ -44,7 +47,7 @@ func StartValkey(ctx context.Context, t *testing.T) ValkeyInstance {
 	}
 
 	// Re-use the Redis module — Valkey is wire-compatible.
-	c, err := tcredis.Run(ctx, "valkey/valkey:8.0-alpine")
+	c, err := tcredis.Run(ctx, valkeyImage)
 	if err != nil {
 		t.Skipf("valkey fixture: failed to start container (Docker unavailable?): %v", err)
 		return ValkeyInstance{}

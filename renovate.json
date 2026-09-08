@@ -6,6 +6,27 @@
   "assignees": [
     "kenchrcum"
   ],
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__tests__/**",
+    "**/tests/**",
+    "**/__fixtures__/**"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^test\\/.*\\.go$/"],
+      "matchStrings": ["// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+const\\s+\\w+Image\\s*=\\s*\"[^\"]+:(?<currentValue>[^\"]+)\""]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^test\\/.*\\.go$/"],
+      "matchStrings": ["// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+const\\s+\\w+Version\\s*=\\s*\"(?<currentValue>[^\"]+)\""]
+    }
+  ],
   "packageRules": [
     {
       "description": "Enable Renovate to propose Go version bumps in go.mod",
@@ -13,6 +34,23 @@
       "matchDepNames": ["go"],
       "matchDepTypes": ["golang"],
       "rangeStrategy": "bump"
+    },
+    {
+      "description": "Keep conformance dependency updates independently reviewable",
+      "matchFileNames": ["test/**/*.go"],
+      "groupName": null,
+      "automerge": false,
+      "addLabels": ["dependencies", "conformance"]
+    },
+    {
+      "description": "Allow RustFS release candidates",
+      "matchDepNames": ["rustfs/rustfs"],
+      "ignoreUnstable": false
+    },
+    {
+      "description": "Keep frozen MinIO server baselines",
+      "matchDepNames": ["minio/minio", "quay.io/minio/minio"],
+      "enabled": false
     }
   ]
 }

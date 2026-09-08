@@ -54,6 +54,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check Docker-only deployment model
         run: bash scripts/test-isolation.sh
+      - name: Check maintained test image pins
+        run: bash scripts/check-test-image-pins.sh
 
   # ── Tier 2 — all local providers (PR / main push / nightly / release) ──────
   conformance-local:

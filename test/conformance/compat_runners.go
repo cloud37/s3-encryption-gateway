@@ -5,6 +5,27 @@ import (
 	"strings"
 )
 
+// renovate: datasource=docker depName=amazon/aws-cli versioning=docker
+const awsCLIImage = "amazon/aws-cli:2.36.40"
+
+// renovate: datasource=docker depName=python versioning=docker
+const pythonImage = "python:3.13-slim"
+
+// renovate: datasource=docker depName=peakcom/s5cmd versioning=docker
+const s5cmdImage = "peakcom/s5cmd:v2.3.0"
+
+// renovate: datasource=docker depName=rclone/rclone versioning=docker
+const rcloneImage = "rclone/rclone:1.68"
+
+// renovate: datasource=docker depName=restic/restic versioning=docker
+const resticImage = "restic/restic:0.18.1"
+
+// renovate: datasource=pypi depName=boto3 versioning=pep440
+const boto3Version = "1.35.0"
+
+// renovate: datasource=pypi depName=minio versioning=pep440
+const minioPyVersion = "7.2.0"
+
 // ─── AWS SDK Go v2 runner (in-process, no Docker) ───────────────────────────
 
 // awsGoV2Runner exercises the AWS SDK Go v2 directly in the test process.
@@ -21,10 +42,10 @@ func (r *awsGoV2Runner) AssertOutput(code int, out, err string) error { return n
 type boto3Runner struct{}
 
 func (r *boto3Runner) Name() string  { return "boto3" }
-func (r *boto3Runner) Image() string { return "python:3.13-slim" }
+func (r *boto3Runner) Image() string { return pythonImage }
 
 func (r *boto3Runner) Script(env sdkTestEnv) string {
-	return "set -e\npip install -q boto3==1.35.0\n" +
+	return "set -e\npip install -q boto3==" + boto3Version + "\n" +
 		"cat > /tmp/test_boto3.py << 'PYEOF'\n" +
 		"import os, boto3\n" +
 		"s3 = boto3.client('s3',\n" +
@@ -63,7 +84,7 @@ func (r *boto3Runner) AssertOutput(code int, out, _ string) error {
 type awscliRunner struct{}
 
 func (r *awscliRunner) Name() string  { return "awscli" }
-func (r *awscliRunner) Image() string { return "amazon/aws-cli:2.22.0" }
+func (r *awscliRunner) Image() string { return awsCLIImage }
 
 func (r *awscliRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf("set -e\n"+
@@ -74,7 +95,7 @@ func (r *awscliRunner) Script(env sdkTestEnv) string {
 		"aws s3api head-object --bucket %[1]s --key %[2]s --endpoint-url \"$GATEWAY_ENDPOINT\" > /dev/null\n"+
 		"# GetObject via s3 cp\n"+
 		"aws s3 cp s3://%[1]s/%[2]s /tmp/testfile-dl --endpoint-url \"$GATEWAY_ENDPOINT\"\n"+
-		"diff /tmp/testfile /tmp/testfile-dl || { echo 'FATAL: downloaded file differs'; exit 1; }\n"+
+		"python3 -c 'import sys; sys.exit(0 if open(\"/tmp/testfile\", \"rb\").read() == open(\"/tmp/testfile-dl\", \"rb\").read() else 1)' || { echo 'FATAL: downloaded file differs'; exit 1; }\n"+
 		"# ListObjectsV2 via s3 ls\n"+
 		"aws s3 ls s3://%[1]s/ --recursive --endpoint-url \"$GATEWAY_ENDPOINT\" | grep -q %[2]s || { echo 'FATAL: key not found in list'; exit 1; }\n"+
 		"# DeleteObject via s3 rm\n"+
@@ -88,7 +109,7 @@ func (r *awscliRunner) Script(env sdkTestEnv) string {
 type awscliCopyMetadataRunner struct{}
 
 func (r *awscliCopyMetadataRunner) Name() string  { return "awscli-copy-metadata" }
-func (r *awscliCopyMetadataRunner) Image() string { return "amazon/aws-cli:2.22.0" }
+func (r *awscliCopyMetadataRunner) Image() string { return awsCLIImage }
 
 func (r *awscliCopyMetadataRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf("set -e\n"+
@@ -130,7 +151,7 @@ func (r *awscliRunner) AssertOutput(code int, out, _ string) error {
 type s5cmdRunner struct{}
 
 func (r *s5cmdRunner) Name() string  { return "s5cmd" }
-func (r *s5cmdRunner) Image() string { return "peakcom/s5cmd:v2.3.0" }
+func (r *s5cmdRunner) Image() string { return s5cmdImage }
 
 func (r *s5cmdRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf("set -e\n"+
@@ -164,7 +185,7 @@ func (r *s5cmdRunner) AssertOutput(code int, out, _ string) error {
 type rcloneRunner struct{}
 
 func (r *rcloneRunner) Name() string  { return "rclone" }
-func (r *rcloneRunner) Image() string { return "rclone/rclone:1.68" }
+func (r *rcloneRunner) Image() string { return rcloneImage }
 
 func (r *rcloneRunner) Script(env sdkTestEnv) string {
 	// Use --s3-* flags directly with :s3: remote syntax instead of
@@ -224,7 +245,7 @@ func (r *rcloneRunner) AssertOutput(code int, out, _ string) error {
 type rcloneSyncCheckRunner struct{}
 
 func (r *rcloneSyncCheckRunner) Name() string  { return "rclone-sync-check" }
-func (r *rcloneSyncCheckRunner) Image() string { return "rclone/rclone:1.68" }
+func (r *rcloneSyncCheckRunner) Image() string { return rcloneImage }
 
 func (r *rcloneSyncCheckRunner) Script(env sdkTestEnv) string {
 	// env.Key is used as the remote prefix so parallel tests don't collide.
@@ -342,7 +363,7 @@ func (r *rcloneSyncCheckRunner) AssertOutput(code int, out, _ string) error {
 type rcloneSyncCheckFallbackRunner struct{}
 
 func (r *rcloneSyncCheckFallbackRunner) Name() string  { return "rclone-sync-check-fallback" }
-func (r *rcloneSyncCheckFallbackRunner) Image() string { return "rclone/rclone:1.68" }
+func (r *rcloneSyncCheckFallbackRunner) Image() string { return rcloneImage }
 
 func (r *rcloneSyncCheckFallbackRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf(`set -e
@@ -409,10 +430,10 @@ func (r *rcloneSyncCheckFallbackRunner) AssertOutput(code int, out, _ string) er
 type minioPyRunner struct{}
 
 func (r *minioPyRunner) Name() string  { return "minio-py" }
-func (r *minioPyRunner) Image() string { return "python:3.13-slim" }
+func (r *minioPyRunner) Image() string { return pythonImage }
 
 func (r *minioPyRunner) Script(env sdkTestEnv) string {
-	return "set -e\npip install -q minio==7.2.0\n" +
+	return "set -e\npip install -q minio==" + minioPyVersion + "\n" +
 		"cat > /tmp/test_minio.py << 'PYEOF'\n" +
 		"import os, io\n" +
 		"from minio import Minio\n" +
@@ -460,11 +481,6 @@ func (r *minioPyRunner) AssertOutput(code int, out, _ string) error {
 // Both runners exercise a real restic repository on S3 through the gateway,
 // which requires bypass_encryption for the bucket (restic encrypts at-rest
 // itself, and uses multipart uploads that the gateway would otherwise wrap).
-
-// resticImage is the official image tag used by both restic runners. Pinned at
-// build time to keep conformance reproducible; bump via Renovate outside the
-// suite.
-const resticImage = "restic/restic:0.18.1"
 
 // resticPassword is the repository-encryption password injected into the
 // container. Restic always encrypts at-rest using this password, regardless

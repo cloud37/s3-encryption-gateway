@@ -45,7 +45,7 @@ func TestAzure_PutGetList_RoundTrip(t *testing.T) {
 	} else {
 		// Start Azurite container.
 		req := tc.ContainerRequest{
-			Image:        "mcr.microsoft.com/azure-storage/azurite:latest",
+			Image:        azuriteImage,
 			ExposedPorts: []string{"10000/tcp"},
 			Env: map[string]string{
 				"AZURITE_ACCOUNTS": "devstoreaccount1:Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",

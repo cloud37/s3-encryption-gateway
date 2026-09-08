@@ -24,6 +24,9 @@ func init() {
 
 type garageProvider struct{}
 
+// renovate: datasource=docker depName=dxflrs/garage versioning=docker
+const garageImage = "dxflrs/garage:v2.4.1"
+
 func (p *garageProvider) Name() string { return "garage" }
 
 func (p *garageProvider) Capabilities() Capabilities {
@@ -82,7 +85,7 @@ func (p *garageProvider) Start(ctx context.Context, t *testing.T) Instance {
 	rpcSecret := "3fb5c4e9d0e2f8a1b7c6d5e4f3a2b1c03fb5c4e9d0e2f8a1b7c6d5e4f3a2b1c0" // #nosec G101 — test-only RPC secret for Garage container
 
 	req := tc.ContainerRequest{
-		Image:        "dxflrs/garage:v2.3.0",
+		Image:        garageImage,
 		ExposedPorts: []string{s3Port, adminPort, rpcPort},
 		Env: map[string]string{
 			"GARAGE_LOG_LEVEL": "warn",

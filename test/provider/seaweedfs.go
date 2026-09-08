@@ -7,7 +7,7 @@ package provider
 // so that credential-authenticated requests work without a running filer
 // config.
 //
-// Image: chrislusf/seaweedfs:latest (Docker Hub)
+// Image: chrislusf/seaweedfs:4.46 (Docker Hub)
 // S3 port: 8333
 //
 // Known gaps confirmed by full conformance run (2026-04-22):
@@ -48,6 +48,9 @@ func init() {
 }
 
 type seaweedfsProvider struct{}
+
+// renovate: datasource=docker depName=chrislusf/seaweedfs versioning=docker
+const seaweedfsImage = "chrislusf/seaweedfs:4.46"
 
 func (p *seaweedfsProvider) Name() string { return "seaweedfs" }
 
@@ -137,7 +140,7 @@ func (p *seaweedfsProvider) Start(ctx context.Context, t *testing.T) Instance {
 	)
 
 	req := tc.ContainerRequest{
-		Image:        "chrislusf/seaweedfs:latest",
+		Image:        seaweedfsImage,
 		ExposedPorts: []string{s3Port},
 		Entrypoint:   []string{"/bin/sh", "-c"},
 		Cmd:          []string{shellCmd},

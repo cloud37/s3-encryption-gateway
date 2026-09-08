@@ -3,7 +3,7 @@ package provider
 // RustFS provider for the conformance test suite.
 //
 // RustFS is a Rust-based S3-compatible object storage server.
-// Image: rustfs/rustfs:latest (Docker Hub, always latest)
+// Image: rustfs/rustfs:v1.0.0-rc.5 (Docker Hub)
 //
 // WARNING: RustFS is currently in active development and explicitly labelled
 // "Do NOT use in production" by its authors. We test against it to catch
@@ -38,6 +38,9 @@ func init() {
 }
 
 type rustfsProvider struct{}
+
+// renovate: datasource=docker depName=rustfs/rustfs versioning=docker
+const rustfsImage = "rustfs/rustfs:v1.0.0-rc.5"
 
 func (p *rustfsProvider) Name() string { return "rustfs" }
 
@@ -102,11 +105,11 @@ func (p *rustfsProvider) Start(ctx context.Context, t *testing.T) Instance {
 	)
 
 	req := tc.ContainerRequest{
-		Image:        "rustfs/rustfs:latest",
+		Image:        rustfsImage,
 		ExposedPorts: []string{s3Port, consolePort},
 		Env: map[string]string{
-			"RUSTFS_ACCESS_KEY": accessKey,
-			"RUSTFS_SECRET_KEY": secretKey,
+			"RUSTFS_ACCESS_KEY":                         accessKey,
+			"RUSTFS_SECRET_KEY":                         secretKey,
 			"RUSTFS_ALLOW_INSECURE_DEFAULT_CREDENTIALS": "true",
 		},
 		// Use the image's own /data directory (already owned by UID 10001

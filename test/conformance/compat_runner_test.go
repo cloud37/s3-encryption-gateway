@@ -1,8 +1,37 @@
 package conformance
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
+
+func TestAWSCLIRunners_PinCRC64NVMEVersion(t *testing.T) {
+	for _, runner := range []sdkToolRunner{&awscliRunner{}, &awscliCopyMetadataRunner{}} {
+		t.Run(runner.Name(), func(t *testing.T) {
+			if runner.Image() != awsCLIImage || !strings.HasPrefix(runner.Image(), "amazon/aws-cli:") {
+				t.Fatalf("image = %q, want shared explicit AWS CLI image %q", runner.Image(), awsCLIImage)
+			}
+			version := strings.TrimPrefix(runner.Image(), "amazon/aws-cli:")
+			var major, minor, patch int
+			if _, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch); err != nil {
+				t.Fatalf("image version %q is not semantic: %v", version, err)
+			}
+			if major < 2 || (major == 2 && (minor < 34 || (minor == 34 && patch < 32))) {
+				t.Fatalf("AWS CLI version %q is below 2.34.32", version)
+			}
+		})
+	}
+	if script := (&awscliRunner{}).Script(sdkTestEnv{}); strings.Contains(script, "--checksum-algorithm") || strings.Contains(script, "WHEN_REQUIRED") {
+		t.Fatalf("AWS CLI script overrides default checksum behavior: %s", script)
+	}
+	if script := (&awscliRunner{}).Script(sdkTestEnv{}); strings.Contains(script, "diff ") {
+		t.Fatalf("AWS CLI script relies on unavailable diff command: %s", script)
+	}
+	if script := (&awscliRunner{}).Script(sdkTestEnv{}); strings.Contains(script, "$(cat ") || !strings.Contains(script, `open("/tmp/testfile", "rb")`) || !strings.Contains(script, `open("/tmp/testfile-dl", "rb")`) {
+		t.Fatalf("AWS CLI script does not use a byte-preserving download comparison: %s", script)
+	}
+}
 
 // TestRunToolContainer_ExitNonZero_ReturnsError asserts that every
 // container-based runner's AssertOutput returns a non-nil error when the

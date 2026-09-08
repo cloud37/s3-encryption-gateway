@@ -35,6 +35,9 @@ func init() {
 
 type minioProvider struct{ tlsReady bool }
 
+// renovate: datasource=docker depName=minio/minio versioning=docker
+const minioImage = "minio/minio:RELEASE.2024-11-07T00-52-20Z"
+
 func (p *minioProvider) Name() string { return "minio" }
 
 func (p *minioProvider) Capabilities() Capabilities {
@@ -127,7 +130,7 @@ func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 	// matrix. The TLS fixture below is deliberately independent.
 	plain, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
 		ContainerRequest: tc.ContainerRequest{
-			Image: "minio/minio:RELEASE.2024-11-07T00-52-20Z", ExposedPorts: []string{"9000/tcp"},
+			Image: minioImage, ExposedPorts: []string{"9000/tcp"},
 			Cmd:        []string{"server", "/data"},
 			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp"),
 			Env:        map[string]string{"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
@@ -169,7 +172,7 @@ func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 	}
 	c, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
 		ContainerRequest: tc.ContainerRequest{
-			Image: "minio/minio:RELEASE.2024-11-07T00-52-20Z", ExposedPorts: []string{"9000/tcp"},
+			Image: minioImage, ExposedPorts: []string{"9000/tcp"},
 			Cmd:        []string{"server", "/data"},
 			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}), // #nosec G402 -- test-only health probe for the generated self-signed fixture
 			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/root/.minio/certs/public.crt", FileMode: 0600}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/root/.minio/certs/private.key", FileMode: 0600}},
