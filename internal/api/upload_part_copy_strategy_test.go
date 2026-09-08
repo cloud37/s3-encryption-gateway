@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
@@ -222,20 +223,49 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_Plaintext(t *testing.T) {
 }
 
 func setupStrategyMPU(t *testing.T) (*Handler, *mpuMockS3Client, string) {
+	h, client, uploadID, _ := setupStrategyMPUWithClock(t)
+	return h, client, uploadID
+}
+
+func setupStrategyMPUWithClock(t *testing.T) (*Handler, *mpuMockS3Client, string, interface{ SetTime(time.Time) }) {
 	t.Helper()
-	h, client, _ := newMPUTestHandler(t, "dst-bucket")
+	h, client, clock := newMPUTestHandler(t, "dst-bucket")
 	router := mux.NewRouter()
 	h.RegisterRoutes(router)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("POST", "/dst-bucket/d?uploads=", nil))
 	require.Equal(t, 200, w.Code, w.Body.String())
-	return h, client, extractUploadID(t, w.Body.String())
+	return h, client, extractUploadID(t, w.Body.String()), clock
 }
 
 type countingMPUClient struct {
 	*mpuMockS3Client
 	uploads   int
 	uploadErr error
+}
+
+func TestUploadPartCopy_AmbiguousBackendErrorIdenticalRetryAfterLeaseSucceeds(t *testing.T) {
+	h, base, uploadID, clock := setupStrategyMPUWithClock(t)
+	base.objects["src/plain"] = []byte("copy retry")
+	base.metadata["src/plain"] = map[string]string{}
+	client := &countingMPUClient{mpuMockS3Client: base, uploadErr: errors.New("ambiguous backend response")}
+	source := &CopySourceMetadata{Class: SourceClassPlaintext}
+	_, _, err := h.uploadPartCopyReencryptMPU(context.Background(), client, "dst-bucket", "d", uploadID, 1, "src", "plain", nil, nil, source, 100, 100)
+	require.Error(t, err)
+	state, err := h.mpuStateStore.Get(context.Background(), uploadID)
+	require.NoError(t, err)
+	require.Len(t, state.Parts, 1)
+	require.Equal(t, mpu.PartStatusReserved, state.Parts[0].Status)
+	client.uploadErr = nil
+	clock.SetTime(time.Now().Add(3 * time.Minute))
+	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client, "dst-bucket", "d", uploadID, 1, "src", "plain", nil, nil, source, 100, 100)
+	require.NoError(t, err)
+	state, err = h.mpuStateStore.Get(context.Background(), uploadID)
+	require.NoError(t, err)
+	require.Len(t, state.Parts, 1)
+	require.Equal(t, mpu.PartStatusCommitted, state.Parts[0].Status)
+	require.NotEmpty(t, state.Parts[0].ETag)
+	require.Equal(t, 2, client.uploads)
 }
 
 func (c *countingMPUClient) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, r io.Reader, n *int64) (string, error) {

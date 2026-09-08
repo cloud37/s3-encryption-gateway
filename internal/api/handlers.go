@@ -3895,7 +3895,7 @@ func (h *Handler) reserveEncryptedMPUPart(ctx context.Context, bucket, uploadID 
 		}
 		claimResult := "mismatch"
 		if errors.Is(err, mpu.ErrPartInProgress) {
-			claimResult = "in_progress"
+			claimResult = "lease_active"
 		}
 		if errors.Is(err, mpu.ErrInvalidStateVersion) {
 			claimResult = "legacy_rejected"
@@ -3906,6 +3906,9 @@ func (h *Handler) reserveEncryptedMPUPart(ctx context.Context, bucket, uploadID 
 	if reservation.AlreadyDone {
 		h.metrics.RecordMPUPartClaim("identical")
 		return encryptedMPUPartReservation{store: store, reservation: reservation, plainBody: plainBody, plainLen: plainBody.Len}, nil
+	}
+	if reservation.Reacquired {
+		h.metrics.RecordMPUPartClaim("lease_reacquired")
 	}
 	h.metrics.RecordMPUPartClaim("reserved")
 	if _, err := plainBody.Seek(0, io.SeekStart); err != nil {
@@ -4151,6 +4154,17 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		// second Valkey round-trip after UploadPart succeeds.
 		encMPUState = uploadState
 		encMPUPlainLen = plainLen
+		lease := 2 * time.Minute
+		if h.config != nil && h.config.MultipartState.ReservationLease > 0 {
+			lease = h.config.MultipartState.ReservationLease
+		}
+		if encMPUEncryptDuration >= lease/4 {
+			if renewErr := encMPUClaimStore.RenewPart(ctx, uploadID, encMPUClaim.PartNumber, encMPUReservation.Token); renewErr != nil {
+				(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+				return
+			}
+			h.metrics.RecordMPUPartClaim("lease_renewed")
+		}
 	} else {
 		// Plaintext multipart path (ADR 0002): buffer to make body seekable for
 		// the AWS SDK's retry behaviour.

@@ -1016,11 +1016,11 @@ func (m *Metrics) RecordMPUPartClaim(result string) {
 		return
 	}
 	switch result {
-	case "reserved", "identical", "mismatch", "in_progress", "legacy_rejected":
+	case "reserved", "identical", "mismatch", "in_progress", "legacy_rejected", "lease_active", "lease_reacquired", "lease_renewed":
+		m.mpuPartClaims.WithLabelValues(result).Inc()
 	default:
-		return
+		m.mpuPartClaims.WithLabelValues("invalid").Inc()
 	}
-	m.mpuPartClaims.WithLabelValues(result).Inc()
 }
 
 // RecordMPUStateTransition records a bounded lifecycle transition outcome.

@@ -26,6 +26,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1871,6 +1872,42 @@ func TestMPU_PartClaim_ChangedRetryReturnsOperationAbortedBeforeEncryptionOrBack
 	if !strings.Contains(w.Body.String(), "OperationAborted") || c.uploadPartCalls != calls {
 		t.Fatalf("changed retry body/calls: %s/%d", w.Body.String(), c.uploadPartCalls)
 	}
+}
+
+func TestUploadPart_AmbiguousBackendErrorIdenticalRetryAfterLeaseSucceeds(t *testing.T) {
+	h, base, mr := newMPUTestHandler(t, "sec48-ambiguous-*")
+	c := &sec38CountingClient{mpuMockS3Client: base, uploadErr: errors.New("ambiguous backend response")}
+	h.s3Client = c
+	id, r := sec38CreateUpload(t, h, "sec48-ambiguous-bucket", "obj")
+	body := []byte("identical retry")
+	first := sec38UploadPart(t, r, "sec48-ambiguous-bucket", "obj", id, 1, body)
+	require.NotEqual(t, http.StatusOK, first.Code)
+	state, err := h.mpuStateStore.Get(context.Background(), id)
+	require.NoError(t, err)
+	require.Len(t, state.Parts, 1)
+	assert.Equal(t, mpu.PartStatusReserved, state.Parts[0].Status)
+	c.uploadErr = nil
+	mr.SetTime(time.Now().Add(3 * time.Minute))
+	retry := sec38UploadPart(t, r, "sec48-ambiguous-bucket", "obj", id, 1, body)
+	require.Equal(t, http.StatusOK, retry.Code, retry.Body.String())
+	state, err = h.mpuStateStore.Get(context.Background(), id)
+	require.NoError(t, err)
+	require.Len(t, state.Parts, 1)
+	assert.Equal(t, mpu.PartStatusCommitted, state.Parts[0].Status)
+}
+
+func TestUploadPart_AmbiguousBackendErrorChangedRetryRejected(t *testing.T) {
+	h, base, mr := newMPUTestHandler(t, "sec48-changed-*")
+	c := &sec38CountingClient{mpuMockS3Client: base, uploadErr: errors.New("ambiguous backend response")}
+	h.s3Client = c
+	id, r := sec38CreateUpload(t, h, "sec48-changed-bucket", "obj")
+	require.NotEqual(t, http.StatusOK, sec38UploadPart(t, r, "sec48-changed-bucket", "obj", id, 1, []byte("original")).Code)
+	calls := c.uploadPartCalls
+	mr.SetTime(time.Now().Add(3 * time.Minute))
+	changed := sec38UploadPart(t, r, "sec48-changed-bucket", "obj", id, 1, []byte("changed"))
+	require.Equal(t, http.StatusConflict, changed.Code)
+	assert.Contains(t, changed.Body.String(), "OperationAborted")
+	assert.Equal(t, calls, c.uploadPartCalls)
 }
 
 func TestHandleAbortMultipartUpload_Success(t *testing.T) {

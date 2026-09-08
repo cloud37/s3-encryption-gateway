@@ -976,11 +976,17 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		claim = mpu.PartClaim{PartNumber: partNumber, Claim: base64.RawURLEncoding.EncodeToString(claimBytes[:]), PlainLen: int64(len(plaintextData)), Token: base64.RawURLEncoding.EncodeToString(token)}
 		reservation, err = store.ReservePart(ctx, uploadID, claim)
 		if err != nil {
+			if errors.Is(err, mpu.ErrPartInProgress) {
+				h.metrics.RecordMPUPartClaim("lease_active")
+			}
 			return nil, 0, err
 		}
 		if reservation.AlreadyDone {
 			h.metrics.RecordMPUPartClaim("identical")
 			return &s3.CopyPartResult{ETag: reservation.CommittedETag, LastModified: time.Now()}, int64(len(plaintextData)), nil
+		}
+		if reservation.Reacquired {
+			h.metrics.RecordMPUPartClaim("lease_reacquired")
 		}
 		h.metrics.RecordMPUPartClaim("reserved")
 		claimStore = store
@@ -995,6 +1001,7 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	}()
 	var encReader io.Reader
 	var encLen int64
+	encryptStart := time.Now()
 	if h.destinationEncryptionReader != nil {
 		encReader, encLen, err = h.destinationEncryptionReader(bytes.NewReader(plaintextData), int64(len(plaintextData)))
 	} else {
@@ -1016,6 +1023,16 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	}
 	if int64(len(encBytes)) != encLen {
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: encrypted length mismatch: got %d, expected %d", len(encBytes), encLen)
+	}
+	lease := 2 * time.Minute
+	if h.config != nil && h.config.MultipartState.ReservationLease > 0 {
+		lease = h.config.MultipartState.ReservationLease
+	}
+	if time.Since(encryptStart) >= lease/4 {
+		if err := claimStore.RenewPart(ctx, uploadID, partNumber, reservation.Token); err != nil {
+			return nil, 0, fmt.Errorf("%w: %v", errMPUStateUnavailable, err)
+		}
+		h.metrics.RecordMPUPartClaim("lease_renewed")
 	}
 	// Once UploadPart starts, the backend result is uncertain. Preserve the
 	// reservation so a retry cannot race a potentially committed part.

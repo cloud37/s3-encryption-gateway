@@ -504,14 +504,14 @@ func TestMetrics_MPUMethods(t *testing.T) {
 func TestMetrics_MPUClaimResults(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := newMetricsWithRegistry(reg, Config{})
-	for _, result := range []string{"reserved", "identical", "mismatch", "in_progress", "legacy_rejected"} {
+	for _, result := range []string{"reserved", "identical", "mismatch", "in_progress", "legacy_rejected", "lease_active", "lease_reacquired", "lease_renewed"} {
 		m.RecordMPUPartClaim(result)
 	}
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
 	for _, mf := range mfs {
 		if mf.GetName() == "gateway_mpu_part_claims_total" {
-			require.Len(t, mf.GetMetric(), 5)
+			require.Len(t, mf.GetMetric(), 8)
 			for _, metric := range mf.GetMetric() {
 				require.Len(t, metric.GetLabel(), 1)
 			}
@@ -531,7 +531,7 @@ func TestMetrics_MPUExactLabelsAndInvalidValues(t *testing.T) {
 
 	claims, err := testutil.GatherAndCount(reg, "gateway_mpu_part_claims_total")
 	require.NoError(t, err)
-	assert.Equal(t, 1, claims)
+	assert.Equal(t, 2, claims)
 	transitions, err := testutil.GatherAndCount(reg, "gateway_mpu_state_transitions_total")
 	require.NoError(t, err)
 	assert.Equal(t, 1, transitions)
@@ -541,9 +541,13 @@ func TestMetrics_MPUExactLabelsAndInvalidValues(t *testing.T) {
 	for _, mf := range mfs {
 		switch mf.GetName() {
 		case "gateway_mpu_part_claims_total":
-			require.Len(t, mf.GetMetric(), 1)
-			assert.Equal(t, "reserved", mf.GetMetric()[0].GetLabel()[0].GetValue())
-			assert.Equal(t, float64(1), mf.GetMetric()[0].GetCounter().GetValue())
+			require.Len(t, mf.GetMetric(), 2)
+			claimsByResult := map[string]float64{}
+			for _, metric := range mf.GetMetric() {
+				require.Len(t, metric.GetLabel(), 1)
+				claimsByResult[metric.GetLabel()[0].GetValue()] = metric.GetCounter().GetValue()
+			}
+			assert.Equal(t, map[string]float64{"reserved": 1, "invalid": 1}, claimsByResult)
 		case "gateway_mpu_state_transitions_total":
 			require.Len(t, mf.GetMetric(), 1)
 			labels := mf.GetMetric()[0].GetLabel()
