@@ -240,7 +240,7 @@ func TestSEC41R7TrailerValidationBranches(t *testing.T) {
 			t.Errorf("accepted post-parse trailer %q", body)
 		}
 	}
-	for _, name := range []string{"x-amz-checksum-sha256", "x-amz-checksum-sha1", "x-amz-checksum-crc32", "x-amz-checksum-crc32c"} {
+	for _, name := range []string{"x-amz-checksum-sha256", "x-amz-checksum-sha1", "x-amz-checksum-crc32", "x-amz-checksum-crc32c", "x-amz-checksum-crc64nvme"} {
 		if err := verifyTrailerChecksums(f, map[string]string{name: base64.StdEncoding.EncodeToString([]byte("wrong"))}); err == nil {
 			t.Errorf("accepted mismatched %s", name)
 		}

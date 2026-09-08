@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/minio/crc64nvme"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -436,6 +437,8 @@ func TestAWSChunkedVerifier_TrailerChecksums(t *testing.T) {
 	checks["x-amz-checksum-crc32"] = []byte{byte(crc >> 24), byte(crc >> 16), byte(crc >> 8), byte(crc)}
 	crc = crc32.Checksum(data, crc32.MakeTable(crc32.Castagnoli))
 	checks["x-amz-checksum-crc32c"] = []byte{byte(crc >> 24), byte(crc >> 16), byte(crc >> 8), byte(crc)}
+	crc64 := crc64nvme.Checksum(data)
+	checks["x-amz-checksum-crc64nvme"] = []byte{byte(crc64 >> 56), byte(crc64 >> 48), byte(crc64 >> 40), byte(crc64 >> 32), byte(crc64 >> 24), byte(crc64 >> 16), byte(crc64 >> 8), byte(crc64)}
 	for name, value := range checks {
 		t.Run(name, func(t *testing.T) {
 			var body strings.Builder
@@ -468,6 +471,30 @@ func TestAWSChunkedVerifier_TrailerChecksums(t *testing.T) {
 			r.Header.Set("X-Amz-Trailer", "x-amz-checksum-sha256")
 			if _, err := verifyAndSpoolAWSBody(r, nil); err == nil {
 				t.Fatal("malformed checksum accepted")
+			}
+		})
+	}
+}
+
+func TestAWSChunkedVerifier_CRC64NVMERejectsMalformedAndMismatch(t *testing.T) {
+	data := []byte("crc64 integrity")
+	cases := map[string][]byte{
+		"invalid-base64": []byte("not base64"),
+		"seven-bytes":    []byte("1234567"),
+		"nine-bytes":     []byte("123456789"),
+		"mismatch":       []byte("different")[:8],
+	}
+	for name, value := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := fmt.Sprintf("%x\r\n%s\r\n0\r\nx-amz-checksum-crc64nvme: %s\r\n\r\n", len(data), data, base64.StdEncoding.EncodeToString(value))
+			r := httptest.NewRequest(http.MethodPut, "http://example.test", strings.NewReader(body))
+			r.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+			r.Header.Set("Content-Encoding", "aws-chunked")
+			r.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(len(data)))
+			r.Header.Set("X-Amz-Trailer", "x-amz-checksum-crc64nvme")
+			_, err := verifyAndSpoolAWSBody(r, nil)
+			if !errors.Is(err, ErrSignatureMismatch) {
+				t.Fatalf("error = %v, want ErrSignatureMismatch", err)
 			}
 		})
 	}

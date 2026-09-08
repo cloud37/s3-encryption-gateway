@@ -14,6 +14,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/minio/crc64nvme"
 )
 
 const (
@@ -35,10 +37,11 @@ func verifyAWSTrailers(b *bufio.Reader, body *os.File, declaration string, signi
 	set := make(map[string]bool)
 	forbidden := map[string]bool{"content-length": true, "transfer-encoding": true, "authorization": true, "x-amz-content-sha256": true, "x-amz-trailer": true}
 	allowedChecksums := map[string]bool{
-		"x-amz-checksum-crc32":  true,
-		"x-amz-checksum-crc32c": true,
-		"x-amz-checksum-sha1":   true,
-		"x-amz-checksum-sha256": true,
+		"x-amz-checksum-crc32":     true,
+		"x-amz-checksum-crc32c":    true,
+		"x-amz-checksum-crc64nvme": true,
+		"x-amz-checksum-sha1":      true,
+		"x-amz-checksum-sha256":    true,
 	}
 	for _, name := range decl {
 		if name != strings.ToLower(name) || name == "" || set[name] || forbidden[name] || !allowedChecksums[name] || !validTrailerToken(name) {
@@ -164,6 +167,7 @@ func verifyTrailerChecksums(body *os.File, values map[string]string) error {
 	var h1 = sha1.New()
 	crc32h := crc32.NewIEEE()
 	crc32ch := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	crc64h := crc64nvme.New()
 	buf := make([]byte, 32<<10)
 	for {
 		n, readErr := streamingSpoolOps.read(body, buf)
@@ -172,6 +176,7 @@ func verifyTrailerChecksums(body *os.File, values map[string]string) error {
 			_, _ = h1.Write(buf[:n])
 			_, _ = crc32h.Write(buf[:n])
 			_, _ = crc32ch.Write(buf[:n])
+			_, _ = crc64h.Write(buf[:n])
 		}
 		if readErr == io.EOF {
 			break
@@ -209,6 +214,13 @@ func verifyTrailerChecksums(body *os.File, values map[string]string) error {
 		var checksum [4]byte
 		binary.BigEndian.PutUint32(checksum[:], got)
 		if e != nil || len(want) != len(checksum) || !hmac.Equal(want, checksum[:]) {
+			return ErrSignatureMismatch
+		}
+	}
+	if v, ok := values["x-amz-checksum-crc64nvme"]; ok {
+		want, e := base64.StdEncoding.DecodeString(v)
+		got := crc64h.Sum(nil)
+		if e != nil || len(want) != crc64nvme.Size || !hmac.Equal(want, got) {
 			return ErrSignatureMismatch
 		}
 	}
