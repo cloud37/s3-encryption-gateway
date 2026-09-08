@@ -2,8 +2,10 @@ package api
 
 import (
 	"bytes"
+	"crypto/md5" // #nosec G501 -- S3 Content-MD5 interoperability header
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -19,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/cloud37/s3-encryption-gateway/internal/util"
 )
+
+const maxBucketConfigurationBody int64 = 1 << 20
 
 // ipExtractor is the shared IP extractor instance configured with trusted proxies.
 // It is set during server initialization via SetIPExtractor.
@@ -285,6 +289,11 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, oper
 func (h *Handler) handlePassthroughWithBodyLimit(w http.ResponseWriter, r *http.Request, operation, bucket, key string, maxBody int64) {
 	start := time.Now()
 	if maxBody > 0 && r.Body != nil {
+		if r.ContentLength > maxBody {
+			(&S3Error{Code: "InvalidRequest", Message: "The request body is too large.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}).WriteXML(w)
+			h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start), 0)
+			return
+		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 		_ = r.Body.Close()
 		if err != nil || int64(len(body)) > maxBody {
@@ -301,6 +310,10 @@ func (h *Handler) handlePassthroughWithBodyLimit(w http.ResponseWriter, r *http.
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
+		if operation == "PutBucketLifecycle" && r.Header.Get("Content-MD5") == "" {
+			digest := md5.Sum(body) // #nosec G401 -- required by S3 lifecycle APIs
+			r.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(digest[:]))
+		}
 	}
 
 	resp, err := h.forwardToBackend(r)

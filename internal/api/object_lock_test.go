@@ -308,6 +308,38 @@ func TestHandlePutObjectLockConfiguration_EnabledPlusRule_Succeeds(t *testing.T)
 	}
 }
 
+func TestObjectLockConfiguration_BodyLimitAndStrictXML(t *testing.T) {
+	_, client, router := newLockTestHandler(t)
+	valid := []byte(`<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>`)
+	for _, tc := range []struct {
+		name   string
+		body   []byte
+		length int64
+		want   int
+	}{
+		{"exact boundary", append(valid, bytes.Repeat([]byte{' '}, int(maxObjectLockXMLBody)-len(valid))...), maxObjectLockXMLBody, http.StatusOK},
+		{"declared oversize", valid, maxObjectLockXMLBody + 1, http.StatusBadRequest},
+		{"streaming oversize", append(valid, bytes.Repeat([]byte{'x'}, maxObjectLockXMLBody)...), -1, http.StatusBadRequest},
+		{"trailing bytes", append(valid, []byte("trailing")...), -1, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := client.putLockConfigCalls
+			r := httptest.NewRequest(http.MethodPut, "/b?object-lock", bytes.NewReader(tc.body))
+			if tc.length >= 0 {
+				r.ContentLength = tc.length
+			}
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			if w.Code != tc.want || (tc.want == http.StatusBadRequest && !strings.Contains(w.Body.String(), "InvalidRequest") && tc.name != "trailing bytes") {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body)
+			}
+			if tc.want != http.StatusOK && client.putLockConfigCalls != before {
+				t.Fatal("backend was contacted")
+			}
+		})
+	}
+}
+
 func TestHandlePutObjectLockConfiguration_DaysAndYears_Rejected(t *testing.T) {
 	_, _, router := newLockTestHandler(t)
 	body := `<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>30</Days><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>`

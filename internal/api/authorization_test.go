@@ -99,8 +99,8 @@ func TestAuthorizationMiddleware_BucketSubresourcesAndCreateClassification(t *te
 		want           authorizationOperation
 	}{
 		{http.MethodPut, "/bucket?anything=1", authorizationUnknown},
-		{http.MethodPut, "/bucket?lifecycle", authorizationWrite},
-		{http.MethodDelete, "/bucket?policy", authorizationWrite},
+		{http.MethodPut, "/bucket?lifecycle", authorizationManageBucket},
+		{http.MethodDelete, "/bucket?policy", authorizationManageBucket},
 		{http.MethodDelete, "/bucket", authorizationDeleteBucket},
 		{http.MethodGet, "/bucket?unknown=1", authorizationUnknown},
 		{http.MethodPost, "/bucket?unknown=1", authorizationUnknown},
@@ -155,13 +155,91 @@ func TestClassifyAuthorizationOperation_FailClosedFixes(t *testing.T) {
 	}
 }
 
-func TestAuthorizationMiddleware_DeleteSubresourceRequiresWriteNotDeleteGrant(t *testing.T) {
-	credential := Credential{Policy: AuthorizationPolicy{Permissions: config.ObjectPermissionReadWrite}}
-	called := false
-	h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
-	h.ServeHTTP(httptest.NewRecorder(), authorizedRequest(http.MethodDelete, "/bucket?policy", credential))
-	if !called {
-		t.Fatal("rw credential should delete a bucket subresource")
+func TestAuthorizationMiddleware_BucketConfigurationRequiresManageGrant(t *testing.T) {
+	selectors := []string{"acl", "cors", "encryption", "intelligent-tiering&id=tier-1", "inventory&id=inv-1", "lifecycle", "logging", "notification", "object-lock", "policy", "replication", "requestPayment", "versioning", "website"}
+	deleteSelectors := map[string]bool{"cors": true, "encryption": true, "inventory&id=inv-1": true, "lifecycle": true, "policy": true, "replication": true, "website": true}
+	methods := []string{http.MethodPut, http.MethodDelete}
+	for _, method := range methods {
+		for _, selector := range selectors {
+			if method == http.MethodDelete && !deleteSelectors[selector] {
+				continue
+			}
+			tc := struct {
+				name   string
+				grant  config.BucketPermission
+				status int
+			}{method + " " + selector + " rw", "", http.StatusForbidden}
+			t.Run(tc.name, func(t *testing.T) {
+				credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadWrite}}
+				recorder := httptest.NewRecorder()
+				called := false
+				h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) }))
+				h.ServeHTTP(recorder, authorizedRequest(method, "/bucket?"+selector, credential))
+				if called || recorder.Code != http.StatusForbidden {
+					t.Fatalf("status=%d called=%v", recorder.Code, called)
+				}
+			})
+			for _, grant := range []config.BucketPermission{config.BucketPermissionManage, config.BucketPermissionCreate, config.BucketPermissionDelete} {
+				grant, want := grant, http.StatusForbidden
+				if grant == config.BucketPermissionManage {
+					want = http.StatusOK
+				}
+				t.Run(method+" "+selector+" "+string(grant), func(t *testing.T) {
+					credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadWrite, BucketPermissions: []config.BucketPermission{grant}}}
+					called := false
+					h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) }))
+					recorder := httptest.NewRecorder()
+					h.ServeHTTP(recorder, authorizedRequest(method, "/bucket?"+selector, credential))
+					if recorder.Code != want || called != (want == http.StatusOK) {
+						t.Fatalf("status=%d called=%v want=%d", recorder.Code, called, want)
+					}
+				})
+			}
+			for _, scope := range []string{"other", "bucket-*"} {
+				t.Run(method+" "+selector+" out-of-scope "+scope, func(t *testing.T) {
+					credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{scope}, Permissions: config.ObjectPermissionReadWrite, BucketPermissions: []config.BucketPermission{config.BucketPermissionManage}}}
+					recorder := httptest.NewRecorder()
+					AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("handler called") })).ServeHTTP(recorder, authorizedRequest(method, "/bucket?"+selector, credential))
+					if recorder.Code != http.StatusForbidden {
+						t.Fatalf("status=%d", recorder.Code)
+					}
+				})
+			}
+		}
+	}
+	// A proxied bucket must still be in the credential's scope.
+	credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadWrite, BucketPermissions: []config.BucketPermission{config.BucketPermissionManage}}}
+	recorder := httptest.NewRecorder()
+	AuthorizationMiddleware("other", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("handler called") })).ServeHTTP(recorder, authorizedRequest(http.MethodPut, "/bucket?policy", credential))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("proxied status=%d", recorder.Code)
+	}
+}
+
+func TestAuthorizationMiddleware_BucketGrantsAreIndependent(t *testing.T) {
+	checks := []struct {
+		grant          config.BucketPermission
+		method, target string
+		want           bool
+	}{
+		{config.BucketPermissionCreate, http.MethodPut, "/bucket", true}, {config.BucketPermissionCreate, http.MethodDelete, "/bucket", false},
+		{config.BucketPermissionCreate, http.MethodPut, "/bucket?policy", false}, {config.BucketPermissionCreate, http.MethodPut, "/bucket/key", false},
+		{config.BucketPermissionDelete, http.MethodDelete, "/bucket", true}, {config.BucketPermissionDelete, http.MethodPut, "/bucket", false},
+		{config.BucketPermissionDelete, http.MethodPut, "/bucket?policy", false}, {config.BucketPermissionDelete, http.MethodPut, "/bucket/key", false},
+		{config.BucketPermissionManage, http.MethodPut, "/bucket?policy", true}, {config.BucketPermissionManage, http.MethodPut, "/bucket", false},
+		{config.BucketPermissionManage, http.MethodDelete, "/bucket", false}, {config.BucketPermissionManage, http.MethodPut, "/bucket/key", false},
+	}
+	for _, tc := range checks {
+		t.Run(string(tc.grant)+" "+tc.method+" "+tc.target, func(t *testing.T) {
+			credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadOnly, BucketPermissions: []config.BucketPermission{tc.grant}}}
+			called := false
+			h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) }))
+			r := httptest.NewRecorder()
+			h.ServeHTTP(r, authorizedRequest(tc.method, tc.target, credential))
+			if called != tc.want || (r.Code == http.StatusOK) != tc.want {
+				t.Fatalf("called=%v status=%d want=%v", called, r.Code, tc.want)
+			}
+		})
 	}
 }
 
@@ -390,16 +468,30 @@ func TestAuthorizationMiddleware_BucketDeleteWithUnsupportedKeyIsUnknown(t *test
 	}
 }
 
-func TestAuthorizationMiddleware_BucketDeleteWithSupportedKeyRequiresWriteNotDeleteGrant(t *testing.T) {
-	// These keys have corresponding DELETE routes and are ordinary writes.
-	credential := Credential{Policy: AuthorizationPolicy{Permissions: config.ObjectPermissionReadWrite}}
+func TestAuthorizationMiddleware_BucketDeleteWithSupportedKeyRequiresManageGrant(t *testing.T) {
+	// These keys have corresponding DELETE configuration routes and require
+	// manage, independently of object rw and bucket delete.
 	for _, key := range []string{"lifecycle", "policy", "cors", "encryption", "replication", "website", "inventory"} {
 		t.Run(key, func(t *testing.T) {
-			called := false
-			h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
-			h.ServeHTTP(httptest.NewRecorder(), authorizedRequest(http.MethodDelete, "/bucket?"+key, credential))
-			if !called {
-				t.Fatalf("DELETE /bucket?%s should be allowed for rw credential", key)
+			for _, tc := range []struct {
+				name  string
+				grant []config.BucketPermission
+				allow bool
+			}{
+				{"rw only", nil, false},
+				{"delete only", []config.BucketPermission{config.BucketPermissionDelete}, false},
+				{"manage", []config.BucketPermission{config.BucketPermissionManage}, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadWrite, BucketPermissions: tc.grant}}
+					called := false
+					h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) }))
+					recorder := httptest.NewRecorder()
+					h.ServeHTTP(recorder, authorizedRequest(http.MethodDelete, "/bucket?"+key, credential))
+					if called != tc.allow || recorder.Code != map[bool]int{true: http.StatusOK, false: http.StatusForbidden}[tc.allow] {
+						t.Fatalf("called=%v status=%d allow=%v", called, recorder.Code, tc.allow)
+					}
+				})
 			}
 		})
 	}
@@ -530,9 +622,10 @@ func TestAuthorizationMiddleware_NonEmptySelectorFailsClosed(t *testing.T) {
 	})
 }
 
-// Test that empty subresource values and x-id pass-through are allowed.
+// Test that empty subresource values and x-id pass-through remain routable,
+// while authorization still requires the new manage grant.
 func TestAuthorizationMiddleware_EmptySelectorAndXidAllowed(t *testing.T) {
-	credential := Credential{Policy: AuthorizationPolicy{Permissions: config.ObjectPermissionReadWrite}}
+	credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadWrite, BucketPermissions: []config.BucketPermission{config.BucketPermissionManage}}}
 
 	// Empty subresource value should match the route
 	t.Run("DELETE/policy=empty", func(t *testing.T) {
@@ -540,7 +633,7 @@ func TestAuthorizationMiddleware_EmptySelectorAndXidAllowed(t *testing.T) {
 		h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 		h.ServeHTTP(httptest.NewRecorder(), authorizedRequest(http.MethodDelete, "/bucket?policy", credential))
 		if !called {
-			t.Fatal("DELETE /bucket?policy should be allowed for rw credential")
+			t.Fatal("DELETE /bucket?policy should be allowed for scoped manage credential")
 		}
 	})
 
@@ -550,7 +643,7 @@ func TestAuthorizationMiddleware_EmptySelectorAndXidAllowed(t *testing.T) {
 		h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 		h.ServeHTTP(httptest.NewRecorder(), authorizedRequest(http.MethodDelete, "/bucket?policy&x-id=123", credential))
 		if !called {
-			t.Fatal("DELETE /bucket?policy&x-id=123 should be allowed for rw credential")
+			t.Fatal("DELETE /bucket?policy&x-id=123 should be allowed for scoped manage credential")
 		}
 	})
 }
@@ -608,37 +701,37 @@ func TestRouterClassifierParity(t *testing.T) {
 		{http.MethodGet, "/bucket?website", authorizationRead, "GetBucketWebsite"},
 		{http.MethodGet, "/bucket?analytics", authorizationRead, "GetBucketAnalytics"},
 
-		{http.MethodPut, "/bucket?acl", authorizationWrite, "PutBucketACL"},
-		{http.MethodPut, "/bucket?cors", authorizationWrite, "PutBucketCors"},
-		{http.MethodPut, "/bucket?encryption", authorizationWrite, "PutBucketEncryption"},
-		{http.MethodPut, "/bucket?inventory", authorizationWrite, "PutBucketInventory"},
-		{http.MethodPut, "/bucket?lifecycle", authorizationWrite, "PutBucketLifecycle"},
-		{http.MethodPut, "/bucket?logging", authorizationWrite, "PutBucketLogging"},
-		{http.MethodPut, "/bucket?notification", authorizationWrite, "PutBucketNotification"},
-		{http.MethodPut, "/bucket?object-lock", authorizationWrite, "PutObjectLockConfiguration"},
-		{http.MethodPut, "/bucket?policy", authorizationWrite, "PutBucketPolicy"},
-		{http.MethodPut, "/bucket?replication", authorizationWrite, "PutBucketReplication"},
-		{http.MethodPut, "/bucket?requestPayment", authorizationWrite, "PutBucketRequestPayment"},
-		{http.MethodPut, "/bucket?versioning", authorizationWrite, "PutBucketVersioning"},
-		{http.MethodPut, "/bucket?website", authorizationWrite, "PutBucketWebsite"},
-		{http.MethodPut, "/bucket?intelligent-tiering", authorizationWrite, "PutBucketIntelligentTiering"},
-		{http.MethodPut, "/bucket?intelligent-tiering&id=cfg-1", authorizationWrite, "PutBucketIntelligentTiering"},
+		{http.MethodPut, "/bucket?acl", authorizationManageBucket, "PutBucketACL"},
+		{http.MethodPut, "/bucket?cors", authorizationManageBucket, "PutBucketCors"},
+		{http.MethodPut, "/bucket?encryption", authorizationManageBucket, "PutBucketEncryption"},
+		{http.MethodPut, "/bucket?inventory", authorizationManageBucket, "PutBucketInventory"},
+		{http.MethodPut, "/bucket?lifecycle", authorizationManageBucket, "PutBucketLifecycle"},
+		{http.MethodPut, "/bucket?logging", authorizationManageBucket, "PutBucketLogging"},
+		{http.MethodPut, "/bucket?notification", authorizationManageBucket, "PutBucketNotification"},
+		{http.MethodPut, "/bucket?object-lock", authorizationManageBucket, "PutObjectLockConfiguration"},
+		{http.MethodPut, "/bucket?policy", authorizationManageBucket, "PutBucketPolicy"},
+		{http.MethodPut, "/bucket?replication", authorizationManageBucket, "PutBucketReplication"},
+		{http.MethodPut, "/bucket?requestPayment", authorizationManageBucket, "PutBucketRequestPayment"},
+		{http.MethodPut, "/bucket?versioning", authorizationManageBucket, "PutBucketVersioning"},
+		{http.MethodPut, "/bucket?website", authorizationManageBucket, "PutBucketWebsite"},
+		{http.MethodPut, "/bucket?intelligent-tiering", authorizationManageBucket, "PutBucketIntelligentTiering"},
+		{http.MethodPut, "/bucket?intelligent-tiering&id=cfg-1", authorizationManageBucket, "PutBucketIntelligentTiering"},
 
-		{http.MethodDelete, "/bucket?lifecycle", authorizationWrite, "DeleteBucketLifecycle"},
-		{http.MethodDelete, "/bucket?policy", authorizationWrite, "DeleteBucketPolicy"},
-		{http.MethodDelete, "/bucket?cors", authorizationWrite, "DeleteBucketCors"},
-		{http.MethodDelete, "/bucket?encryption", authorizationWrite, "DeleteBucketEncryption"},
-		{http.MethodDelete, "/bucket?replication", authorizationWrite, "DeleteBucketReplication"},
-		{http.MethodDelete, "/bucket?website", authorizationWrite, "DeleteBucketWebsite"},
-		{http.MethodDelete, "/bucket?inventory", authorizationWrite, "DeleteBucketInventory"},
-		{http.MethodDelete, "/bucket?inventory&id=report", authorizationWrite, "DeleteBucketInventory"},
+		{http.MethodDelete, "/bucket?lifecycle", authorizationManageBucket, "DeleteBucketLifecycle"},
+		{http.MethodDelete, "/bucket?policy", authorizationManageBucket, "DeleteBucketPolicy"},
+		{http.MethodDelete, "/bucket?cors", authorizationManageBucket, "DeleteBucketCors"},
+		{http.MethodDelete, "/bucket?encryption", authorizationManageBucket, "DeleteBucketEncryption"},
+		{http.MethodDelete, "/bucket?replication", authorizationManageBucket, "DeleteBucketReplication"},
+		{http.MethodDelete, "/bucket?website", authorizationManageBucket, "DeleteBucketWebsite"},
+		{http.MethodDelete, "/bucket?inventory", authorizationManageBucket, "DeleteBucketInventory"},
+		{http.MethodDelete, "/bucket?inventory&id=report", authorizationManageBucket, "DeleteBucketInventory"},
 
 		// Batch delete
 		{http.MethodPost, "/bucket?delete", authorizationWrite, "DeleteObjects"},
 
 		// Selector + x-id pass-through stays on the intended handler
 		{http.MethodGet, "/bucket?policy&x-id=123", authorizationRead, "GetBucketPolicy"},
-		{http.MethodDelete, "/bucket?policy&x-id=123", authorizationWrite, "DeleteBucketPolicy"},
+		{http.MethodDelete, "/bucket?policy&x-id=123", authorizationManageBucket, "DeleteBucketPolicy"},
 
 		// ListObjects pagination parameters
 		{http.MethodGet, "/bucket?list-type=2", authorizationRead, "ListObjects"},
@@ -654,7 +747,7 @@ func TestRouterClassifierParity(t *testing.T) {
 		// inventory/analytics subresource + id parameter
 		{http.MethodGet, "/bucket?inventory&id=report", authorizationRead, "GetBucketInventory"},
 		{http.MethodGet, "/bucket?analytics&id=report", authorizationRead, "GetBucketAnalytics"},
-		{http.MethodPut, "/bucket?inventory&id=report", authorizationWrite, "PutBucketInventory"},
+		{http.MethodPut, "/bucket?inventory&id=report", authorizationManageBucket, "PutBucketInventory"},
 
 		// Object-level routes
 		{http.MethodGet, "/bucket/key", authorizationRead, "GetObject"},

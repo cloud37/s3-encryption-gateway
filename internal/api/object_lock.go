@@ -150,9 +150,15 @@ func extractObjectLockInput(r *http.Request) (*s3.ObjectLockInput, *S3Error) {
 // readLimitedBody reads up to maxObjectLockXMLBody bytes from the body
 // and returns the bytes or a 400 MalformedXML S3Error on read failure.
 func readLimitedBody(r *http.Request) ([]byte, *S3Error) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxObjectLockXMLBody))
+	if r.ContentLength > maxObjectLockXMLBody {
+		return nil, &S3Error{Code: "InvalidRequest", Message: "The request body is too large.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxObjectLockXMLBody+1))
 	if err != nil {
 		return nil, &S3Error{Code: "MalformedXML", Message: "Unable to read request body", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
+	}
+	if int64(len(body)) > maxObjectLockXMLBody {
+		return nil, &S3Error{Code: "InvalidRequest", Message: "The request body is too large.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
 	}
 	return body, nil
 }
@@ -179,6 +185,19 @@ func decodeStrictXML(body []byte, into interface{}, resource string) *S3Error {
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	dec.Strict = true
 	if err := dec.Decode(into); err != nil {
+		return &S3Error{Code: "MalformedXML", Message: "The XML you provided was not well-formed or did not validate against our published schema", Resource: resource, HTTPStatus: http.StatusBadRequest}
+	}
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return &S3Error{Code: "MalformedXML", Message: "The XML you provided was not well-formed or did not validate against our published schema", Resource: resource, HTTPStatus: http.StatusBadRequest}
+		}
+		if chars, ok := tok.(xml.CharData); ok && strings.TrimSpace(string(chars)) == "" {
+			continue
+		}
 		return &S3Error{Code: "MalformedXML", Message: "The XML you provided was not well-formed or did not validate against our published schema", Resource: resource, HTTPStatus: http.StatusBadRequest}
 	}
 	return nil

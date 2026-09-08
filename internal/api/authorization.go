@@ -16,6 +16,7 @@ const (
 	authorizationWrite
 	authorizationCreateBucket
 	authorizationDeleteBucket
+	authorizationManageBucket
 	authorizationListBuckets
 )
 
@@ -66,6 +67,11 @@ func AuthorizationMiddleware(proxiedBucket string, auditLog audit.Logger) func(h
 			case authorizationDeleteBucket:
 				if !credential.HasBucketPermission(config.BucketPermissionDelete) {
 					writeAuthorizationDenied(w, r, auditLog, "bucket_delete")
+					return
+				}
+			case authorizationManageBucket:
+				if !credential.HasBucketPermission(config.BucketPermissionManage) {
+					writeAuthorizationDenied(w, r, auditLog, "bucket_manage")
 					return
 				}
 			}
@@ -230,9 +236,9 @@ func classifyAuthorizationOperation(r *http.Request) (authorizationOperation, st
 		}
 		return classifyBucketSelectorQuery(query, bucketReadSelectors, inventoryIDSelectors, authorizationRead), bucket
 	case http.MethodPut:
-		return classifyBucketSelectorQuery(query, bucketPutSelectors, inventoryIDSelectors, authorizationWrite), bucket
+		return classifyBucketSelectorQuery(query, bucketPutSelectors, inventoryIDSelectors, authorizationManageBucket), bucket
 	case http.MethodDelete:
-		return classifyBucketSelectorQuery(query, bucketDeleteSelectors, inventoryIDSelectors, authorizationWrite), bucket
+		return classifyBucketSelectorQuery(query, bucketDeleteSelectors, inventoryIDSelectors, authorizationManageBucket), bucket
 	case http.MethodPost:
 		if len(query) != 1 {
 			return authorizationUnknown, bucket
