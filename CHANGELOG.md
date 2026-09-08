@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **Explicit bucket configuration administration (V1.0-SEC-47):** Bucket
+  configuration PUT/DELETE operations require the independent scoped `manage`
+  grant, and raw configuration bodies are capped at 1 MiB.
+
+- **Fail-closed multipart routing (V1.0-SEC-46):** Persist creation-time
+  encrypted/plaintext mode for every Valkey-tracked MPU. Missing state returns
+  `NoSuchUpload` instead of selecting plaintext. Legacy untracked plaintext
+  requires `MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true` temporarily.
+
 - **Encrypted chunk manifest bounds (V1.0-SEC-45):** Reject out-of-range
   chunk sizes before range arithmetic, allocation, source reads, or
   authentication, preventing malformed metadata from causing attacker-sized

@@ -896,7 +896,7 @@
                   "label": { "type": "string", "description": "Optional human-readable label for audit logs." },
                   "buckets": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[^*\\s][^*\\s]*(\\*)?$" }, "description": "Omit for unrestricted access; use [] to deny all buckets." },
                   "permissions": { "type": "string", "enum": ["ro", "rw"], "description": "Object access permission; defaults to rw." },
-                  "bucketPermissions": { "type": "array", "items": { "type": "string", "enum": ["create", "delete"] }, "uniqueItems": true, "description": "Explicit bucket lifecycle grants." }
+                  "bucketPermissions": { "type": "array", "items": { "type": "string", "enum": ["create", "delete", "manage"] }, "uniqueItems": true, "description": "Explicit independent bucket grants: create, delete, or manage configuration." }
                 }
               }
             }
@@ -1236,6 +1236,10 @@
           "description": "Encrypted multipart upload state store (V0.6-SEC-3 / ADR-0009). External Valkey is required when track is set.",
           "additionalProperties": false,
           "properties": {
+            "allowUntrackedPlaintextUploads": {
+              "allOf": [{ "$ref": "#/$defs/configValue" }],
+              "description": "Migration-only compatibility for MPUs without routing state. Default false (fail-closed); renders MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS."
+            },
             "valkey": {
               "type": "object",
               "description": "External Valkey connection settings for multipart state.",

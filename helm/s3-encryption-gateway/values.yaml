@@ -198,7 +198,7 @@ config:
         # Omit buckets for unrestricted access; use [] for deny-all.
         # buckets: ["tenant-a", "shared-*"]
         # permissions: rw # ro or rw
-        # bucketPermissions: [] # create and/or delete
+        # bucketPermissions: [] # create, delete, and/or manage (independent)
 
     # Alternatively, reference an existing Kubernetes Secret containing the
     # full credentials list as a single file (YAML or JSON). Useful when
@@ -592,6 +592,9 @@ config:
   # values below are for supplying an external Valkey cluster instead; leave
   # blank to inherit the in-cluster subchart address.
   multipartState:
+    # Migration-only compatibility; default false to fail closed on missing state.
+    allowUntrackedPlaintextUploads:
+      value: ""
     valkey:
       addr:
         value: ""

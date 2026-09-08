@@ -1,5 +1,21 @@
 # Security Policy
 
+## Bucket configuration administration (SEC-47)
+
+Configuration mutations require a scoped `bucket_permissions: [manage]` grant;
+object `rw` and bucket `create`/`delete` grants do not imply it. Raw
+configuration bodies are rejected above 1 MiB before backend contact, while
+Object Lock retains its stricter 100 KiB parser limit.
+
+## Multipart routing state (SEC-46)
+
+When Valkey is configured, every new MPU receives a durable routing record with
+its creation-time encryption policy. UploadPart, UploadPartCopy, Complete, and
+Abort use that snapshot. Missing state returns `NoSuchUpload` before backend or
+source access; transient store failures return `ServiceUnavailable` and never
+downgrade to plaintext. Legacy untracked plaintext migration requires the
+temporary, warned, default-off setting `MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true`.
+
 ## Supported Versions
 
 | Version | Supported |

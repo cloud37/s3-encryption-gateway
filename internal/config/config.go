@@ -766,6 +766,7 @@ type BucketPermission string
 const (
 	BucketPermissionCreate BucketPermission = "create"
 	BucketPermissionDelete BucketPermission = "delete"
+	BucketPermissionManage BucketPermission = "manage"
 )
 
 // GatewayCredential is a single access-key/secret-key pair managed by the gateway.
@@ -850,7 +851,7 @@ func ValidateGatewayCredentials(credentials []GatewayCredential, requireSecret b
 		}
 		grants := make(map[BucketPermission]struct{}, len(credential.BucketPermissions))
 		for _, grant := range credential.BucketPermissions {
-			if grant != BucketPermissionCreate && grant != BucketPermissionDelete {
+			if grant != BucketPermissionCreate && grant != BucketPermissionDelete && grant != BucketPermissionManage {
 				return fmt.Errorf("auth.credentials[%d]: invalid bucket permission %q", i, grant)
 			}
 			if _, exists := grants[grant]; exists {
@@ -929,6 +930,9 @@ type AdminRateLimitConfig struct {
 // MultipartStateConfig holds configuration for the multipart-upload encryption state store.
 type MultipartStateConfig struct {
 	Valkey ValkeyConfig `yaml:"valkey"`
+	// AllowUntrackedPlaintextUploads permits legacy MPUs created before routing
+	// records were persisted. It is intentionally disabled by default.
+	AllowUntrackedPlaintextUploads bool `yaml:"allow_untracked_plaintext_uploads" env:"MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS"`
 }
 
 // ListSizeTranslateConfig controls how ListObjects resolves plaintext sizes for
@@ -1984,6 +1988,9 @@ func loadFromEnv(config *Config) error {
 		b := v == "true" || v == "1"
 		config.MultipartState.Valkey.EncryptState = &b
 	}
+	if v := os.Getenv("MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS"); v != "" {
+		config.MultipartState.AllowUntrackedPlaintextUploads = v == "true" || v == "1"
+	}
 	// V1.0-S3-3 — ListObjects plaintext size translation via Valkey size cache.
 	if v := os.Getenv("LIST_SIZE_TRANSLATE_ENABLED"); v != "" {
 		config.ListSizeTranslate.Enabled = v == "true" || v == "1"
@@ -2434,6 +2441,9 @@ func (c *Config) Validate() error {
 		if c.MultipartState.Valkey.AllowLegacyPlaintextState {
 			slog.Warn("allow_legacy_plaintext_state is true — state decryption will fall back to plaintext on AEAD failure; disable after migration")
 		}
+	}
+	if c.MultipartState.AllowUntrackedPlaintextUploads {
+		slog.Warn("multipart_state.allow_untracked_plaintext_uploads is enabled — missing MPU state will be treated as legacy plaintext; use only during migration")
 	}
 
 	// Validate backend retry configuration (V0.6-PERF-2).

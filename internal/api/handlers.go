@@ -42,19 +42,20 @@ type Handler struct {
 	// clientAcquirer, when non-nil, overrides client resolution in
 	// getS3Client. It is a test seam for observing that authorization
 	// precedes backend client acquisition.
-	clientAcquirer      func(*http.Request) (s3.Client, error)
-	encryptionEngine    crypto.EncryptionEngine
-	logger              *logrus.Logger
-	metrics             *metrics.Metrics
-	keyManager          crypto.KeyManager
-	cache               cache.Cache
-	auditLogger         audit.Logger
-	config              *config.Config
-	allowBucketCreation atomic.Bool
-	policyManager       *config.PolicyManager
-	engineCache         *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
-	mpuStateStore       mpu.StateStore  // nil when encrypted MPU is not configured
-	sizeCache           sizecache.SizeCache
+	clientAcquirer                 func(*http.Request) (s3.Client, error)
+	encryptionEngine               crypto.EncryptionEngine
+	logger                         *logrus.Logger
+	metrics                        *metrics.Metrics
+	keyManager                     crypto.KeyManager
+	cache                          cache.Cache
+	auditLogger                    audit.Logger
+	config                         *config.Config
+	allowBucketCreation            atomic.Bool
+	allowUntrackedPlaintextUploads atomic.Bool
+	policyManager                  *config.PolicyManager
+	engineCache                    *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
+	mpuStateStore                  mpu.StateStore  // nil when encrypted MPU is not configured
+	sizeCache                      sizecache.SizeCache
 	// Test seams for API metadata classification failures. Nil uses production
 	// implementations; keeping these private avoids changing the public API.
 	apiMetadataExpander    func(map[string]string) (map[string]string, error)
@@ -94,6 +95,7 @@ func NewHandlerWithFeatures(
 	}
 	if config != nil {
 		h.allowBucketCreation.Store(config.AllowBucketCreation)
+		h.allowUntrackedPlaintextUploads.Store(config.MultipartState.AllowUntrackedPlaintextUploads)
 	}
 	// Create client factory for per-request credential support.
 	// V0.6-PERF-2: inject metrics so the factory can emit retry counters.
@@ -112,6 +114,16 @@ func (h *Handler) SetAllowBucketCreation(enabled bool) { h.allowBucketCreation.S
 
 // AllowBucketCreation reports the current live management gate.
 func (h *Handler) AllowBucketCreation() bool { return h.allowBucketCreation.Load() }
+
+// SetAllowUntrackedPlaintextUploads updates the reload-safe legacy MPU gate.
+func (h *Handler) SetAllowUntrackedPlaintextUploads(enabled bool) {
+	h.allowUntrackedPlaintextUploads.Store(enabled)
+}
+
+// AllowUntrackedPlaintextUploads reports the current live compatibility gate.
+func (h *Handler) AllowUntrackedPlaintextUploads() bool {
+	return h.allowUntrackedPlaintextUploads.Load()
+}
 
 // WithMPUStateStore attaches an encrypted multipart state store to the handler.
 // When non-nil, buckets with EncryptMultipartUploads=true will use this store.
@@ -135,7 +147,7 @@ func (h *Handler) Close() {
 
 // bucketEncryptsMPU reports whether the bucket's CURRENT policy requires
 // encrypted multipart uploads. Only call this at CreateMultipartUpload time —
-// subsequent UploadPart / Complete / Abort must use uploadStateEncrypted so
+// subsequent UploadPart / Complete / Abort must use uploadState so
 // that mid-upload policy flips do not affect in-flight uploads (ADR-0009
 // §Security Considerations: "Policy snapshot captured at Create").
 func (h *Handler) bucketEncryptsMPU(bucket string) bool {
@@ -145,46 +157,39 @@ func (h *Handler) bucketEncryptsMPU(bucket string) bool {
 	return h.policyManager.BucketEncryptsMultipart(bucket)
 }
 
-// uploadStateEncrypted fetches the Valkey UploadState for uploadID.
-//
-//   - (state, true, nil)  — upload is an encrypted MPU; use state.PolicySnapshot.
-//   - (nil,   false, nil) — upload has no state record: this is a *plaintext*
-//     MPU (created before Valkey was introduced, or on a bucket that doesn't
-//     require encryption). Safe to take the plaintext branch.
-//   - (nil,   false, err) — transient infrastructure failure (Valkey down,
-//     timeout, etc). The caller MUST treat this as fail-closed and refuse
-//     the request rather than silently downgrading to plaintext, because
-//     the upload may actually be encrypted and we just can't tell right now.
-//
-// This is the correct decision predicate for UploadPart, CompleteMultipartUpload,
-// and AbortMultipartUpload — it reads the PolicySnapshot stored at Create time
-// rather than the live policy, preventing mid-upload policy flips from affecting
-// in-flight encrypted uploads (ADR-0009 §Security Considerations).
-func (h *Handler) uploadStateEncrypted(ctx context.Context, uploadID string) (*mpu.UploadState, bool, error) {
-	if h.mpuStateStore == nil || h.keyManager == nil {
-		// Infrastructure absent is structurally "not encrypted" — bucketEncryptsMPU
-		// + mpuGuardMisconfig at request entry already produced a 503 if the
-		// policy required encryption, so reaching here means plaintext is
-		// allowed.
-		return nil, false, nil
+// uploadState is the single routing authority for an MPU. A configured store
+// miss is not evidence of plaintext: it is a missing upload unless the
+// explicit legacy migration switch is enabled.
+func (h *Handler) uploadState(ctx context.Context, uploadID string) (*mpu.UploadState, error) {
+	if h.mpuStateStore == nil {
+		return nil, nil
 	}
-	opStart := time.Now()
 	state, err := h.mpuStateStore.Get(ctx, uploadID)
-	if err != nil {
-		if errors.Is(err, mpu.ErrUploadNotFound) {
-			// Normal path for plaintext MPU — upload was never registered in Valkey.
-			h.metrics.RecordMPUStateStoreOp("Get", "not_found", time.Since(opStart))
-			return nil, false, nil
-		}
-		// Transient infra error (Valkey down, timeout). Do NOT downgrade
-		// to plaintext silently — the upload may actually be encrypted and
-		// proceeding plaintext would write unencrypted data to a destination
-		// that the client thinks is encrypted. Caller must surface as 503.
-		h.metrics.RecordMPUStateStoreOp("Get", "error", time.Since(opStart))
-		return nil, false, err
+	if err == nil {
+		return state, nil
 	}
-	h.metrics.RecordMPUStateStoreOp("Get", "success", time.Since(opStart))
-	return state, state.PolicySnapshot.EncryptMultipartUploads, nil
+	if errors.Is(err, mpu.ErrUploadNotFound) {
+		if h.allowUntrackedPlaintextUploads.Load() {
+			if h.logger != nil {
+				h.logger.WithField("uploadID", uploadID).Warn("using legacy untracked plaintext MPU compatibility path")
+			}
+			return nil, nil
+		}
+		return nil, mpu.ErrUploadNotFound
+	}
+	return nil, err
+}
+
+func (h *Handler) writeMissingMPUState(w http.ResponseWriter, r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, mpu.ErrUploadNotFound) {
+		(&S3Error{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist.", Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+	} else {
+		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the request", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+	}
+	return true
 }
 
 func validateMPURouteIdentity(state *mpu.UploadState, bucket, key string) error {
@@ -3455,16 +3460,25 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 
 	// When EncryptMultipartUploads is enabled for this bucket, generate a
 	// per-upload DEK and persist state to Valkey before returning to the client.
-	if h.bucketEncryptsMPU(bucket) {
+	if h.mpuStateStore != nil {
 		opStart := time.Now()
-		binding, bindErr := base64.RawURLEncoding.DecodeString(metadata[crypto.MetaObjectBindingID])
-		var bindingID [16]byte
 		var storeErr error
-		if bindErr != nil || len(binding) != 16 {
-			storeErr = fmt.Errorf("invalid MPU binding metadata")
+		if h.bucketEncryptsMPU(bucket) {
+			binding, bindErr := base64.RawURLEncoding.DecodeString(metadata[crypto.MetaObjectBindingID])
+			var bindingID [16]byte
+			if bindErr != nil || len(binding) != 16 {
+				storeErr = fmt.Errorf("invalid MPU binding metadata")
+			} else {
+				copy(bindingID[:], binding)
+				storeErr = h.initMPUEncryptionState(ctx, uploadID, bucket, key, bindingID)
+			}
 		} else {
-			copy(bindingID[:], binding)
-			storeErr = h.initMPUEncryptionState(ctx, uploadID, bucket, key, bindingID)
+			storeErr = h.mpuStateStore.Create(ctx, &mpu.UploadState{
+				UploadID: uploadID, Bucket: bucket, Key: key,
+				PolicySnapshot: mpu.PolicySnapshot{EncryptMultipartUploads: false},
+				CreatedAt:      time.Now().UTC(), StateVersion: mpu.CurrentStateVersion,
+				Phase: mpu.UploadPhaseOpen, Revision: 1,
+			})
 		}
 		if storeErr != nil {
 			h.metrics.RecordMPUStateStoreOp("Create", "error", time.Since(opStart))
@@ -4015,7 +4029,10 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if uploadState, isEnc, stateErr := h.uploadStateEncrypted(ctx, uploadID); stateErr != nil {
+	if uploadState, stateErr := h.uploadState(ctx, uploadID); stateErr != nil {
+		if h.writeMissingMPUState(w, r, stateErr) {
+			return
+		}
 		// Transient Valkey failure mid-upload — do NOT downgrade to plaintext.
 		// The upload may be an encrypted MPU whose state we temporarily can't
 		// read; proceeding plaintext would write unencrypted bytes under the
@@ -4046,7 +4063,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		s3Err.WriteXML(w)
 		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
-	} else if isEnc {
+	} else if uploadState != nil && uploadState.PolicySnapshot.EncryptMultipartUploads {
 		if identityErr := validateMPURouteIdentity(uploadState, bucket, key); identityErr != nil {
 			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
 			return
@@ -4307,8 +4324,11 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	// For encrypted MPU: consult the PolicySnapshot stored at Create time so
 	// a policy flip mid-upload cannot cause the manifest to be skipped or
 	// written for an upload that was never encrypted (ADR-0009).
-	completeState, completeIsEnc, completeStateErr := h.uploadStateEncrypted(ctx, uploadID)
+	completeState, completeStateErr := h.uploadState(ctx, uploadID)
 	if completeStateErr != nil {
+		if h.writeMissingMPUState(w, r, completeStateErr) {
+			return
+		}
 		h.logger.WithError(completeStateErr).WithFields(logrus.Fields{
 			"bucket":   bucket,
 			"key":      key,
@@ -4335,6 +4355,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
+	completeIsEnc := completeState != nil && completeState.PolicySnapshot.EncryptMultipartUploads
 	if completeIsEnc {
 		if identityErr := validateMPURouteIdentity(completeState, bucket, key); identityErr != nil {
 			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
@@ -4418,6 +4439,10 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		if delErr := h.mpuStateStore.Delete(ctx, uploadID); delErr != nil {
 			h.logger.WithError(delErr).WithField("uploadID", uploadID).
 				Warn("Failed to delete MPU state after completion")
+		}
+	} else if completeState != nil && h.mpuStateStore != nil {
+		if delErr := h.mpuStateStore.Delete(ctx, uploadID); delErr != nil {
+			h.logger.WithError(delErr).WithField("uploadID", uploadID).Warn("mpu.complete: failed to delete plaintext routing state")
 		}
 	}
 
@@ -4504,12 +4529,15 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 	}
 	var abortStore mpu.StateStore
 	var abortRevision uint64
+	var abortState *mpu.UploadState
 	if store := h.mpuStateStore; store != nil {
-		state, stateErr := store.Get(ctx, uploadID)
-		if stateErr != nil && !errors.Is(stateErr, mpu.ErrUploadNotFound) {
-			(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the abort.", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
-			return
+		state, stateErr := h.uploadState(ctx, uploadID)
+		if stateErr != nil {
+			if h.writeMissingMPUState(w, r, stateErr) {
+				return
+			}
 		}
+		abortState = state
 		if state != nil && state.PolicySnapshot.EncryptMultipartUploads {
 			abortStore = store
 			abortRevision, err = store.BeginAbort(ctx, uploadID)
@@ -4570,6 +4598,10 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 				Success:   true,
 				Metadata:  map[string]interface{}{"upload_id": uploadID},
 			})
+		}
+	} else if abortState != nil {
+		if delErr := h.mpuStateStore.Delete(ctx, uploadID); delErr != nil {
+			h.logger.WithError(delErr).WithField("uploadID", uploadID).Warn("mpu.abort: failed to delete plaintext routing state")
 		}
 	}
 
@@ -5001,6 +5033,9 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 // Returns an error if the KeyManager is absent — encrypted MPU state must
 // never be readable without KMS cooperation (fail-closed).
 func (h *Handler) unwrapMPUDEK(ctx context.Context, state *mpu.UploadState, bucket, uploadID string) ([]byte, error) {
+	if err := state.ValidateEncryptedCryptoMaterial(); err != nil {
+		return nil, err
+	}
 	if h.keyManager == nil {
 		return nil, fmt.Errorf("cannot decrypt MPU part: no KeyManager configured")
 	}
@@ -6232,7 +6267,7 @@ func (h *Handler) handleGetBucketVersioning(w http.ResponseWriter, r *http.Reque
 
 // handlePutBucketVersioning handles PUT /{bucket}?versioning — PutBucketVersioning.
 func (h *Handler) handlePutBucketVersioning(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketVersioning", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketVersioning", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleListMultipartUploads handles GET /{bucket}?uploads — ListMultipartUploads.
@@ -6247,7 +6282,7 @@ func (h *Handler) handleGetBucketACL(w http.ResponseWriter, r *http.Request) {
 
 // handlePutBucketACL handles PUT /{bucket}?acl — PutBucketACL.
 func (h *Handler) handlePutBucketACL(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketACL", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketACL", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketPolicy handles GET /{bucket}?policy — GetBucketPolicy.
@@ -6257,12 +6292,12 @@ func (h *Handler) handleGetBucketPolicy(w http.ResponseWriter, r *http.Request) 
 
 // handlePutBucketPolicy handles PUT /{bucket}?policy — PutBucketPolicy.
 func (h *Handler) handlePutBucketPolicy(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketPolicy", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketPolicy", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketPolicy handles DELETE /{bucket}?policy — DeleteBucketPolicy.
 func (h *Handler) handleDeleteBucketPolicy(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketPolicy", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketPolicy", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketCors handles GET /{bucket}?cors — GetBucketCors.
@@ -6272,12 +6307,12 @@ func (h *Handler) handleGetBucketCors(w http.ResponseWriter, r *http.Request) {
 
 // handlePutBucketCors handles PUT /{bucket}?cors — PutBucketCors.
 func (h *Handler) handlePutBucketCors(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketCors", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketCors", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketCors handles DELETE /{bucket}?cors — DeleteBucketCors.
 func (h *Handler) handleDeleteBucketCors(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketCors", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketCors", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketLifecycle handles GET /{bucket}?lifecycle — GetBucketLifecycle.
@@ -6287,12 +6322,12 @@ func (h *Handler) handleGetBucketLifecycle(w http.ResponseWriter, r *http.Reques
 
 // handlePutBucketLifecycle handles PUT /{bucket}?lifecycle — PutBucketLifecycle.
 func (h *Handler) handlePutBucketLifecycle(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketLifecycle", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketLifecycle", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketLifecycle handles DELETE /{bucket}?lifecycle — DeleteBucketLifecycle.
 func (h *Handler) handleDeleteBucketLifecycle(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketLifecycle", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketLifecycle", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketEncryption handles GET /{bucket}?encryption — GetBucketEncryption.
@@ -6302,12 +6337,12 @@ func (h *Handler) handleGetBucketEncryption(w http.ResponseWriter, r *http.Reque
 
 // handlePutBucketEncryption handles PUT /{bucket}?encryption — PutBucketEncryption.
 func (h *Handler) handlePutBucketEncryption(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketEncryption", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketEncryption", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketEncryption handles DELETE /{bucket}?encryption — DeleteBucketEncryption.
 func (h *Handler) handleDeleteBucketEncryption(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketEncryption", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketEncryption", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketNotification handles GET /{bucket}?notification — GetBucketNotification.
@@ -6317,7 +6352,7 @@ func (h *Handler) handleGetBucketNotification(w http.ResponseWriter, r *http.Req
 
 // handlePutBucketNotification handles PUT /{bucket}?notification — PutBucketNotification.
 func (h *Handler) handlePutBucketNotification(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketNotification", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketNotification", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketReplication handles GET /{bucket}?replication — GetBucketReplication.
@@ -6327,12 +6362,12 @@ func (h *Handler) handleGetBucketReplication(w http.ResponseWriter, r *http.Requ
 
 // handlePutBucketReplication handles PUT /{bucket}?replication — PutBucketReplication.
 func (h *Handler) handlePutBucketReplication(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketReplication", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketReplication", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketReplication handles DELETE /{bucket}?replication — DeleteBucketReplication.
 func (h *Handler) handleDeleteBucketReplication(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketReplication", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketReplication", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketLogging handles GET /{bucket}?logging — GetBucketLogging.
@@ -6342,7 +6377,7 @@ func (h *Handler) handleGetBucketLogging(w http.ResponseWriter, r *http.Request)
 
 // handlePutBucketLogging handles PUT /{bucket}?logging — PutBucketLogging.
 func (h *Handler) handlePutBucketLogging(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketLogging", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketLogging", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketRequestPayment handles GET /{bucket}?requestPayment — GetBucketRequestPayment.
@@ -6352,7 +6387,7 @@ func (h *Handler) handleGetBucketRequestPayment(w http.ResponseWriter, r *http.R
 
 // handlePutBucketRequestPayment handles PUT /{bucket}?requestPayment — PutBucketRequestPayment.
 func (h *Handler) handlePutBucketRequestPayment(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketRequestPayment", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketRequestPayment", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketWebsite handles GET /{bucket}?website — GetBucketWebsite.
@@ -6362,12 +6397,12 @@ func (h *Handler) handleGetBucketWebsite(w http.ResponseWriter, r *http.Request)
 
 // handlePutBucketWebsite handles PUT /{bucket}?website — PutBucketWebsite.
 func (h *Handler) handlePutBucketWebsite(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketWebsite", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketWebsite", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketWebsite handles DELETE /{bucket}?website — DeleteBucketWebsite.
 func (h *Handler) handleDeleteBucketWebsite(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketWebsite", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketWebsite", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketInventory handles GET /{bucket}?inventory — GetBucketInventory.
@@ -6377,12 +6412,12 @@ func (h *Handler) handleGetBucketInventory(w http.ResponseWriter, r *http.Reques
 
 // handlePutBucketInventory handles PUT /{bucket}?inventory — PutBucketInventory.
 func (h *Handler) handlePutBucketInventory(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketInventory", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketInventory", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketInventory handles DELETE /{bucket}?inventory — DeleteBucketInventory.
 func (h *Handler) handleDeleteBucketInventory(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "DeleteBucketInventory", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketInventory", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetBucketAnalytics handles GET /{bucket}?analytics — GetBucketAnalytics.
@@ -6392,7 +6427,7 @@ func (h *Handler) handleGetBucketAnalytics(w http.ResponseWriter, r *http.Reques
 
 // handlePutBucketIntelligentTiering handles PUT /{bucket}?intelligent-tiering — PutBucketIntelligentTiering.
 func (h *Handler) handlePutBucketIntelligentTiering(w http.ResponseWriter, r *http.Request) {
-	h.handlePassthrough(w, r, "PutBucketIntelligentTiering", mux.Vars(r)["bucket"], "")
+	h.handlePassthroughWithBodyLimit(w, r, "PutBucketIntelligentTiering", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleGetObjectTagging handles GET /{bucket}/{key}?tagging — GetObjectTagging.

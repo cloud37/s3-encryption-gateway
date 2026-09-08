@@ -7,6 +7,15 @@ log_level: "info"
 # bucket_permissions: [create] credentials.
 allow_bucket_creation: false
 
+# Bucket configuration PUT/DELETE requires an explicit manage grant;
+# manage is independent from object rw and bucket create/delete.
+
+# Migration-only compatibility for MPUs without a durable routing record.
+# Default false: missing state returns NoSuchUpload rather than selecting plaintext.
+# Set MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true only while migrating legacy MPUs.
+multipart_state:
+  allow_untracked_plaintext_uploads: false
+
 auth:
   # Maximum acceptable clock skew for SigV4 timestamp validation.
   # Default: 5m (matching AWS SigV4 specification).

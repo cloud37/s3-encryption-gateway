@@ -138,6 +138,13 @@ See [ADR 0009](docs/adr/0009-encrypted-multipart-uploads.md) for the full design
 
 #### Enabling encrypted multipart uploads
 
+When Valkey is configured, routing state is persisted for both encrypted and
+plaintext MPUs. State loss fails closed: operations return `NoSuchUpload` rather
+than risking a plaintext downgrade. For a controlled migration of legacy
+untracked plaintext MPUs only, temporarily set
+`MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true`, then drain or abort legacy
+uploads and disable it.
+
 Encrypted multipart uploads require a **Valkey** (or Redis-protocol-compatible) instance for in-flight state storage. The same Valkey instance and connection pool also back the [ListObjects plaintext size cache](#listobjects-plaintext-size-translation) — a single Valkey deployment serves both features. Enable per bucket via policy and configure the state store in the gateway config:
 
 ```yaml
@@ -751,7 +758,7 @@ auth:
       secret_key: "YOUR_GATEWAY_SECRET_KEY"
       buckets: ["application-data", "shared-*"] # omit for unrestricted; [] denies all
       permissions: "rw" # use "ro" for read-only object access
-      bucket_permissions: [] # explicit "create" and/or "delete" only
+      bucket_permissions: [] # independent create, delete, and/or manage grants
 
 backend:
   endpoint: "https://s3.amazonaws.com"
@@ -874,7 +881,11 @@ Bucket creation is disabled by default. To enable it, operators must set
 authenticated credential must both match the target bucket scope and explicitly
 include `bucket_permissions: [create]`. `rw` never grants bucket management.
 DeleteBucket is independently controlled by scope plus
-`bucket_permissions: [delete]`; it has no global enable switch. The gateway
+`bucket_permissions: [delete]`; it has no global enable switch. Bucket
+configuration PUT/DELETE operations independently require
+`bucket_permissions: [manage]`; this does not grant object writes, creation, or
+deletion. Raw configuration bodies are capped at 1 MiB before backend
+forwarding, while Object Lock retains its 100 KiB parser limit. The gateway
 forwards authorized CreateBucket bodies, including LocationConstraint, raw to
 the backend, whose IAM permissions remain required. File configuration changes
 hot-reload safely; environment and Helm values are process-start settings and
