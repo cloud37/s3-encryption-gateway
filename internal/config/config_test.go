@@ -913,7 +913,7 @@ func TestConfig_Validate_DuplicateCredentialBucketPermission(t *testing.T) {
 
 func TestLoadFromEnv_CredentialFileAuthorization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credentials.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("- access_key: file-ak\n  secret_key: file-sk\n  buckets: [file-*]\n  permissions: ro\n  bucket_permissions: [delete]\n"), 0600))
+	require.NoError(t, os.WriteFile(path, []byte("- access_key: file-ak\n  secret_key: file-sk\n  buckets: [file-*]\n  permissions: ro\n  bucket_permissions: [manage]\n"), 0600))
 	t.Setenv("AUTH_CREDENTIALS_FILE", path)
 	cfg := &Config{}
 	require.NoError(t, loadCredentialFile(cfg))
@@ -923,7 +923,7 @@ func TestLoadFromEnv_CredentialFileAuthorization(t *testing.T) {
 	assert.Equal(t, []string{"file-*"}, credential.Buckets)
 	require.NotNil(t, credential.Permissions)
 	assert.Equal(t, ObjectPermissionReadOnly, *credential.Permissions)
-	assert.Equal(t, []BucketPermission{BucketPermissionDelete}, credential.BucketPermissions)
+	assert.Equal(t, []BucketPermission{BucketPermissionManage}, credential.BucketPermissions)
 }
 
 func TestLoadFromEnv_CredentialBucketsAbsentVersusEmpty(t *testing.T) {
@@ -948,7 +948,7 @@ func TestLoadFromEnv_CredentialAuthorizationFields(t *testing.T) {
 	t.Setenv("GW_CRED_0_SECRET_KEY", "env-sk")
 	t.Setenv("GW_CRED_0_BUCKETS", "bucket1,bucket2")
 	t.Setenv("GW_CRED_0_PERMISSIONS", "ro")
-	t.Setenv("GW_CRED_0_BUCKET_PERMISSIONS", "create,delete")
+	t.Setenv("GW_CRED_0_BUCKET_PERMISSIONS", "manage")
 	t.Setenv("GW_CRED_0_LABEL", "env-label")
 
 	cfg := &Config{}
@@ -970,8 +970,8 @@ func TestLoadFromEnv_CredentialAuthorizationFields(t *testing.T) {
 	if cred.Permissions == nil || *cred.Permissions != ObjectPermissionReadOnly {
 		t.Errorf("permissions = %v, want ro", cred.Permissions)
 	}
-	if len(cred.BucketPermissions) != 2 || cred.BucketPermissions[0] != BucketPermissionCreate || cred.BucketPermissions[1] != BucketPermissionDelete {
-		t.Errorf("bucket_permissions = %v, want [create delete]", cred.BucketPermissions)
+	if len(cred.BucketPermissions) != 1 || cred.BucketPermissions[0] != BucketPermissionManage {
+		t.Errorf("bucket_permissions = %v, want [manage]", cred.BucketPermissions)
 	}
 	if cred.Label != "env-label" {
 		t.Errorf("label = %q, want env-label", cred.Label)

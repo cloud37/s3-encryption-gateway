@@ -384,9 +384,10 @@ func TestApplyConfigChanges_UnrelatedSectionsAreHandled(t *testing.T) {
 
 // reloadCredential describes one auth credential entry in a test config file.
 type reloadCredential struct {
-	accessKey string
-	secretKey string
-	buckets   string // YAML fragment; empty omits the field
+	accessKey         string
+	secretKey         string
+	buckets           string // YAML fragment; empty omits the field
+	bucketPermissions string // YAML fragment; empty omits the field
 }
 
 func writeReloadConfig(t *testing.T, path string, creds ...reloadCredential) {
@@ -396,6 +397,9 @@ func writeReloadConfig(t *testing.T, path string, creds ...reloadCredential) {
 		fmt.Fprintf(&credsYAML, "    - access_key: %q\n      secret_key: %q\n", c.accessKey, c.secretKey)
 		if c.buckets != "" {
 			fmt.Fprintf(&credsYAML, "      buckets: %s\n", c.buckets)
+		}
+		if c.bucketPermissions != "" {
+			fmt.Fprintf(&credsYAML, "      bucket_permissions: %s\n", c.bucketPermissions)
 		}
 	}
 	yaml := fmt.Sprintf(`log_level: info
@@ -535,6 +539,38 @@ func TestConfigReloader_EndToEnd_ScopeChangeBecomesActive(t *testing.T) {
 	waitForCondition(t, 5*time.Second, "key1 scope change", func() bool {
 		cred, err := store.Lookup("key1")
 		return err == nil && cred.AllowsBucket("tenant-b") && !cred.AllowsBucket("tenant-a")
+	})
+}
+
+func TestConfigReloader_EndToEnd_BucketManagePermissionChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeReloadConfig(t, configPath, reloadCredential{accessKey: "key1", secretKey: "secret1"})
+
+	cfg, err := config.LoadConfig(configPath)
+	require.NoError(t, err)
+	store, _ := newReloadHarness(t, configPath, cfg)
+
+	cred, err := store.Lookup("key1")
+	require.NoError(t, err)
+	assert.False(t, cred.HasBucketPermission(config.BucketPermissionManage))
+
+	time.Sleep(100 * time.Millisecond)
+	writeReloadConfig(t, configPath, reloadCredential{
+		accessKey:         "key1",
+		secretKey:         "secret1",
+		bucketPermissions: "[manage]",
+	})
+
+	waitForCondition(t, 5*time.Second, "key1 manage permission activation", func() bool {
+		cred, err := store.Lookup("key1")
+		return err == nil && cred.HasBucketPermission(config.BucketPermissionManage)
+	})
+
+	writeReloadConfig(t, configPath, reloadCredential{accessKey: "key1", secretKey: "secret1"})
+	waitForCondition(t, 5*time.Second, "key1 manage permission revocation", func() bool {
+		cred, err := store.Lookup("key1")
+		return err == nil && !cred.HasBucketPermission(config.BucketPermissionManage)
 	})
 }
 

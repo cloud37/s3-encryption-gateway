@@ -5,6 +5,8 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
@@ -39,7 +43,43 @@ func newS3CompatClient(t *testing.T, inst provider.Instance) *s3.Client {
 	return s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = true
 		o.BaseEndpoint = aws.String(inst.Endpoint)
+		o.APIOptions = append(o.APIOptions, addLifecycleContentMD5)
 	})
+}
+
+// addLifecycleContentMD5 supplies the legacy integrity header required by
+// MinIO and other S3-compatible providers for lifecycle XML. The AWS SDK v2
+// no longer computes Content-MD5 for this operation; this middleware is
+// provider-agnostic and only applies to the lifecycle subresource.
+func addLifecycleContentMD5(stack *middleware.Stack) error {
+	return stack.Finalize.Add(middleware.FinalizeMiddlewareFunc("AddLifecycleContentMD5",
+		func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			req, ok := in.Request.(*smithyhttp.Request)
+			if !ok {
+				return next.HandleFinalize(ctx, in)
+			}
+			if _, lifecycle := req.URL.Query()["lifecycle"]; !lifecycle || req.Header.Get("Content-MD5") != "" {
+				return next.HandleFinalize(ctx, in)
+			}
+			stream := req.GetStream()
+			if stream == nil {
+				return next.HandleFinalize(ctx, in)
+			}
+			body, err := io.ReadAll(stream)
+			if err != nil {
+				return middleware.FinalizeOutput{}, middleware.Metadata{}, err
+			}
+			sum := md5.Sum(body) // #nosec G401 -- required S3 compatibility header
+			req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(sum[:]))
+			if err := req.RewindStream(); err != nil {
+				var setErr error
+				in.Request, setErr = req.SetStream(bytes.NewReader(body))
+				if setErr != nil {
+					return middleware.FinalizeOutput{}, middleware.Metadata{}, setErr
+				}
+			}
+			return next.HandleFinalize(ctx, in)
+		}), middleware.Before)
 }
 
 func testS3Compat_DeleteBucket(t *testing.T, inst provider.Instance) {

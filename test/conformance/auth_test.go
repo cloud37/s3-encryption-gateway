@@ -1120,7 +1120,9 @@ func testAuthorization_BucketLifecycleGrants(t *testing.T, inst provider.Instanc
 // operation class through the live gateway. The expected backend result is
 // intentionally not asserted: providers vary in their implementation of many
 // S3 subresources. The assertion is that ro reaches every read route but is
-// stopped before every mutation, while rw is not stopped by authorization.
+// stopped before every mutation, while rw reaches object mutations and MPU
+// operations. Bucket configuration mutations are a separate capability and
+// require manage.
 func testAuthorization_OperationPermissionMatrix(t *testing.T, inst provider.Instance) {
 	t.Helper()
 	readOnly := config.ObjectPermissionReadOnly
@@ -1137,7 +1139,14 @@ func testAuthorization_OperationPermissionMatrix(t *testing.T, inst provider.Ins
 		Label:     "matrix-read-write",
 		Buckets:   []string{inst.Bucket},
 	}
-	gw := harness.StartGateway(t, inst, harness.WithAuth(reader, writer))
+	manager := config.GatewayCredential{
+		AccessKey:         "AUTH2MATRIXMANAGE",
+		SecretKey:         "matrix-manage-secret",
+		Label:             "matrix-bucket-manager",
+		Buckets:           []string{inst.Bucket},
+		BucketPermissions: []config.BucketPermission{config.BucketPermissionManage},
+	}
+	gw := harness.StartGateway(t, inst, harness.WithAuth(reader, writer, manager))
 	key := uniqueKey(t)
 
 	reads := []struct {
@@ -1184,8 +1193,12 @@ func testAuthorization_OperationPermissionMatrix(t *testing.T, inst provider.Ins
 		{"AbortMultipartUpload", http.MethodDelete, "/" + inst.Bucket + "/" + key + "?uploadId=not-a-real-upload", nil},
 		{"RestoreObject", http.MethodPost, "/" + inst.Bucket + "/" + key + "?restore", []byte("<RestoreRequest></RestoreRequest>")},
 	}
+	bucketConfigurationWrites := []struct {
+		name, method, suffix string
+		body                 []byte
+	}{}
 	for _, selector := range []string{"acl", "cors", "encryption", "intelligent-tiering", "inventory", "lifecycle", "logging", "notification", "object-lock", "policy", "replication", "requestPayment", "versioning", "website"} {
-		writes = append(writes, struct {
+		bucketConfigurationWrites = append(bucketConfigurationWrites, struct {
 			name, method, suffix string
 			body                 []byte
 		}{"PutBucket_" + selector, http.MethodPut, "/" + inst.Bucket + "?" + selector, []byte("<Configuration></Configuration>")})
@@ -1197,7 +1210,7 @@ func testAuthorization_OperationPermissionMatrix(t *testing.T, inst provider.Ins
 		}{"PutObject_" + selector, http.MethodPut, "/" + inst.Bucket + "/" + key + "?" + selector, []byte("<Configuration></Configuration>")})
 	}
 	for _, selector := range []string{"lifecycle", "policy", "cors", "encryption", "replication", "website", "inventory"} {
-		writes = append(writes, struct {
+		bucketConfigurationWrites = append(bucketConfigurationWrites, struct {
 			name, method, suffix string
 			body                 []byte
 		}{"DeleteBucket_" + selector, http.MethodDelete, "/" + inst.Bucket + "?" + selector, nil})
@@ -1213,6 +1226,15 @@ func testAuthorization_OperationPermissionMatrix(t *testing.T, inst provider.Ins
 		})
 		t.Run("rw_allows_"+tc.name, func(t *testing.T) {
 			assertSignedOperationNotAuthorizationDenied(t, gw, tc.method, tc.suffix, tc.body, writer)
+		})
+	}
+	for _, tc := range bucketConfigurationWrites {
+		tc := tc
+		t.Run("rw_denies_bucket_configuration_"+tc.name, func(t *testing.T) {
+			assertSignedOperationAccessDenied(t, gw, tc.method, tc.suffix, tc.body, writer)
+		})
+		t.Run("manage_allows_bucket_configuration_"+tc.name, func(t *testing.T) {
+			assertSignedOperationNotAuthorizationDenied(t, gw, tc.method, tc.suffix, tc.body, manager)
 		})
 	}
 }

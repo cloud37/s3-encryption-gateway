@@ -38,11 +38,10 @@ type minioProvider struct{ tlsReady bool }
 func (p *minioProvider) Name() string { return "minio" }
 
 func (p *minioProvider) Capabilities() Capabilities {
-	// BucketPolicy, BucketLifecycle, BucketCors, BucketACL, ObjectACL, and
-	// BucketEncryption are omitted because the default MinIO test container
-	// does not enable these features (canned ACLs, KMS, Content-MD5 signing).
-	// The gateway's passthrough for these operations is verified by unit tests.
+	// MinIO supports bucket policy and lifecycle round trips used by SEC47.
 	caps := CapMultipartUpload |
+		CapBucketPolicy |
+		CapBucketLifecycle |
 		CapMultipartCopy |
 		CapObjectTagging |
 		CapInlinePutTagging |
