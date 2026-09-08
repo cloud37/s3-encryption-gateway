@@ -138,6 +138,11 @@ See [ADR 0009](docs/adr/0009-encrypted-multipart-uploads.md) for the full design
 
 #### Enabling encrypted multipart uploads
 
+If a backend response is ambiguous, retry the identical part after the bounded
+reservation lease expires. The default lease is 2 minutes and can be configured
+with `multipart_state.reservation_lease` or `MPU_RESERVATION_LEASE` (10 seconds
+through 15 minutes). Changed plaintext is rejected rather than reusing a nonce.
+
 When Valkey is configured, routing state is persisted for both encrypted and
 plaintext MPUs. State loss fails closed: operations return `NoSuchUpload` rather
 than risking a plaintext downgrade. For a controlled migration of legacy

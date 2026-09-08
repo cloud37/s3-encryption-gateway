@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
@@ -35,6 +39,65 @@ func testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag(t *testing.T, in
 	if got := get(t, gw, inst.Bucket, key); !bytes.Equal(got, data) {
 		t.Fatalf("identical retry plaintext mismatch")
 	}
+}
+
+func testSEC48_EncryptedMPUIdenticalPartRetry(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	vk := provider.StartValkey(ctx, t)
+	store, err := mpu.NewValkeyStateStoreWithLease(ctx, config.ValkeyConfig{
+		Addr: vk.Addr, EncryptState: config.BoolPtr(false), InsecureAllowPlaintext: true,
+		TLS: config.ValkeyTLSConfig{Enabled: false}, TTLSeconds: 3600,
+		DialTimeout: 2 * time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, PoolSize: 4,
+	}, nil, "", 10*time.Second)
+	if err != nil {
+		t.Fatalf("create MPU state store: %v", err)
+	}
+	// The backend fault is injected at the gateway boundary; the first request
+	// remains ambiguous while the deterministic claim is held in Valkey.
+	transport := &sec48FailOnceTransport{inner: http.DefaultTransport}
+	gw := harness.StartGateway(t, inst, harness.WithMPUStateStore(store), harness.WithEncryptedMPUForBucket(inst.Bucket), harness.WithBackendTransport(transport), harness.WithConfigMutator(func(c *config.Config) {
+		c.MultipartState.ReservationLease = 10 * time.Second
+		// Do not let the SDK retry the synthetic ambiguous failure. The first
+		// UploadPart must return to the gateway with its reservation still held.
+		c.Backend.Retry.Mode = "off"
+	}))
+	key := uniqueKey(t)
+	uploadID := initiateMultipartUpload(t, gw, inst.Bucket, key)
+	t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+	data := bytes.Repeat([]byte("sec48"), 1024)
+	status, _ := uploadPartStatus(t, gw, inst.Bucket, key, uploadID, 1, data)
+	if status == http.StatusOK {
+		t.Fatal("ambiguous backend request unexpectedly succeeded")
+	}
+	// Allow a small bounded margin beyond the ten-second lease for request and
+	// scheduler latency; the conformance harness has no direct Valkey clock
+	// control.
+	time.Sleep(11 * time.Second)
+	if etag := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, data); etag == "" {
+		t.Fatal("identical retry returned an empty ETag")
+	}
+	status, _ = uploadPartStatus(t, gw, inst.Bucket, key, uploadID, 1, bytes.Repeat([]byte("changed"), 1024))
+	if status != http.StatusConflict {
+		t.Fatalf("changed content status=%d, want %d", status, http.StatusConflict)
+	}
+}
+
+type sec48FailOnceTransport struct {
+	inner  http.RoundTripper
+	mu     sync.Mutex
+	failed bool
+}
+
+func (t *sec48FailOnceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	if !t.failed && req.URL.Query().Get("partNumber") == "1" && req.URL.Query().Get("uploadId") != "" {
+		t.failed = true
+		t.mu.Unlock()
+		return nil, harness.ErrConnectionReset
+	}
+	t.mu.Unlock()
+	return t.inner.RoundTrip(req)
 }
 
 func testSEC38_EncryptedMPU_ChangedPartReplacementRejected(t *testing.T, inst provider.Instance) {

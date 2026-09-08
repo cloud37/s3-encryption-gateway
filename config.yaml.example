@@ -15,6 +15,9 @@ allow_bucket_creation: false
 # Set MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true only while migrating legacy MPUs.
 multipart_state:
   allow_untracked_plaintext_uploads: false
+  # Identical encrypted part retries may reacquire after this lease expires.
+  # Valid range: 10s–15m. Default: 2m.
+  reservation_lease: "2m"
 
 auth:
   # Maximum acceptable clock skew for SigV4 timestamp validation.

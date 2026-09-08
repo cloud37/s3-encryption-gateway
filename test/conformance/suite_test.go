@@ -171,6 +171,7 @@ func TestConformance(t *testing.T) {
 				{"EncryptedMPU_AbortCleansState", provider.CapEncryptedMPU, testEncryptedMPUAbortCleansState},
 				{"EncryptedMPU_LargeObject", provider.CapEncryptedMPU, testEncryptedMPU_LargeObject},
 				{"SEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_IdenticalPartRetryReturnsStoredETag},
+				{"testSEC48_EncryptedMPUIdenticalPartRetry", provider.CapEncryptedMPU, testSEC48_EncryptedMPUIdenticalPartRetry},
 				{"SEC38_EncryptedMPU_ChangedPartReplacementRejected", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_ChangedPartReplacementRejected},
 				{"SEC38_EncryptedMPU_CompleteSelectedSubset", provider.CapEncryptedMPU, testSEC38_EncryptedMPU_CompleteSelectedSubset},
 				{"SEC46_PlaintextAndEncryptedMPUModePersistence", provider.CapMultipartUpload, testSEC46_PlaintextAndEncryptedMPUModePersistence},

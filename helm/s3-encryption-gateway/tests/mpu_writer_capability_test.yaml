@@ -63,3 +63,37 @@ tests:
           content:
             name: MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS
             value: "true"
+  - it: renders the default reservation lease
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MPU_RESERVATION_LEASE
+            value: "2m"
+  - it: renders an overridden reservation lease
+    set:
+      config.multipartState.reservationLease.value: "10m"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MPU_RESERVATION_LEASE
+            value: "10m"
+  - it: renders the minimum reservation lease bound
+    set:
+      config.multipartState.reservationLease.value: "10s"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MPU_RESERVATION_LEASE
+            value: "10s"
+  - it: accepts the maximum reservation lease bound
+    set:
+      config.multipartState.reservationLease.value: "15m"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MPU_RESERVATION_LEASE
+            value: "15m"

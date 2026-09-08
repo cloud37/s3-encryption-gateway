@@ -1236,6 +1236,10 @@
           "description": "Encrypted multipart upload state store (V0.6-SEC-3 / ADR-0009). External Valkey is required when track is set.",
           "additionalProperties": false,
           "properties": {
+            "reservationLease": {
+              "allOf": [{ "$ref": "#/$defs/configValue" }],
+              "description": "Lease for recovering identical encrypted MPU part reservations (10s–15m, default 2m). Renders MPU_RESERVATION_LEASE."
+            },
             "allowUntrackedPlaintextUploads": {
               "allOf": [{ "$ref": "#/$defs/configValue" }],
               "description": "Migration-only compatibility for MPUs without routing state. Default false (fail-closed); renders MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS."

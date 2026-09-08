@@ -95,6 +95,10 @@ The S3 Encryption Gateway is designed with the following properties:
 Header-authenticated SigV4 requests with a concrete lowercase SHA-256
 `X-Amz-Content-Sha256` value are hashed before routing, encryption, backend
 access, cache updates, or multipart state mutation. The gateway streams the
+
+Encrypted MPU reservations use bounded Valkey-server-time leases for ambiguous
+backend outcomes. Only an identical plaintext claim can reacquire an expired
+lease; token fencing rejects stale commit, renew, and release operations.
 body into a mode-0600 temporary file, compares the digest in constant time,
 and only then publishes the replayable body to downstream handlers. Mismatches
 are rejected atomically and temporary files are removed on success, failure,

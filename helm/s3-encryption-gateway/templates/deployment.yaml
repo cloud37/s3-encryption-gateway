@@ -327,6 +327,10 @@ spec:
         - name: MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS
           value: {{ .Values.config.multipartState.allowUntrackedPlaintextUploads.value | quote }}
         {{- end }}
+        {{- if .Values.config.multipartState.reservationLease.value }}
+        - name: MPU_RESERVATION_LEASE
+          value: {{ .Values.config.multipartState.reservationLease.value | quote }}
+        {{- end }}
         {{- if .Values.config.multipartState.valkey.encryptionPassword.value }}
         - name: VALKEY_ENCRYPTION_PASSWORD
           value: {{ .Values.config.multipartState.valkey.encryptionPassword.value | quote }}

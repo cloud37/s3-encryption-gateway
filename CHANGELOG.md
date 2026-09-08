@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **Encrypted MPU reservation recovery (V1.0-SEC-48):** identical retries can
+  recover after a bounded, token-fenced lease without permitting changed
+  plaintext to reuse deterministic nonces.
+
 - **Explicit bucket configuration administration (V1.0-SEC-47):** Bucket
   configuration PUT/DELETE operations require the independent scoped `manage`
   grant, and raw configuration bodies are capped at 1 MiB.

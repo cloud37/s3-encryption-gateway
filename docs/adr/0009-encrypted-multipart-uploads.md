@@ -1,5 +1,14 @@
 # ADR 0009: Encrypted Multipart Uploads with Per-Upload DEK and Finalization Manifest
 
+## Ambiguous backend recovery (V1.0-SEC-48)
+
+An encrypted part reservation is retained after backend invocation, including
+errors whose outcome is ambiguous. Identical retries may reacquire it after
+the `multipart_state.reservation_lease` interval (default 2 minutes, bounded
+to 10 seconds–15 minutes); changed plaintext remains permanently rejected.
+Valkey `TIME` determines expiry and token fencing prevents stale workers from
+committing, renewing, or releasing a transferred reservation.
+
 ## Routing-state safety update (V1.0-SEC-46)
 
 Valkey stores a routing record for every new MPU, including plaintext opt-out

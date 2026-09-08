@@ -592,6 +592,8 @@ config:
   # values below are for supplying an external Valkey cluster instead; leave
   # blank to inherit the in-cluster subchart address.
   multipartState:
+    reservationLease:
+      value: "2m"
     # Migration-only compatibility; default false to fail closed on missing state.
     allowUntrackedPlaintextUploads:
       value: ""
