@@ -27,7 +27,7 @@ conformance tests in CI.
 |---|---|---|---|---|---|---|---|---|---|
 | AWS SDK Go v2 | v1.102 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | boto3 | 1.35 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| awscli | 2.22 | ✅ | ✅ | ⚠️ | ✅ | ✅ | ✅ | ✅ | HeadObject via `s3api` |
+| awscli | 2.36.40 | ✅ | ✅ | ⚠️ | ✅ | ✅ | ✅ | ✅ | HeadObject via `s3api` |
 | s5cmd | 2.3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ETag caveat |
 | rclone | 1.68 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | Needs `--s3-copy-cutoff=1` |
 | minio-py | 7.2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
@@ -38,9 +38,13 @@ The matrix pins specific Docker image tags for container-based smoke tests.
 These tags correspond to the latest stable release at the time of certification.
 Requests to update pinned versions should be filed as a GitHub issue.
 
+Maintained conformance images use explicit, Renovate-managed version pins.
+Updates are reviewed through pull requests and the compatibility matrix; a
+versioned tag is reproducible by version but is not claimed to be immutable.
+
 | Tool | Image | Tag |
 |---|---|---|
-| awscli | `amazon/aws-cli` | `2.22.0` |
+| awscli | `amazon/aws-cli` | `2.36.40` |
 | s5cmd | `peak/s5cmd` | `v2.3.0` |
 | rclone | `rclone/rclone` | `1.68` |
 | boto3 / minio-py | `python` | `3.13-slim` |
@@ -127,9 +131,11 @@ go test -count=1 -tags=conformance -v \
 
 AWS SigV4 streaming payloads are supported only with the exact protocol modes
 documented in `SECURITY.md`. AWS CLI and SDK-style signed multi-chunk uploads
-are verified atomically before storage. Signed trailers and all four supported
+are verified atomically before storage. Signed trailers and all five supported
 checksum trailers are verified before storage; unknown or ambiguous modes are
 rejected rather than decoded as plaintext.
+
+The accepted checksum trailers are CRC64NVME, CRC32, CRC32C, SHA-1, and SHA-256.
 
 Header-authenticated non-streaming SigV4 requests may provide a concrete
 lowercase SHA-256 `X-Amz-Content-Sha256` value. The gateway hashes and spools

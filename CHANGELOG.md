@@ -36,6 +36,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **AWS CLI CRC64NVME uploads (issue #283):** validate the default CRC64NVME
+  AWS-chunked trailer and add Renovate-gated maintained image updates.
+
 - **Backend SSL configuration (issue #284):** `BACKEND_USE_SSL` now strictly
   overrides YAML configuration and controls the scheme for scheme-less backend
   endpoints in both SDK and proxy clients; explicit endpoint schemes remain

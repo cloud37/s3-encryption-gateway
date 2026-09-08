@@ -321,16 +321,19 @@ can be disabled with the corresponding environment variable.
 
 | Provider   | Image                           | Skip env var                    | Notes                                              |
 |------------|---------------------------------|---------------------------------|----------------------------------------------------|
-| `minio`    | `minio/minio:RELEASE.2024-...`  | `GATEWAY_TEST_SKIP_MINIO=1`     | Primary reference; PR gate uses this provider only |
-| `garage`   | `dxflrs/garage:v2.3.0`          | `GATEWAY_TEST_SKIP_GARAGE=1`    | Rust-based; requires bootstrap via admin REST API  |
-| `rustfs`   | `rustfs/rustfs:latest`          | `GATEWAY_TEST_SKIP_RUSTFS=1`    | Alpha-quality; capability bitmap is conservative   |
-| `seaweedfs`| `chrislusf/seaweedfs:latest`    | `GATEWAY_TEST_SKIP_SEAWEEDFS=1` | Blob-store-backed S3 gateway; single-node CI mode  |
+| `minio`    | `minio/minio:RELEASE.2024-...`  | `GATEWAY_TEST_SKIP_MINIO=1`     | Primary reference; PR-gated local provider          |
+| `garage`   | `dxflrs/garage:v2.4.1`          | `GATEWAY_TEST_SKIP_GARAGE=1`    | Rust-based; requires bootstrap via admin REST API  |
+| `rustfs`   | `rustfs/rustfs:v1.0.0-rc.5`     | `GATEWAY_TEST_SKIP_RUSTFS=1`    | Alpha-quality; PR-gated, capability bitmap conservative |
+| `seaweedfs`| `chrislusf/seaweedfs:4.46`      | `GATEWAY_TEST_SKIP_SEAWEEDFS=1` | Blob-store-backed; PR-gated local provider       |
+
+All four local providers (MinIO, Garage, RustFS, and SeaweedFS) run in the
+pull-request conformance gate. RustFS compatibility failures are reported and
+tracked as provider issues, but the provider remains part of the gate.
 
 **RustFS note**: RustFS is explicitly labelled "Do NOT use in production" by
-its authors as of 2026.  The provider is included to test gateway behaviour
+its authors as of 2026. The provider is included to test gateway behaviour
 against an actively-developed implementation and to provide early signal on
-compatibility.  Failing RustFS tests are not a PR gate blocker; they are
-tracked separately.
+compatibility.
 
 Confirmed capability gaps (full conformance run 2026-04-22):
 - **Object Lock** (`CapObjectLock` absent): RustFS accepts the `ObjectLockConfiguration`
@@ -384,7 +387,11 @@ MinIO/RustFS (~30 req/s) due to SeaweedFS's multi-component architecture.
 
 **The conformance contract**: test bodies must never branch on provider names.
 Use capability bits. The `TestConformance_NoProviderNameLiterals` AST check in
-`test/conformance/matrix_selftest.go` enforces this mechanically.
+`test/conformance/matrix_guard_test.go` enforces this mechanically.
+
+The legacy `integration`-tagged Azurite fixture is outside the PR conformance
+gate. It is retained for separate integration validation until migrated to the
+conformance tier.
 
 ---
 
