@@ -406,6 +406,168 @@ func TestStateStore_ReservePart_InProgress(t *testing.T) {
 	assert.ErrorIs(t, err, ErrPartInProgress)
 }
 
+func TestStateStore_ReservePart_IdenticalActiveLeaseInProgress(t *testing.T) {
+	TestStateStore_ReservePart_InProgress(t)
+}
+
+func TestStateStore_ReservePart_IdenticalExpiredLeaseReacquired(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.reservationLease = time.Second
+	st := sampleState("expired-lease")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	mr.SetTime(time.Now().Add(2 * time.Second))
+	r, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: p.Claim, PlainLen: p.PlainLen, Token: "tb"})
+	require.NoError(t, err)
+	assert.True(t, r.Reacquired)
+	assert.Equal(t, "tb", r.Token)
+}
+
+func TestStateStore_ReservePart_ChangedClaimNeverReacquired(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.reservationLease = time.Second
+	st := sampleState("changed-expired")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	mr.SetTime(time.Now().Add(2 * time.Second))
+	_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "b", PlainLen: 3, Token: "tb"})
+	assert.ErrorIs(t, err, ErrPartContentMismatch)
+}
+
+func TestStateStore_ReservationLease_StaleTokenCannotCommitReleaseOrRenew(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.reservationLease = time.Second
+	st := sampleState("stale-lease")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	mr.SetTime(time.Now().Add(2 * time.Second))
+	newP := p
+	newP.Token = "tb"
+	r, err := s.ReservePart(context.Background(), st.UploadID, newP)
+	require.NoError(t, err)
+	p.ETag, p.EncLen, p.ChunkCount = `"e"`, 19, 1
+	assert.Error(t, s.CommitPart(context.Background(), st.UploadID, p))
+	assert.Error(t, s.ReleasePart(context.Background(), st.UploadID, 1, p.Token))
+	assert.Error(t, s.RenewPart(context.Background(), st.UploadID, 1, p.Token))
+	assert.NotZero(t, r.Revision)
+}
+
+func TestStateStore_ReservationLease_RenewActiveLease(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.reservationLease = time.Second
+	st := sampleState("renew-active")
+	require.NoError(t, s.Create(context.Background(), st))
+	p := reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	mr.SetTime(time.Now().Add(500 * time.Millisecond))
+	require.NoError(t, s.RenewPart(context.Background(), st.UploadID, 1, p.Token))
+	assert.NoError(t, s.RenewPart(context.Background(), st.UploadID, 1, p.Token))
+}
+
+func TestStateStore_RenewPart_InvalidClaims(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		pn    int32
+		token string
+	}{
+		{name: "zero part", pn: 0, token: "token"},
+		{name: "part too large", pn: 10001, token: "token"},
+		{name: "empty token", pn: 1, token: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.RenewPart(ctx, "missing", tc.pn, tc.token)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid renew claim")
+		})
+	}
+}
+
+func TestStateStore_RenewPart_MissingPartAndCommittedPart(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	st := sampleState("renew-missing-part")
+	require.NoError(t, s.Create(ctx, st))
+	assert.ErrorIs(t, s.RenewPart(ctx, st.UploadID, 1, "token"), ErrUploadNotFound)
+
+	p := reserveTestPart(t, s, st.UploadID, 1, "claim", "token")
+	commitTestPart(t, s, st.UploadID, p, `"etag"`)
+	assert.ErrorIs(t, s.RenewPart(ctx, st.UploadID, 1, p.Token), ErrRevisionConflict)
+}
+
+func TestStateStore_RenewPart_BackendResultBranches(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		result     interface{}
+		backendErr error
+		want       error
+	}{
+		{name: "invalid version", result: int64(3), want: ErrInvalidStateVersion},
+		{name: "invalid phase", result: int64(4), want: ErrInvalidPhase},
+		{name: "revision conflict", result: int64(2), want: ErrRevisionConflict},
+		{name: "malformed result", result: "not-an-integer"},
+		{name: "backend failure", backendErr: errors.New("connection lost")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestStore(t)
+			st := sampleState("renew-result-" + tc.name)
+			require.NoError(t, s.Create(ctx, st))
+			original := runRenewPart
+			t.Cleanup(func() { runRenewPart = original })
+			runRenewPart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+				return tc.result, tc.backendErr
+			}
+			err := s.RenewPart(ctx, st.UploadID, 1, "token")
+			if tc.want != nil {
+				assert.ErrorIs(t, err, tc.want)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestStateStore_RenewPart_RetryLimit(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	st := sampleState("renew-retry-limit")
+	require.NoError(t, s.Create(ctx, st))
+	original := runRenewPart
+	t.Cleanup(func() { runRenewPart = original })
+	calls := 0
+	runRenewPart = func(context.Context, redis.UniversalClient, []string, ...interface{}) (interface{}, error) {
+		calls++
+		return int64(5), nil
+	}
+	err := s.RenewPart(ctx, st.UploadID, 1, "token")
+	assert.ErrorIs(t, err, ErrRevisionConflict)
+	assert.Equal(t, 16, calls)
+}
+
+func TestStateStore_ReservationLease_ConcurrentTakeoverSingleWinner(t *testing.T) {
+	s, mr := newTestStore(t)
+	s.reservationLease = time.Second
+	st := sampleState("concurrent-takeover")
+	require.NoError(t, s.Create(context.Background(), st))
+	reserveTestPart(t, s, st.UploadID, 1, "a", "ta")
+	mr.SetTime(time.Now().Add(2 * time.Second))
+	results := make(chan error, 2)
+	for _, token := range []string{"tb", "tc"} {
+		go func(token string) {
+			_, err := s.ReservePart(context.Background(), st.UploadID, PartClaim{PartNumber: 1, Claim: "a", PlainLen: 3, Token: token})
+			results <- err
+		}(token)
+	}
+	var success int
+	for i := 0; i < 2; i++ {
+		if <-results == nil {
+			success++
+		}
+	}
+	assert.Equal(t, 1, success)
+}
+
 func TestStateStore_ReservePart_ConcurrentDifferentContent(t *testing.T) {
 	s, _ := newTestStore(t)
 	st := sampleState("concurrent-content")

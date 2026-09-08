@@ -820,11 +820,12 @@ func main() {
 	var mpuStore mpupkg.StateStore
 	if cfg.MultipartState.Valkey.Addr != "" {
 		var err error
-		mpuStore, err = mpupkg.NewValkeyStateStore(
+		mpuStore, err = mpupkg.NewValkeyStateStoreWithLease(
 			context.Background(),
 			cfg.MultipartState.Valkey,
 			keyManager,              // always non-nil per §1.5 of V1.0-SEC-30 plan
 			cfg.Encryption.Password, // legacy password for V1 fallback (empty if none)
+			cfg.MultipartState.ReservationLease,
 		)
 		if err != nil {
 			logger.WithError(err).Fatal("Failed to initialise MPU Valkey state store")

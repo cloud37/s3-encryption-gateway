@@ -929,7 +929,8 @@ type AdminRateLimitConfig struct {
 
 // MultipartStateConfig holds configuration for the multipart-upload encryption state store.
 type MultipartStateConfig struct {
-	Valkey ValkeyConfig `yaml:"valkey"`
+	Valkey           ValkeyConfig  `yaml:"valkey"`
+	ReservationLease time.Duration `yaml:"reservation_lease" env:"MPU_RESERVATION_LEASE"`
 	// AllowUntrackedPlaintextUploads permits legacy MPUs created before routing
 	// records were persisted. It is intentionally disabled by default.
 	AllowUntrackedPlaintextUploads bool `yaml:"allow_untracked_plaintext_uploads" env:"MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS"`
@@ -1117,6 +1118,7 @@ func LoadConfig(path string) (*Config, error) {
 			},
 		},
 		MultipartState: MultipartStateConfig{
+			ReservationLease: 2 * time.Minute,
 			Valkey: ValkeyConfig{
 				TTLSeconds:   ValkeyDefaultTTLSeconds,
 				DialTimeout:  2 * time.Second,
@@ -1991,6 +1993,13 @@ func loadFromEnv(config *Config) error {
 	if v := os.Getenv("MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS"); v != "" {
 		config.MultipartState.AllowUntrackedPlaintextUploads = v == "true" || v == "1"
 	}
+	if v := os.Getenv("MPU_RESERVATION_LEASE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid MPU_RESERVATION_LEASE %q: %w", v, err)
+		}
+		config.MultipartState.ReservationLease = d
+	}
 	// V1.0-S3-3 — ListObjects plaintext size translation via Valkey size cache.
 	if v := os.Getenv("LIST_SIZE_TRANSLATE_ENABLED"); v != "" {
 		config.ListSizeTranslate.Enabled = v == "true" || v == "1"
@@ -2444,6 +2453,14 @@ func (c *Config) Validate() error {
 	}
 	if c.MultipartState.AllowUntrackedPlaintextUploads {
 		slog.Warn("multipart_state.allow_untracked_plaintext_uploads is enabled — missing MPU state will be treated as legacy plaintext; use only during migration")
+	}
+	// A zero value is retained for callers that construct Config directly; it
+	// means the documented two-minute default. Nonzero values remain bounded.
+	if c.MultipartState.ReservationLease == 0 {
+		c.MultipartState.ReservationLease = 2 * time.Minute
+	}
+	if c.MultipartState.ReservationLease < 10*time.Second || c.MultipartState.ReservationLease > 15*time.Minute {
+		return fmt.Errorf("multipart_state.reservation_lease must be between 10s and 15m")
 	}
 
 	// Validate backend retry configuration (V0.6-PERF-2).

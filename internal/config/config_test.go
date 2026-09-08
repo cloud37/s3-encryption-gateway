@@ -27,6 +27,48 @@ func TestAllowUntrackedPlaintextUploads_DefaultFalse(t *testing.T) {
 	assert.False(t, cfg.MultipartState.AllowUntrackedPlaintextUploads)
 }
 
+func TestReservationLease_DefaultAndBounds(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	require.NoError(t, err)
+	_, err = f.WriteString("auth:\n  credentials:\n    - access_key: test\n      secret_key: test\nbackend:\n  access_key: test\n  secret_key: test\nencryption:\n  password: test\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	cfg, err := LoadConfig(f.Name())
+	require.NoError(t, err)
+	// Simulate a directly constructed/decoded Config that omitted the field.
+	cfg.MultipartState.ReservationLease = 0
+	assert.NoError(t, cfg.Validate())
+	assert.Equal(t, 2*time.Minute, cfg.MultipartState.ReservationLease)
+	assert.Equal(t, 2*time.Minute, cfg.MultipartState.ReservationLease)
+	cfg.MultipartState.ReservationLease = 9 * time.Second
+	assert.Error(t, cfg.Validate())
+	cfg.MultipartState.ReservationLease = 16 * time.Minute
+	assert.Error(t, cfg.Validate())
+	cfg.MultipartState.ReservationLease = 10 * time.Second
+	assert.NoError(t, cfg.Validate())
+	cfg.MultipartState.ReservationLease = 15 * time.Minute
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestLoadConfig_ReservationLeaseEnvOverride(t *testing.T) {
+	t.Setenv("MPU_RESERVATION_LEASE", "10s")
+	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
+	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
+	t.Setenv("ENCRYPTION_PASSWORD", "test-password")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("auth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\n"), 0600))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Second, cfg.MultipartState.ReservationLease)
+}
+
+func TestLoadConfig_InvalidReservationLeaseEnvReturnsError(t *testing.T) {
+	t.Setenv("MPU_RESERVATION_LEASE", "not-a-duration")
+	_, err := LoadConfig("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MPU_RESERVATION_LEASE")
+}
+
 func TestAllowUntrackedPlaintextUploads_EnvAndWarning(t *testing.T) {
 	t.Setenv("MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS", "true")
 	t.Setenv("BACKEND_ACCESS_KEY", "test-key")

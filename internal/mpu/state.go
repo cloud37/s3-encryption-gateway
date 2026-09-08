@@ -77,14 +77,15 @@ const (
 
 // PartRecord holds per-part encryption metadata persisted in Valkey.
 type PartRecord struct {
-	PartNumber int32      `json:"pn"`
-	ETag       string     `json:"etag"`
-	PlainLen   int64      `json:"plain_len"`
-	EncLen     int64      `json:"enc_len"`
-	ChunkCount int32      `json:"chunks"`
-	Claim      string     `json:"claim,omitempty"`
-	Status     PartStatus `json:"status,omitempty"`
-	Token      string     `json:"token,omitempty"`
+	PartNumber          int32      `json:"pn"`
+	ETag                string     `json:"etag"`
+	PlainLen            int64      `json:"plain_len"`
+	EncLen              int64      `json:"enc_len"`
+	ChunkCount          int32      `json:"chunks"`
+	Claim               string     `json:"claim,omitempty"`
+	Status              PartStatus `json:"status,omitempty"`
+	Token               string     `json:"token,omitempty"`
+	LeaseUntilUnixMilli int64      `json:"lease_until_ms,omitempty"`
 }
 
 type PartClaim struct {
@@ -99,10 +100,12 @@ type PartClaim struct {
 }
 
 type Reservation struct {
-	Token         string
-	Revision      uint64
-	CommittedETag string
-	AlreadyDone   bool
+	Token               string
+	Revision            uint64
+	CommittedETag       string
+	AlreadyDone         bool
+	LeaseUntilUnixMilli int64
+	Reacquired          bool
 }
 
 type SelectedPart struct {
@@ -186,6 +189,7 @@ type StateStore interface {
 	Get(ctx context.Context, uploadID string) (*UploadState, error)
 
 	ReservePart(ctx context.Context, uploadID string, part PartClaim) (Reservation, error)
+	RenewPart(ctx context.Context, uploadID string, partNumber int32, token string) error
 	ReleasePart(ctx context.Context, uploadID string, partNumber int32, token string) error
 	CommitPart(ctx context.Context, uploadID string, part PartClaim) error
 	BeginComplete(ctx context.Context, uploadID string, selected []SelectedPart) (*UploadState, uint64, error)
@@ -224,22 +228,51 @@ if current then
   local decoded = cjson.decode(current)
   local claim = decoded.claim
   local status = decoded.status
-  local etag = decoded.etag or ''
-  if claim ~= ARGV[2] then return {3} end
-  if status == 'reserved' then return {4} end
+	local etag = decoded.etag or ''
+	if claim ~= ARGV[2] then return {3} end
+	if status == 'reserved' then
+	  local now = redis.call('TIME')
+	  local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+	  if not decoded.lease_until_ms or tonumber(decoded.lease_until_ms) > nowms then return {4} end
+	end
   if status == 'committed' then return {5, etag} end
 end
 local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or '1') + 1
-local value = cjson.encode({pn=tonumber(ARGV[1]), claim=ARGV[2], plain_len=tonumber(ARGV[3]), status='reserved', token=ARGV[4]})
-redis.call('HSET', KEYS[1], field, value, 'meta', ARGV[6], 'revision', revision)
-redis.call('EXPIRE', KEYS[1], ARGV[7])
-return {6, revision}
+local now = redis.call('TIME')
+local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+	local lease = nowms + tonumber(ARGV[6])
+local value = cjson.encode({pn=tonumber(ARGV[1]), claim=ARGV[2], plain_len=tonumber(ARGV[3]), status='reserved', token=ARGV[4], lease_until_ms=lease})
+redis.call('HSET', KEYS[1], field, value, 'meta', ARGV[7], 'revision', revision)
+redis.call('EXPIRE', KEYS[1], ARGV[8])
+	if current then return {8, revision, lease} end
+	return {6, revision, lease}
 `
 
 var reservePartLua = redis.NewScript(reservePartScript)
 
 var runReservePart = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
 	return reservePartLua.Run(ctx, client, keys, args...).Result()
+}
+
+const renewPartScript = `
+if redis.call('HGET', KEYS[1], 'state_version') ~= '2' then return 3 end
+if redis.call('HGET', KEYS[1], 'phase') ~= 'open' then return 4 end
+if tonumber(redis.call('HGET', KEYS[1], 'revision') or '0') ~= tonumber(ARGV[3]) then return 5 end
+local field = 'part:' .. ARGV[1]
+local current = redis.call('HGET', KEYS[1], field)
+if not current then return 0 end
+local decoded = cjson.decode(current)
+if decoded.status ~= 'reserved' or decoded.token ~= ARGV[2] then return 2 end
+local now = redis.call('TIME')
+local nowms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+decoded.lease_until_ms = nowms + tonumber(ARGV[4])
+redis.call('HSET', KEYS[1], field, cjson.encode(decoded))
+return 1
+`
+
+var renewPartLua = redis.NewScript(renewPartScript)
+var runRenewPart = func(ctx context.Context, client redis.UniversalClient, keys []string, args ...interface{}) (interface{}, error) {
+	return renewPartLua.Run(ctx, client, keys, args...).Result()
 }
 
 const commitPartScript = `
@@ -390,12 +423,13 @@ const (
 
 // ValkeyStateStore implements StateStore backed by Valkey (via go-redis/v9).
 type ValkeyStateStore struct {
-	client       redis.UniversalClient
-	ttl          time.Duration
-	stateDEK     []byte            // random 32-byte AES-256 key (envelope DEK)
-	stateKeyV1   []byte            // legacy HKDF key for pre-upgrade state (nil if none)
-	keyManager   crypto.KeyManager // wraps/unwraps the state DEK
-	encryptState bool
+	client           redis.UniversalClient
+	ttl              time.Duration
+	reservationLease time.Duration
+	stateDEK         []byte            // random 32-byte AES-256 key (envelope DEK)
+	stateKeyV1       []byte            // legacy HKDF key for pre-upgrade state (nil if none)
+	keyManager       crypto.KeyManager // wraps/unwraps the state DEK
+	encryptState     bool
 	// allowLegacyPlaintext permits Get/List to fall back to plaintext JSON
 	// when state AEAD decryption fails. Intended ONLY for one-time migration
 	// from a pre-encryption deployment. Default false (fail-closed). V1.0-SEC-30.
@@ -405,6 +439,13 @@ type ValkeyStateStore struct {
 	metrics          *metrics.Metrics
 	writerCapability string
 	writerPresenceID string
+}
+
+func (s *ValkeyStateStore) leaseDuration() time.Duration {
+	if s.reservationLease <= 0 {
+		return 2 * time.Minute
+	}
+	return s.reservationLease
 }
 
 // NewValkeyStateStore constructs a ValkeyStateStore.
@@ -417,6 +458,10 @@ type ValkeyStateStore struct {
 // legacy state. The V1 key is read-only (never used for new encryption) and
 // expires with the 7-day state TTL.
 func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, keyManager crypto.KeyManager, legacyPassword string) (*ValkeyStateStore, error) {
+	return NewValkeyStateStoreWithLease(ctx, cfg, keyManager, legacyPassword, 2*time.Minute)
+}
+
+func NewValkeyStateStoreWithLease(ctx context.Context, cfg config.ValkeyConfig, keyManager crypto.KeyManager, legacyPassword string, reservationLease time.Duration) (*ValkeyStateStore, error) {
 	password := ""
 	if cfg.PasswordEnv != "" {
 		password = os.Getenv(cfg.PasswordEnv)
@@ -484,6 +529,7 @@ func NewValkeyStateStore(ctx context.Context, cfg config.ValkeyConfig, keyManage
 	s := &ValkeyStateStore{
 		client:               client,
 		ttl:                  ttl,
+		reservationLease:     reservationLease,
 		stateDEK:             stateDEK,
 		stateKeyV1:           stateKeyV1,
 		keyManager:           keyManager,
@@ -800,7 +846,7 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 		if err != nil {
 			return Reservation{}, err
 		}
-		result, err := runReservePart(ctx, s.client, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.PlainLen, part.Token, state.Revision, meta, int(s.ttl/time.Second))
+		result, err := runReservePart(ctx, s.client, []string{uploadKey(uploadID)}, part.PartNumber, part.Claim, part.PlainLen, part.Token, state.Revision, int(s.leaseDuration()/time.Millisecond), meta, int(s.ttl/time.Second))
 		if err != nil {
 			return Reservation{}, wrapRedisErr(err)
 		}
@@ -840,7 +886,24 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 			if revision < 0 {
 				return Reservation{}, fmt.Errorf("mpu: invalid reserve revision")
 			}
-			return Reservation{Token: part.Token, Revision: uint64(revision)}, nil
+			var lease int64
+			if len(values) > 2 {
+				lease, _ = redisInt(values[2])
+			}
+			return Reservation{Token: part.Token, Revision: uint64(revision), LeaseUntilUnixMilli: lease}, nil
+		case 8:
+			if len(values) < 2 {
+				return Reservation{}, fmt.Errorf("mpu: malformed reserve revision")
+			}
+			revision, ok := redisInt(values[1])
+			if !ok || revision < 0 {
+				return Reservation{}, fmt.Errorf("mpu: invalid reserve revision")
+			}
+			var lease int64
+			if len(values) > 2 {
+				lease, _ = redisInt(values[2])
+			}
+			return Reservation{Token: part.Token, Revision: uint64(revision), LeaseUntilUnixMilli: lease, Reacquired: true}, nil
 		case 7:
 			continue
 		default:
@@ -848,6 +911,41 @@ func (s *ValkeyStateStore) ReservePart(ctx context.Context, uploadID string, par
 		}
 	}
 	return Reservation{}, ErrRevisionConflict
+}
+
+func (s *ValkeyStateStore) RenewPart(ctx context.Context, uploadID string, partNumber int32, token string) error {
+	if partNumber < 1 || partNumber > 10000 || token == "" {
+		return fmt.Errorf("mpu: invalid renew claim")
+	}
+	for attempts := 0; attempts < 16; attempts++ {
+		state, err := s.Get(ctx, uploadID)
+		if err != nil {
+			return err
+		}
+		result, err := runRenewPart(ctx, s.client, []string{uploadKey(uploadID)}, partNumber, token, state.Revision, int(s.leaseDuration()/time.Millisecond))
+		if err != nil {
+			return wrapRedisErr(err)
+		}
+		code, ok := redisInt(result)
+		if !ok {
+			return fmt.Errorf("mpu: malformed renew result")
+		}
+		switch code {
+		case 1:
+			return nil
+		case 0:
+			return ErrUploadNotFound
+		case 3:
+			return ErrInvalidStateVersion
+		case 4:
+			return ErrInvalidPhase
+		case 5:
+			continue
+		default:
+			return ErrRevisionConflict
+		}
+	}
+	return ErrRevisionConflict
 }
 
 func (s *ValkeyStateStore) CommitPart(ctx context.Context, uploadID string, part PartClaim) error {
