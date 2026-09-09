@@ -86,6 +86,25 @@ type awscliRunner struct{}
 func (r *awscliRunner) Name() string  { return "awscli" }
 func (r *awscliRunner) Image() string { return awsCLIImage }
 
+// awscliListBucketsRunner verifies the root ListBuckets command rather than a
+// bucket-scoped ListObjects command.
+type awscliListBucketsRunner struct{}
+
+func (r *awscliListBucketsRunner) Name() string  { return "awscli-list-buckets" }
+func (r *awscliListBucketsRunner) Image() string { return awsCLIImage }
+func (r *awscliListBucketsRunner) Script(env sdkTestEnv) string {
+	return fmt.Sprintf("set -e\naws s3 ls --endpoint-url \"$GATEWAY_ENDPOINT\" | grep -q %[1]s\necho 'awscli-list-buckets:OK'\n", env.Bucket)
+}
+func (r *awscliListBucketsRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("awscli list buckets exited %d", code)
+	}
+	if !strings.Contains(out, "awscli-list-buckets:OK") {
+		return fmt.Errorf("awscli list buckets: expected OK marker in stdout")
+	}
+	return nil
+}
+
 func (r *awscliRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf("set -e\n"+
 		"# PutObject via s3 cp\n"+

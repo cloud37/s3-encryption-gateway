@@ -7,7 +7,7 @@ import (
 )
 
 func TestAWSCLIRunners_PinCRC64NVMEVersion(t *testing.T) {
-	for _, runner := range []sdkToolRunner{&awscliRunner{}, &awscliCopyMetadataRunner{}} {
+	for _, runner := range []sdkToolRunner{&awscliRunner{}, &awscliCopyMetadataRunner{}, &awscliListBucketsRunner{}} {
 		t.Run(runner.Name(), func(t *testing.T) {
 			if runner.Image() != awsCLIImage || !strings.HasPrefix(runner.Image(), "amazon/aws-cli:") {
 				t.Fatalf("image = %q, want shared explicit AWS CLI image %q", runner.Image(), awsCLIImage)
@@ -33,6 +33,25 @@ func TestAWSCLIRunners_PinCRC64NVMEVersion(t *testing.T) {
 	}
 }
 
+func TestAWSCLIListBucketsRunner_Contract(t *testing.T) {
+	runner := &awscliListBucketsRunner{}
+	if runner.Image() != awsCLIImage {
+		t.Fatalf("image=%q want=%q", runner.Image(), awsCLIImage)
+	}
+	script := runner.Script(sdkTestEnv{Bucket: "fixture-bucket"})
+	for _, want := range []string{`aws s3 ls --endpoint-url "$GATEWAY_ENDPOINT"`, "fixture-bucket", "awscli-list-buckets:OK"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q: %s", want, script)
+		}
+	}
+	if strings.Contains(script, "s3://") {
+		t.Fatalf("root list command must not target a bucket: %s", script)
+	}
+	if runner.AssertOutput(1, "awscli-list-buckets:OK", "") == nil || runner.AssertOutput(0, "", "") == nil || runner.AssertOutput(0, "awscli-list-buckets:OK", "") != nil {
+		t.Fatal("runner output contract failed")
+	}
+}
+
 // TestRunToolContainer_ExitNonZero_ReturnsError asserts that every
 // container-based runner's AssertOutput returns a non-nil error when the
 // container exits with a non-zero code. This verifies the error-detection
@@ -41,6 +60,7 @@ func TestRunToolContainer_ExitNonZero_ReturnsError(t *testing.T) {
 	runners := []sdkToolRunner{
 		&boto3Runner{},
 		&awscliRunner{},
+		&awscliListBucketsRunner{},
 		&s5cmdRunner{},
 		&rcloneRunner{},
 		&minioPyRunner{},
@@ -67,6 +87,7 @@ func TestRunToolContainer_MissingMarker_ReturnsError(t *testing.T) {
 	runners := []sdkToolRunner{
 		&boto3Runner{},
 		&awscliRunner{},
+		&awscliListBucketsRunner{},
 		&s5cmdRunner{},
 		&rcloneRunner{},
 		&minioPyRunner{},

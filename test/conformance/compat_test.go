@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"testing"
 	"time"
 
@@ -20,6 +21,30 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
+
+func testCompatAWSCLIListBucketsPermissions(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	u, err := url.Parse(inst.Endpoint)
+	if err != nil || u.Scheme != "http" {
+		t.Skipf("provider fixture lacks HTTP endpoint required for scheme-less forwarding: %q", inst.Endpoint)
+	}
+	for _, credential := range []config.GatewayCredential{
+		{AccessKey: inst.AccessKey, SecretKey: inst.SecretKey, Permissions: compatPermissionPtr(config.ObjectPermissionReadWrite)},
+		{AccessKey: inst.AccessKey, SecretKey: inst.SecretKey, BucketPermissions: []config.BucketPermission{config.BucketPermissionCreate}},
+		{AccessKey: inst.AccessKey, SecretKey: inst.SecretKey, BucketPermissions: []config.BucketPermission{config.BucketPermissionDelete}},
+		{AccessKey: inst.AccessKey, SecretKey: inst.SecretKey, Permissions: compatPermissionPtr(config.ObjectPermissionReadWrite), BucketPermissions: []config.BucketPermission{config.BucketPermissionCreate, config.BucketPermissionDelete}},
+	} {
+		gw := harness.StartGateway(t, inst, harness.WithBucketManagementCredentials(credential), harness.WithConfigMutator(func(cfg *config.Config) { cfg.Backend.Endpoint = u.Host; cfg.Backend.UseSSL = false }))
+		env := sdkTestEnv{Endpoint: gw.URL, Region: inst.Region, AccessKey: inst.AccessKey, SecretKey: inst.SecretKey, Bucket: inst.Bucket, Key: compatUniqueKey(t)}
+		if err := runToolContainer(context.Background(), t, &awscliListBucketsRunner{}, env); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func compatPermissionPtr(permission config.ObjectPermission) *config.ObjectPermission {
+	return &permission
+}
 
 // newCompatS3Client creates an AWS SDK Go v2 S3 client routed through the
 // gateway at the given URL.

@@ -337,6 +337,7 @@ func TestConformance(t *testing.T) {
 				{"Compat_AWSGoV2", provider.CapSDKAWSGoV2, testCompatSmoke_AWSGoV2},
 				{"Compat_Boto3", provider.CapSDKBoto3, testCompatSmoke_Boto3},
 				{"Compat_AWSCLI", provider.CapCLIAWSCLI, testCompatSmoke_AWSCLI},
+				{"Compat_AWSCLI_ListBucketsPermissions", provider.CapCLIAWSCLI, testCompatAWSCLIListBucketsPermissions},
 				{"Compat_S5cmd", provider.CapCLIS5cmd, testCompatSmoke_S5cmd},
 				{"Compat_Rclone", provider.CapCLIRclone, testCompatSmoke_Rclone},
 				{"Compat_Rclone_SyncCheck_SizeCache", provider.CapCLIRclone | provider.CapSizeTranslation, testRcloneSyncCheck_SizeCache},
