@@ -23,7 +23,7 @@ import (
 )
 
 // renovate: datasource=docker depName=ghcr.io/cosmian/kms versioning=docker
-const cosmianKMSImage = "ghcr.io/cosmian/kms:5.22.0"
+const cosmianKMSImage = "ghcr.io/cosmian/kms:5.27.1"
 
 const (
 
