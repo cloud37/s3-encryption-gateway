@@ -134,6 +134,7 @@ func BenchmarkSpoolManager_Grow(b *testing.B) {
 	m := NewSpoolManager(int64(b.N))
 	r, _ := m.Acquire(context.Background(), 0, int64(b.N))
 	b.ReportAllocs()
+	b.SetBytes(1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = r.Grow(1)
