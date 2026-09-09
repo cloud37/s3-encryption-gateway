@@ -148,7 +148,7 @@ config:
 | `config.backend.provider` | Provider hint string (optional) | `""` |
 | `config.backend.useSSL` | Selects HTTPS for scheme-less backend endpoints; explicit `http://` or `https://` endpoint schemes take precedence | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
-Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it or use `["*"]` for unrestricted access, or use `[]` for deny-all. A bare `*` is broad authority, particularly with `create`, `delete`, or `manage`. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration).
+Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it or use `["*"]` for unrestricted access, or use `[]` for deny-all. A bare `*` is broad authority, particularly with `create`, `delete`, or `manage`. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration). Root ListBuckets is allowed for both `ro` and `rw` (with omitted permissions defaulting to `rw`): an absent `buckets` scope returns backend-visible buckets, while an explicit empty `buckets: []` scope returns a successful empty inventory.
 
 #### Credential Migration and Reload
 

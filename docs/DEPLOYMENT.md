@@ -6,7 +6,19 @@ The S3 Encryption Gateway is designed for containerized deployment in Kubernetes
 
 ## Credential Authorization
 
-Gateway credentials can be limited to exact buckets and trailing-prefix scopes. Omit `buckets` or use `buckets: ["*"]` to retain unrestricted access, or set `buckets: []` to deny all access. A bare `*` is broad authority and should be limited to trusted provisioning or administrative credentials, especially with lifecycle grants. Set `permissions: ro` for read-only object access; `rw` is the default. Bucket lifecycle permissions require explicit `bucket_permissions: [create, delete]` grants. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
+Gateway credentials can be limited to exact buckets and trailing-prefix scopes. Omit `buckets` or use `buckets: ["*"]` to retain unrestricted access, or set `buckets: []` to deny all access. A bare `*` is broad authority and should be limited to trusted provisioning or administrative credentials, especially with lifecycle grants. Set `permissions: ro` for read-only object access; `rw` is the default.
+
+The following ListBuckets behavior applies to every credential combination:
+
+| `permissions` | `bucket_permissions` | `buckets` | ListBuckets result |
+|---|---|---|---|
+| omitted (defaults to `rw`) | omitted | absent | Forward and return backend-visible buckets |
+| explicit `rw` | omitted | absent | Same as omitted/default |
+| explicit `ro` | omitted | absent | Same ListBuckets access as `rw` |
+| omitted or `rw` | `create`, `delete`, or both | absent | Same routing as no lifecycle grants |
+| omitted or `rw` | any valid grants | explicitly empty | Forward, then return HTTP 200 with an empty inventory |
+
+Lifecycle grants affect bucket mutation only; they do not affect ListBuckets authorization or routing. Credential permissions and bucket scopes never select the backend endpoint or transport. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
 
 ## Docker Container Design
 

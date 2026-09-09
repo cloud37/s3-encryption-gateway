@@ -36,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **ListBuckets backend forwarding (V1.0-S3-7):** Raw ListBuckets and passthrough
+  requests now share backend endpoint resolution and TLS handling; explicit
+  credential permissions no longer correlate with gateway-generated 502 errors.
+
 - **AWS CLI CRC64NVME uploads (issue #283):** validate the default CRC64NVME
   AWS-chunked trailer and add Renovate-gated maintained image updates.
 
