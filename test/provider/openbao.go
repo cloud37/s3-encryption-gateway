@@ -22,7 +22,7 @@ import (
 )
 
 // renovate: datasource=docker depName=quay.io/openbao/openbao versioning=docker
-const openBaoImage = "quay.io/openbao/openbao:2.5.5"
+const openBaoImage = "quay.io/openbao/openbao:2.6.2"
 
 const (
 
