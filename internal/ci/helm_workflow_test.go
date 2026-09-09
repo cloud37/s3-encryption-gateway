@@ -28,8 +28,8 @@ func TestHelmWorkflow_OCIPublishIsReleaseOnly(t *testing.T) {
 	if release == nil {
 		t.Fatal("workflow has no release job")
 	}
-	if got := scalarValue(mappingValue(release, "if")); got != "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')" {
-		t.Fatalf("release job is not push-only: %q", got)
+	if got := scalarValue(mappingValue(release, "if")); got != "(github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')" {
+		t.Fatalf("release job is not restricted to main/master pushes or manual dispatches: %q", got)
 	}
 
 	permissions := mappingValue(release, "permissions")
