@@ -513,31 +513,28 @@ config:
       value: "10s"
     maxHeaderBytes:
       value: "1048576"
+    spoolDirectory:
+      value: ""
+      valueFrom: {}
+    maxVerifiedSpoolBytes:
+      value: "5368709120"
+      valueFrom: {}
+    maxAggregateSpoolBytes:
+      value: "10737418240"
+      valueFrom: {}
 
   # TLS configuration
   tls:
     enabled:
       value: "false"
-    # Enable cert-manager for automatic certificate management
-    # When enabled, a self-signed certificate will be automatically created
-    # and mounted into the pod. The certFile and keyFile will be automatically
-    # configured to use the mounted certificate.
     useCertManager:
       value: "false"
     certFile:
       value: ""
       valueFrom: {}
-      # valueFrom:
-      #   secretKeyRef:
-      #     name: s3-encryption-gateway-secrets
-      #     key: tls-cert-file
     keyFile:
       value: ""
       valueFrom: {}
-      # valueFrom:
-      #   secretKeyRef:
-      #     name: s3-encryption-gateway-secrets
-      #     key: tls-key-file
 
   # Rate limiting configuration
   rateLimit:
@@ -985,6 +982,11 @@ monitoring:
     labels: {}
 
 # Valkey subchart configuration (for MPU state store)
+# Size ephemeral storage to at least maxAggregateSpoolBytes plus a safety margin.
+ephemeralStorage:
+  requests: ""
+  limits: ""
+
 valkey:
   enabled: false
   architecture: standalone

@@ -68,11 +68,41 @@ if helm template test "$CHART_DIR" \
   --set config.auth.credentials[0].accessKey.value=gw-access-key \
   --set config.auth.credentials[0].secretKey.value=gw-secret-key \
   --set config.encryption.password.value=test-password 2>&1 | grep -q "GW_CRED_0_ACCESS_KEY"; then
-  echo "✓ GW_CRED_0_ACCESS_KEY is present"
+echo "✓ GW_CRED_0_ACCESS_KEY is present"
 else
   echo "✗ GW_CRED_0_ACCESS_KEY is missing"
   exit 1
 fi
+
+# Test 1c: SEC-49 spool budgets and ephemeral-storage render together.
+echo ""
+echo "Test 1c: SEC-49 spool limits and ephemeral-storage"
+SEC49_OUTPUT=$(helm template sec49 "$CHART_DIR" \
+  --set config.backend.accessKey.value=test-access-key \
+  --set config.backend.secretKey.value=test-secret-key \
+  --set config.encryption.password.value=test-password \
+  --set-string config.tls.enabled.value=false \
+  --set config.server.spoolDirectory.value=/var/lib/s3gw-spool \
+  --set-string config.server.maxVerifiedSpoolBytes.value=123456789 \
+  --set-string config.server.maxAggregateSpoolBytes.value=987654321 \
+  --set ephemeralStorage.requests=12Gi \
+  --set ephemeralStorage.limits=20Gi)
+for expected in \
+  'name: SERVER_SPOOL_DIRECTORY' \
+  'name: SERVER_MAX_VERIFIED_SPOOL_BYTES' \
+  'name: SERVER_MAX_AGGREGATE_SPOOL_BYTES' \
+  'ephemeral-storage: "12Gi"' \
+  'ephemeral-storage: "20Gi"' \
+  '/var/lib/s3gw-spool' \
+  '123456789' \
+  '987654321'; do
+  if grep -q "$expected" <<<"$SEC49_OUTPUT"; then
+    echo "✓ SEC-49 rendered: $expected"
+  else
+    echo "✗ SEC-49 rendering missing: $expected"
+    exit 1
+  fi
+done
 
 # Test 2: existingCredentialsSecret rendering
 echo ""

@@ -49,6 +49,17 @@ spec:
           {{- toYaml .Values.securityContext | nindent 10 }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if or .Values.ephemeralStorage.requests .Values.ephemeralStorage.limits }}
+        resources:
+          requests:
+            {{- if .Values.ephemeralStorage.requests }}
+            ephemeral-storage: {{ .Values.ephemeralStorage.requests | quote }}
+            {{- end }}
+          limits:
+            {{- if .Values.ephemeralStorage.limits }}
+            ephemeral-storage: {{ .Values.ephemeralStorage.limits | quote }}
+            {{- end }}
+        {{- end }}
         ports:
         - name: http
           containerPort: 8080
@@ -60,6 +71,9 @@ spec:
         {{- end }}
         env:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "LISTEN_ADDR" "value" .Values.config.listenAddr.value "valueFrom" .Values.config.listenAddr.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_SPOOL_DIRECTORY" "value" .Values.config.server.spoolDirectory.value "valueFrom" .Values.config.server.spoolDirectory.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_MAX_VERIFIED_SPOOL_BYTES" "value" .Values.config.server.maxVerifiedSpoolBytes.value "valueFrom" .Values.config.server.maxVerifiedSpoolBytes.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_MAX_AGGREGATE_SPOOL_BYTES" "value" .Values.config.server.maxAggregateSpoolBytes.value "valueFrom" .Values.config.server.maxAggregateSpoolBytes.valueFrom) | nindent 8 }}
          {{- include "s3-encryption-gateway.envVar" (dict "name" "LOG_LEVEL" "value" .Values.config.logLevel.value "valueFrom" .Values.config.logLevel.valueFrom) | nindent 8 }}
          {{- include "s3-encryption-gateway.envVar" (dict "name" "ALLOW_BUCKET_CREATION" "value" .Values.config.allowBucketCreation.value "valueFrom" .Values.config.allowBucketCreation.valueFrom) | nindent 8 }}
         {{- if and .Values.config.proxiedBucket (or .Values.config.proxiedBucket.value .Values.config.proxiedBucket.valueFrom) }}

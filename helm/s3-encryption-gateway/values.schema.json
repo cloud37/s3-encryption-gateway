@@ -1147,14 +1147,17 @@
 
         "server": {
           "type": "object",
-          "description": "HTTP server timeout configuration.",
+          "description": "HTTP server and bounded verified-body spool configuration.",
           "additionalProperties": false,
           "properties": {
             "readTimeout":       { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum duration for reading the entire request (0s = disabled; recommended — readHeaderTimeout covers slow-loris; a non-zero value kills large object streams)." },
             "writeTimeout":      { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum duration before timing out writes of the response (0s = disabled; recommended for large S3 object streaming)." },
             "idleTimeout":       { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum time to wait for the next request on keep-alive connections (e.g. 60s)." },
             "readHeaderTimeout": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum time to read request headers (e.g. 10s)." },
-            "maxHeaderBytes":    { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum size in bytes of HTTP request headers (e.g. 1048576 = 1 MiB)." }
+            "maxHeaderBytes":    { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum size of HTTP request headers." },
+            "spoolDirectory": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Optional temporary spool directory." },
+            "maxVerifiedSpoolBytes": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum single verified spool bytes." },
+            "maxAggregateSpoolBytes": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Process-wide aggregate verified spool budget." }
           }
         },
 
