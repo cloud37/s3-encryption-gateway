@@ -57,6 +57,61 @@ func TestConfigApplier_AllowBucketCreationUpdatesLiveHandler(t *testing.T) {
 	}
 }
 
+func TestConfigApplier_SEC49ReconfiguresLiveManager(t *testing.T) {
+	oldCfg := &config.Config{Server: config.ServerConfig{MaxAggregateSpoolBytes: 10}}
+	newCfg := &config.Config{Server: config.ServerConfig{MaxAggregateSpoolBytes: 20}}
+	manager := api.NewSpoolManager(10)
+	m, ok := manager.(interface{ ReconfigureCapacity(int64) error })
+	if !ok {
+		t.Fatal("manager does not support reconfiguration")
+	}
+	a := NewConfigChangeApplier(logrus.New(), nil, nil, nil, nil, oldCfg, nil, nil)
+	a.SetSpoolManager(m)
+	if err := a.ApplyConfigChanges(oldCfg, newCfg); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := manager.Acquire(context.Background(), 20, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyConfigChanges(newCfg, &config.Config{Server: config.ServerConfig{MaxAggregateSpoolBytes: 10}}); err == nil {
+		t.Fatal("expected shrink below reservation to fail")
+	}
+	reservation.Release()
+}
+
+func TestConfigApplier_SEC49ReloadsLiveVerifiedSpoolLimits(t *testing.T) {
+	oldCfg := &config.Config{Server: config.ServerConfig{MaxVerifiedSpoolBytes: 64, MaxPartBuffer: 16, MaxAggregateSpoolBytes: 128}}
+	newCfg := &config.Config{Server: config.ServerConfig{MaxVerifiedSpoolBytes: 256, MaxPartBuffer: 32, MaxAggregateSpoolBytes: 512}}
+	source := api.NewSpoolLimitSource(api.SpoolLimitsForConfig(oldCfg))
+	a := NewConfigChangeApplier(logrus.New(), nil, nil, nil, nil, oldCfg, nil, nil)
+	a.SetSpoolLimitSource(source)
+	if err := a.ApplyConfigChanges(oldCfg, newCfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.Limits(); got != (api.SpoolLimits{Global: 256, Part: 32}) {
+		t.Fatalf("live limits=%+v", got)
+	}
+}
+
+func TestConfigApplier_SEC49InvalidOrShrinkVerifiedLimitIsSafe(t *testing.T) {
+	source := api.NewSpoolLimitSource(api.SpoolLimits{Global: 100, Part: 20})
+	source.Set(api.SpoolLimits{Global: 0, Part: 0})
+	if got := source.Limits(); got != (api.SpoolLimits{Global: 100, Part: 20}) {
+		t.Fatalf("invalid update changed live limits=%+v", got)
+	}
+	oldCfg := &config.Config{Server: config.ServerConfig{MaxVerifiedSpoolBytes: 100, MaxPartBuffer: 20}}
+	newCfg := &config.Config{Server: config.ServerConfig{MaxVerifiedSpoolBytes: 10, MaxPartBuffer: 4}}
+	a := NewConfigChangeApplier(logrus.New(), nil, nil, nil, nil, oldCfg, nil, nil)
+	a.SetSpoolLimitSource(source)
+	if err := a.ApplyConfigChanges(oldCfg, newCfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.Limits(); got != (api.SpoolLimits{Global: 10, Part: 4}) {
+		t.Fatalf("shrink limits=%+v", got)
+	}
+}
+
 func TestInitTracing_InvalidExporter(t *testing.T) {
 	logger := logrus.New()
 	cfg := config.TracingConfig{

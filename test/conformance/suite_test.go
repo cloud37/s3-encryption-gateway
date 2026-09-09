@@ -93,6 +93,8 @@ func TestConformance(t *testing.T) {
 				{"SEC43_SigV4ConcretePayload_TamperedUploadPartRejected", provider.CapMultipartUpload, testSEC43_SigV4ConcretePayload_TamperedUploadPartRejected},
 				{"SEC43_SigV4ConcretePayload_TamperedDeleteObjectsRejectedWithoutDeletion", provider.CapBatchDelete, testSEC43_SigV4ConcretePayload_TamperedDeleteObjectsRejectedWithoutDeletion},
 				{"SEC43_SigV4ConcretePayload_TamperedTaggingRejectedWithoutMutation", provider.CapObjectTagging, testSEC43_SigV4ConcretePayload_TamperedTaggingRejectedWithoutMutation},
+				{"SEC49_ValidBoundedSignedPayloads", provider.CapMultipartUpload, testSEC49_ValidBoundedSignedPayloads},
+				{"SEC49_OversizeSignedPayloadNoMutation", provider.CapMultipartUpload, testSEC49_OversizeSignedPayloadNoMutation},
 
 				// Multipart operations.
 				{"Multipart_Basic", provider.CapMultipartUpload, testMultipartBasic},

@@ -187,12 +187,10 @@ func TestVerifyAndSpoolV4Payload_Mode0600AndIdempotentClose(t *testing.T) {
 
 func TestVerifyAndSpoolV4Payload_RequestCancellation(t *testing.T) {
 	original := streamingSpoolOps
-	var path string
+	created := false
 	streamingSpoolOps.createTemp = func(dir, pattern string) (*os.File, error) {
+		created = true
 		f, err := original.createTemp(dir, pattern)
-		if err == nil {
-			path = f.Name()
-		}
 		return f, err
 	}
 	t.Cleanup(func() { streamingSpoolOps = original })
@@ -201,15 +199,16 @@ func TestVerifyAndSpoolV4Payload_RequestCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(r.Context())
 	cancel()
 	r = r.WithContext(ctx)
-	_, err := verifyAndSpoolV4Payload(r, concreteSigning([]byte("body")))
+	m := NewSpoolManager(64).(*spoolManager)
+	_, err := verifyAndSpoolV4Payload(r, concreteSigning([]byte("body")), m, int64(64))
 	if !errors.Is(err, ErrStreamingCanceled) {
 		t.Fatalf("err = %v", err)
 	}
-	if path == "" {
-		t.Fatal("spool path was not captured")
+	if created {
+		t.Fatal("temporary spool was created before canceled admission")
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("spool remains: %v", statErr)
+	if got := m.CurrentBytes(); got != 0 {
+		t.Fatalf("reservation leaked: %d bytes", got)
 	}
 	if !closed {
 		t.Fatal("original body was not closed")

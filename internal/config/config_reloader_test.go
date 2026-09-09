@@ -208,11 +208,11 @@ func TestValidateReloadSafety(t *testing.T) {
 		{
 			name: "safe changes allowed",
 			oldConfig: &Config{
-				LogLevel:  "info",
+				LogLevel:   "info",
 				ListenAddr: ":8080",
 			},
 			newConfig: &Config{
-				LogLevel:  "debug",
+				LogLevel:   "debug",
 				ListenAddr: ":9090",
 			},
 			expectError: false,
@@ -370,6 +370,16 @@ auth:
 	})
 }
 
+func TestConfigReloader_SEC49SpoolDirectoryRestartOnly(t *testing.T) {
+	reloader := &ConfigReloader{}
+	old := &Config{Server: ServerConfig{SpoolDirectory: "/old"}}
+	newCfg := &Config{Server: ServerConfig{SpoolDirectory: "/new"}}
+	err := reloader.validateReloadSafety(old, newCfg)
+	if err == nil || err.Error() != "server.spool_directory cannot be changed during hot reload" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestNewConfigReloader_WatchSetupFailures(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
@@ -390,7 +400,8 @@ func TestNewConfigReloader_WatchSetupFailures(t *testing.T) {
 	}
 }
 
-func TestGetCurrentConfig(t *testing.T) {	logger := logrus.New()
+func TestGetCurrentConfig(t *testing.T) {
+	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
 	originalConfig := &Config{LogLevel: "info"}

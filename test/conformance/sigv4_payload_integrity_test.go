@@ -3,16 +3,61 @@
 package conformance
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/xml"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
+
+func sec49DoDeceptiveRequest(t *testing.T, req *http.Request) *http.Response {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", req.URL.Host, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "%s %s HTTP/1.1\r\nHost: %s\r\n", req.Method, req.URL.RequestURI(), req.Host); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	for name, values := range req.Header {
+		if name == "Host" || name == "Content-Length" {
+			continue
+		}
+		for _, value := range values {
+			if _, err := fmt.Fprintf(conn, "%s: %s\r\n", name, value); err != nil {
+				conn.Close()
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := fmt.Fprintf(conn, "Content-Length: %d\r\n\r\n", req.ContentLength); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "x"); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{Reader: resp.Body, Closer: conn}
+	return resp
+}
 
 func sec43SignedRequest(t *testing.T, gw *harness.Gateway, method, target string, signed, sent []byte) *http.Response {
 	t.Helper()
