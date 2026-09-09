@@ -325,13 +325,8 @@ jobs:
         run: |
           set -euo pipefail
           OCI_REF=oci://ghcr.io/cloud37/s3-encryption-gateway
-          OCI_DIR="${RUNNER_TEMP}/helm-oci-verify"
-          mkdir -p "${OCI_DIR}"
-          helm pull "${OCI_REF}@${CHART_DIGEST}" --destination "${OCI_DIR}"
-          OCI_ARCHIVE=$(find "${OCI_DIR}" -maxdepth 1 -name 's3-encryption-gateway-*.tgz' -print -quit)
-          test -f "${OCI_ARCHIVE}"
-          metadata="${OCI_DIR}/oci-chart-metadata.yaml"
-          helm show chart "${OCI_ARCHIVE}" > "${metadata}"
+          metadata="${RUNNER_TEMP}/oci-chart-metadata.yaml"
+          helm show chart "${OCI_REF}@${CHART_DIGEST}" > "${metadata}"
           test "$(awk -F': ' '$1 == "name" {print $2; exit}' "${metadata}")" = s3-encryption-gateway
           test "$(awk -F': ' '$1 == "version" {print $2; exit}' "${metadata}")" = "${CHART_VERSION}"
           {
