@@ -622,7 +622,10 @@ type ServerConfig struct {
 	// occurs. Default: 64 MiB. Operators uploading parts larger than 64 MiB
 	// should raise this value and size pod memory accordingly.
 	// V0.6-PERF-1 — Phase D.
-	MaxPartBuffer int64 `yaml:"max_part_buffer" env:"SERVER_MAX_PART_BUFFER"`
+	MaxPartBuffer          int64  `yaml:"max_part_buffer" env:"SERVER_MAX_PART_BUFFER"`
+	SpoolDirectory         string `yaml:"spool_directory" env:"SERVER_SPOOL_DIRECTORY"`
+	MaxVerifiedSpoolBytes  int64  `yaml:"max_verified_spool_bytes" env:"SERVER_MAX_VERIFIED_SPOOL_BYTES"`
+	MaxAggregateSpoolBytes int64  `yaml:"max_aggregate_spool_bytes" env:"SERVER_MAX_AGGREGATE_SPOOL_BYTES"`
 	// ForceHTTPS unconditionally sends the HSTS header regardless of whether
 	// the request arrived over TLS. This is required when the gateway runs
 	// behind a TLS-terminating reverse proxy (nginx, ALB, Traefik, etc.)
@@ -637,6 +640,8 @@ const DefaultMaxLegacyCopySourceBytes int64 = 256 * 1024 * 1024
 // DefaultMaxPartBuffer is the default cap for the UploadPart seekable-body
 // wrapper (64 MiB). See ServerConfig.MaxPartBuffer.
 const DefaultMaxPartBuffer int64 = 64 * 1024 * 1024
+const DefaultMaxVerifiedSpoolBytes int64 = 5 * 1024 * 1024 * 1024
+const DefaultMaxAggregateSpoolBytes int64 = 10 * 1024 * 1024 * 1024
 
 // RateLimitConfig holds rate limiting configuration.
 type RateLimitConfig struct {
@@ -1064,6 +1069,8 @@ func LoadConfig(path string) (*Config, error) {
 			DisableMultipartUploads:  false,   // Allow multipart uploads by default for compatibility
 			MaxLegacyCopySourceBytes: DefaultMaxLegacyCopySourceBytes,
 			MaxPartBuffer:            DefaultMaxPartBuffer,
+			MaxVerifiedSpoolBytes:    DefaultMaxVerifiedSpoolBytes,
+			MaxAggregateSpoolBytes:   DefaultMaxAggregateSpoolBytes,
 		},
 		RateLimit: RateLimitConfig{
 			Enabled: false,
@@ -1595,6 +1602,19 @@ func loadFromEnv(config *Config) error {
 			config.Server.MaxHeaderBytes = maxBytes
 		}
 	}
+	if v := os.Getenv("SERVER_SPOOL_DIRECTORY"); v != "" {
+		config.Server.SpoolDirectory = v
+	}
+	if v := os.Getenv("SERVER_MAX_VERIFIED_SPOOL_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			config.Server.MaxVerifiedSpoolBytes = n
+		}
+	}
+	if v := os.Getenv("SERVER_MAX_AGGREGATE_SPOOL_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			config.Server.MaxAggregateSpoolBytes = n
+		}
+	}
 	if v := os.Getenv("SERVER_FORCE_HTTPS"); v != "" {
 		config.Server.ForceHTTPS = v == "true" || v == "1"
 	}
@@ -2106,6 +2126,17 @@ func parseSelfContainedAESKeys(value string) []SelfContainedAESKeyEntry {
 func (c *Config) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listen_addr is required")
+	}
+	// Keep zero-value Config useful to focused validation callers that predate
+	// SEC-49. LoadConfig always installs positive defaults, so non-zero values
+	// are still strictly validated for real configurations.
+	if c.Server.MaxVerifiedSpoolBytes != 0 || c.Server.MaxAggregateSpoolBytes != 0 {
+		if c.Server.MaxVerifiedSpoolBytes <= 0 {
+			return fmt.Errorf("server.max_verified_spool_bytes must be positive")
+		}
+		if c.Server.MaxAggregateSpoolBytes < c.Server.MaxVerifiedSpoolBytes {
+			return fmt.Errorf("server.max_aggregate_spool_bytes must be >= max_verified_spool_bytes")
+		}
 	}
 
 	// metrics.addr must be a distinct address from the S3 and admin ports.
@@ -2814,6 +2845,9 @@ func (r *ConfigReloader) reloadConfig() {
 
 // validateReloadSafety ensures that only non-crypto settings have changed.
 func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
+	if old.Server.SpoolDirectory != new.Server.SpoolDirectory {
+		return fmt.Errorf("server.spool_directory cannot be changed during hot reload")
+	}
 	// Crypto settings that MUST NOT change during hot reload
 	if old.Encryption.Password != new.Encryption.Password {
 		return fmt.Errorf("encryption.password cannot be changed during hot reload")

@@ -17,6 +17,10 @@ var ErrMissingMPUManifest = errors.New("encrypted multipart object manifest is m
 func writeStreamingPayloadError(w http.ResponseWriter, resource string, err error) {
 	code, message, status := "InvalidRequest", "The AWS-chunked request body is invalid.", http.StatusBadRequest
 	switch {
+	case errors.Is(err, ErrSpoolRequestLimit):
+		code, message, status = "EntityTooLarge", "The request exceeds the permitted payload size.", http.StatusRequestEntityTooLarge
+	case errors.Is(err, ErrSpoolCapacity):
+		code, message, status = "SlowDown", "Please reduce your request rate.", http.StatusServiceUnavailable
 	case errors.Is(err, ErrStreamingSpool):
 		code, message, status = "InternalError", "We encountered an internal error. Please try again.", http.StatusInternalServerError
 	case errors.Is(err, ErrUnsupportedStreamingMode):

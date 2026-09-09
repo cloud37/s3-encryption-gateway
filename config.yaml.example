@@ -380,6 +380,9 @@ server:
   idle_timeout: "60s"
   read_header_timeout: "10s"
   max_header_bytes: 1048576
+  spool_directory: ""  # Empty uses the operating system temporary directory
+  max_verified_spool_bytes: 5368709120   # 5 GiB single PutObject ceiling
+  max_aggregate_spool_bytes: 10737418240 # 10 GiB per process; size ephemeral storage above this
   # disable_multipart_uploads: false  # Optional: Set to true to disable multipart uploads entirely
   #                                   # This ensures all uploaded data is encrypted, but prevents multipart uploads
   #                                   # Set via SERVER_DISABLE_MULTIPART_UPLOADS env var

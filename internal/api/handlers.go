@@ -63,6 +63,8 @@ type Handler struct {
 	// Optional test seam for observing destination encryption construction.
 	destinationEncryptionConstructed func()
 	destinationEncryptionReader      func(io.Reader, int64) (io.Reader, int64, error)
+	spoolManager                     SpoolManager
+	spoolLimits                      *SpoolLimitSource
 }
 
 // NewHandler creates a new API handler (backward compatibility).
@@ -97,6 +99,14 @@ func NewHandlerWithFeatures(
 		h.allowBucketCreation.Store(config.AllowBucketCreation)
 		h.allowUntrackedPlaintextUploads.Store(config.MultipartState.AllowUntrackedPlaintextUploads)
 	}
+	h.spoolManager = DefaultSpoolManager()
+	if config != nil && config.Server.MaxAggregateSpoolBytes > 0 {
+		if m != nil {
+			h.spoolManager = NewSpoolManager(config.Server.MaxAggregateSpoolBytes, config.Server.SpoolDirectory, m)
+		} else {
+			h.spoolManager = NewSpoolManager(config.Server.MaxAggregateSpoolBytes, config.Server.SpoolDirectory)
+		}
+	}
 	// Create client factory for per-request credential support.
 	// V0.6-PERF-2: inject metrics so the factory can emit retry counters.
 	if config != nil {
@@ -105,6 +115,23 @@ func NewHandlerWithFeatures(
 	if policyManager != nil {
 		// Initialise the TTL cache with a 1-hour default TTL and 5-minute sweep.
 		h.engineCache = newTTLEngineCache(1*time.Hour, 5*time.Minute)
+	}
+	return h
+}
+
+// WithSpoolManager injects the process-wide manager shared with authentication.
+// If omitted, the constructor's isolated default remains suitable for tests.
+func (h *Handler) WithSpoolManager(manager SpoolManager) *Handler {
+	if manager != nil {
+		h.spoolManager = manager
+	}
+	return h
+}
+
+// WithSpoolLimitSource injects the live request-limit source shared with auth.
+func (h *Handler) WithSpoolLimitSource(source *SpoolLimitSource) *Handler {
+	if source != nil {
+		h.spoolLimits = source
 	}
 	return h
 }
@@ -442,6 +469,10 @@ func (h *Handler) writeS3ClientError(w http.ResponseWriter, r *http.Request, err
 // TestWriteS3ClientError_NoLeakRegression in auth_error_test.go.
 func classifyAuthError(err error, resource string) *S3Error {
 	switch {
+	case errors.Is(err, ErrSpoolRequestLimit):
+		return &S3Error{Code: "EntityTooLarge", Message: "The request exceeds the permitted payload size.", Resource: resource, HTTPStatus: http.StatusRequestEntityTooLarge}
+	case errors.Is(err, ErrSpoolCapacity):
+		return &S3Error{Code: "SlowDown", Message: "Please reduce your request rate.", Resource: resource, HTTPStatus: http.StatusServiceUnavailable}
 	case errors.Is(err, ErrSignatureMismatch):
 		return &S3Error{
 			Code:       "SignatureDoesNotMatch",
@@ -1929,7 +1960,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		writeStreamingPayloadError(w, r.URL.Path, modeErr)
 		return
 	} else if mode != streamingNone {
-		spool, verifyErr := verifyAndSpoolAWSBody(r, streamingContext(r))
+		spool, verifyErr := verifyAndSpoolAWSBody(r, streamingContext(r), h.spoolManager, h.verifiedSpoolLimit(r))
 		if verifyErr != nil {
 			writeStreamingPayloadError(w, r.URL.Path, verifyErr)
 			return
@@ -3991,7 +4022,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mode != streamingNone {
-		spool, verifyErr := verifyAndSpoolAWSBody(r, streamingContext(r))
+		spool, verifyErr := verifyAndSpoolAWSBody(r, streamingContext(r), h.spoolManager, h.verifiedSpoolLimit(r))
 		if verifyErr != nil {
 			writeStreamingPayloadError(w, r.URL.Path, verifyErr)
 			return
@@ -6175,6 +6206,23 @@ func effectiveMaxPartBuffer(cfg *config.Config) int64 {
 		return cfg.Server.MaxPartBuffer
 	}
 	return config.DefaultMaxPartBuffer
+}
+
+func effectiveVerifiedSpoolLimit(cfg *config.Config, r *http.Request) int64 {
+	global := int64(5 << 30)
+	part := effectiveMaxPartBuffer(cfg)
+	if cfg != nil && cfg.Server.MaxVerifiedSpoolBytes > 0 {
+		global = cfg.Server.MaxVerifiedSpoolBytes
+	}
+	return spoolLimitForRequest(r, global, part)
+}
+
+func (h *Handler) verifiedSpoolLimit(r *http.Request) int64 {
+	if h.spoolLimits != nil {
+		limits := h.spoolLimits.Limits()
+		return spoolLimitForRequest(r, limits.Global, limits.Part)
+	}
+	return effectiveVerifiedSpoolLimit(h.config, r)
 }
 
 // handleListBuckets handles GET / — ListBuckets.

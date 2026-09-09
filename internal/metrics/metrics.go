@@ -174,6 +174,8 @@ type Metrics struct {
 	listSizeCacheHitsTotal    *prometheus.CounterVec
 	listSizeCacheMissesTotal  *prometheus.CounterVec
 	listSizeFallbackHeadTotal *prometheus.CounterVec
+	spoolBytes                prometheus.Gauge
+	spoolRejectionsTotal      *prometheus.CounterVec
 }
 
 // NewMetrics creates a new metrics instance with default configuration.
@@ -192,6 +194,17 @@ func NewMetricsWithRegistry(reg prometheus.Registerer) *Metrics {
 	return newMetricsWithRegistry(reg, Config{EnableBucketLabel: true})
 }
 
+// SetSpoolBytes updates the process-wide verified-body spool gauge.
+func (m *Metrics) SetSpoolBytes(value int64) { m.spoolBytes.Set(float64(value)) }
+
+// RecordSpoolRejection records one bounded spool admission rejection.
+func (m *Metrics) RecordSpoolRejection(reason string) {
+	if reason != "request_limit" && reason != "aggregate_limit" {
+		return
+	}
+	m.spoolRejectionsTotal.WithLabelValues(reason).Inc()
+}
+
 // newMetricsWithRegistry creates a new metrics instance with a custom registry (for testing).
 func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 	factory := promauto.With(reg)
@@ -200,8 +213,10 @@ func newMetricsWithRegistry(reg prometheus.Registerer, cfg Config) *Metrics {
 		gatherer = g
 	}
 	return &Metrics{
-		config:   cfg,
-		gatherer: gatherer,
+		config:               cfg,
+		gatherer:             gatherer,
+		spoolBytes:           factory.NewGauge(prometheus.GaugeOpts{Name: "s3_gateway_spool_bytes", Help: "Current bytes reserved by verified temporary spools"}),
+		spoolRejectionsTotal: factory.NewCounterVec(prometheus.CounterOpts{Name: "s3_gateway_spool_rejections_total", Help: "Verified spool admission rejections"}, []string{"reason"}),
 		httpRequestsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "http_requests_total",

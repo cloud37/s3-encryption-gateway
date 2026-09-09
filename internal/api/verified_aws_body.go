@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
@@ -45,10 +46,11 @@ var streamingSpoolOps = struct {
 
 type verifiedAWSFile struct {
 	*os.File
-	length  int64
-	path    string
-	closed  bool
-	closeMu sync.Mutex
+	length      int64
+	path        string
+	closed      bool
+	closeMu     sync.Mutex
+	reservation SpoolReservation
 }
 
 func (f *verifiedAWSFile) DecodedLength() int64 { return f.length }
@@ -59,6 +61,9 @@ func (f *verifiedAWSFile) Close() error {
 		return nil
 	}
 	f.closed = true
+	if f.reservation != nil {
+		defer f.reservation.Release()
+	}
 	err := streamingSpoolOps.close(f.File)
 	removeErr := streamingSpoolOps.remove(f.path)
 	if err != nil {
@@ -78,7 +83,8 @@ func validAWSContentEncoding(value string) bool {
 	return true
 }
 
-func verifyAndSpoolAWSBody(r *http.Request, signing *V4SigningContext) (verifiedAWSBody, error) {
+func verifyAndSpoolAWSBody(r *http.Request, signing *V4SigningContext, options ...interface{}) (verifiedAWSBody, error) {
+	manager, limit := spoolOptions(options...)
 	mode, modeErr := classifyStreamingPayloadMode(r.Header.Get("x-amz-content-sha256"))
 	if modeErr != nil {
 		return nil, modeErr
@@ -108,23 +114,37 @@ func verifyAndSpoolAWSBody(r *http.Request, signing *V4SigningContext) (verified
 		}
 		decoded = parsed
 	}
-	f, err := streamingSpoolOps.createTemp("", "s3gw-aws-body-*")
+	reservation, err := manager.Acquire(r.Context(), max64(decoded, 0), limit)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrStreamingCanceled
+		}
+		return nil, err
+	}
+	directory := ""
+	if sm, ok := manager.(*spoolManager); ok {
+		directory = sm.tempDirectory()
+	}
+	f, err := streamingSpoolOps.createTemp(directory, "s3gw-aws-body-*")
+	if err != nil {
+		reservation.Release()
 		return nil, fmt.Errorf("%w: create temporary body: %v", ErrStreamingSpool, err)
 	}
 	path := f.Name()
 	if err := streamingSpoolOps.chmod(f, 0600); err != nil {
 		_ = streamingSpoolOps.close(f)
 		_ = streamingSpoolOps.remove(path)
+		reservation.Release()
 		return nil, fmt.Errorf("%w: chmod temporary body: %v", ErrStreamingSpool, err)
 	}
-	cleanup := func() { _ = streamingSpoolOps.close(f); _ = streamingSpoolOps.remove(path) }
+	cleanup := func() { _ = streamingSpoolOps.close(f); _ = streamingSpoolOps.remove(path); reservation.Release() }
 	b := bufio.NewReader(r.Body)
 	if r.Context().Err() != nil {
 		cleanup()
 		return nil, ErrStreamingCanceled
 	}
-	length, finalSignature, err := verifyAWSChunkedContext(b, f, signing, decoded, mode == streamingSignedPayloadTrailer || mode == streamingUnsignedPayloadTrailer, r.Context().Done())
+	writer := &reservingWriter{w: f, reservation: reservation, remaining: max64(decoded, 0)}
+	length, finalSignature, err := verifyAWSChunkedContext(b, writer, signing, decoded, mode == streamingSignedPayloadTrailer || mode == streamingUnsignedPayloadTrailer, r.Context().Done())
 	// The verifier transfers the final chain signature to this caller because
 	// trailer authentication needs it. The caller owns it until that work ends.
 	defer clearAuthBytes(finalSignature[:])
@@ -145,22 +165,42 @@ func verifyAndSpoolAWSBody(r *http.Request, signing *V4SigningContext) (verified
 		cleanup()
 		return nil, fmt.Errorf("%w: %v", ErrStreamingSpool, err)
 	}
-	return &verifiedAWSFile{File: f, length: length, path: path}, nil
+	if decoded < 0 && length > 0 { /* growth is performed by the writer below */
+	}
+	return &verifiedAWSFile{File: f, length: length, path: path, reservation: reservation}, nil
 }
 
-func verifyAndSpoolV4Payload(r *http.Request, signing *V4SigningContext) (verifiedAWSBody, error) {
+func verifyAndSpoolV4Payload(r *http.Request, signing *V4SigningContext, options ...interface{}) (verifiedAWSBody, error) {
 	if r == nil || signing == nil || !signing.verifyPayload {
 		return nil, errors.New("invalid concrete SigV4 payload verification request")
 	}
 	defer r.Body.Close()
-	f, err := streamingSpoolOps.createTemp("", "s3gw-aws-body-*")
+	manager, limit := spoolOptions(options...)
+	declared := r.ContentLength
+	if declared < 0 {
+		declared = 0
+	}
+	reservation, err := manager.Acquire(r.Context(), declared, limit)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrStreamingCanceled
+		}
+		return nil, err
+	}
+	directory := ""
+	if sm, ok := manager.(*spoolManager); ok {
+		directory = sm.tempDirectory()
+	}
+	f, err := streamingSpoolOps.createTemp(directory, "s3gw-aws-body-*")
+	if err != nil {
+		reservation.Release()
 		return nil, fmt.Errorf("%w: create temporary body: %v", ErrStreamingSpool, err)
 	}
 	path := f.Name()
 	cleanup := func() {
 		_ = streamingSpoolOps.close(f)
 		_ = streamingSpoolOps.remove(path)
+		reservation.Release()
 	}
 	if err := streamingSpoolOps.chmod(f, 0600); err != nil {
 		cleanup()
@@ -176,6 +216,18 @@ func verifyAndSpoolV4Payload(r *http.Request, signing *V4SigningContext) (verifi
 		}
 		n, readErr := streamingSpoolOps.readRequestBody(r.Body, buf)
 		if n > 0 {
+			extra := int64(n) - declared
+			if extra > 0 {
+				if err := reservation.Grow(extra); err != nil {
+					cleanup()
+					return nil, err
+				}
+			}
+			if declared > int64(n) {
+				declared -= int64(n)
+			} else {
+				declared = 0
+			}
 			written, writeErr := streamingSpoolOps.write(f, buf[:n])
 			if written != n || writeErr != nil {
 				cleanup()
@@ -203,5 +255,30 @@ func verifyAndSpoolV4Payload(r *http.Request, signing *V4SigningContext) (verifi
 		cleanup()
 		return nil, fmt.Errorf("%w: seek temporary body", ErrStreamingSpool)
 	}
-	return &verifiedAWSFile{File: f, length: length, path: path}, nil
+	return &verifiedAWSFile{File: f, length: length, path: path, reservation: reservation}, nil
+}
+
+func spoolOptions(options ...interface{}) (SpoolManager, int64) {
+	m := DefaultSpoolManager()
+	limit := int64(5 << 30)
+	for _, option := range options {
+		switch v := option.(type) {
+		case SpoolManager:
+			m = v
+		case int64:
+			limit = v
+		case SpoolLimits:
+			limit = v.Global
+		case *SpoolLimitSource:
+			limits := v.Limits()
+			limit = limits.Global
+		}
+	}
+	return m, limit
+}
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

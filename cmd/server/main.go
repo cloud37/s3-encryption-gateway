@@ -56,6 +56,8 @@ type ConfigChangeApplier struct {
 	credentialStore api.CredentialStore
 	managementGate  interface{ SetAllowBucketCreation(bool) }
 	mpuRoutingGate  interface{ SetAllowUntrackedPlaintextUploads(bool) }
+	spoolManager    interface{ ReconfigureCapacity(int64) error }
+	spoolLimits     *api.SpoolLimitSource
 }
 
 func (a *ConfigChangeApplier) SetManagementGate(g interface{ SetAllowBucketCreation(bool) }) {
@@ -64,6 +66,14 @@ func (a *ConfigChangeApplier) SetManagementGate(g interface{ SetAllowBucketCreat
 
 func (a *ConfigChangeApplier) SetMPURoutingGate(g interface{ SetAllowUntrackedPlaintextUploads(bool) }) {
 	a.mpuRoutingGate = g
+}
+
+func (a *ConfigChangeApplier) SetSpoolManager(m interface{ ReconfigureCapacity(int64) error }) {
+	a.spoolManager = m
+}
+
+func (a *ConfigChangeApplier) SetSpoolLimitSource(source *api.SpoolLimitSource) {
+	a.spoolLimits = source
 }
 
 // NewConfigChangeApplier creates a new applier for configuration changes
@@ -96,6 +106,19 @@ func stringSlicesEqual(a, b []string) bool {
 // ApplyConfigChanges applies non-crypto configuration changes to running components
 func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Config) error {
 	changes := []string{}
+	if oldConfig.Server.SpoolDirectory != newConfig.Server.SpoolDirectory {
+		return fmt.Errorf("server.spool_directory cannot be changed during hot reload")
+	}
+	if oldConfig.Server.MaxAggregateSpoolBytes != newConfig.Server.MaxAggregateSpoolBytes && a.spoolManager != nil {
+		if err := a.spoolManager.ReconfigureCapacity(newConfig.Server.MaxAggregateSpoolBytes); err != nil {
+			return fmt.Errorf("reconfigure spool capacity: %w", err)
+		}
+		changes = append(changes, fmt.Sprintf("server.max_aggregate_spool_bytes: %d -> %d", oldConfig.Server.MaxAggregateSpoolBytes, newConfig.Server.MaxAggregateSpoolBytes))
+	}
+	if oldConfig.Server.MaxVerifiedSpoolBytes != newConfig.Server.MaxVerifiedSpoolBytes && a.spoolLimits != nil {
+		a.spoolLimits.Set(api.SpoolLimitsForConfig(newConfig))
+		changes = append(changes, fmt.Sprintf("server.max_verified_spool_bytes: %d -> %d", oldConfig.Server.MaxVerifiedSpoolBytes, newConfig.Server.MaxVerifiedSpoolBytes))
+	}
 	if a.managementGate != nil && oldConfig.AllowBucketCreation != newConfig.AllowBucketCreation {
 		a.managementGate.SetAllowBucketCreation(newConfig.AllowBucketCreation)
 		changes = append(changes, fmt.Sprintf("allow_bucket_creation: %v -> %v", oldConfig.AllowBucketCreation, newConfig.AllowBucketCreation))
@@ -811,8 +834,11 @@ func main() {
 	}
 	logger.WithField("count", len(cfg.Auth.Credentials)).Info("Gateway credential store initialized")
 
+	// One process-wide manager owns accounting for both middleware and handlers.
+	spoolManager := api.NewSpoolManager(cfg.Server.MaxAggregateSpoolBytes, cfg.Server.SpoolDirectory, m)
+	spoolLimits := api.NewSpoolLimitSource(api.SpoolLimitsForConfig(cfg))
 	// Initialize API handler with Phase 5 features
-	handler := api.NewHandlerWithFeatures(s3Client, encryptionEngine, logger, m, keyManager, objectCache, auditLogger, cfg, policyManager)
+	handler := api.NewHandlerWithFeatures(s3Client, encryptionEngine, logger, m, keyManager, objectCache, auditLogger, cfg, policyManager).WithSpoolManager(spoolManager).WithSpoolLimitSource(spoolLimits)
 
 	// Initialise Valkey state store for encrypted multipart uploads when any
 	// bucket policy enables EncryptMultipartUploads. Fail-closed: if Valkey is
@@ -877,6 +903,10 @@ func main() {
 		configApplier = NewConfigChangeApplier(logger, tracerProvider, rateLimiterPtr, objectCache, auditLogger, cfg, policyManager, credStore)
 		configApplier.SetManagementGate(handler)
 		configApplier.SetMPURoutingGate(handler)
+		configApplier.SetSpoolLimitSource(spoolLimits)
+		if reconfigurable, ok := spoolManager.(interface{ ReconfigureCapacity(int64) error }); ok {
+			configApplier.SetSpoolManager(reconfigurable)
+		}
 
 		// Create and start config reloader
 		var err error
@@ -970,7 +1000,7 @@ func main() {
 	// validation are caught, but it must be outermost among functional
 	// middleware so unauthenticated requests are rejected early.
 	httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, auditLogger)(httpHandler)
-	httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, auditLogger, cfg.Auth.AllowLegacySignatureV2)(httpHandler)
+	httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, auditLogger, cfg.Auth.AllowLegacySignatureV2, spoolManager, spoolLimits)(httpHandler)
 
 	// RecoveryMiddleware wraps the ENTIRE chain so panics in any layer are caught.
 	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)

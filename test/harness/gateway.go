@@ -121,6 +121,15 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	if o.extraConfig != nil {
 		o.extraConfig(cfg)
 	}
+	// StartGateway constructs Config directly rather than through LoadConfig.
+	// Preserve production defaults so the shared SEC-49 manager has a usable
+	// aggregate budget unless a test explicitly configures one.
+	if cfg.Server.MaxVerifiedSpoolBytes <= 0 {
+		cfg.Server.MaxVerifiedSpoolBytes = config.DefaultMaxVerifiedSpoolBytes
+	}
+	if cfg.Server.MaxAggregateSpoolBytes <= 0 {
+		cfg.Server.MaxAggregateSpoolBytes = config.DefaultMaxAggregateSpoolBytes
+	}
 
 	// Network listener on a random free port.
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
@@ -256,11 +265,14 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		o.keyManager = km
 	}
 
+	// One manager is shared by authentication and streaming handlers so tests
+	// exercise the same aggregate accounting as production.
+	spoolManager := api.NewSpoolManager(cfg.Server.MaxAggregateSpoolBytes, cfg.Server.SpoolDirectory, m)
 	// API handler.
 	handler := api.NewHandlerWithFeatures(
 		s3Client, encryptionEngine, logger, m,
 		o.keyManager, nil, o.auditLogger, cfg, o.policyManager,
-	)
+	).WithSpoolManager(spoolManager)
 	if o.mpuStore != nil {
 		handler.WithMPUStateStore(o.mpuStore)
 		stopHealthCheck := mpu.StartHealthCheck(context.Background(), o.mpuStore, cfg.MultipartState.Valkey.HealthCheckInterval, m.SetMPUValkeyUp)
@@ -294,7 +306,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			t.Fatalf("harness.StartGateway: create credential store: %v", credErr)
 		}
 		httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, nil)(httpHandler)
-		httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, nil, cfg.Auth.AllowLegacySignatureV2)(httpHandler)
+		httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, nil, cfg.Auth.AllowLegacySignatureV2, spoolManager, api.SpoolLimitsForConfig(cfg))(httpHandler)
 	}
 
 	// HTTP server.

@@ -79,9 +79,21 @@ func writeS3ClientError(w http.ResponseWriter, r *http.Request, err error, metho
 //
 // auditLog may be nil; when nil, audit events are silently skipped so callers
 // that do not configure an audit sink still function correctly.
-func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logrus.Logger, auditLog audit.Logger, allowSigV2 bool) func(http.Handler) http.Handler {
+func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logrus.Logger, auditLog audit.Logger, allowSigV2 bool, options ...interface{}) func(http.Handler) http.Handler {
+	manager, limit := spoolOptions(options...)
+	partLimit := effectiveMaxPartBuffer(nil)
+	var liveLimits *SpoolLimitSource
+	for _, option := range options {
+		if limits, ok := option.(SpoolLimits); ok && limits.Part > 0 {
+			partLimit = limits.Part
+		}
+		if source, ok := option.(*SpoolLimitSource); ok {
+			liveLimits = source
+		}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestGlobal, requestPart := limit, partLimit
 			// Allow only the exact system endpoints without authentication
 			// so Kubernetes probes and Prometheus scraping work without
 			// credentials. Exact match only — prefix matching would let
@@ -187,7 +199,14 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 				r = r.WithContext(context.WithValue(r.Context(), v4SigningContextKey{}, signingContext))
 			}
 			if signingContext != nil && signingContext.verifyPayload {
-				spool, verifyErr := verifyAndSpoolV4Payload(r, signingContext)
+				// Classify before verification so semantic limits are enforced before
+				// the body is read or a temporary file is created.
+				if liveLimits != nil {
+					limits := liveLimits.Limits()
+					requestGlobal, requestPart = limits.Global, limits.Part
+				}
+				requestLimit := spoolLimitForRequest(r, requestGlobal, requestPart)
+				spool, verifyErr := verifyAndSpoolV4Payload(r, signingContext, manager, requestLimit)
 				if verifyErr != nil {
 					auditErr := ErrStreamingSpool
 					if errors.Is(verifyErr, ErrSignatureMismatch) {
