@@ -6,7 +6,7 @@ import (
 )
 
 // renovate: datasource=docker depName=amazon/aws-cli versioning=docker
-const awsCLIImage = "amazon/aws-cli:2.36.40"
+const awsCLIImage = "amazon/aws-cli:2.36.41"
 
 // renovate: datasource=docker depName=python versioning=docker
 const pythonImage = "python:3.13-slim"
