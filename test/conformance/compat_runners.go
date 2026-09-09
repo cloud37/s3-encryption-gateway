@@ -24,7 +24,7 @@ const resticImage = "restic/restic:0.18.1"
 const boto3Version = "1.43.90"
 
 // renovate: datasource=pypi depName=minio versioning=pep440
-const minioPyVersion = "7.2.0"
+const minioPyVersion = "7.2.20"
 
 // ─── AWS SDK Go v2 runner (in-process, no Docker) ───────────────────────────
 
