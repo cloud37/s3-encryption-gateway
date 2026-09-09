@@ -596,8 +596,21 @@ The `/ready` endpoint performs dependency health checks (KMS, Valkey) and return
 | `podMonitor.interval` | Scrape interval | `30s` |
 | `podMonitor.scrapeTimeout` | Scrape timeout | `10s` |
 | `podMonitor.labels` | Extra labels for PodMonitor | `{}` |
+| `metrics.port` | Dedicated unauthenticated `/metrics` listener port; `0` uses the admin or S3 port fallback | `0` |
+| `metrics.enableBucketLabel` | Preserve bucket names on bucket-labelled S3 metrics; disabled mode uses `bucket="*"` | `false` |
 
 **ServiceMonitor vs PodMonitor**: `ServiceMonitor` targets the Service (recommended). `PodMonitor` targets pods directly — useful when the Service is disabled or for fine-grained pod-level metrics. Both emit a `track` relabel rule when `track` is set, enabling per-track PromQL queries in blue/green topologies.
+
+### Client Traffic Metrics
+
+The gateway exposes the following Prometheus metrics for S3 client traffic:
+
+- `s3_client_requests_total{operation,bucket,status_code}` records each completed S3 route once.
+- `s3_client_bytes_total{bucket,direction}` records actual plaintext application-body bytes at the client boundary. `direction` is `in` for uploads and `out` for downloads.
+
+Input bytes are counted after AWS streaming framing is decoded; output bytes are counted only when successfully written. Headers, TLS framing, backend retries, and internal copy traffic are excluded.
+
+Set `metrics.enableBucketLabel: true` to preserve bucket names. With the default `false`, all bucket labels are collapsed to `*` to bound cardinality. Labels never contain object keys, upload IDs, credentials, paths, or error text.
 
 #### Network Policy
 
@@ -1256,6 +1269,15 @@ helm upgrade my-gateway s3-encryption-gateway/s3-encryption-gateway
 helm uninstall my-gateway
 ```
 
+## Backend TLS
+
+Set `config.backend.tls.caFile.value` to the path of a mounted PEM private CA
+to augment system roots. Use `valueFrom` for secret/config-map references.
+`config.backend.tls.insecureSkipVerify.value` defaults to `"false"`; enabling
+it is unsafe and intended only for local diagnostics. Mount the CA with the
+chart's `extraVolumes` and `extraVolumeMounts`, then restart the gateway after
+changes.
+
 ## Security Best Practices
 
 1. **Use Secrets for Sensitive Data**: Always use `valueFrom.secretKeyRef` for:
@@ -1316,17 +1338,3 @@ For issues, feature requests, or questions:
 ## License
 
 MIT License — see [LICENSE](https://github.com/cloud37/s3-encryption-gateway/blob/main/LICENSE) for details.
-### Client Traffic Metrics
-
-`s3_client_requests_total{operation,bucket,status_code}` counts completed S3
-routes and `s3_client_bytes_total{bucket,direction}` counts application-body
-bytes at the client boundary. Set `metrics.enableBucketLabel: true` to retain
-bucket labels; disabled mode uses `*` to bound cardinality.
-# Backend TLS
-
-Set `config.backend.tls.caFile.value` to the path of a mounted PEM private CA
-to augment system roots. Use `valueFrom` for secret/config-map references.
-`config.backend.tls.insecureSkipVerify.value` defaults to `"false"`; enabling
-it is unsafe and intended only for local diagnostics. Mount the CA with the
-chart's `extraVolumes` and `extraVolumeMounts`, then restart the gateway after
-changes.

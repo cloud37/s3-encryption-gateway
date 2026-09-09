@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.13.0-rc3] — 2026-09-09
+## [0.12.0-rc3] — 2026-09-09
 
 ### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
 
