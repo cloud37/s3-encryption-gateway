@@ -6,22 +6,19 @@ release:
 values:
   - ../values.yaml
 tests:
-- it: renders manage bucket permission exactly
-  set:
-    auth:
-      credentials:
-        - accessKey: manage-ak
-          secretKey: manage-sk
-          bucketPermissions: [manage]
-  asserts:
-    - equal:
-        path: spec.template.spec.containers[0].env[0].name
-        value: GW_CRED_0_ACCESS_KEY
-    - contains:
-        path: spec.template.spec.containers[0].env
-        content:
-          name: GW_CRED_0_BUCKET_PERMISSIONS
-          value: manage
+  - it: renders manage bucket permission exactly
+    set:
+      config.auth:
+        credentials:
+          - accessKey: { value: manage-ak }
+            secretKey: { value: manage-sk }
+            bucketPermissions: [manage]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GW_CRED_0_BUCKET_PERMISSIONS
+            value: manage
 
   - it: should default ALLOW_BUCKET_CREATION to false
     asserts:
@@ -52,6 +49,19 @@ tests:
           content:
             name: GW_CRED_0_BUCKET_PERMISSIONS
             value: "create,delete"
+  - it: should render explicit unrestricted wildcard scope
+    set:
+      config.auth.credentials:
+        - accessKey: { value: "wildcard" }
+          secretKey: { value: "secret" }
+          buckets: ["*"]
+      config.encryption.password.value: "test-password"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GW_CRED_0_BUCKETS
+            value: "*"
   - it: should not infer bucket permissions from rw
     set:
       config.auth.credentials:

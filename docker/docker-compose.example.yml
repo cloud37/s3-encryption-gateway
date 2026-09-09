@@ -47,6 +47,17 @@ services:
       BACKEND_SECRET_KEY: ${BACKEND_SECRET_KEY}
       BACKEND_USE_SSL: ${BACKEND_USE_SSL:-false}
 
+      # Gateway client credentials. A bare * explicitly grants access to all
+      # buckets; restrict it for tenant credentials. Keep this static block and
+      # configure values in .env rather than editing Compose per deployment.
+      GW_CRED_0_ACCESS_KEY: ${GW_CRED_0_ACCESS_KEY}
+      GW_CRED_0_SECRET_KEY: ${GW_CRED_0_SECRET_KEY}
+      GW_CRED_0_PERMISSIONS: ${GW_CRED_0_PERMISSIONS:-rw}
+      GW_CRED_0_BUCKET_PERMISSIONS: ${GW_CRED_0_BUCKET_PERMISSIONS:-}
+      # Use '-' rather than ':-' here: an explicitly empty .env value must
+      # remain the gateway's intentional deny-all scope.
+      GW_CRED_0_BUCKETS: ${GW_CRED_0_BUCKETS-*}
+
       # Encryption configuration (REQUIRED - change this!)
       ENCRYPTION_PASSWORD: ${ENCRYPTION_PASSWORD}
       ENCRYPTION_PREFERRED_ALGORITHM: ${ENCRYPTION_PREFERRED_ALGORITHM:-AES256-GCM}

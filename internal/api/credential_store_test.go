@@ -202,6 +202,22 @@ func TestCredentialStore_BucketMatchTrailingWildcardPrefix(t *testing.T) {
 	}
 }
 
+func TestCredentialStore_BucketMatchBareWildcardIsUnrestricted(t *testing.T) {
+	store, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: []string{"*"}}})
+	if err != nil {
+		t.Fatalf("NewStaticCredentialStore error = %v", err)
+	}
+	credential, err := store.Lookup("key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bucket := range []string{"existing-bucket", "newly-created-bucket"} {
+		if !credential.AllowsBucket(bucket) {
+			t.Errorf("bare wildcard did not allow %q", bucket)
+		}
+	}
+}
+
 // TestCredentialStore_MutatingConstructorInputDoesNotAffectStore proves the
 // store deep-copies constructor input: mutating the caller's slice after
 // publication must not change stored policy data.

@@ -43,6 +43,7 @@ func (p *minioProvider) Name() string { return "minio" }
 func (p *minioProvider) Capabilities() Capabilities {
 	// MinIO supports bucket policy and lifecycle round trips used by SEC47.
 	caps := CapMultipartUpload |
+		CapBucketManagement |
 		CapBucketPolicy |
 		CapBucketLifecycle |
 		CapMultipartCopy |

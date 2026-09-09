@@ -774,7 +774,7 @@ func TestConfig_ResolvedCredentials_MutationIsIsolated(t *testing.T) {
 }
 
 func TestConfig_Validate_CredentialBucketPatterns(t *testing.T) {
-	for _, pattern := range []string{"*", "*foo", "foo*bar", "", "foo**", "foo bar", " foo", "foo\tbar"} {
+	for _, pattern := range []string{"*foo", "foo*bar", "", "foo**", "foo bar", " foo", "foo\tbar"} {
 		if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: []string{pattern}}}, true); err == nil {
 			t.Fatalf("pattern %q accepted", pattern)
 		}
@@ -782,7 +782,7 @@ func TestConfig_Validate_CredentialBucketPatterns(t *testing.T) {
 }
 
 func TestConfig_Validate_CredentialBucketPatternsAccepted(t *testing.T) {
-	patterns := []string{"tenant-a", "shared-*"}
+	patterns := []string{"tenant-a", "shared-*", "*"}
 	if err := ValidateGatewayCredentials([]GatewayCredential{{AccessKey: "key", SecretKey: "secret", Buckets: patterns}}, true); err != nil {
 		t.Fatalf("valid patterns rejected: %v", err)
 	}
@@ -983,6 +983,33 @@ func TestLoadFromEnv_CredentialBucketsAbsentVersusEmpty(t *testing.T) {
 	if cfg.Auth.Credentials[0].Buckets == nil || len(cfg.Auth.Credentials[0].Buckets) != 0 {
 		t.Fatalf("empty env scope was not preserved: %#v", cfg.Auth.Credentials[0].Buckets)
 	}
+}
+
+func TestLoadFromEnv_CredentialBareWildcardBucketScope(t *testing.T) {
+	t.Setenv("GW_CRED_0_ACCESS_KEY", "env-ak")
+	t.Setenv("GW_CRED_0_SECRET_KEY", "env-sk")
+	t.Setenv("GW_CRED_0_BUCKETS", "*")
+	cfg := &Config{}
+	if err := loadFromEnv(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Auth.Credentials) != 1 || len(cfg.Auth.Credentials[0].Buckets) != 1 || cfg.Auth.Credentials[0].Buckets[0] != "*" {
+		t.Fatalf("wildcard scope not preserved: %#v", cfg.Auth.Credentials)
+	}
+	if err := ValidateGatewayCredentials(cfg.Auth.Credentials, true); err != nil {
+		t.Fatalf("wildcard scope failed validation: %v", err)
+	}
+}
+
+func TestLoadCredentialFile_BareWildcardBucketScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("- access_key: wildcard-ak\n  secret_key: wildcard-sk\n  buckets: ['*']\n"), 0600))
+	t.Setenv("AUTH_CREDENTIALS_FILE", path)
+	cfg := &Config{}
+	require.NoError(t, loadCredentialFile(cfg))
+	require.Len(t, cfg.Auth.Credentials, 1)
+	assert.Equal(t, []string{"*"}, cfg.Auth.Credentials[0].Buckets)
+	require.NoError(t, ValidateGatewayCredentials(cfg.Auth.Credentials, true))
 }
 
 func TestLoadFromEnv_CredentialAuthorizationFields(t *testing.T) {

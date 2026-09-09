@@ -6,7 +6,7 @@ The S3 Encryption Gateway is designed for containerized deployment in Kubernetes
 
 ## Credential Authorization
 
-Gateway credentials can be limited to exact buckets and trailing-prefix scopes. Omit `buckets` to retain unrestricted access, or set `buckets: []` to deny all access. Set `permissions: ro` for read-only object access; `rw` is the default. Bucket lifecycle permissions require explicit `bucket_permissions: [create, delete]` grants. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
+Gateway credentials can be limited to exact buckets and trailing-prefix scopes. Omit `buckets` or use `buckets: ["*"]` to retain unrestricted access, or set `buckets: []` to deny all access. A bare `*` is broad authority and should be limited to trusted provisioning or administrative credentials, especially with lifecycle grants. Set `permissions: ro` for read-only object access; `rw` is the default. Bucket lifecycle permissions require explicit `bucket_permissions: [create, delete]` grants. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
 
 ## Docker Container Design
 

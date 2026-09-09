@@ -56,7 +56,7 @@ auth:
       permissions: "rw"
 ```
 
-Omit `buckets` for unrestricted access or use `buckets: []` to deny all buckets. `permissions: ro` allows reads only. Bucket creation and deletion need explicit `bucket_permissions` grants.
+Omit `buckets` or use `buckets: ["*"]` for unrestricted access; use `buckets: []` to deny all buckets. A bare `*` is broad authority, especially with bucket lifecycle grants, and should be limited to trusted provisioning credentials. `permissions: ro` allows reads only. Bucket creation and deletion need explicit `bucket_permissions` grants.
 
 Throughout this document, replace `my-gateway-access-key` / `changeme` with
 the credentials from your `gateway.yaml`.
@@ -648,18 +648,19 @@ Invalid reloads are rejected and the prior policy remains active.
 
 ## 8. Wildcard Grammar
 
-The `buckets` list in each credential entry supports exact names and trailing-prefix wildcards:
+The `buckets` list in each credential entry supports exact names, an explicit unrestricted wildcard, and trailing-prefix wildcards:
 
 | Pattern | Matches | Does not match |
 |---|---|---|
 | `exact-bucket` | `exact-bucket` | `exact-bucket-2` |
+| `*` | every bucket | — |
 | `tenant-*` | `tenant-a`, `tenant-b` | `other-tenant` |
 
 **Rules:**
 
 - Only **one** `*` is permitted.
-- The `*` must be the **last character** of the pattern.
-- `*` by itself is rejected.
+- A bare `*` grants unrestricted scope and is broad authority; use it only for trusted provisioning or administrative credentials.
+- Otherwise, the `*` must be the **last character** of the pattern and have a non-empty prefix.
 - Duplicate patterns within a single credential are rejected at startup.
 
 **Example:**
@@ -673,7 +674,7 @@ auth:
       permissions: "rw"
 ```
 
-Omit `buckets` for unrestricted access; use `buckets: []` to intentionally deny all buckets.
+Omit `buckets` or use `buckets: ["*"]` for unrestricted access; use `buckets: []` to intentionally deny all buckets.
 
 ---
 

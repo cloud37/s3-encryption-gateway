@@ -17,6 +17,7 @@ type AuthorizationPolicy struct {
 }
 
 type bucketMatcher struct {
+	all    bool
 	exact  string
 	prefix string
 }
@@ -34,7 +35,7 @@ type Credential struct {
 func (c Credential) AllowsBucket(bucket string) bool {
 	if c.Policy.matchers != nil {
 		for _, matcher := range c.Policy.matchers {
-			if matcher.exact == bucket || (matcher.prefix != "" && strings.HasPrefix(bucket, matcher.prefix)) {
+			if matcher.all || matcher.exact == bucket || (matcher.prefix != "" && strings.HasPrefix(bucket, matcher.prefix)) {
 				return true
 			}
 		}
@@ -44,7 +45,9 @@ func (c Credential) AllowsBucket(bucket string) bool {
 		return true
 	}
 	for _, pattern := range c.Policy.Buckets {
-		if strings.HasSuffix(pattern, "*") {
+		if pattern == "*" {
+			return true
+		} else if strings.HasSuffix(pattern, "*") {
 			if strings.HasPrefix(bucket, strings.TrimSuffix(pattern, "*")) {
 				return true
 			}
@@ -143,7 +146,9 @@ func compileBucketMatchers(patterns []string) []bucketMatcher {
 	}
 	matchers := make([]bucketMatcher, 0, len(patterns))
 	for _, pattern := range patterns {
-		if strings.HasSuffix(pattern, "*") {
+		if pattern == "*" {
+			matchers = append(matchers, bucketMatcher{all: true})
+		} else if strings.HasSuffix(pattern, "*") {
 			matchers = append(matchers, bucketMatcher{prefix: strings.TrimSuffix(pattern, "*")})
 		} else {
 			matchers = append(matchers, bucketMatcher{exact: pattern})

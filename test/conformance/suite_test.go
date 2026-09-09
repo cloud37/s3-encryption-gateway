@@ -345,6 +345,7 @@ func TestConformance(t *testing.T) {
 
 				// V1.0-S3-2 S3 API feature parity
 				{"BucketManagement_CreateBucket_EnabledAuthorized", provider.CapBucketManagement, testBucketManagementCreateBucketEnabledAuthorized},
+				{"BucketManagement_CreateBucket_WildcardScope", provider.CapBucketManagement, testBucketManagementCreateBucketWildcardScope},
 				{"BucketManagement_CreateBucket_DefaultDisabled", 0, testBucketManagementCreateBucketDefaultDisabled},
 				{"BucketManagement_CreateBucket_OutOfScope", 0, testBucketManagementCreateBucketOutOfScope},
 				{"BucketManagement_CreateBucket_LocationConstraint", provider.CapBucketManagement, testBucketManagementCreateBucketLocationConstraint},

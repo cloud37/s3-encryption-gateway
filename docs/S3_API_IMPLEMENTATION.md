@@ -266,7 +266,7 @@ type S3Response struct {
 
 ### Strategy
 - **Per-credential gateway authentication**: Every inbound request must present a valid access key configured in `auth.credentials`. The gateway validates AWS Signature V4 (and V2) against the stored secret before any backend interaction.
-- **Per-credential bucket scope**: Each credential can be restricted to exact bucket names and trailing-`*` prefixes. An omitted `buckets` list means unrestricted; an explicit empty list `[]` denies all buckets.
+- **Per-credential bucket scope**: Each credential can be restricted to exact bucket names and trailing-`*` prefixes. An omitted `buckets` list or explicit `[*]` means unrestricted; an explicit empty list `[]` denies all buckets. A bare `*` is broad authority and is appropriate only for trusted provisioning credentials.
 - **Object permissions**: `ro` permits reads only; `rw` permits reads and mutations. Both default to `rw` when omitted.
 - **Bucket permissions**: Explicit grants `create` and `delete` are required for CreateBucket and DeleteBucket. `rw` does not imply either.
 

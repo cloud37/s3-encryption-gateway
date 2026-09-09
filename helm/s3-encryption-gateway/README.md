@@ -148,15 +148,15 @@ config:
 | `config.backend.provider` | Provider hint string (optional) | `""` |
 | `config.backend.useSSL` | Selects HTTPS for scheme-less backend endpoints; explicit `http://` or `https://` endpoint schemes take precedence | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
-Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it for unrestricted access or use `[]` for deny-all. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration).
+Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it or use `["*"]` for unrestricted access, or use `[]` for deny-all. A bare `*` is broad authority, particularly with `create`, `delete`, or `manage`. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration).
 
 #### Credential Migration and Reload
 
 Existing credentials remain unrestricted and read-write when `buckets` and
 `permissions` are omitted. To migrate safely, first add explicit bucket scopes,
 then use `ro` for readers and grant `create` or `delete` only where required.
-Exact bucket names and non-empty trailing-prefix patterns such as `tenant-*`
-are supported; other wildcard forms are rejected.
+Exact bucket names, the explicit unrestricted `*`, and non-empty trailing-prefix
+patterns such as `tenant-*` are supported; other wildcard forms are rejected.
 
 Credential policy files and the main configuration file can be reloaded with
 `SIGHUP` when the deployment is configured to watch them. A failed reload keeps

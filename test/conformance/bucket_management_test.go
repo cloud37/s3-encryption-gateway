@@ -53,6 +53,23 @@ func testBucketManagementCreateBucketEnabledAuthorized(t *testing.T, inst provid
 	t.Cleanup(func() { _, _ = bucketManagementRequest(t, gw, http.MethodDelete, name, nil, c) })
 }
 
+// testBucketManagementCreateBucketWildcardScope proves the explicit broad
+// authority spelling supports provisioning dynamically named buckets. Backend
+// IAM remains the final authority for the create and cleanup operations.
+func testBucketManagementCreateBucketWildcardScope(t *testing.T, inst provider.Instance) {
+	if inst.Bucket == "" {
+		t.Skip("provider has no managed bucket fixture")
+	}
+	name := "s3mgmt-wildcard-" + uniqueSuffix(t)
+	c := bucketManagementCredential("*", config.BucketPermissionCreate, config.BucketPermissionDelete)
+	gw := harness.StartGateway(t, inst, harness.WithBucketCreation(true), harness.WithBucketManagementCredentials(c))
+	resp, body := bucketManagementRequest(t, gw, http.MethodPut, name, nil, c)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		t.Fatalf("CreateBucket with wildcard scope status=%d body=%s", resp.StatusCode, body)
+	}
+	t.Cleanup(func() { _, _ = bucketManagementRequest(t, gw, http.MethodDelete, name, nil, c) })
+}
+
 func testBucketManagementCreateBucketDefaultDisabled(t *testing.T, inst provider.Instance) {
 	name := "s3mgmt-disabled-" + uniqueSuffix(t)
 	c := bucketManagementCredential(name, config.BucketPermissionCreate)

@@ -843,10 +843,10 @@ func ValidateGatewayCredentials(credentials []GatewayCredential, requireSecret b
 		}
 		patterns := make(map[string]struct{}, len(credential.Buckets))
 		for _, bucket := range credential.Buckets {
-			// The grammar matches the Helm values.schema.json pattern
-			// ^[^*\s][^*\s]*(\*)?$: no whitespace anywhere, at most one
-			// trailing "*", never a bare "*".
-			if bucket == "" || strings.ContainsAny(bucket, " \t\r\n\v\f") || bucket == "*" || strings.Count(bucket, "*") > 1 || (strings.Contains(bucket, "*") && !strings.HasSuffix(bucket, "*")) {
+			// A bare "*" explicitly grants unrestricted scope. All other
+			// patterns must be an exact bucket name or a single trailing-prefix
+			// wildcard. This grammar matches the Helm values schema.
+			if bucket == "" || strings.ContainsAny(bucket, " \t\r\n\v\f") || (bucket != "*" && (strings.Count(bucket, "*") > 1 || (strings.Contains(bucket, "*") && !strings.HasSuffix(bucket, "*")))) {
 				return fmt.Errorf("auth.credentials[%d]: invalid bucket pattern %q", i, bucket)
 			}
 			if _, exists := patterns[bucket]; exists {
