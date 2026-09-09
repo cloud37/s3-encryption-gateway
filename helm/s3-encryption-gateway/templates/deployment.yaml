@@ -367,7 +367,6 @@ spec:
             httpHeaders:
               {{- toYaml .Values.livenessProbe.httpGet.httpHeaders | nindent 14 }}
             {{- end }}
-            insecureSkipTLSVerify: true
           {{- if .Values.livenessProbe.initialDelaySeconds }}
           initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
           {{- end }}
@@ -396,7 +395,6 @@ spec:
             httpHeaders:
               {{- toYaml .Values.readinessProbe.httpGet.httpHeaders | nindent 14 }}
             {{- end }}
-            insecureSkipTLSVerify: true
           {{- if .Values.readinessProbe.initialDelaySeconds }}
           initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
           {{- end }}
