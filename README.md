@@ -25,6 +25,35 @@ This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 
 ## Installation
 
+### OCI registry (GHCR)
+
+Signed OCI releases are published at `ghcr.io/cloud37/s3-encryption-gateway`.
+Install a specific chart version with:
+
+```bash
+helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway \
+  --version 0.11.10
+```
+
+For strongest artifact pinning, install by the immutable manifest digest:
+
+```bash
+helm install my-gateway \
+  oci://ghcr.io/cloud37/s3-encryption-gateway@sha256:<manifest-digest>
+```
+
+Verify the digest-qualified chart with the GitHub Actions keyless identity
+before installation (replace `<manifest-digest>` with the release digest):
+
+```bash
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main|master)$' \
+  ghcr.io/cloud37/s3-encryption-gateway@sha256:<manifest-digest>
+```
+
+### Classic GitHub Pages repository
+
 ### Add the Helm repository
 
 ```bash
@@ -117,17 +146,17 @@ config:
 | `config.backend.accessKey` | Backend access key (use valueFrom) | `""` |
 | `config.backend.secretKey` | Backend secret key (use valueFrom) | `""` |
 | `config.backend.provider` | Provider hint string (optional) | `""` |
-| `config.backend.useSSL` | Use SSL for backend connection | `"true"` |
+| `config.backend.useSSL` | Selects HTTPS for scheme-less backend endpoints; explicit `http://` or `https://` endpoint schemes take precedence | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
-Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it for unrestricted access or use `[]` for deny-all. `permissions` is `ro` or `rw`, while `bucketPermissions` explicitly grants `create` and `delete`.
+Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it or use `["*"]` for unrestricted access, or use `[]` for deny-all. A bare `*` is broad authority, particularly with `create`, `delete`, or `manage`. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration). Root ListBuckets is allowed for both `ro` and `rw` (with omitted permissions defaulting to `rw`): an absent `buckets` scope returns backend-visible buckets, while an explicit empty `buckets: []` scope returns a successful empty inventory.
 
 #### Credential Migration and Reload
 
 Existing credentials remain unrestricted and read-write when `buckets` and
 `permissions` are omitted. To migrate safely, first add explicit bucket scopes,
 then use `ro` for readers and grant `create` or `delete` only where required.
-Exact bucket names and non-empty trailing-prefix patterns such as `tenant-*`
-are supported; other wildcard forms are rejected.
+Exact bucket names, the explicit unrestricted `*`, and non-empty trailing-prefix
+patterns such as `tenant-*` are supported; other wildcard forms are rejected.
 
 Credential policy files and the main configuration file can be reloaded with
 `SIGHUP` when the deployment is configured to watch them. A failed reload keeps
@@ -567,8 +596,21 @@ The `/ready` endpoint performs dependency health checks (KMS, Valkey) and return
 | `podMonitor.interval` | Scrape interval | `30s` |
 | `podMonitor.scrapeTimeout` | Scrape timeout | `10s` |
 | `podMonitor.labels` | Extra labels for PodMonitor | `{}` |
+| `metrics.port` | Dedicated unauthenticated `/metrics` listener port; `0` uses the admin or S3 port fallback | `0` |
+| `metrics.enableBucketLabel` | Preserve bucket names on bucket-labelled S3 metrics; disabled mode uses `bucket="*"` | `false` |
 
 **ServiceMonitor vs PodMonitor**: `ServiceMonitor` targets the Service (recommended). `PodMonitor` targets pods directly — useful when the Service is disabled or for fine-grained pod-level metrics. Both emit a `track` relabel rule when `track` is set, enabling per-track PromQL queries in blue/green topologies.
+
+### Client Traffic Metrics
+
+The gateway exposes the following Prometheus metrics for S3 client traffic:
+
+- `s3_client_requests_total{operation,bucket,status_code}` records each completed S3 route once.
+- `s3_client_bytes_total{bucket,direction}` records actual plaintext application-body bytes at the client boundary. `direction` is `in` for uploads and `out` for downloads.
+
+Input bytes are counted after AWS streaming framing is decoded; output bytes are counted only when successfully written. Headers, TLS framing, backend retries, and internal copy traffic are excluded.
+
+Set `metrics.enableBucketLabel: true` to preserve bucket names. With the default `false`, all bucket labels are collapsed to `*` to bound cardinality. Labels never contain object keys, upload IDs, credentials, paths, or error text.
 
 #### Network Policy
 
@@ -1227,6 +1269,15 @@ helm upgrade my-gateway s3-encryption-gateway/s3-encryption-gateway
 helm uninstall my-gateway
 ```
 
+## Backend TLS
+
+Set `config.backend.tls.caFile.value` to the path of a mounted PEM private CA
+to augment system roots. Use `valueFrom` for secret/config-map references.
+`config.backend.tls.insecureSkipVerify.value` defaults to `"false"`; enabling
+it is unsafe and intended only for local diagnostics. Mount the CA with the
+chart's `extraVolumes` and `extraVolumeMounts`, then restart the gateway after
+changes.
+
 ## Security Best Practices
 
 1. **Use Secrets for Sensitive Data**: Always use `valueFrom.secretKeyRef` for:
@@ -1287,9 +1338,3 @@ For issues, feature requests, or questions:
 ## License
 
 MIT License — see [LICENSE](https://github.com/cloud37/s3-encryption-gateway/blob/main/LICENSE) for details.
-### Client Traffic Metrics
-
-`s3_client_requests_total{operation,bucket,status_code}` counts completed S3
-routes and `s3_client_bytes_total{bucket,direction}` counts application-body
-bytes at the client boundary. Set `metrics.enableBucketLabel: true` to retain
-bucket labels; disabled mode uses `*` to bound cardinality.
