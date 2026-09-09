@@ -1840,3 +1840,36 @@ func md5sum(b []byte) []byte {
 	h.Write(b)
 	return h.Sum(nil)
 }
+
+func TestResolveEndpoint_UseSSLAndExplicitSchemePrecedence(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		ssl      bool
+		want     string
+		wantErr  bool
+	}{
+		{"rustfs:9000", false, "http://rustfs:9000", false},
+		{"rustfs:9000", true, "https://rustfs:9000", false},
+		{"http://rustfs:9000", true, "http://rustfs:9000", false},
+		{"https://rustfs:9000", false, "https://rustfs:9000", false},
+		{" rustfs:9000/ ", false, "http://rustfs:9000", false},
+		{"", false, "", true}, {"ftp://host", false, "", true}, {"http:///path", false, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			u, err := ResolveEndpoint(tc.endpoint, tc.ssl)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, u.String())
+		})
+	}
+	u, err := ResolveEndpoint("backend:9000", false)
+	require.NoError(t, err)
+	u.Path = "/changed"
+	fresh, err := ResolveEndpoint("backend:9000", false)
+	require.NoError(t, err)
+	require.Empty(t, fresh.Path)
+}

@@ -4264,12 +4264,16 @@ func TestHandleListBuckets_ReadOnlyCredentialAllowed(t *testing.T) {
 func TestHandleListBuckets_BackendErrorReturns502(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
+	var logs bytes.Buffer
+	logger.SetOutput(&logs)
 	mockClient := newMockS3Client()
 	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
-			Endpoint: "http://127.0.0.1:1",
-			UseSSL:   false,
+			Endpoint:  "http://127.0.0.1:1",
+			UseSSL:    false,
+			AccessKey: "backend-access-key-secret",
+			SecretKey: "backend-secret-key-secret",
 		},
 	}
 	handler := NewHandlerWithFeatures(mockClient, mockEngine, logger, getTestMetrics(), nil, nil, nil, cfg, nil)
@@ -4277,7 +4281,8 @@ func TestHandleListBuckets_BackendErrorReturns502(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/?private=query-secret-value", nil)
+	req.Header.Set("Authorization", "SensitiveAuthorizationValue")
 	req = req.WithContext(context.WithValue(req.Context(), credentialKey, Credential{
 		Policy: AuthorizationPolicy{
 			Permissions: config.ObjectPermissionReadWrite,
@@ -4292,6 +4297,52 @@ func TestHandleListBuckets_BackendErrorReturns502(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "BadGateway") {
 		t.Errorf("expected BadGateway in response, got: %s", body)
+	}
+	output := logs.String()
+	for _, want := range []string{"Failed to forward ListBuckets request to backend", "operation=ListBuckets", "backend_scheme=http", "backend_host=\"127.0.0.1:1\"", "send backend request"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("log missing %q: %s", want, output)
+		}
+	}
+	for _, secret := range []string{"backend-access-key-secret", "backend-secret-key-secret", "SensitiveAuthorizationValue", "query-secret-value"} {
+		if strings.Contains(output, secret) {
+			t.Errorf("log leaked %q: %s", secret, output)
+		}
+	}
+}
+
+func TestHandleListBuckets_PermissionAndScopeMatrix(t *testing.T) {
+	var requests int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`<ListAllMyBucketsResult><Buckets><Bucket><Name>fixture</Name></Bucket></Buckets></ListAllMyBucketsResult>`))
+	}))
+	defer backend.Close()
+	for _, permission := range []config.ObjectPermission{config.ObjectPermissionReadOnly, config.ObjectPermissionReadWrite} {
+		for _, grants := range [][]config.BucketPermission{nil, {config.BucketPermissionCreate}, {config.BucketPermissionDelete}, {config.BucketPermissionCreate, config.BucketPermissionDelete}} {
+			for _, scope := range [][]string{nil, {}} {
+				requests = 0
+				engine, err := crypto.NewEngine([]byte("test-password-123456"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				handler := NewHandlerWithFeatures(newMockS3Client(), engine, logrus.New(), getTestMetrics(), nil, nil, nil, &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL}}, nil)
+				router := mux.NewRouter()
+				handler.RegisterRoutes(router)
+				req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(context.WithValue(context.Background(), credentialKey, Credential{Policy: AuthorizationPolicy{Permissions: permission, Buckets: scope, BucketPermissions: grants}}))
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				if w.Code != http.StatusOK || requests != 1 {
+					t.Fatalf("permission=%q grants=%v scope=%#v status=%d requests=%d", permission, grants, scope, w.Code, requests)
+				}
+				if scope == nil && !strings.Contains(w.Body.String(), "fixture") {
+					t.Fatal("unrestricted scope filtered bucket")
+				}
+				if scope != nil && strings.Contains(w.Body.String(), "fixture") {
+					t.Fatal("empty scope exposed bucket")
+				}
+			}
+		}
 	}
 }
 

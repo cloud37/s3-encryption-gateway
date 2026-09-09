@@ -8,11 +8,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1044,6 +1046,76 @@ func TestLoadFromEnv_CredentialAuthorizationFields(t *testing.T) {
 	}
 	if cred.Label != "env-label" {
 		t.Errorf("label = %q, want env-label", cred.Label)
+	}
+}
+
+func TestLoadFromEnv_CredentialListBucketsPermissionMatrix(t *testing.T) {
+	permissions := []struct {
+		name  string
+		value *ObjectPermission
+	}{{"omitted", nil}, {"rw", ptrPermission(ObjectPermissionReadWrite)}, {"ro", ptrPermission(ObjectPermissionReadOnly)}}
+	grants := []struct {
+		value string
+		want  []BucketPermission
+	}{{"", nil}, {"create", []BucketPermission{BucketPermissionCreate}}, {"delete", []BucketPermission{BucketPermissionDelete}}, {"create,delete", []BucketPermission{BucketPermissionCreate, BucketPermissionDelete}}}
+	for _, permission := range permissions {
+		for _, grant := range grants {
+			t.Run(permission.name+"/"+grant.value, func(t *testing.T) {
+				t.Setenv("GW_CRED_0_ACCESS_KEY", "matrix-ak")
+				t.Setenv("GW_CRED_0_SECRET_KEY", "matrix-sk")
+				t.Setenv("BACKEND_ENDPOINT", "stable-backend:9000")
+				t.Setenv("BACKEND_USE_SSL", "false")
+				if permission.value == nil {
+					require.NoError(t, os.Unsetenv("GW_CRED_0_PERMISSIONS"))
+				} else {
+					t.Setenv("GW_CRED_0_PERMISSIONS", string(*permission.value))
+				}
+				t.Setenv("GW_CRED_0_BUCKET_PERMISSIONS", grant.value)
+				require.NoError(t, os.Unsetenv("GW_CRED_0_BUCKETS"))
+				cfg := &Config{}
+				if err := loadFromEnv(cfg); err != nil {
+					t.Fatal(err)
+				}
+				if err := ValidateGatewayCredentials(cfg.Auth.Credentials, true); err != nil {
+					t.Fatal(err)
+				}
+				if len(cfg.Auth.Credentials) != 1 {
+					t.Fatal("credential missing")
+				}
+				cred := cfg.Auth.Credentials[0]
+				if permission.value == nil && cred.Permissions != nil || permission.value != nil && (cred.Permissions == nil || *cred.Permissions != *permission.value) {
+					t.Fatalf("permissions=%v", cred.Permissions)
+				}
+				if !reflect.DeepEqual(cred.BucketPermissions, grant.want) {
+					t.Fatalf("grants=%v want=%v", cred.BucketPermissions, grant.want)
+				}
+				if cred.Buckets != nil {
+					t.Fatalf("absent scope=%#v want nil", cred.Buckets)
+				}
+				if cfg.Backend.Endpoint != "stable-backend:9000" || cfg.Backend.UseSSL {
+					t.Fatalf("backend changed: %+v", cfg.Backend)
+				}
+			})
+		}
+	}
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scope-empty-%t", empty), func(t *testing.T) {
+			t.Setenv("GW_CRED_0_ACCESS_KEY", "scope-ak")
+			t.Setenv("GW_CRED_0_SECRET_KEY", "scope-sk")
+			if empty {
+				t.Setenv("GW_CRED_0_BUCKETS", "")
+			} else {
+				require.NoError(t, os.Unsetenv("GW_CRED_0_BUCKETS"))
+			}
+			cfg := &Config{}
+			_ = loadFromEnv(cfg)
+			if empty && (cfg.Auth.Credentials[0].Buckets == nil || len(cfg.Auth.Credentials[0].Buckets) != 0) {
+				t.Fatal("empty scope lost")
+			}
+			if !empty && cfg.Auth.Credentials[0].Buckets != nil {
+				t.Fatal("absent scope became non-nil")
+			}
+		})
 	}
 }
 

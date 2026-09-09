@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/md5" // #nosec G501 -- S3 Content-MD5 interoperability header
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -19,6 +18,7 @@ import (
 
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	backends3 "github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/util"
 )
 
@@ -151,17 +151,11 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 		return nil, ErrBackendNotConfigured
 	}
 
-	u, err := url.Parse(h.config.Backend.Endpoint)
+	u, err := backends3.ResolveEndpoint(h.config.Backend.Endpoint, h.config.Backend.UseSSL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid backend endpoint: %w", err)
+		return nil, fmt.Errorf("resolve backend endpoint: %w", err)
 	}
-	if u.Scheme == "" {
-		if h.config.Backend.UseSSL {
-			u.Scheme = "https"
-		} else {
-			u.Scheme = "http"
-		}
-	}
+	u = u.Clone()
 	u.Path = r.URL.Path
 	u.RawQuery = r.URL.RawQuery
 
@@ -232,7 +226,7 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 			region = "us-east-1"
 		}
 		if err := signer.SignHTTP(r.Context(), credsVal, proxyReq, payloadHash, "s3", region, time.Now()); err != nil {
-			return nil, fmt.Errorf("failed to sign backend request: %w", err)
+			return nil, fmt.Errorf("sign backend request: %w", err)
 		}
 		// The AWS signer normalizes bare query selectors to `key=`. Restore the
 		// wire form because several S3-compatible backends distinguish `?tagging`
@@ -244,17 +238,16 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 		})
 	}
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
+	transport, err := backends3.NewBackendHTTPTransport(h.config.Backend.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("build backend transport: %w", err)
 	}
 	client := &http.Client{
 		Transport: transport,
 	}
 	resp, err := client.Do(proxyReq) // #nosec G704 — S3 proxy: forward to configured backend
 	if err != nil {
-		return nil, fmt.Errorf("backend request failed: %w", err)
+		return nil, fmt.Errorf("send backend request: %w", err)
 	}
 	return resp, nil
 }

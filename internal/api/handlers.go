@@ -6238,6 +6238,10 @@ func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.forwardToBackend(r)
 	if err != nil {
+		scheme, host := backendEndpointIdentity(h.config)
+		h.logger.WithError(sanitizeBackendForwardError(err)).WithFields(logrus.Fields{
+			"operation": "ListBuckets", "backend_scheme": scheme, "backend_host": host,
+		}).Error("Failed to forward ListBuckets request to backend")
 		(&S3Error{Code: "BadGateway", Message: "The upstream S3 backend returned an error.", Resource: r.URL.Path, HTTPStatus: http.StatusBadGateway}).WriteXML(w)
 		return
 	}
@@ -6287,6 +6291,50 @@ func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 	if err := xml.NewEncoder(w).Encode(result); err != nil {
 		return
 	}
+}
+
+// backendEndpointIdentity returns only safe endpoint fields for diagnostics.
+func backendEndpointIdentity(cfg *config.Config) (scheme, host string) {
+	if cfg == nil {
+		return "", ""
+	}
+	u, err := s3.ResolveEndpoint(cfg.Backend.Endpoint, cfg.Backend.UseSSL)
+	if err != nil {
+		return "", ""
+	}
+	return u.Scheme, u.Host
+}
+
+// sanitizeBackendForwardError removes URL credentials and query material from
+// transport errors before they reach structured logs.
+func sanitizeBackendForwardError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	for start := strings.IndexByte(message, '"'); start >= 0; {
+		rest := message[start+1:]
+		end := strings.IndexByte(rest, '"')
+		if end < 0 {
+			break
+		}
+		end += start + 1
+		if u, parseErr := url.Parse(message[start+1 : end]); parseErr == nil && u.Host != "" {
+			u.User = nil
+			u.RawQuery = ""
+			message = message[:start+1] + u.String() + message[end:]
+			start = strings.IndexByte(message[start+1+len(u.String()):], '"')
+			if start >= 0 {
+				start += 1 + len(u.String())
+			}
+			continue
+		}
+		start = strings.IndexByte(message[end+1:], '"')
+		if start >= 0 {
+			start += end + 1
+		}
+	}
+	return errors.New(message)
 }
 
 // handleDeleteBucket handles DELETE /{bucket} — DeleteBucket.

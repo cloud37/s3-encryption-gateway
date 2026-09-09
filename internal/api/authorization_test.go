@@ -35,6 +35,34 @@ func TestAuthorizationMiddleware_ReadOnlyAllowsObjectReads(t *testing.T) {
 	}
 }
 
+func TestAuthorizationMiddleware_ListBucketsIgnoresLifecycleGrants(t *testing.T) {
+	for _, permission := range []config.ObjectPermission{config.ObjectPermissionReadOnly, config.ObjectPermissionReadWrite} {
+		for _, grants := range [][]config.BucketPermission{nil, {config.BucketPermissionCreate}, {config.BucketPermissionDelete}, {config.BucketPermissionCreate, config.BucketPermissionDelete}} {
+			t.Run(string(permission)+"/"+strings.Join(bucketPermissionStrings(grants), ","), func(t *testing.T) {
+				called := false
+				h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+				h.ServeHTTP(httptest.NewRecorder(), authorizedRequest(http.MethodGet, "/", Credential{Policy: AuthorizationPolicy{Permissions: permission, BucketPermissions: grants}}))
+				if !called {
+					t.Fatalf("permission=%q grants=%v denied", permission, grants)
+				}
+			})
+		}
+	}
+	recorder := httptest.NewRecorder()
+	AuthorizationMiddleware("", nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("invalid permission passed") })).ServeHTTP(recorder, authorizedRequest(http.MethodGet, "/", Credential{}))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+}
+
+func bucketPermissionStrings(grants []config.BucketPermission) []string {
+	values := make([]string, len(grants))
+	for i, grant := range grants {
+		values[i] = string(grant)
+	}
+	return values
+}
+
 func TestAuthorizationMiddleware_ReadOnlyDeniesObjectWrites(t *testing.T) {
 	credential := Credential{Policy: AuthorizationPolicy{Buckets: []string{"tenant"}, Permissions: config.ObjectPermissionReadOnly}}
 	called := false

@@ -52,7 +52,7 @@ func newTLSFixture(t *testing.T) tlsFixture {
 }
 
 func TestNewBackendHTTPTransport_DefaultVerification(t *testing.T) {
-	tr, err := newBackendHTTPTransport(config.BackendTLSConfig{})
+	tr, err := NewBackendHTTPTransport(config.BackendTLSConfig{})
 	require.NoError(t, err)
 	require.NotNil(t, tr.TLSClientConfig)
 	if tr.TLSClientConfig.InsecureSkipVerify {
@@ -65,7 +65,7 @@ func TestNewBackendHTTPTransport_DefaultVerification(t *testing.T) {
 
 func TestNewBackendHTTPTransport_CustomCA(t *testing.T) {
 	f := newTLSFixture(t)
-	tr, err := newBackendHTTPTransport(config.BackendTLSConfig{CAFile: f.caFile})
+	tr, err := NewBackendHTTPTransport(config.BackendTLSConfig{CAFile: f.caFile})
 	require.NoError(t, err)
 	client := &http.Client{Transport: tr}
 	resp, err := client.Get(f.server.URL)
@@ -75,7 +75,7 @@ func TestNewBackendHTTPTransport_CustomCA(t *testing.T) {
 
 func TestNewBackendHTTPTransport_InsecureSkipVerify(t *testing.T) {
 	f := newTLSFixture(t)
-	tr, err := newBackendHTTPTransport(config.BackendTLSConfig{InsecureSkipVerify: true})
+	tr, err := NewBackendHTTPTransport(config.BackendTLSConfig{InsecureSkipVerify: true})
 	require.NoError(t, err)
 	require.True(t, tr.TLSClientConfig.InsecureSkipVerify)
 	resp, err := (&http.Client{Transport: tr}).Get(f.server.URL)
@@ -86,7 +86,7 @@ func TestNewBackendHTTPTransport_InsecureSkipVerify(t *testing.T) {
 func TestNewBackendHTTPTransport_InvalidCA_ReturnsError(t *testing.T) {
 	path := t.TempDir() + "/bad.pem"
 	require.NoError(t, os.WriteFile(path, []byte("not pem"), 0600))
-	_, err := newBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
+	_, err := NewBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), path)
 }
@@ -94,14 +94,14 @@ func TestNewBackendHTTPTransport_InvalidCA_ReturnsError(t *testing.T) {
 func TestNewBackendHTTPTransport_CAFileErrors(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		path := t.TempDir() + "/missing.pem"
-		_, err := newBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
+		_, err := NewBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), path)
 	})
 
 	t.Run("directory", func(t *testing.T) {
 		path := t.TempDir()
-		_, err := newBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
+		_, err := NewBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not regular")
 	})
@@ -109,7 +109,7 @@ func TestNewBackendHTTPTransport_CAFileErrors(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		path := t.TempDir() + "/empty.pem"
 		require.NoError(t, os.WriteFile(path, nil, 0600))
-		_, err := newBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
+		_, err := NewBackendHTTPTransport(config.BackendTLSConfig{CAFile: path})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "contains no certificates")
 	})
@@ -120,7 +120,7 @@ func TestNewBackendHTTPTransport_DefaultTransportMustBeHTTPTransport(t *testing.
 	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, nil })
 	t.Cleanup(func() { http.DefaultTransport = original })
 
-	_, err := newBackendHTTPTransport(config.BackendTLSConfig{})
+	_, err := NewBackendHTTPTransport(config.BackendTLSConfig{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not an *http.Transport")
 }
@@ -138,7 +138,7 @@ func TestNewBackendHTTPTransport_ConcurrentConstruction(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tr, err := newBackendHTTPTransport(config.BackendTLSConfig{CAFile: f.caFile})
+			tr, err := NewBackendHTTPTransport(config.BackendTLSConfig{CAFile: f.caFile})
 			if err != nil {
 				errs <- err
 				return

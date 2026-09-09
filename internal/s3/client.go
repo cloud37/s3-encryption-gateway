@@ -299,7 +299,7 @@ func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (C
 		awsconfig.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
 	}
 	if f.httpTransport == nil {
-		transport, err := newBackendHTTPTransport(f.baseConfig.TLS)
+		transport, err := NewBackendHTTPTransport(f.baseConfig.TLS)
 		if err != nil {
 			return nil, fmt.Errorf("build backend HTTP transport: %w", err)
 		}
@@ -336,12 +336,11 @@ func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (C
 
 	// Set custom endpoint if provided (for any S3-compatible provider)
 	if f.baseConfig.Endpoint != "" {
-		endpoint := normalizeEndpoint(f.baseConfig.Endpoint, f.baseConfig.UseSSL)
-
-		// Validate endpoint URL
-		if err := validateEndpoint(endpoint); err != nil {
+		resolvedEndpoint, err := ResolveEndpoint(f.baseConfig.Endpoint, f.baseConfig.UseSSL)
+		if err != nil {
 			return nil, fmt.Errorf("invalid endpoint: %w", err)
 		}
+		endpoint := resolvedEndpoint.String()
 
 		s3Options = append(s3Options, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(endpoint)
@@ -445,6 +444,26 @@ func validateEndpoint(endpoint string) error {
 	}
 
 	return nil
+}
+
+// ResolveEndpoint parses and validates a configured backend endpoint.
+// Explicit HTTP(S) schemes take precedence over useSSL; scheme-less endpoints
+// receive the scheme selected by useSSL. The returned URL is newly allocated
+// and may safely be mutated by the caller.
+func ResolveEndpoint(endpoint string, useSSL bool) (*url.URL, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if strings.Contains(endpoint, "://") && !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		return nil, fmt.Errorf("endpoint must use http:// or https:// scheme")
+	}
+	normalized := normalizeEndpoint(endpoint, useSSL)
+	if err := validateEndpoint(normalized); err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	return u, nil
 }
 
 // PutObject uploads an object to S3.

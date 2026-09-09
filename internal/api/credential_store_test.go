@@ -1,6 +1,7 @@
 package api
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -77,6 +78,41 @@ func TestCredentialStore_ExplicitEmptyScopeRemainsDenyAll(t *testing.T) {
 	}
 	if credential.Policy.Buckets == nil || credential.AllowsBucket("any-bucket") {
 		t.Fatal("explicit empty scope became unrestricted")
+	}
+}
+
+func TestStaticCredentialStore_ListBucketsPermissionMatrix(t *testing.T) {
+	permissions := []struct {
+		name  string
+		input *config.ObjectPermission
+		want  config.ObjectPermission
+	}{{"omitted", nil, config.ObjectPermissionReadWrite}, {"ro", ptrPermission(config.ObjectPermissionReadOnly), config.ObjectPermissionReadOnly}, {"rw", ptrPermission(config.ObjectPermissionReadWrite), config.ObjectPermissionReadWrite}}
+	grants := [][]config.BucketPermission{nil, {config.BucketPermissionCreate}, {config.BucketPermissionDelete}, {config.BucketPermissionCreate, config.BucketPermissionDelete}}
+	for _, permission := range permissions {
+		for _, grant := range grants {
+			for _, scope := range [][]string{nil, {}} {
+				store, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "key", SecretKey: "secret", Permissions: permission.input, Buckets: scope, BucketPermissions: grant}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cred, err := store.Lookup("key")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cred.Policy.Permissions != permission.want {
+					t.Fatalf("permission=%q want=%q", cred.Policy.Permissions, permission.want)
+				}
+				if !reflect.DeepEqual(cred.Policy.BucketPermissions, grant) {
+					t.Fatalf("grants=%v want=%v", cred.Policy.BucketPermissions, grant)
+				}
+				if (scope == nil) != (cred.Policy.Buckets == nil) {
+					t.Fatalf("scope nil mismatch: %#v", cred.Policy.Buckets)
+				}
+				if (scope == nil) != cred.AllowsBucket("bucket") {
+					t.Fatalf("scope=%#v allows=%v", scope, cred.AllowsBucket("bucket"))
+				}
+			}
+		}
 	}
 }
 

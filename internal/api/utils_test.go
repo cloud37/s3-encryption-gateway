@@ -2,10 +2,13 @@ package api
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -15,6 +18,73 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )
+
+func forwardingHandler(endpoint string, useSSL bool, tls config.BackendTLSConfig) *Handler {
+	return &Handler{config: &config.Config{Backend: config.BackendConfig{Endpoint: endpoint, UseSSL: useSSL, TLS: tls}}}
+}
+
+func TestForwardToBackend_SchemeLessEndpointHonorsUseSSL(t *testing.T) {
+	called := false
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = r.URL.Path == "/wanted"
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	h := forwardingHandler(strings.TrimPrefix(backend.URL, "http://"), false, config.BackendTLSConfig{})
+	resp, err := h.forwardToBackend(httptest.NewRequest(http.MethodGet, "/wanted", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !called {
+		t.Fatal("scheme-less endpoint did not reach backend")
+	}
+}
+
+func TestForwardToBackend_ExplicitSchemeTakesPrecedence(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer backend.Close()
+	resp, err := forwardingHandler(backend.URL, true, config.BackendTLSConfig{}).forwardToBackend(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+}
+
+func TestForwardToBackend_InvalidEndpointFailsBeforeDispatch(t *testing.T) {
+	_, err := forwardingHandler("ftp://backend", false, config.BackendTLSConfig{}).forwardToBackend(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err == nil || !strings.Contains(err.Error(), "resolve backend endpoint") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestForwardToBackend_CustomCATrust(t *testing.T) {
+	called := false
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	cert := backend.Certificate()
+	if cert == nil {
+		t.Fatal("TLS server did not expose certificate")
+	}
+	caFile := t.TempDir() + "/backend-ca.pem"
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x509.ParseCertificate(cert.Raw); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := forwardingHandler(backend.URL, false, config.BackendTLSConfig{CAFile: caFile}).forwardToBackend(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !called {
+		t.Fatal("raw forwarding did not reach TLS backend")
+	}
+}
 
 func TestCopyProxyResponse_ReturnsActualBytesWritten(t *testing.T) {
 	backendResp := &http.Response{

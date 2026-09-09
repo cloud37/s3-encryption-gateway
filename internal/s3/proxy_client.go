@@ -24,21 +24,12 @@ type ProxyClient struct {
 
 // NewProxyClient creates a new proxy client that forwards requests to the backend.
 func NewProxyClient(cfg *config.BackendConfig) (*ProxyClient, error) {
-	endpoint := cfg.Endpoint
-	if endpoint == "" {
-		return nil, fmt.Errorf("backend endpoint is required")
-	}
-
-	endpoint = normalizeEndpoint(endpoint, cfg.UseSSL)
-	backendURL, err := url.Parse(endpoint)
+	backendURL, err := ResolveEndpoint(cfg.Endpoint, cfg.UseSSL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid backend endpoint: %w", err)
 	}
-	if err := validateEndpoint(endpoint); err != nil {
-		return nil, fmt.Errorf("invalid backend endpoint: %w", err)
-	}
 
-	transport, err := newBackendHTTPTransport(cfg.TLS)
+	transport, err := NewBackendHTTPTransport(cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("build backend HTTP transport: %w", err)
 	}

@@ -10,8 +10,10 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 )
 
-// newBackendHTTPTransport creates the shared hardened transport for backend clients.
-func newBackendHTTPTransport(cfg config.BackendTLSConfig) (*http.Transport, error) {
+// NewBackendHTTPTransport builds the transport used for backend HTTP traffic.
+// The caller owns the returned transport and may tune operation-specific
+// timeout fields before first use.
+func NewBackendHTTPTransport(cfg config.BackendTLSConfig) (*http.Transport, error) {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("http.DefaultTransport is not an *http.Transport")
