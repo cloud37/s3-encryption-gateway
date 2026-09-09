@@ -17,7 +17,7 @@ import (
 )
 
 // renovate: datasource=docker depName=valkey/valkey versioning=docker
-const valkeyImage = "valkey/valkey:8.0-alpine"
+const valkeyImage = "valkey/valkey:9.1-alpine"
 
 // ValkeyInstance holds the connection details for a running Valkey container.
 type ValkeyInstance struct {
