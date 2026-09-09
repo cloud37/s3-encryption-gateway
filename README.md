@@ -83,7 +83,68 @@ All objects are encrypted before being sent to the backend and decrypted on retr
 
 ### Per-Bucket Policies
 
-Policies let you override encryption behaviour on a per-bucket basis using glob-pattern matches. Use them for multi-tenant setups (different keys per tenant) or when specific buckets must bypass encryption.
+Policies let you override **encryption behaviour** on a per-bucket basis using
+glob-pattern matches. Use them for multi-tenant setups (different keys per
+tenant) or when specific buckets must bypass encryption.
+
+> **Encryption policy and client authorization are separate controls.** A
+> `GW_POLICY_N_*` / policy-file rule selects how objects in matching buckets are
+> encrypted. Gateway credentials under `auth.credentials` decide which buckets
+> a client access key may read, write, create, delete, or manage. An encryption
+> policy never grants a client access, and a credential scope never selects an
+> encryption key.
+
+#### Per-client bucket authorization
+
+Give each application or tenant its own gateway access key and restrict it to
+only the buckets it needs. Credential scopes accept exact bucket names,
+trailing-prefix patterns such as `tenant-a-*`, or a bare `*` for explicit
+unrestricted access:
+
+| `buckets` value | Effective scope |
+|---|---|
+| omitted | Unrestricted (backward-compatible default) |
+| `[]` | Deny all buckets |
+| <code>["app-data", "tenant-a-*"]</code> | Exact bucket plus matching prefixes |
+| <code>["*"]</code> | Every backend-visible bucket — **broad authority** |
+
+`*` is appropriate only for trusted administrative or provisioning clients.
+In particular, combining it with bucket lifecycle permissions can authorize a
+client to manage any bucket permitted by the gateway's backend IAM identity.
+`PROXIED_BUCKET`, when configured, still narrows every credential scope.
+
+```yaml
+auth:
+  credentials:
+    # An application credential: objects only within its tenant namespace.
+    - access_key: "tenant-a-client"
+      secret_key_env: "TENANT_A_GATEWAY_SECRET"
+      buckets: ["tenant-a-*"]
+      permissions: "rw"
+
+    # A trusted provisioning service: may create and delete dynamically named
+    # buckets. Backend IAM remains the final authority.
+    - access_key: "provisioner"
+      secret_key_env: "PROVISIONER_GATEWAY_SECRET"
+      buckets: ["*"]
+      permissions: "rw"
+      bucket_permissions: ["create", "delete"]
+```
+
+Object permissions are `ro` or `rw` (`rw` is the default). Bucket lifecycle
+permissions are deliberately independent: `rw` alone does **not** allow bucket
+creation, deletion, or configuration changes.
+
+| `bucket_permissions` grant | Allows |
+|---|---|
+| `create` | CreateBucket, when `ALLOW_BUCKET_CREATION=true` |
+| `delete` | DeleteBucket |
+| `manage` | Bucket configuration PUT/DELETE operations, such as lifecycle and policy |
+
+An authorized CreateBucket request is forwarded to the backend, then the new
+bucket uses the normal encryption-policy matching below. For example, a newly
+created `tenant-a-reports` bucket matches the `tenant-a-*` encryption policy;
+the provisioning credential above does not alter that choice.
 
 **Via YAML files** (mount any number of files; load them with `policies:` in config):
 
@@ -761,7 +822,7 @@ auth:
   credentials:
     - access_key: "YOUR_GATEWAY_ACCESS_KEY"
       secret_key: "YOUR_GATEWAY_SECRET_KEY"
-      buckets: ["application-data", "shared-*"] # omit for unrestricted; [] denies all
+      buckets: ["application-data", "shared-*"] # omit or use ["*"] for unrestricted; [] denies all
       permissions: "rw" # use "ro" for read-only object access
       bucket_permissions: [] # independent create, delete, and/or manage grants
 
