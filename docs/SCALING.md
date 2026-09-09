@@ -332,3 +332,10 @@ Memory reclaimed on CompleteMultipartUpload or after 7 days (TTL eviction).
 3. Beyer, B. et al., *Site Reliability Engineering* (O'Reilly, 2016).
 4. Plotka, B., *Efficient Go* (O'Reilly, 2022).
 5. KEDA Prometheus scaler: <https://keda.sh/docs/2.14/scalers/prometheus/>
+# Verified spool capacity
+
+The aggregate verified-body spool budget is process-local and is not shared
+between replicas. A deployment with N replicas therefore has up to N times
+the configured aggregate capacity, subject to backend and node limits. Size
+ephemeral storage above the per-process budget and use 503 `SlowDown` as the
+retryable signal during bursts.

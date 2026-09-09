@@ -2981,3 +2981,7 @@ unless noted.
 - Add strict SigV4 streaming-chain verification, checksum trailers, bounded
   atomic spooling, and fail-closed rejection of malformed or unknown streaming
   payload modes.
+# Unreleased
+
+- Bound verified SigV4 and AWS-chunked temporary spooling by operation and
+  process-wide aggregate budgets, with 413/503 overload responses and metrics.

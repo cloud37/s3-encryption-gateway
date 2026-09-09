@@ -989,3 +989,9 @@ requires scope plus `bucket_permissions: [delete]`; object `rw` grants neither.
 The backend IAM identity must also be permitted to perform the operation.
 Creation is false by default. YAML file changes hot-reload; environment/Helm
 changes require a process restart.
+# Temporary spool storage
+
+Set `server.spool_directory` when a dedicated writable volume is preferred.
+Configure ephemeral-storage requests and limits to at least
+`server.max_aggregate_spool_bytes` plus a safety margin. The limit is per
+gateway process; each Kubernetes replica has an independent budget.

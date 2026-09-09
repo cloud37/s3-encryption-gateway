@@ -1104,3 +1104,13 @@ MIT License — see [LICENSE](LICENSE) file for details.
 
 - **Issues**: [GitHub Issues](https://github.com/cloud37/s3-encryption-gateway/issues)
 - **Documentation**: [`docs/`](docs/) directory
+# Verified payload spooling
+
+Concrete SigV4 and AWS-chunked request bodies are verified before backend
+mutation. `server.max_verified_spool_bytes` applies an operation-aware single
+request limit (PutObject defaults to 5 GiB; UploadPart uses `max_part_buffer`;
+control XML defaults to 1 MiB), while `server.max_aggregate_spool_bytes` caps
+in-flight temporary bytes per process. Request-limit failures return HTTP 413
+`EntityTooLarge`; aggregate exhaustion returns retryable HTTP 503 `SlowDown`.
+Each replica enforces its own budget, so size ephemeral storage to at least the
+aggregate budget plus safety margin and multiply capacity by replica count.

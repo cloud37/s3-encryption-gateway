@@ -118,3 +118,11 @@ supported checksum trailers and strict framing. Bodies are fully verified into
 length, line, trailer, and chunk bounds are enforced. Invalid or unknown modes
 fail closed and internal spool failures return `InternalError` without
 revealing signatures, keys, payloads, or trailer values.
+# Verified payload resource bounds
+
+Verified request bodies are admitted before temporary-file creation and are
+metered while read. The single-request operation matrix and process-wide
+aggregate budget prevent authenticated clients from exhausting local disk.
+Excess single requests receive opaque 413 `EntityTooLarge`; aggregate pressure
+receives retryable 503 `SlowDown`. Metrics expose only current bytes and the
+bounded rejection reasons `request_limit` and `aggregate_limit`.
