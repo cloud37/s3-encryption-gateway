@@ -32,7 +32,7 @@ Install a specific chart version with:
 
 ```bash
 helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway \
-  --version 0.12.0-rc2
+  --version 0.11.10
 ```
 
 For strongest artifact pinning, install by the immutable manifest digest:

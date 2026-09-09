@@ -4,13 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## [0.13.0-rc3] — 2026-09-09
+
+### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️
+
+This is a release candidate for validation in isolated, non-production
+environments only. Do **not** upgrade a productive environment to this version:
+state-v2 encrypted MPU writers cannot be rolled back to pre-0.12.0 releases.
+Wait for the stable 0.12.0 release before scheduling a production upgrade.
 
 ### Security
 
 - **Encrypted MPU reservation recovery (V1.0-SEC-48):** identical retries can
   recover after a bounded, token-fenced lease without permitting changed
-  plaintext to reuse deterministic nonces.
+  plaintext to reuse deterministic nonces. The reservation lease and migration
+  controls are configurable for operators.
 
 - **Explicit bucket configuration administration (V1.0-SEC-47):** Bucket
   configuration PUT/DELETE operations require the independent scoped `manage`
@@ -26,13 +34,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   authentication, preventing malformed metadata from causing attacker-sized
   resource use.
 
-- Add backend TLS custom-CA trust configuration and an explicitly unsafe
-  `insecure_skip_verify` diagnostic option for HTTPS backends.
+- **Bounded verified-payload spooling (V1.0-SEC-49):** SigV4 and AWS-chunked
+  temporary bodies are bounded by per-operation and process-wide aggregate
+  budgets. Overloaded requests fail with 413 or 503, and spool usage is exposed
+  through metrics.
+
+- **Backend TLS trust configuration (GH-285):** Add custom-CA trust
+  configuration and an explicitly unsafe `insecure_skip_verify` diagnostic
+  option for HTTPS backends.
 
 ### Added
 
-- Helm charts are now published as signed, digest-addressable OCI artifacts to
-  GHCR, while the existing GitHub Pages chart repository remains supported.
+- **Signed Helm OCI publishing (GH-277):** Helm charts are now published as
+  signed, digest-addressable OCI artifacts to GHCR, while the existing GitHub
+  Pages chart repository remains supported.
+
+- **Explicit unrestricted bucket scopes (V1.0-AUTH-2):** Credentials can
+  explicitly request unrestricted bucket access with `*`, while an explicitly
+  empty bucket list continues to mean deny-all. Bucket configuration
+  documentation and Compose examples now describe these scopes.
+
+- **Operational configuration controls (V1.0-SEC-48, V1.0-SEC-49, GH-285):**
+  Helm and server configuration expose verified-spool directory and budget
+  controls, encrypted MPU reservation leases, legacy untracked-plaintext MPU
+  migration mode, backend TLS settings, and Valkey ephemeral-storage guidance.
 
 ### Fixed
 
@@ -41,12 +66,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   credential permissions no longer correlate with gateway-generated 502 errors.
 
 - **AWS CLI CRC64NVME uploads (issue #283):** validate the default CRC64NVME
-  AWS-chunked trailer and add Renovate-gated maintained image updates.
+  AWS-chunked trailer and pin/manage the compatibility images used by
+  conformance tests.
 
 - **Backend SSL configuration (issue #284):** `BACKEND_USE_SSL` now strictly
   overrides YAML configuration and controls the scheme for scheme-less backend
   endpoints in both SDK and proxy clients; explicit endpoint schemes remain
   authoritative.
+
+- **Helm probe and CI fixes (issue #290):** Removed the invalid
+  `insecureSkipTLSVerify` field from Kubernetes probes and made Helm artifact
+  testing use runner temporary directories.
+
+### Changed
+
+- **Go toolchain:** The project now requires Go 1.27.1.
+
+### Dependencies
+
+- Updated `github.com/alicebob/miniredis/v2` to v2.39.0.
+- Updated `github.com/aws/aws-sdk-go-v2` to v1.46.0.
+- Updated `github.com/aws/aws-sdk-go-v2/config` to v1.33.3.
+- Updated `github.com/aws/aws-sdk-go-v2/credentials` to v1.20.3.
+- Updated `github.com/aws/aws-sdk-go-v2/service/s3` to v1.112.0.
+- Updated `github.com/minio/crc64nvme` to v1.1.1.
+- Updated `github.com/moby/moby/api` to v1.56.0.
+- Updated `golang.org/x/crypto` to v0.57.0.
+- Updated `golang.org/x/perf` to revision `22c9c6c9d4da`.
+- Updated `golang.org/x/sys` to v0.48.0.
+- Updated the Valkey Helm dependency to ~0.12.0.
+- Updated the AWS CLI compatibility image to v2.36.41.
+- Updated the boto3 compatibility image to v1.43.90.
+- Updated the MinIO compatibility image to v7.2.20.
+- Updated the Python compatibility image to v3.14.
+- Updated the OpenBao compatibility image to v2.6.2.
+- Updated the Cosmian KMS compatibility image to v5.27.1.
+- Updated the Restic compatibility image to v0.19.1.
+- Updated the Rclone compatibility image to v1.75.
+- Updated the Valkey compatibility image to v9.
+
+### Documentation
+
+- **Release and operational documentation (GH-277, GH-283, GH-285,
+  V1.0-AUTH-2, V1.0-SEC-45–V1.0-SEC-49):** Documented backend TLS trust and
+  diagnostic settings, explicit credential bucket scopes, AWS CLI CRC64NVME
+  compatibility, verified-spool controls, and the security hardening and
+  operational migration procedures above.
 
 ## [0.12.0-rc2] — 2026-09-01
 
@@ -2985,7 +3050,3 @@ unless noted.
 - Add strict SigV4 streaming-chain verification, checksum trailers, bounded
   atomic spooling, and fail-closed rejection of malformed or unknown streaming
   payload modes.
-# Unreleased
-
-- Bound verified SigV4 and AWS-chunked temporary spooling by operation and
-  process-wide aggregate budgets, with 413/503 overload responses and metrics.
