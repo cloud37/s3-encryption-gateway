@@ -16,13 +16,17 @@ import (
 // Prefix matching would let /metrics-<anything> bypass auth — see
 // V1.0-SEC-30.
 var systemEndpoints = map[string]bool{
-	"/health":  true,
-	"/ready":   true,
-	"/live":    true,
-	"/metrics": true,
-	"/healthz": true,
-	"/readyz":  true,
-	"/livez":   true,
+	"/health":             true,
+	"/ready":              true,
+	"/live":               true,
+	"/metrics":            true,
+	"/healthz":            true,
+	"/readyz":             true,
+	"/livez":              true,
+	"/minio/health/live":  true,
+	"/minio/health/ready": true,
+	"/health/live":        true,
+	"/health/ready":       true,
 }
 
 // isSystemEndpoint reports whether path is an unauthenticated system endpoint.

@@ -285,7 +285,11 @@ func TestS3Instrumentation_HealthRoutesDoNotEmitS3ClientMetrics(t *testing.T) {
 	h := &Handler{metrics: metrics.NewMetricsWithRegistry(reg)}
 	router := mux.NewRouter()
 	h.RegisterRoutes(router)
-	for _, path := range []string{"/health", "/ready", "/readyz", "/live", "/livez"} {
+	for _, path := range []string{
+		"/health", "/ready", "/readyz", "/live", "/livez",
+		"/minio/health/live", "/minio/health/ready",
+		"/health/live", "/health/ready",
+	} {
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 	}

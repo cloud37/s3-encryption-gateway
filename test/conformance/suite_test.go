@@ -47,6 +47,8 @@ func TestConformance(t *testing.T) {
 				fn   func(*testing.T, provider.Instance)
 			}{
 				// Core object operations — run on every provider.
+				{"CompatibleHealthAliases", 0, testCompatibleHealthAliases},
+				{"CompatibleHealthAliasNearMatchesRequireAuth", 0, testCompatibleHealthAliasNearMatchesRequireAuth},
 				{"BackendConnection_SchemeLessHTTP", 0, testBackendSchemeLessHTTPRoundTrip},
 				{"BackendTLS_CustomCARoundTrip", provider.CapBackendTLSFixture, testBackendTLSCustomCARoundTrip},
 				{"BackendTLS_InsecureSkipVerifyRoundTrip", provider.CapBackendTLSFixture, testBackendTLSInsecureSkipVerifyRoundTrip},

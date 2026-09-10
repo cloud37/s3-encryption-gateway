@@ -684,6 +684,28 @@ func TestHandler_HandleHealth(t *testing.T) {
 	}
 }
 
+func TestHandler_CompatibleHealthAliases(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	handler := NewHandler(newMockS3Client(), mockEngine, logger, getTestMetrics())
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	for _, path := range []string{
+		"/minio/health/live", "/minio/health/ready",
+		"/health/live", "/health/ready",
+	} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			if w.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want %d", path, w.Code, http.StatusOK)
+			}
+		})
+	}
+}
+
 func TestHandler_HandlePutObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)

@@ -549,6 +549,10 @@ Multipart-specific audit events: `mpu.create`, `mpu.part`, `mpu.complete`, `mpu.
 Returns HTTP 503 with `status: "not_ready"` if any configured dependency fails its health check.
 
 - `GET /live` — liveness probe
+- Compatibility aliases: `/minio/health/live` and `/health/live` map to
+  liveness; `/minio/health/ready` and `/health/ready` map to readiness. These
+  exact-match aliases support replacing MinIO or RustFS S3 endpoints without
+  changing existing external health checks.
 - `GET /metrics` — Prometheus metrics
 
 Metrics endpoint routing (in priority order):

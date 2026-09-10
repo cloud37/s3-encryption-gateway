@@ -297,6 +297,14 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/live", h.handleLive).Methods("GET").Name("Live")
 	r.HandleFunc("/livez", h.handleLive).Methods("GET").Name("Live") // k8s-convention alias
 
+	// S3-compatible health endpoint aliases. These are registered before the
+	// generic S3 router so unauthenticated health probes cannot be interpreted
+	// as bucket/object requests. AuthMiddleware permits only these exact paths.
+	r.HandleFunc("/minio/health/live", h.handleLive).Methods("GET").Name("MinIOLive")
+	r.HandleFunc("/minio/health/ready", h.handleReady).Methods("GET").Name("MinIOReady")
+	r.HandleFunc("/health/live", h.handleLive).Methods("GET").Name("RustFSLive")
+	r.HandleFunc("/health/ready", h.handleReady).Methods("GET").Name("RustFSReady")
+
 	r.Handle("/", h.instrumentS3("ListBuckets", h.handleListBuckets)).Methods("GET").Name("ListBuckets")
 
 	// S3 API routes

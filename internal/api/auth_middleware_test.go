@@ -722,14 +722,18 @@ func TestAuthMiddleware_MetricsExact_Allowed(t *testing.T) {
 	}
 }
 
-// TestAuthMiddleware_HealthReadyLive_Allowed verifies that /health, /ready,
-// and /live all pass through without authentication.
+// TestAuthMiddleware_HealthReadyLive_Allowed verifies that canonical and
+// S3-compatible health routes all pass through without authentication.
 func TestAuthMiddleware_HealthReadyLive_Allowed(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
 	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
 
-	for _, path := range []string{"/health", "/ready", "/live"} {
+	for _, path := range []string{
+		"/health", "/ready", "/live",
+		"/minio/health/live", "/minio/health/ready",
+		"/health/live", "/health/ready",
+	} {
 		t.Run(path, func(t *testing.T) {
 			var reached bool
 			handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -746,6 +750,32 @@ func TestAuthMiddleware_HealthReadyLive_Allowed(t *testing.T) {
 			}
 			if !reached {
 				t.Error("inner handler was not reached")
+			}
+		})
+	}
+}
+
+// TestAuthMiddleware_HealthAliasNearMatchesRejected proves compatible health
+// aliases retain exact-match authentication bypass semantics (V1.0-SEC-30).
+func TestAuthMiddleware_HealthAliasNearMatchesRejected(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	middleware := AuthMiddleware(testCredentialStore(), 5*time.Minute, logger, nil, true)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("near-match health alias reached unauthenticated handler")
+	}))
+
+	for _, path := range []string{
+		"/minio/health/live-extra",
+		"/minio/health/ready/anything",
+		"/health/live-extra",
+		"/health/ready/anything",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
 			}
 		})
 	}
