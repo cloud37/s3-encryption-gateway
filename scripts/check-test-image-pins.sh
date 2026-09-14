@@ -10,7 +10,7 @@ import re
 import sys
 
 files = sorted(Path("test").rglob("*.go"))
-baseline = "RELEASE.2024-11-07T00-52-20Z"
+baseline = "RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
 channel = re.compile(r"^(latest|edge|nightly|stable|main|master|dev|canary)$", re.I)
 annotation = re.compile(
     r"^// renovate: datasource=(?P<datasource>\S+) depName=(?P<dep>\S+) "
@@ -45,7 +45,7 @@ for path in files:
             dep, tag = value.rsplit(":", 1)
             if dep != ann["dep"] or ann["dep"] == "" or channel.fullmatch(tag):
                 raise SystemExit(f"{path}:{i+1}: annotation/value mismatch for {name}")
-            if ann["dep"] in {"minio/minio", "quay.io/minio/minio"} and tag != baseline:
+            if ann["dep"] == "quay.io/minio/minio" and tag != baseline:
                 raise SystemExit(f"{path}:{i+1}: MinIO must remain at {baseline}")
         else:
             if ann["datasource"] != "pypi" or ann["versioning"] != "pep440":
@@ -66,14 +66,20 @@ expected = {
     ("docker", "restic/restic"), ("docker", "dxflrs/garage"),
     ("docker", "rustfs/rustfs"), ("docker", "chrislusf/seaweedfs"),
     ("docker", "quay.io/openbao/openbao"), ("docker", "ghcr.io/cosmian/kms"),
-    ("docker", "valkey/valkey"), ("docker", "minio/minio"),
-    ("docker", "quay.io/minio/minio"), ("pypi", "boto3"), ("pypi", "minio"),
+    ("docker", "valkey/valkey"), ("docker", "quay.io/minio/minio"),
+    ("pypi", "boto3"), ("pypi", "minio"),
 }
 actual = [(source, dep) for _, source, dep, _ in found]
+expected_counts = {
+    item: 2 if item == ("docker", "quay.io/minio/minio") else 1
+    for item in expected
+}
 for item in expected:
     count = actual.count(item)
-    if count != 1:
-        raise SystemExit(f"expected exactly one annotation for {item}, found {count}")
+    if count != expected_counts[item]:
+        raise SystemExit(
+            f"expected {expected_counts[item]} annotation(s) for {item}, found {count}"
+        )
 if set(actual) != expected:
     raise SystemExit(f"managed inventory mismatch: unexpected entries {sorted(set(actual) - expected)}")
 

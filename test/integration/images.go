@@ -7,4 +7,4 @@ package integration
 const azuriteImage = "mcr.microsoft.com/azure-storage/azurite:3.33.0"
 
 // renovate: datasource=docker depName=quay.io/minio/minio versioning=docker
-const minioImage = "quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z"
+const minioImage = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"

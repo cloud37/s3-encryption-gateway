@@ -49,7 +49,7 @@
     },
     {
       "description": "Keep frozen MinIO server baselines",
-      "matchDepNames": ["minio/minio", "quay.io/minio/minio"],
+      "matchDepNames": ["quay.io/minio/minio"],
       "enabled": false
     }
   ]

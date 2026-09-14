@@ -321,7 +321,7 @@ can be disabled with the corresponding environment variable.
 
 | Provider   | Image                           | Skip env var                    | Notes                                              |
 |------------|---------------------------------|---------------------------------|----------------------------------------------------|
-| `minio`    | `minio/minio:RELEASE.2024-...`  | `GATEWAY_TEST_SKIP_MINIO=1`     | Primary reference; PR-gated local provider          |
+| `minio`    | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772` | `GATEWAY_TEST_SKIP_MINIO=1` | Primary reference; PR-gated local provider |
 | `garage`   | `dxflrs/garage:v2.4.1`          | `GATEWAY_TEST_SKIP_GARAGE=1`    | Rust-based; requires bootstrap via admin REST API  |
 | `rustfs`   | `rustfs/rustfs:v1.0.0-rc.5`     | `GATEWAY_TEST_SKIP_RUSTFS=1`    | Alpha-quality; PR-gated, capability bitmap conservative |
 | `seaweedfs`| `chrislusf/seaweedfs:4.46`      | `GATEWAY_TEST_SKIP_SEAWEEDFS=1` | Blob-store-backed; PR-gated local provider       |

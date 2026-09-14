@@ -97,7 +97,7 @@ printf 'bench-macro(%s): wrapping NDJSON → %s\n' "$provider" "$outfile" >&2
 # the provider file carries a constant; defaults to empty string otherwise.
 provider_image="$(
   case "$provider" in
-    minio)     grep -hoE 'minio/minio:[A-Za-z0-9._/:-]+' test/provider/minio.go 2>/dev/null | head -1 ;;
+    minio)     grep -hoE 'quay.io/minio/minio:[A-Za-z0-9._/:-]+' test/provider/minio.go 2>/dev/null | head -1 ;;
     garage)    grep -hoE 'dxflrs/garage:[A-Za-z0-9._/:-]+' test/provider/garage.go 2>/dev/null | head -1 ;;
     rustfs)    grep -hoE 'rustfs/rustfs:[A-Za-z0-9._/:-]+' test/provider/rustfs.go 2>/dev/null | head -1 ;;
     seaweedfs) grep -hoE 'chrislusf/seaweedfs:[A-Za-z0-9._/:-]+' test/provider/seaweedfs.go 2>/dev/null | head -1 ;;

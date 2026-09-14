@@ -35,8 +35,8 @@ func init() {
 
 type minioProvider struct{ tlsReady bool }
 
-// renovate: datasource=docker depName=minio/minio versioning=docker
-const minioImage = "minio/minio:RELEASE.2024-11-07T00-52-20Z"
+// renovate: datasource=docker depName=quay.io/minio/minio versioning=docker
+const minioImage = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
 
 func (p *minioProvider) Name() string { return "minio" }
 
