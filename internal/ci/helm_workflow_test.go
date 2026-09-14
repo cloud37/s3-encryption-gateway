@@ -47,7 +47,7 @@ func TestHelmWorkflow_OCIPublishIsReleaseOnly(t *testing.T) {
 	}
 
 	steps := sequenceValue(mappingValue(release, "steps"))
-	wantOCI := []string{"helm registry login", "helm push", "cosign sign"}
+	wantOCI := []string{"helm registry login", "oras push", "cosign sign"}
 	for _, marker := range wantOCI {
 		found := false
 		for _, step := range steps {
@@ -70,7 +70,7 @@ func TestHelmWorkflow_OCIPublishIsReleaseOnly(t *testing.T) {
 		}
 		for _, step := range sequenceValue(mappingValue(mappingValue(jobs, job), "steps")) {
 			run := scalarValue(mappingValue(step, "run"))
-			if strings.Contains(run, "helm registry login") || strings.Contains(run, "helm push") || strings.Contains(run, "cosign sign") {
+			if strings.Contains(run, "helm registry login") || strings.Contains(run, "oras login") || strings.Contains(run, "oras push") || strings.Contains(run, "helm push") || strings.Contains(run, "cosign sign") {
 				t.Fatalf("non-release job %q contains an OCI publishing step", job)
 			}
 		}

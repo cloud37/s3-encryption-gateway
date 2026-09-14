@@ -99,6 +99,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up ORAS
+        if: steps.version_check.outputs.already_released == 'false'
+        uses: oras-project/setup-oras@v2.0.1
+
       - name: Extract changelog entry
         if: steps.version_check.outputs.already_released == 'false'
         run: |
@@ -112,6 +116,8 @@ jobs:
         run: |
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             --username "${{ github.actor }}" --password-stdin
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
 
       - name: Package and publish OCI chart
         id: oci_chart
@@ -122,20 +128,27 @@ jobs:
           set -euo pipefail
           OCI_DIR="${RUNNER_TEMP}/helm-oci"
           CHART_NAME=s3-encryption-gateway
+          OCI_REPOSITORY=s3-encryption-gateway-helm
           mkdir -p "${OCI_DIR}"
           helm package helm/s3-encryption-gateway --destination "${OCI_DIR}"
           ARCHIVE="${OCI_DIR}/${CHART_NAME}-${CHART_VERSION}.tgz"
           test -f "${ARCHIVE}"
           test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "name" {print $2; exit}')" = "${CHART_NAME}"
           test "$(helm show chart "${ARCHIVE}" | awk -F': ' '$1 == "version" {print $2; exit}')" = "${CHART_VERSION}"
+          CONFIG_FILE="${OCI_DIR}/config.json"
+          printf '{}' > "${CONFIG_FILE}"
           PUSH_OUTPUT=$(mktemp)
-          helm push "${ARCHIVE}" oci://ghcr.io/cloud37 2>&1 | tee "${PUSH_OUTPUT}"
+          oras push "ghcr.io/cloud37/${OCI_REPOSITORY}:${CHART_VERSION}" \
+            --artifact-type application/vnd.cncf.helm.config.v1+json \
+            --config "${CONFIG_FILE}:application/vnd.cncf.helm.config.v1+json" \
+            "${ARCHIVE}:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
+            2>&1 | tee "${PUSH_OUTPUT}"
           DIGEST=$(grep -Eo 'sha256:[0-9a-fA-F]{64}' "${PUSH_OUTPUT}" | tail -n1 || true)
           if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "ERROR: helm push did not return a valid manifest digest" >&2
+            echo "ERROR: oras push did not return a valid manifest digest" >&2
             exit 1
           fi
-          CHART_REF="ghcr.io/cloud37/${CHART_NAME}@${DIGEST}"
+          CHART_REF="ghcr.io/cloud37/${OCI_REPOSITORY}@${DIGEST}"
           echo "chart_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "chart_ref=${CHART_REF}" >> "$GITHUB_OUTPUT"
           echo "Published ${CHART_REF}"
@@ -324,7 +337,7 @@ jobs:
           CHART_REF: ${{ steps.oci_chart.outputs.chart_ref }}
         run: |
           set -euo pipefail
-          OCI_REF=oci://ghcr.io/cloud37/s3-encryption-gateway
+          OCI_REF=oci://ghcr.io/cloud37/s3-encryption-gateway-helm
           metadata="${RUNNER_TEMP}/oci-chart-metadata.yaml"
           helm show chart "${OCI_REF}@${CHART_DIGEST}" > "${metadata}"
           test "$(awk -F': ' '$1 == "name" {print $2; exit}' "${metadata}")" = s3-encryption-gateway

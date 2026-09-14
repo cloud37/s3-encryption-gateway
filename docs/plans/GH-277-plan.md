@@ -18,7 +18,7 @@ version `0.12.0-rc2` (`helm/s3-encryption-gateway/Chart.yaml:1-3,38-39`). The
 release workflow runs for changes under `helm/**`, lints and renders the chart
 (`.github/workflows/helm.yml:23-50`), then uses chart-releaser to create a GitHub
 release and update the classic repository (`.github/workflows/helm.yml:83-115`).
-No step logs in to GHCR, invokes `helm push`, or publishes a Helm OCI manifest.
+No step logs in to GHCR, invokes `oras push`, or publishes a Helm OCI manifest.
 
 The release job currently has `contents`, `pages`, and OIDC permissions
 (`.github/workflows/helm.yml:52-60`). It already installs cosign and performs
@@ -30,10 +30,12 @@ release-producing steps when the matching GitHub release already exists
 (`.github/workflows/helm.yml:83-98`), and the new OCI publication must use that
 same immutable-release decision rather than overwrite a tag independently.
 
-Helm OCI push infers the artifact basename and tag from `Chart.yaml`; pushing
-`s3-encryption-gateway-<version>.tgz` to `oci://ghcr.io/cloud37` therefore creates
-`ghcr.io/cloud37/s3-encryption-gateway:<version>` [1]. Users then install from
-`oci://ghcr.io/cloud37/s3-encryption-gateway --version <version>`, or pin the
+The Helm chart name must remain `s3-encryption-gateway` for compatibility with
+the classic repository, while the OCI package is named independently as
+`s3-encryption-gateway-helm`. ORAS publishes the packaged chart with Helm's OCI
+config and layer media types to create
+`ghcr.io/cloud37/s3-encryption-gateway-helm:<version>`. Users then install from
+`oci://ghcr.io/cloud37/s3-encryption-gateway-helm --version <version>`, or pin the
 manifest digest. GHCR can associate workflow-published packages with this
 repository via `GITHUB_TOKEN`, but first publication visibility must be checked:
 new packages may initially be private [3].
@@ -48,7 +50,7 @@ provenance while retaining the current `index.yaml` channel.
 ### Goals
 
 1. **Dual publication** — every new chart release is available from both the
-   existing GitHub Pages repository and `ghcr.io/cloud37/s3-encryption-gateway`.
+   existing GitHub Pages repository and `ghcr.io/cloud37/s3-encryption-gateway-helm`.
 2. **Immutable version contract** — the OCI tag exactly equals `Chart.yaml`
    `version`, and release reruns do not overwrite an already released version.
 3. **Digest-bound signing** — sign the OCI manifest digest, never only a mutable
@@ -82,16 +84,17 @@ provenance while retaining the current `index.yaml` channel.
 | Property | Contract |
 |---|---|
 | Push target | `oci://ghcr.io/cloud37` |
-| Resulting artifact | `ghcr.io/cloud37/s3-encryption-gateway:<chart-version>` |
-| Install reference | `oci://ghcr.io/cloud37/s3-encryption-gateway --version <chart-version>` |
+| Resulting artifact | `ghcr.io/cloud37/s3-encryption-gateway-helm:<chart-version>` |
+| Install reference | `oci://ghcr.io/cloud37/s3-encryption-gateway-helm --version <chart-version>` |
 | Package source | `helm/s3-encryption-gateway`, after dependency build |
 | Version source | `version:` in `helm/s3-encryption-gateway/Chart.yaml` |
 | Publication trigger | New chart version on push to `main`/`master`, using existing `already_released == 'false'` guard |
 | Classic repository | Published unchanged by chart-releaser |
 | OCI mutability | No force/re-push for an existing released version |
 
-Helm derives the OCI basename and tag from chart metadata, so the push target
-must stop at the namespace and must not append the chart name or version [1].
+ORAS is used instead of `helm push` because Helm derives the OCI basename from
+chart metadata and cannot independently name this registry package. The chart
+metadata and classic package name therefore remain unchanged.
 
 ### 3.2 Workflow contract
 
@@ -115,26 +118,28 @@ permissions:
   run: |
     mkdir -p /tmp/opencode/helm-oci
     helm package helm/s3-encryption-gateway --destination /tmp/opencode/helm-oci
-    helm push "/tmp/opencode/helm-oci/s3-encryption-gateway-${CHART_VERSION}.tgz" \
-      oci://ghcr.io/cloud37
+    oras push "ghcr.io/cloud37/s3-encryption-gateway-helm:${CHART_VERSION}" \
+      --artifact-type application/vnd.cncf.helm.config.v1+json \
+      --config "/tmp/opencode/helm-oci/config.json:application/vnd.cncf.helm.config.v1+json" \
+      "/tmp/opencode/helm-oci/s3-encryption-gateway-${CHART_VERSION}.tgz:application/vnd.cncf.helm.chart.content.v1.tar+gzip"
     # Resolve and expose the immutable manifest digest as chart_digest.
 ```
 
 The implementation must obtain the registry-reported or resolved digest and
-construct `ghcr.io/cloud37/s3-encryption-gateway@sha256:...`; it must fail if no
+construct `ghcr.io/cloud37/s3-encryption-gateway-helm@sha256:...`; it must fail if no
 digest is available. Token input must not be echoed.
 
 ### 3.3 Signature and identity contract
 
 ```bash
 cosign sign --yes \
-  ghcr.io/cloud37/s3-encryption-gateway@sha256:<digest>
+  ghcr.io/cloud37/s3-encryption-gateway-helm@sha256:<digest>
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp \
     '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main|master)$' \
-  ghcr.io/cloud37/s3-encryption-gateway@sha256:<digest>
+  ghcr.io/cloud37/s3-encryption-gateway-helm@sha256:<digest>
 ```
 
 Verification is identity-constrained rather than merely checking that some
@@ -147,11 +152,11 @@ first controlled publication and then fixed to the workflow path/ref contract.
 
 ```bash
 helm install my-gateway \
-  oci://ghcr.io/cloud37/s3-encryption-gateway \
+  oci://ghcr.io/cloud37/s3-encryption-gateway-helm \
   --version <version>
 
 helm install my-gateway \
-  oci://ghcr.io/cloud37/s3-encryption-gateway@sha256:<digest>
+  oci://ghcr.io/cloud37/s3-encryption-gateway-helm@sha256:<digest>
 ```
 
 The README must also provide the `cosign verify` command above and retain the
@@ -167,8 +172,9 @@ strongest artifact-selection mechanism because tags can otherwise be mutable
   `release` job. Keep pull-request jobs read-only.
 - **A2. `.github/workflows/helm.yml` (edit):** after dependency build and version
   resolution, package the chart once into `/tmp/opencode/helm-oci`, verify the
-  archive name/version, authenticate to `ghcr.io` with `GITHUB_TOKEN`, and push
-  to `oci://ghcr.io/cloud37` only when `already_released == 'false'`.
+  archive name/version, authenticate ORAS to `ghcr.io` with `GITHUB_TOKEN`, and
+  push to `ghcr.io/cloud37/s3-encryption-gateway-helm:<version>` only when
+  `already_released == 'false'`.
 - **A3. `.github/workflows/helm.yml` (edit):** resolve the pushed manifest digest
   using Helm output or `crane digest`, validate it against `^sha256:[0-9a-f]{64}$`,
   and expose the digest-qualified reference as a step output. Do not sign a tag.
@@ -258,7 +264,7 @@ is not acceptable final evidence for the four local providers.
 | `set -o pipefail; make test 2>&1 \| tee /tmp/opencode/GH-277-make-test.log >/dev/null` | Full unit, race, and aggregate coverage gate | 1 | coordinator | Once after the final worker edit |
 | `set -o pipefail; make test-conformance 2>&1 \| tee /tmp/opencode/GH-277-make-test-conformance.log >/dev/null` | Full registered-provider conformance gate; all four local providers must execute, while unconfigured external providers may skip | 2 | coordinator | Once after `make test`, with Docker available, after the final worker edit |
 | `make test-isolation-check` | Enforce the Docker-only, Testcontainers-based Tier 2 model | Structural | coordinator | Once after conformance completes |
-| `helm pull oci://ghcr.io/cloud37/s3-encryption-gateway --version "$VERSION" && cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main\|master)$' "ghcr.io/cloud37/s3-encryption-gateway@$DIGEST"` | Prove public OCI retrieval and repository-bound signature | Release | release owner | Once for the first controlled release and each release thereafter in workflow |
+| `helm pull oci://ghcr.io/cloud37/s3-encryption-gateway-helm --version "$VERSION" && cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main\|master)$' "ghcr.io/cloud37/s3-encryption-gateway-helm@$DIGEST"` | Prove public OCI retrieval and repository-bound signature | Release | release owner | Once for the first controlled release and each release thereafter in workflow |
 
 ### Commands to verify locally
 
@@ -267,7 +273,7 @@ helm dependency build helm/s3-encryption-gateway && helm lint helm/s3-encryption
 set -o pipefail; make test 2>&1 | tee /tmp/opencode/GH-277-make-test.log >/dev/null
 set -o pipefail; make test-conformance 2>&1 | tee /tmp/opencode/GH-277-make-test-conformance.log >/dev/null
 make test-isolation-check
-helm pull oci://ghcr.io/cloud37/s3-encryption-gateway --version "$VERSION" && cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main|master)$' "ghcr.io/cloud37/s3-encryption-gateway@$DIGEST"
+helm pull oci://ghcr.io/cloud37/s3-encryption-gateway-helm --version "$VERSION" && cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/cloud37/s3-encryption-gateway/\.github/workflows/helm\.yml@refs/heads/(main|master)$' "ghcr.io/cloud37/s3-encryption-gateway-helm@$DIGEST"
 ```
 
 Acceptance evidence must record the exit status for every matrix command. The
@@ -291,7 +297,7 @@ credentials are absent. Do not add Docker-backed release checks to Tier 1.
 ## 8. Definition of Done
 
 - [ ] Per `docs/issues/GH-277.md:25-30`, the release job publishes
-      `ghcr.io/cloud37/s3-encryption-gateway:<Chart.yaml version>` and preserves
+      `ghcr.io/cloud37/s3-encryption-gateway-helm:<Chart.yaml version>` and preserves
       chart-releaser/GitHub Pages publication.
 - [ ] Only the release job has `packages: write`, and GHCR authentication uses
       `GITHUB_TOKEN` via stdin.
