@@ -4,6 +4,57 @@ entries:
   - annotations:
       artifacthub.io/category: security
       artifacthub.io/changes: |
+        - kind: security
+          description: Fail-closed encrypted MPU routing, bounded KDF limits, and authenticated chunked-v2 completeness
+        - kind: added
+          description: Signed digest-addressable Helm OCI artifacts at GHCR and S3-compatible health probe aliases
+        - kind: fixed
+          description: ListBuckets forwarding, retryable chunked uploads, backend TLS handling, and encrypted ETag serialization
+        - kind: changed
+          description: Stable 0.12.0 release with coordinated upgrade and rollback procedures
+      artifacthub.io/containsSecurityUpdates: "true"
+      artifacthub.io/images: |
+        - name: s3-encryption-gateway
+          image: docker.io/cloud37io/s3-encryption-gateway:0.12.0
+          whitelisted: true
+        - name: s3-encryption-gateway-fips
+          image: docker.io/cloud37io/s3-encryption-gateway:0.12.0-fips
+          whitelisted: true
+      artifacthub.io/license: MIT
+      artifacthub.io/prerelease: "false"
+      artifacthub.io/signKey: |
+        fingerprint: keyless
+        url: https://github.com/cloud37/s3-encryption-gateway
+    apiVersion: v2
+    appVersion: 0.12.0
+    created: "2026-09-22T16:23:08.19430123Z"
+    dependencies:
+    - condition: valkey.enabled
+      name: valkey
+      repository: https://valkey.io/valkey-helm/
+      version: ~0.12.0
+    description: A Helm chart for S3 Encryption Gateway - a transparent proxy providing
+      client-side encryption for S3-compatible storage services
+    digest: 32df30bbd5703a48b29d77621b397ad25a23a43a2a736ac1188df5adee5fee5a
+    home: https://github.com/cloud37/s3-encryption-gateway
+    keywords:
+    - s3
+    - encryption
+    - gateway
+    - storage
+    maintainers:
+    - name: kenchrcum
+      url: https://github.com/kenchrcum
+    name: s3-encryption-gateway
+    sources:
+    - https://github.com/cloud37/s3-encryption-gateway
+    type: application
+    urls:
+    - https://github.com/cloud37/s3-encryption-gateway/releases/download/s3-encryption-gateway-0.12.0/s3-encryption-gateway-0.12.0.tgz
+    version: 0.12.0
+  - annotations:
+      artifacthub.io/category: security
+      artifacthub.io/changes: |
         - kind: added
           description: Multi-arch images (linux/amd64, linux/arm64) published to Docker Hub
         - kind: added
@@ -2100,4 +2151,4 @@ entries:
     urls:
     - https://github.com/kenchrcum/s3-encryption-gateway/releases/download/s3-encryption-gateway-0.1.0/s3-encryption-gateway-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-09T16:31:34.947135678Z"
+generated: "2026-09-22T16:23:08.194800884Z"
