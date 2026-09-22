@@ -55,6 +55,75 @@ func TestAuthMiddleware_NoCredentials(t *testing.T) {
 	}
 }
 
+func TestIsUnauthenticatedCORSPreflight(t *testing.T) {
+	tests := []struct {
+		name            string
+		method          string
+		path            string
+		origin          string
+		requestedMethod string
+		authorization   string
+		want            bool
+	}{
+		{name: "bucket preflight", method: http.MethodOptions, path: "/bucket", origin: "https://example.com", requestedMethod: http.MethodPut, want: true},
+		{name: "object preflight", method: http.MethodOptions, path: "/bucket/object", origin: "https://example.com", requestedMethod: http.MethodPut, want: true},
+		{name: "missing origin", method: http.MethodOptions, path: "/bucket/object", requestedMethod: http.MethodPut},
+		{name: "missing requested method", method: http.MethodOptions, path: "/bucket/object", origin: "https://example.com"},
+		{name: "non-options", method: http.MethodPut, path: "/bucket/object", origin: "https://example.com", requestedMethod: http.MethodPut},
+		{name: "root path", method: http.MethodOptions, path: "/", origin: "https://example.com", requestedMethod: http.MethodPut},
+		{name: "signed authorization", method: http.MethodOptions, path: "/bucket/object", origin: "https://example.com", requestedMethod: http.MethodPut, authorization: "AWS4-HMAC-SHA256 Credential=key/date/region/s3/aws4_request"},
+		{name: "presigned credentials", method: http.MethodOptions, path: "/bucket/object?X-Amz-Credential=key/date/region/s3/aws4_request", origin: "https://example.com", requestedMethod: http.MethodPut},
+		{name: "partial presigned signature", method: http.MethodOptions, path: "/bucket/object?X-Amz-Signature=signature", origin: "https://example.com", requestedMethod: http.MethodPut},
+		{name: "partial sigv2 credentials", method: http.MethodOptions, path: "/bucket/object?Expires=123", origin: "https://example.com", requestedMethod: http.MethodPut},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Origin", tt.origin)
+			req.Header.Set("Access-Control-Request-Method", tt.requestedMethod)
+			if tt.authorization != "" {
+				req.Header.Set("Authorization", tt.authorization)
+			}
+			if got := isUnauthenticatedCORSPreflight(req); got != tt.want {
+				t.Fatalf("isUnauthenticatedCORSPreflight() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAuthMiddleware_CORSPreflightBypassReachesNext(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	h := AuthMiddleware(testCredentialStore(), time.Minute, logger, nil, true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/object", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestAuthMiddleware_IncompleteCORSPreflightStillRequiresCredentials(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	h := AuthMiddleware(testCredentialStore(), time.Minute, logger, nil, true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next called for incomplete CORS preflight")
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/object", nil)
+	req.Header.Set("Origin", "https://example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
 func TestAuthMiddleware_UnknownAccessKey(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)

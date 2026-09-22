@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
@@ -553,22 +554,152 @@ func testS3Compat_GetPutDeleteBucketLifecycle(t *testing.T, inst provider.Instan
 
 func testS3Compat_CORSPreflight_OPTIONS(t *testing.T, inst provider.Instance) {
 	t.Helper()
-	gw := harness.StartGateway(t, inst)
+	gw := harness.StartGateway(t, inst,
+		harness.WithAuth(config.GatewayCredential{
+			AccessKey: testAccessKey,
+			SecretKey: testSecretKey,
+			Buckets:   []string{inst.Bucket},
+		}))
+	paths := []string{
+		fmt.Sprintf("%s/%s", gw.URL, inst.Bucket),
+		fmt.Sprintf("%s/%s/%s", gw.URL, inst.Bucket, uniqueKey(t)),
+	}
+	for _, path := range paths {
+		t.Run("valid/"+path, func(t *testing.T) {
+			resp, body := doCORSPreflight(t, gw, path, true, true, false)
+			defer resp.Body.Close()
 
-	req, err := http.NewRequest("OPTIONS", fmt.Sprintf("%s/%s", gw.URL, inst.Bucket), nil)
+			// Provider CORS implementations differ, and some providers do not
+			// advertise CapBucketCors. Regardless of the backend response, an
+			// authenticated gateway must not reject a genuine browser preflight
+			// before forwarding it. A gateway-generated authentication error is
+			// the regression this test is designed to catch.
+			if resp.StatusCode == http.StatusForbidden && strings.Contains(string(body), "Missing or invalid credentials") {
+				t.Fatalf("OPTIONS was rejected by gateway authentication: status %d body %s", resp.StatusCode, body)
+			}
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusForbidden &&
+				resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("OPTIONS: unexpected status %d (expected 200, 204, 400, 403, or 405): %s", resp.StatusCode, body)
+			}
+		})
+	}
+
+	// These malformed requests must not use the public exception. This guards
+	// against accidentally treating all OPTIONS requests as preflights.
+	for _, tc := range []struct {
+		name             string
+		origin           bool
+		requestedMethod  bool
+		partialQueryAuth string
+	}{
+		{name: "missing origin", requestedMethod: true},
+		{name: "missing requested method", origin: true},
+		{name: "partial presign", origin: true, requestedMethod: true, partialQueryAuth: "X-Amz-Signature=partial"},
+	} {
+		t.Run("invalid/"+tc.name, func(t *testing.T) {
+			path := paths[1]
+			resp, body := doCORSPreflightWithOptions(t, gw, path, tc.origin, tc.requestedMethod, false, tc.partialQueryAuth)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "Missing or invalid credentials") {
+				t.Fatalf("OPTIONS status=%d body=%s, want gateway authentication rejection", resp.StatusCode, body)
+			}
+		})
+	}
+
+	// A correctly signed OPTIONS request remains on the normal authenticated
+	// path, rather than using the unauthenticated browser exception.
+	t.Run("signed", func(t *testing.T) {
+		path := paths[1]
+		resp, body := doCORSPreflightWithOptions(t, gw, path, true, true, true, "")
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden && strings.Contains(string(body), "Missing or invalid credentials") {
+			t.Fatalf("signed OPTIONS was treated as unauthenticated: %s", body)
+		}
+	})
+}
+
+func doCORSPreflight(t *testing.T, gw *harness.Gateway, path string, origin, requestedMethod, signed bool) (*http.Response, []byte) {
+	return doCORSPreflightWithOptions(t, gw, path, origin, requestedMethod, signed, "")
+}
+
+func doCORSPreflightWithOptions(t *testing.T, gw *harness.Gateway, path string, origin, requestedMethod, signed bool, rawQuery string) (*http.Response, []byte) {
+	t.Helper()
+	if rawQuery != "" {
+		path += "?" + rawQuery
+	}
+	req, err := http.NewRequest(http.MethodOptions, path, nil)
 	if err != nil {
 		t.Fatalf("OPTIONS request: %v", err)
+	}
+	if origin {
+		req.Header.Set("Origin", "https://example.com")
+	}
+	if requestedMethod {
+		req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+		req.Header.Set("Access-Control-Request-Headers", "content-type")
+	}
+	if signed {
+		signV4Headers(t, req, testAccessKey, testSecretKey, nil)
 	}
 	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
 		t.Fatalf("OPTIONS: %v", err)
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		resp.Body.Close()
+		t.Fatalf("read OPTIONS response: %v", err)
+	}
+	return resp, body
+}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden &&
-		resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("OPTIONS: unexpected status %d (expected 200, 400, 403, or 405)", resp.StatusCode)
+func testS3Compat_CORSPreflight_ConfiguredBackend(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	client := newS3CompatClient(t, inst)
+	_, err := client.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+		Bucket: aws.String(inst.Bucket),
+		CORSConfiguration: &types.CORSConfiguration{CORSRules: []types.CORSRule{{
+			AllowedOrigins: []string{"https://example.com"},
+			AllowedMethods: []string{"PUT"},
+			AllowedHeaders: []string{"content-type"},
+			MaxAgeSeconds:  aws.Int32(3600),
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("PutBucketCors: %v", err)
+	}
+	defer func() {
+		if _, err := client.DeleteBucketCors(ctx, &s3.DeleteBucketCorsInput{Bucket: aws.String(inst.Bucket)}); err != nil {
+			t.Logf("DeleteBucketCors cleanup: %v", err)
+		}
+	}()
+
+	gw := harness.StartGateway(t, inst, harness.WithAuth(config.GatewayCredential{
+		AccessKey: testAccessKey,
+		SecretKey: testSecretKey,
+		Buckets:   []string{inst.Bucket},
+	}))
+	for _, path := range []string{
+		fmt.Sprintf("%s/%s", gw.URL, inst.Bucket),
+		fmt.Sprintf("%s/%s/%s", gw.URL, inst.Bucket, uniqueKey(t)),
+	} {
+		t.Run(path, func(t *testing.T) {
+			resp, body := doCORSPreflight(t, gw, path, true, true, false)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("OPTIONS status=%d body=%s, want 200 or 204", resp.StatusCode, body)
+			}
+			if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://example.com" {
+				t.Errorf("Access-Control-Allow-Origin=%q, want %q", got, "https://example.com")
+			}
+			if !strings.Contains(strings.ToUpper(resp.Header.Get("Access-Control-Allow-Methods")), http.MethodPut) {
+				t.Errorf("Access-Control-Allow-Methods=%q, want PUT", resp.Header.Get("Access-Control-Allow-Methods"))
+			}
+			if !strings.Contains(strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers")), "content-type") {
+				t.Errorf("Access-Control-Allow-Headers=%q, want content-type", resp.Header.Get("Access-Control-Allow-Headers"))
+			}
+		})
 	}
 }
 

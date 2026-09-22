@@ -367,6 +367,7 @@ func TestConformance(t *testing.T) {
 				{"S3Compat_GetPutDeleteBucketCors", provider.CapBucketCors, testS3Compat_GetPutDeleteBucketCors},
 				{"S3Compat_GetPutDeleteBucketLifecycle", provider.CapBucketLifecycle, testS3Compat_GetPutDeleteBucketLifecycle},
 				{"S3Compat_CORSPreflight_OPTIONS", 0, testS3Compat_CORSPreflight_OPTIONS},
+				{"S3Compat_CORSPreflight_ConfiguredBackend", provider.CapBucketCors, testS3Compat_CORSPreflight_ConfiguredBackend},
 				{"S3Compat_GetPutDeleteBucketEncryption", provider.CapBucketEncryption, testS3Compat_GetPutDeleteBucketEncryption},
 				{"S3Compat_SelectObjectContent_501", 0, testS3Compat_SelectObjectContent_501},
 			}

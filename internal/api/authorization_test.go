@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -32,6 +34,120 @@ func TestAuthorizationMiddleware_ReadOnlyAllowsObjectReads(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), authorizedRequest(http.MethodGet, "/tenant-a/key", credential))
 	if !called {
 		t.Fatal("read request was denied")
+	}
+}
+
+func TestAuthorizationMiddleware_CORSPreflightBypass(t *testing.T) {
+	called := false
+	h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/object", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight called=%v status=%d, want called=true status=%d", called, rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestAuthenticatedMiddlewareChain_CORSPreflightBypass(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	called := false
+	terminal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := AuthMiddleware(testCredentialStore(), time.Minute, logger, nil, true)(
+		AuthorizationMiddleware("", nil)(terminal),
+	)
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/object", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight called=%v status=%d, want called=true status=%d", called, rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestAuthenticatedMiddlewareChain_CORSPreflightRoutesAndReflectsBackendHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+		w.Header().Set("Access-Control-Allow-Methods", r.Header.Get("Access-Control-Request-Method"))
+		w.Header().Set("Access-Control-Allow-Headers", r.Header.Get("Access-Control-Request-Headers"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	engine, err := crypto.NewEngine([]byte("test-password-123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithFeatures(newMockS3Client(), engine, logger, getTestMetrics(), nil, nil, nil, &config.Config{
+		Backend: config.BackendConfig{Endpoint: backend.URL},
+	}, nil)
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	chain := AuthMiddleware(testCredentialStore(), time.Minute, logger, nil, true)(
+		AuthorizationMiddleware("", nil)(router),
+	)
+
+	for _, path := range []string{"/bucket", "/bucket/object"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodOptions, path, nil)
+			req.Header.Set("Origin", "https://example.com")
+			req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+			req.Header.Set("Access-Control-Request-Headers", "content-type")
+			rec := httptest.NewRecorder()
+			chain.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
+				t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, "https://example.com")
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Methods"); got != http.MethodPut {
+				t.Fatalf("Access-Control-Allow-Methods = %q, want %q", got, http.MethodPut)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "content-type" {
+				t.Fatalf("Access-Control-Allow-Headers = %q, want %q", got, "content-type")
+			}
+		})
+	}
+}
+
+func TestAuthorizationMiddleware_CORSPreflightRespectsProxiedBucket(t *testing.T) {
+	h := AuthorizationMiddleware("allowed", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler called for out-of-scope preflight")
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/other/object", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestAuthorizationMiddleware_SignedCORSPreflightStillRequiresPrincipal(t *testing.T) {
+	h := AuthorizationMiddleware("", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler called without authenticated principal")
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/object", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=key/date/region/s3/aws4_request")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 }
 
