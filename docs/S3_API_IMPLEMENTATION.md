@@ -195,6 +195,15 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
 | T2-13 | `PUT` | `/{bucket}?encryption` | **PutBucketEncryption** | `handlePutBucketEncryption` | Proxy verbatim |
 | T2-14 | `DELETE` | `/{bucket}?encryption` | **DeleteBucketEncryption** | `handleDeleteBucketEncryption` | Proxy verbatim |
 
+Browser CORS preflight requests are permitted to reach the `OPTIONS` handler
+without gateway SigV4 credentials when they contain both `Origin` and
+`Access-Control-Request-Method` and no gateway authentication material. This is
+required because browsers do not send the credentials from a subsequent
+presigned request on the preflight. The gateway still authenticates the actual
+presigned `PUT`, and `proxied_bucket` remains enforced for unauthenticated
+preflights. Incomplete or credentialed `OPTIONS` requests continue through the
+normal authentication and authorization path.
+
 ### New Operations — Tier 3 (Specialised)
 
 | # | Method | Route | Operation | Handler | Handling |

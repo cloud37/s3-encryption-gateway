@@ -30,6 +30,21 @@ func AuthorizationMiddleware(proxiedBucket string, auditLog audit.Logger) func(h
 				next.ServeHTTP(w, r)
 				return
 			}
+			if isUnauthenticatedCORSPreflight(r) {
+				// There is no gateway principal on a browser preflight. Still
+				// enforce the deployment-wide bucket restriction before allowing
+				// the request to reach the backend.
+				bucket := strings.TrimPrefix(r.URL.Path, "/")
+				if slash := strings.IndexByte(bucket, '/'); slash >= 0 {
+					bucket = bucket[:slash]
+				}
+				if proxiedBucket != "" && bucket != proxiedBucket {
+					writeAuthorizationDenied(w, r, auditLog, "bucket_scope")
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
 			credential, ok := CredentialFromContext(r)
 			if !ok {
 				writeAuthorizationDenied(w, r, auditLog, "unknown_operation")

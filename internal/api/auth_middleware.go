@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
@@ -34,6 +35,58 @@ var systemEndpoints = map[string]bool{
 // bypass auth and fall through to the /{bucket} route.
 func isSystemEndpoint(path string) bool {
 	return systemEndpoints[path]
+}
+
+// isUnauthenticatedCORSPreflight reports whether r is a browser CORS
+// preflight that can be handled without gateway credentials. Browsers do not
+// send the credentials from the subsequent presigned request on the
+// preflight, so requiring SigV4 here prevents the request from ever reaching
+// the backend's CORS configuration.
+//
+// The predicate is intentionally narrow: an OPTIONS request must identify
+// both the requesting origin and the method it wants to use, and it must not
+// carry any gateway authentication material. OPTIONS requests with malformed
+// or incomplete CORS headers, or with credentials, remain on the normal
+// authenticated path.
+func isUnauthenticatedCORSPreflight(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodOptions {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get("Origin")) == "" || strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")) == "" {
+		return false
+	}
+	if hasAuthenticationMaterial(r) {
+		return false
+	}
+
+	// CORS preflight is only a valid S3 bucket/object operation. Do not turn a
+	// public OPTIONS exception into a general root or arbitrary-path bypass.
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		return false
+	}
+	bucket, key, hasKey := strings.Cut(path, "/")
+	return bucket != "" && (!hasKey || key != "")
+}
+
+// hasAuthenticationMaterial is stricter than HasCredentials for the public
+// preflight exception. A partial presigned query (for example, a signature or
+// algorithm without a credential) is still authentication material and must
+// not turn an otherwise authenticated request into an unauthenticated one.
+func hasAuthenticationMaterial(r *http.Request) bool {
+	if HasCredentials(r) {
+		return true
+	}
+	for key := range r.URL.Query() {
+		switch strings.ToLower(key) {
+		case "awsaccesskeyid", "signature", "expires", "date",
+			"x-amz-algorithm", "x-amz-signature", "x-amz-credential",
+			"x-amz-date", "x-amz-expires", "x-amz-signedheaders",
+			"x-amz-security-token":
+			return true
+		}
+	}
+	return false
 }
 
 // contextKey is a private type for context keys to avoid collisions.
@@ -103,6 +156,10 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			// credentials. Exact match only — prefix matching would let
 			// /metrics-<anything> bypass auth (V1.0-SEC-30).
 			if isSystemEndpoint(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if isUnauthenticatedCORSPreflight(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
