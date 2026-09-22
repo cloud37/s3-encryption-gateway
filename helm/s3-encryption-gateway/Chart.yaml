@@ -22,21 +22,23 @@ annotations:
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.0-rc3
+      image: docker.io/cloud37io/s3-encryption-gateway:0.12.0
       whitelisted: true
     - name: s3-encryption-gateway-fips
       image: docker.io/cloud37io/s3-encryption-gateway:0.12.0-fips
       whitelisted: true
   artifacthub.io/changes: |
+    - kind: security
+      description: Fail-closed encrypted MPU routing, bounded KDF limits, and authenticated chunked-v2 completeness
     - kind: added
-      description: Multi-arch images (linux/amd64, linux/arm64) published to Docker Hub
-    - kind: added
-      description: SLSA provenance and SBOM attestations via cosign keyless signing
-    - kind: added
-      description: Artifact Hub listing with full metadata and image references
-  artifacthub.io/containsSecurityUpdates: "false"
-version: 0.12.0-rc3
-appVersion: "0.12.0-rc3"
+      description: Signed digest-addressable Helm OCI artifacts at GHCR and S3-compatible health probe aliases
+    - kind: fixed
+      description: ListBuckets forwarding, retryable chunked uploads, backend TLS handling, and encrypted ETag serialization
+    - kind: changed
+      description: Stable 0.12.0 release with coordinated upgrade and rollback procedures
+  artifacthub.io/containsSecurityUpdates: "true"
+version: 0.12.0
+appVersion: "0.12.0"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;

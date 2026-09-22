@@ -11,8 +11,11 @@
 
 This release changes encryption write formats and deployment prerequisites.
 Plan a coordinated upgrade rather than a rolling mix of old and new writers.
+The procedure below applies when upgrading from the stable `0.11.10` release
+or any `0.12.0` release candidate. The stable release no longer carries the
+release-candidate restriction, but the format and rollback constraints remain.
 
-1. Ensure build and runtime environments use Go 1.27.0 or later.
+1. Ensure build and runtime environments use Go 1.27.1 or later.
 2. Before enabling chunked v2 writers, drain v1-only readers. Once v2 objects
    exist, retain a v2-capable release for rollback; rewrite v1 objects with
    GET-through-gateway -> PUT-through-gateway when authenticated completeness
@@ -37,6 +40,14 @@ Plan a coordinated upgrade rather than a rolling mix of old and new writers.
    this release. Move encrypted objects through gateway `CopyObject` or a
    GET-through-gateway -> PUT-through-gateway rewrite so their location binding
    is regenerated.
+
+For a Helm-managed upgrade, install or upgrade the chart at `0.12.0` and use
+the image tag `0.12.0` (or `0.12.0-fips` with the FIPS values overlay). Keep
+the existing encryption password/key-manager and backend credentials unchanged.
+The state-v2 writer switch is intentionally a separate second upgrade as
+described in step 3 above. After rollout, verify `/ready` (or one of the
+S3-compatible readiness aliases) and confirm that all replicas report the same
+Valkey MPU writer capability before restoring normal traffic.
 
 The detailed procedures below remain the authoritative instructions for each
 change.

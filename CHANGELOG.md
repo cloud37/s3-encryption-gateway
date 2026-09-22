@@ -4,6 +4,233 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.0] — 2026-09-21
+
+This stable release includes the changes from `0.12.0-rc1`, `0.12.0-rc2`, and
+`0.12.0-rc3`, together with the dependency, compatibility-image, and release
+automation updates made after `rc3`.
+
+### ⚠️ Upgrade Instructions ⚠️
+
+This release changes encryption write formats, multipart-upload state
+coordination, authentication defaults, and deployment prerequisites. Do not
+perform a rolling upgrade that leaves pre-0.12.0 and 0.12.0 writers serving
+the same workload.
+
+1. Use Go 1.27.1 or later for build and runtime environments.
+2. Migrate SigV2 clients to SigV4 before upgrading. SigV2 is disabled by
+   default; during a controlled migration only, set
+   `auth.allow_legacy_signature_v2: true` (or
+   `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`). This opt-in is temporary, and
+   enabled SigV2 requests use the hardened canonicalization rules.
+3. Drain v1-only readers before enabling chunked-v2 writers. Once v2 objects
+   exist, roll back only to a v2-capable release. Rewrite chunked-v1 objects
+   through the gateway with GET-through-gateway -> PUT-through-gateway when
+   authenticated completeness is required.
+4. Before enabling the state-v2 encrypted-MPU writer, drain or abort
+   in-flight encrypted MPUs and complete a separate scale-down to one old
+   replica. For Helm deployments, first run
+   `helm upgrade RELEASE CHART --reuse-values --set replicaCount=1` and wait
+   for `kubectl rollout status deployment/DEPLOYMENT`. Only then perform the
+   image upgrade with
+   `--set-string config.multipartState.valkey.stateV2Writer.enabled.value=true`.
+   Helm renders `VALKEY_MPU_STATE_V2_WRITER=true` on every replica; the first
+   state-v2 writer atomically initializes `mpu:writer-version` and later
+   replicas verify it. Do not run state-v1 and state-v2 writers together.
+   Drain or abort state-v2 MPUs before any rollback.
+5. Inventory KDF parameters before lowering decrypt limits. Rewrite objects
+   above the new operational limits, then deploy the new limits uniformly to
+   every replica; do not run a mixed-limit fleet.
+6. Do not backend-move, copy, or rename objects written by this release.
+   Use gateway `CopyObject` or GET-through-gateway -> PUT-through-gateway so
+   location binding is regenerated.
+
+The authoritative coordinated upgrade, rollback, KDF, object-rewrite, and
+legacy-MPU procedures are in [`docs/MIGRATION.md`](docs/MIGRATION.md).
+
+### Security
+
+- **SigV2 hardening (V1.0-SEC-44):** SigV2 is disabled by default. The
+  temporary opt-in now authenticates routing-sensitive S3 subresources.
+
+- **Non-streaming SigV4 payload integrity (V1.0-SEC-43):** Concrete signed
+  payloads are hashed and verified before downstream dispatch; mismatches are
+  rejected atomically while `UNSIGNED-PAYLOAD` remains compatible.
+
+- **Object location binding (V1.0-SEC-42):** New encrypted writes bind
+  ciphertext authentication to the gateway bucket/key location. Legacy
+  objects remain readable, but backend-native moves fail authentication.
+
+- **Authenticated chunked completeness (V1.0-SEC-37):** New chunked-v2
+  objects authenticate exact data-chunk count and plaintext size with a
+  terminal record. Chunked-v1 objects remain readable and are classified as
+  `class_e_chunked_v1` for GET-through-gateway -> PUT-through-gateway migration.
+
+- **Nonce-safe encrypted MPUs (V1.0-SEC-38, V1.0-SEC-48):** Encrypted parts
+  immutably claim their first content. Identical retries remain safe; changed
+  replacements are rejected. A bounded, token-fenced reservation lease can
+  recover identical retries after ambiguous backend responses without
+  permitting changed plaintext to reuse deterministic nonces.
+
+- **Bounded KDF decrypt costs (V1.0-SEC-39):** Password-envelope and metadata
+  KDF parameters are checked against hard and configurable operational limits
+  at every decrypt boundary. Lowering limits can make existing objects
+  unreadable, so use the documented inventory and rewrite procedure.
+
+- **SigV2/SigV4 presigned-signature redaction (V1.0-SEC-40):** Access logs
+  and tracing redact presigned signatures.
+
+- **Verified SigV4 streaming payloads (V1.0-SEC-41):** Seed, chunk, terminal
+  signature, trailer, and checksum validation completes before backend or
+  object state mutation. Verified temporary bodies use bounded per-operation
+  and process-wide budgets.
+
+- **Bounded verified-payload spooling (V1.0-SEC-49):** SigV4 and AWS-chunked
+  temporary bodies are bounded by per-operation and process-wide aggregate
+  budgets. Overloaded requests fail with 413 or 503, and spool usage is
+  exposed through metrics.
+
+- **Fail-closed multipart routing (V1.0-SEC-46):** Creation-time encrypted
+  or plaintext mode is persisted for Valkey-tracked MPUs. Missing state
+  returns `NoSuchUpload` instead of selecting plaintext. Legacy untracked
+  plaintext is available only through the temporary
+  `MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=true` migration switch.
+
+- **Encrypted chunk manifest bounds (V1.0-SEC-45):** Out-of-range chunk sizes
+  are rejected before arithmetic, allocation, source reads, or
+  authentication.
+
+- **Explicit bucket administration (V1.0-SEC-47):** Bucket configuration
+  PUT/DELETE operations require the independent scoped `manage` grant and
+  raw configuration bodies are capped at 1 MiB.
+
+- **Tar extraction dependency (issue #274):** Updated
+  `github.com/moby/go-archive` to v0.3.0, resolving `GO-2026-6253`.
+
+- **Backend TLS trust (GH-285):** HTTPS backends support custom CA trust and
+  an explicitly unsafe `insecure_skip_verify` diagnostic option.
+
+### Added
+
+- **Per-credential authorization (V1.0-AUTH-2):** Credentials support exact,
+  prefix, and explicit unrestricted (`*`) bucket scopes, with independent
+  `create`, `delete`, and `manage` grants. An explicitly empty bucket list is
+  deny-all, and ListBuckets is filtered by effective scope.
+
+- **Authorized bucket management:** Optional, default-disabled CreateBucket
+  and independently scoped DeleteBucket passthrough are available when the
+  global gate, credential grant, and backend permissions allow them.
+
+- **Configurable KDF decrypt limits:** YAML, environment, and Helm settings
+  expose PBKDF2 and Argon2id operational decrypt ceilings.
+
+- **KMS reauthentication observability:** Added
+  `gateway_kms_reauth_total` and outage/token-revocation regression coverage.
+
+- **S3-compatible health aliases:** `/minio/health/live`,
+  `/minio/health/ready`, `/health/live`, and `/health/ready` map to the
+  gateway's liveness and readiness handlers with exact-match authentication
+  bypass semantics.
+
+- **Signed Helm OCI publishing (GH-277):** Charts are published as signed,
+  digest-addressable OCI artifacts at
+  `ghcr.io/cloud37/s3-encryption-gateway-helm`; the GitHub Pages chart
+  repository remains supported.
+
+- **Operational controls:** Helm and server configuration expose verified
+  spool directories and budgets, encrypted-MPU reservation leases, legacy
+  MPU migration mode, backend TLS settings, and Valkey ephemeral-storage
+  guidance.
+
+### Fixed
+
+- **ListBuckets forwarding (V1.0-S3-7):** Raw ListBuckets and passthrough
+  requests share backend endpoint resolution and TLS handling, including
+  scheme-less endpoints and explicit credential-permission combinations.
+
+- **Retryable chunked PutObject:** Known-length streaming bodies are bounded
+  and seekable so AWS SDK backend retries can replay them. Zero-length bodies
+  now use the known-length path, and retry coverage exercises transient 5xx
+  failures.
+
+- **OpenBao/Vault token recovery:** Failed renewals and request-time 401/403
+  responses trigger storm-bounded reauthentication and one retry instead of
+  leaving the adapter unavailable until the original lease expires.
+
+- **AWS CLI CRC64NVME uploads (GH-283):** The default AWS-chunked trailer is
+  validated and compatibility images are pinned and managed.
+
+- **Encrypted object ETags (issue #272):** Restored ETags on HEAD, full GET,
+  ranged GET, cached GET, and SigV4-forwarded GET responses are serialized as
+  quoted HTTP entity-tags exactly once.
+
+- **Backend SSL configuration (issue #284):** `BACKEND_USE_SSL` strictly
+  overrides YAML configuration and controls scheme-less backend endpoints in
+  SDK and proxy clients; explicit endpoint schemes remain authoritative.
+
+- **Helm probes and release CI:** Removed the invalid
+  `insecureSkipTLSVerify` probe field, isolated artifact work in runner
+  temporary directories, and moved OCI publication to ORAS so the chart
+  package has its own GHCR repository.
+
+- **Browser presigned PUT CORS preflight (issue #318):** Genuine unauthenticated
+  browser `OPTIONS` preflights now reach the backend CORS handler, while
+  malformed or credentialed `OPTIONS` requests remain authenticated and the
+  actual presigned operation continues to require SigV4 authentication.
+
+### Changed
+
+- The project now requires Go 1.27.1.
+
+- Unit-test and FIPS-test CI use a 20-minute Go timeout with a 45-minute job
+  limit. `make security-scan` uses the module-declared toolchain.
+
+- HSM-tagged validation remains disabled while the PKCS#11 provider is a
+  non-functional skeleton.
+
+### Dependencies
+
+- Updated `github.com/aws/aws-sdk-go-v2` to v1.47.0.
+- Updated `github.com/aws/aws-sdk-go-v2/config` to v1.33.5.
+- Updated `github.com/aws/aws-sdk-go-v2/credentials` to v1.20.5.
+- Updated `github.com/aws/aws-sdk-go-v2/service/s3` to v1.113.1.
+- Updated `github.com/aws/smithy-go` to v1.28.2.
+- Updated `github.com/openbao/openbao/api/v2` to v2.7.0.
+- Updated `golang.org/x/crypto` to v0.57.0.
+- Updated `golang.org/x/sys` to v0.48.0.
+- Updated `golang.org/x/perf` to revision `22c9c6c9d4da`.
+- Updated `go.opentelemetry.io/otel` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc`
+  to v1.46.0.
+- Updated `go.opentelemetry.io/otel/exporters/stdout/stdouttrace` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/sdk` to v1.46.0.
+- Updated `go.opentelemetry.io/otel/trace` to v1.46.0.
+- Updated `google.golang.org/grpc` to v1.83.2.
+- Updated `github.com/sirupsen/logrus` to v1.10.2.
+- Updated `github.com/prometheus/client_model` to v0.6.3.
+- Updated Helm used in CI to v4.3.0.
+- Updated the Valkey chart dependency to `~0.12.0`.
+- Updated the AWS CLI compatibility image to v2.36.49.
+- Updated the boto3 compatibility image to v1.43.98.
+- Updated the SeaweedFS compatibility image to v4.47.
+- Updated the Valkey compatibility image to v9.2.
+- Updated the MinIO compatibility image to the pinned
+  `RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772`.
+- Updated the OpenBao compatibility image to v2.6.2.
+- Updated the Cosmian KMS compatibility image to v5.27.1.
+- Updated the Restic compatibility image to v0.19.1.
+- Updated the Rclone compatibility image to v1.75.
+
+### Documentation
+
+- Consolidated the coordinated 0.12.0 upgrade and rollback procedures in
+  [`docs/MIGRATION.md`](docs/MIGRATION.md), including SigV2 migration, state-v2
+  MPU rollout, chunked-v1 rewriting, KDF-limit rollout, and location-binding
+  restrictions.
+- Documented explicit bucket scopes, backend TLS trust, verified-payload
+  spool controls, AWS CLI CRC64NVME compatibility, health aliases, and signed
+  OCI chart installation and verification.
+
 ## [0.12.0-rc3] — 2026-09-09
 
 ### ⚠️ Release Candidate: Do Not Upgrade Production ⚠️

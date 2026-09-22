@@ -6,6 +6,14 @@
 > Scope: Helm chart v0.6+. Implemented by V0.6-OPS-1.
 > See `docs/plans/V0.6-OPS-1-plan.md` for design rationale and references.
 
+> **0.12.0 upgrade warning:** The generic rolling, blue/green, and canary
+> recipes below must not be used to mix pre-0.12.0 and 0.12.0 MPU writers.
+> Follow [`docs/MIGRATION.md`](MIGRATION.md) first: drain or abort encrypted
+> MPUs, scale to one old replica, perform the state-v2 writer upgrade, and
+> verify readiness before resuming normal traffic. These recipes are suitable
+> for the post-upgrade traffic shift or for changes that do not alter the
+> encrypted-MPU writer protocol.
+
 ---
 
 ## Table of Contents
@@ -218,7 +226,7 @@ key version and shared Valkey as blue.
 helm install gw-green helm/s3-encryption-gateway \
   --namespace s3-gateway \
   --values helm/s3-encryption-gateway/examples/values-green.yaml \
-  --set image.tag=0.11.10 \   # new version
+  --set image.tag=0.12.0 \   # new version
   --set config.backend.endpoint.value=https://your-backend.example.com \
   --set config.encryption.password.valueFrom.secretKeyRef.name=my-secrets \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
@@ -336,7 +344,7 @@ helm upgrade gw-stable helm/s3-encryption-gateway \
 helm install gw-canary helm/s3-encryption-gateway \
   --namespace s3-gateway \
   --values helm/s3-encryption-gateway/examples/values-canary-canary.yaml \
-  --set image.tag=0.11.10-rc1 \   # candidate version
+  --set image.tag=0.12.0 \   # candidate version
   --set config.backend.endpoint.value=https://your-backend.example.com \
   --set config.encryption.password.valueFrom.secretKeyRef.name=my-secrets \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
@@ -404,7 +412,7 @@ After `promote.sh 100` and a final soak:
    helm upgrade gw-stable helm/s3-encryption-gateway \
      --namespace s3-gateway \
      --values helm/s3-encryption-gateway/examples/values-canary-stable.yaml \
-     --set image.tag=0.11.10-rc1
+      --set image.tag=0.12.0
    ```
 2. Update `docs/examples/canary/traefikservice.yaml` weights back to 100/0
    (stable=100, canary=0) and apply.
@@ -870,4 +878,3 @@ and the full plan at `docs/plans/V0.6-OPS-2-plan.md`.
     https://doc.traefik.io/traefik/providers/kubernetes-crd/
 11. Kubernetes Gateway API — HTTPRoute:
     https://gateway-api.sigs.k8s.io/api-types/httproute/
-
