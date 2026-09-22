@@ -193,7 +193,7 @@ legacy-MPU procedures are in [`docs/MIGRATION.md`](docs/MIGRATION.md).
 - Updated `github.com/aws/aws-sdk-go-v2` to v1.47.0.
 - Updated `github.com/aws/aws-sdk-go-v2/config` to v1.33.5.
 - Updated `github.com/aws/aws-sdk-go-v2/credentials` to v1.20.5.
-- Updated `github.com/aws/aws-sdk-go-v2/service/s3` to v1.113.1.
+- Updated `github.com/aws/aws-sdk-go-v2/service/s3` to v1.113.2.
 - Updated `github.com/aws/smithy-go` to v1.28.2.
 - Updated `github.com/openbao/openbao/api/v2` to v2.7.0.
 - Updated `golang.org/x/crypto` to v0.57.0.
@@ -210,8 +210,8 @@ legacy-MPU procedures are in [`docs/MIGRATION.md`](docs/MIGRATION.md).
 - Updated `github.com/prometheus/client_model` to v0.6.3.
 - Updated Helm used in CI to v4.3.0.
 - Updated the Valkey chart dependency to `~0.12.0`.
-- Updated the AWS CLI compatibility image to v2.36.49.
-- Updated the boto3 compatibility image to v1.43.98.
+- Updated the AWS CLI compatibility image to v2.36.50.
+- Updated the boto3 compatibility image to v1.43.99.
 - Updated the SeaweedFS compatibility image to v4.47.
 - Updated the Valkey compatibility image to v9.2.
 - Updated the MinIO compatibility image to the pinned
