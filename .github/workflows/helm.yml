@@ -138,11 +138,13 @@ jobs:
           CONFIG_FILE="${OCI_DIR}/config.json"
           printf '{}' > "${CONFIG_FILE}"
           PUSH_OUTPUT=$(mktemp)
-          oras push "ghcr.io/cloud37/${OCI_REPOSITORY}:${CHART_VERSION}" \
-            --artifact-type application/vnd.cncf.helm.config.v1+json \
-            --config "${CONFIG_FILE}:application/vnd.cncf.helm.config.v1+json" \
-            "${ARCHIVE}:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
-            2>&1 | tee "${PUSH_OUTPUT}"
+          (
+            cd "${OCI_DIR}"
+            oras push "ghcr.io/cloud37/${OCI_REPOSITORY}:${CHART_VERSION}" \
+              --artifact-type application/vnd.cncf.helm.config.v1+json \
+              --config "config.json:application/vnd.cncf.helm.config.v1+json" \
+              "${CHART_NAME}-${CHART_VERSION}.tgz:application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+          ) 2>&1 | tee "${PUSH_OUTPUT}"
           DIGEST=$(grep -Eo 'sha256:[0-9a-fA-F]{64}' "${PUSH_OUTPUT}" | tail -n1 || true)
           if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "ERROR: oras push did not return a valid manifest digest" >&2
