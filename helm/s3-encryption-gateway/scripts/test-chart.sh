@@ -104,6 +104,34 @@ for expected in \
   fi
 done
 
+# The read-only root filesystem still needs a writable spool for signed GETs.
+echo ""
+echo "Test 1d: default spool and existing /tmp mount"
+DEFAULT_SPOOL=$(helm template spool "$CHART_DIR" --show-only templates/deployment.yaml)
+grep -q 'name: SERVER_SPOOL_DIRECTORY' <<<"$DEFAULT_SPOOL" || { echo "✗ spool env missing"; exit 1; }
+grep -q 'value: "/tmp"' <<<"$DEFAULT_SPOOL" || { echo "✗ spool path missing"; exit 1; }
+grep -q 'mountPath: /tmp' <<<"$DEFAULT_SPOOL" || { echo "✗ /tmp mount missing"; exit 1; }
+grep -q 'emptyDir: {}' <<<"$DEFAULT_SPOOL" || { echo "✗ default spool volume missing"; exit 1; }
+if [[ $(grep -c 'name: gateway-spool' <<<"$DEFAULT_SPOOL") -ne 2 ]]; then
+  echo "✗ default spool mount and volume must match"
+  exit 1
+fi
+CUSTOM_TMP=$(helm template spool "$CHART_DIR" --show-only templates/deployment.yaml \
+  --set extraVolumeMounts[0].name=operator-tmp \
+  --set extraVolumeMounts[0].mountPath=/tmp \
+  --set extraVolumes[0].name=operator-tmp \
+  --set extraVolumes[0].emptyDir.sizeLimit=1Gi)
+if grep -q 'name: gateway-spool' <<<"$CUSTOM_TMP"; then
+  echo "✗ custom /tmp mount conflicts with default spool volume"
+  exit 1
+fi
+if [[ $(grep -c 'mountPath: /tmp' <<<"$CUSTOM_TMP") -ne 1 ]]; then
+  echo "✗ custom /tmp mount must render only once"
+  exit 1
+fi
+grep -q 'name: operator-tmp' <<<"$CUSTOM_TMP" || { echo "✗ custom /tmp volume missing"; exit 1; }
+echo "✓ default spool and custom /tmp mount rendered without conflicts"
+
 # Test 2: existingCredentialsSecret rendering
 echo ""
 echo "Test 2: existingCredentialsSecret"

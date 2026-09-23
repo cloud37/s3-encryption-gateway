@@ -443,8 +443,18 @@ spec:
         {{- end }}
         {{- $tlsCertMount := and (or (eq .Values.config.tls.enabled.value "true") (eq .Values.config.tls.enabled.value "1")) (and .Values.config.tls.useCertManager.value (or (eq .Values.config.tls.useCertManager.value "true") (eq .Values.config.tls.useCertManager.value "1"))) }}
         {{- $credsSecret := .Values.config.auth.existingCredentialsSecret }}
-        {{- if or $tlsCertMount .Values.policies $credsSecret .Values.extraVolumeMounts }}
+        {{- $customTmpMount := false }}
+        {{- range .Values.extraVolumeMounts }}
+          {{- if eq .mountPath "/tmp" }}
+            {{- $customTmpMount = true }}
+          {{- end }}
+        {{- end }}
+        {{- if or (not $customTmpMount) $tlsCertMount .Values.policies $credsSecret .Values.extraVolumeMounts }}
         volumeMounts:
+          {{- if not $customTmpMount }}
+          - name: gateway-spool
+            mountPath: /tmp
+          {{- end }}
           {{- if $tlsCertMount }}
           - name: tls-cert
             mountPath: /etc/tls
@@ -469,8 +479,12 @@ spec:
       {{- end }}
       {{- $tlsCertVol := and (or (eq .Values.config.tls.enabled.value "true") (eq .Values.config.tls.enabled.value "1")) (and .Values.config.tls.useCertManager.value (or (eq .Values.config.tls.useCertManager.value "true") (eq .Values.config.tls.useCertManager.value "1"))) }}
       {{- $credsSecret := .Values.config.auth.existingCredentialsSecret }}
-      {{- if or $tlsCertVol .Values.policies $credsSecret .Values.extraVolumes }}
+      {{- if or (not $customTmpMount) $tlsCertVol .Values.policies $credsSecret .Values.extraVolumes }}
       volumes:
+        {{- if not $customTmpMount }}
+        - name: gateway-spool
+          emptyDir: {}
+        {{- end }}
         {{- if $tlsCertVol }}
         - name: tls-cert
           secret:

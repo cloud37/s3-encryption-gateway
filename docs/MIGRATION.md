@@ -41,6 +41,43 @@ release-candidate restriction, but the format and rollback constraints remain.
    GET-through-gateway -> PUT-through-gateway rewrite so their location binding
    is regenerated.
 
+### Temporary spool storage for Helm deployments
+
+**Configure a writable spool volume before upgrading the image to `0.12.0`.**
+The chart sets `securityContext.readOnlyRootFilesystem: true` and does not
+provide a writable temporary volume by default. The `0.12.0` gateway creates a
+temporary file to verify signed SigV4 payloads before dispatch, even for an
+empty-body GET such as ListObjects. Without a writable spool directory,
+authenticated S3 requests can return HTTP 500 `InternalError` while `/ready`
+still succeeds.
+
+Add the following chart values alongside the existing settings (keep the root
+filesystem read-only):
+
+```yaml
+config:
+  server:
+    spoolDirectory:
+      value: /tmp
+extraVolumes:
+  - name: gateway-temp
+    emptyDir: {}
+extraVolumeMounts:
+  - name: gateway-temp
+    mountPath: /tmp
+```
+
+`emptyDir` is local to each pod, backed by node ephemeral storage by default,
+and removed with the pod. Size ephemeral-storage requests and limits for the
+expected verified-body workload; the default aggregate spool budget is 10 GiB
+per gateway process. After rollout, verify a signed ListObjects request through
+the gateway as well as `/ready`.
+
+The chart after `0.12.0` provides the `/tmp` `emptyDir` and spool setting by
+default. Existing `extraVolumeMounts` entries at `/tmp` take precedence; keep
+them writable. The explicit values above remain necessary for the published
+`0.12.0` chart.
+
 For a Helm-managed upgrade, install or upgrade the chart at `0.12.0` and use
 the image tag `0.12.0` (or `0.12.0-fips` with the FIPS values overlay). Keep
 the existing encryption password/key-manager and backend credentials unchanged.

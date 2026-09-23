@@ -514,7 +514,9 @@ config:
     maxHeaderBytes:
       value: "1048576"
     spoolDirectory:
-      value: ""
+      # The chart mounts a writable, disk-backed emptyDir at /tmp by default.
+      # If overriding this path, provide a writable volume there as well.
+      value: "/tmp"
       valueFrom: {}
     maxVerifiedSpoolBytes:
       value: "5368709120"

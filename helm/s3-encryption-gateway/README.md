@@ -389,6 +389,14 @@ Use the built-in Valkey subchart for development or point at an external cluster
 > same value. Do not use this upgrade path with multiple old replicas, because
 > legacy writers cannot be detected by the new release.
 
+> **Writable spool storage:** The published `0.12.0` chart requires an explicit
+> writable mount for signed requests when using the default read-only root
+> filesystem; see the [chart values example](../../docs/MIGRATION.md#temporary-spool-storage-for-helm-deployments).
+> The next chart mounts a disk-backed `emptyDir` at `/tmp` and sets
+> `config.server.spoolDirectory.value: /tmp` by default. An existing
+> `extraVolumeMounts` entry at `/tmp` takes precedence over the built-in mount.
+> If you set the spool directory to another path, supply a writable mount there.
+
 **ListObjects size cache (`config.listSizeTranslate.*`)** — V1.0-S3-3. Reuses the
 Valkey instance above; no separate deployment. All fields use the
 `configValue` shape (`.value` / `.valueFrom`).

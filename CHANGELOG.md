@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.0 – Unreleased
+
+- **Helm writable spool default:** The gateway chart mounts a disk-backed
+  `emptyDir` at `/tmp` and sets the spool directory there, so signed requests
+  work with the default read-only root filesystem. Existing `/tmp` mounts
+  supplied through `extraVolumeMounts` take precedence.
+
 ## [0.12.0] — 2026-09-21
 
 This stable release includes the changes from `0.12.0-rc1`, `0.12.0-rc2`, and
@@ -16,6 +23,17 @@ This release changes encryption write formats, multipart-upload state
 coordination, authentication defaults, and deployment prerequisites. Do not
 perform a rolling upgrade that leaves pre-0.12.0 and 0.12.0 writers serving
 the same workload.
+
+**Helm deployments with a read-only root filesystem require writable spool
+storage before switching images.** The chart defaults to
+`securityContext.readOnlyRootFilesystem: true`, but does not mount a writable
+temporary directory. The `0.12.0` image spools verified SigV4 request bodies
+to a temporary file before dispatch, including signed, empty-body GET requests
+such as ListObjects. Without a writable spool directory, authenticated requests
+can fail with HTTP 500 `InternalError` before reaching the S3 backend. Mount a
+writable volume and set `config.server.spoolDirectory.value` to its path; a
+per-pod `emptyDir` is sufficient. See the [Helm values example in the migration
+guide](docs/MIGRATION.md#temporary-spool-storage-for-helm-deployments).
 
 1. Use Go 1.27.1 or later for build and runtime environments.
 2. Migrate SigV2 clients to SigV4 before upgrading. SigV2 is disabled by

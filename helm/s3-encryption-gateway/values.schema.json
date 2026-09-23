@@ -1155,7 +1155,7 @@
             "idleTimeout":       { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum time to wait for the next request on keep-alive connections (e.g. 60s)." },
             "readHeaderTimeout": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum time to read request headers (e.g. 10s)." },
             "maxHeaderBytes":    { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum size of HTTP request headers." },
-            "spoolDirectory": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Optional temporary spool directory." },
+            "spoolDirectory": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Temporary spool directory. Defaults to /tmp, which the chart mounts as a writable emptyDir; mount a writable volume if overriding the path." },
             "maxVerifiedSpoolBytes": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Maximum single verified spool bytes." },
             "maxAggregateSpoolBytes": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Process-wide aggregate verified spool budget." }
           }
