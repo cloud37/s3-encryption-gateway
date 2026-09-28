@@ -178,7 +178,7 @@ func (r *sec37ReadCounter) Read(p []byte) (int, error) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_ReadsExactTrailerAndOverread(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ func resealSEC37Terminal(t *testing.T, ciphertext []byte, manifest *ChunkManifes
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_Password(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestSEC37_AuthenticateChunkedTrailer_Password(t *testing.T) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_ContextCanceled(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManager(t *testing.T) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_V1Unauthenticated(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,11 +540,11 @@ func TestSEC37_DecryptV1_RemainsReadable(t *testing.T) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_WrongKey(t *testing.T) {
-	good, err := NewEngineWithChunking([]byte("sec37-good-password"), "", nil, true, MinChunkSize)
+	good, err := newUnitChunkedEngine([]byte("sec37-good-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad, err := NewEngineWithChunking([]byte("sec37-bad-password"), "", nil, true, MinChunkSize)
+	bad, err := newUnitChunkedEngine([]byte("sec37-bad-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestSEC37_AuthenticateChunkedTrailer_WrongKey(t *testing.T) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_RejectsMalformedLengthsAndCommitments(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +604,7 @@ func TestSEC37_AuthenticateChunkedTrailer_RejectsMalformedLengthsAndCommitments(
 }
 
 func TestSEC37_DecryptRange_ValidationBranches(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestSEC37_DecryptRange_ValidationBranches(t *testing.T) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_ErrorMatrix(t *testing.T) {
-	good, err := NewEngineWithChunking([]byte("sec37-good-password"), "", nil, true, MinChunkSize)
+	good, err := newUnitChunkedEngine([]byte("sec37-good-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +694,7 @@ func TestSEC37_AuthenticateChunkedTrailer_KeyManagerAndMetadataErrors(t *testing
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_ProtectedChunkedMetadata(t *testing.T) {
-	engine, err := NewEngineWithOpts([]byte("sec37-protected-password"), WithMetadataKey(bytes.Repeat([]byte{0x55}, 32)), WithChunking(true), WithChunkSize(MinChunkSize))
+	engine, err := NewEngineWithOpts([]byte("sec37-protected-password"), WithMetadataKey(bytes.Repeat([]byte{0x55}, 32)), WithChunking(true), WithChunkSize(MinChunkSize), WithPBKDF2Iterations(MinPBKDF2Iterations))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ type sec37ErrorReader struct{ err error }
 func (r sec37ErrorReader) Read([]byte) (int, error) { return 0, r.err }
 
 func TestSEC37_AuthenticateChunkedTrailer_ReachableErrorMatrix(t *testing.T) {
-	eng, err := NewEngineWithChunking([]byte("sec37-auth-errors-password"), "", nil, true, MinChunkSize)
+	eng, err := newUnitChunkedEngine([]byte("sec37-auth-errors-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,7 +789,7 @@ func TestSEC37_AuthenticateChunkedTrailer_ReachableErrorMatrix(t *testing.T) {
 }
 
 func TestSEC37_AuthenticateChunkedTrailer_CompactorAndTerminalDecodeBranches(t *testing.T) {
-	eng, err := NewEngineWithChunking([]byte("sec37-branches-password"), "", nil, true, MinChunkSize)
+	eng, err := newUnitChunkedEngine([]byte("sec37-branches-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +899,7 @@ func TestSEC37_PassthroughAuthenticateChunkedTrailer(t *testing.T) {
 }
 
 func TestSEC37_DecryptRange_MetadataAndKeyManagerBranches(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,7 +948,7 @@ func TestSEC37_NewRangeDecryptReader_ConstructorBranches(t *testing.T) {
 }
 
 func TestSEC37_DecryptRange_PasswordAndOptimizedBranches(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-range-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-range-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1022,7 +1022,7 @@ func TestSEC37_DecryptRange_EngineEntryBranches(t *testing.T) {
 }
 
 func TestSEC37_DecryptRange_ParameterErrorBranches(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("sec37-parameter-password"), "", nil, true, MinChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("sec37-parameter-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1059,7 @@ func TestSEC37_DecryptRange_ParameterErrorBranches(t *testing.T) {
 }
 
 func TestSEC37_DecryptRange_ReachableParameterMatrix(t *testing.T) {
-	eng, err := NewEngineWithChunking([]byte("sec37-range-errors-password"), "", nil, true, MinChunkSize)
+	eng, err := newUnitChunkedEngine([]byte("sec37-range-errors-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1128,7 +1128,7 @@ func TestSEC37_DecryptRange_CompactorAndProtectedMetadataErrors(t *testing.T) {
 }
 
 func TestSEC37_DecryptRange_ResponseMetadataAndFallback(t *testing.T) {
-	eng, err := NewEngineWithChunking([]byte("sec37-response-password"), "", nil, true, MinChunkSize)
+	eng, err := newUnitChunkedEngine([]byte("sec37-response-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}

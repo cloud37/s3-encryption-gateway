@@ -10,7 +10,7 @@ import (
 // TestSEC42_FallbackCoverage exercises every current fallback write/dispatch,
 // seal/open, metadata restoration, and relocation branch in one artifact.
 func TestSEC42_FallbackCoverage(t *testing.T) {
-	e0, err := NewEngineWithProvider([]byte("coverage-password-123"), "", nil, "default")
+	e0, err := newUnitEngine([]byte("coverage-password-123"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestSEC42_FallbackCoverage(t *testing.T) {
 }
 
 func TestSEC42_FallbackWriterValidationAndOverflow(t *testing.T) {
-	e0, err := NewEngine([]byte("fallback-validation-password"))
+	e0, err := newUnitEngine([]byte("fallback-validation-password"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestSEC42_FallbackWriterValidationAndOverflow(t *testing.T) {
 }
 
 func TestSEC42_BoundFallbackValidationBranches(t *testing.T) {
-	e0, err := NewEngine([]byte("fallback-validation-password"))
+	e0, err := newUnitEngine([]byte("fallback-validation-password"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestSEC42_BoundFallbackValidationBranches(t *testing.T) {
 }
 
 func TestSEC42_FallbackDispatchAndLegacyFailures(t *testing.T) {
-	e0, err := NewEngine([]byte("fallback-validation-password"))
+	e0, err := newUnitEngine([]byte("fallback-validation-password"))
 	if err != nil {
 		t.Fatal(err)
 	}

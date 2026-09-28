@@ -122,7 +122,7 @@ func TestMPUV2_RejectsWrongChunkIndexCoordinate(t *testing.T) {
 }
 
 func TestMultipartManifestV2_AuthenticatedRelationshipMismatch(t *testing.T) {
-	eng, err := NewEngine([]byte("manifest-relationship-password"))
+	eng, err := newUnitEngine([]byte("manifest-relationship-password"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestMultipartManifestV2_AuthenticatedRelationshipMismatch(t *testing.T) {
 }
 
 func TestMPUManifestV2_EncryptDecryptAndReject(t *testing.T) {
-	eng, err := NewEngine([]byte("manifest-v2-coverage-password"))
+	eng, err := newUnitEngine([]byte("manifest-v2-coverage-password"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +555,7 @@ func TestMultipartManifestValidateV1AndUnsupported(t *testing.T) {
 
 func mustEngine(t *testing.T, password string) *engine {
 	t.Helper()
-	e, err := NewEngine([]byte(password))
+	e, err := newUnitEngine([]byte(password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +563,7 @@ func mustEngine(t *testing.T, password string) *engine {
 }
 
 func TestObjectBinding_ConcurrentContextsDoNotCrossContaminate(t *testing.T) {
-	eng, err := NewEngine([]byte("concurrent-object-binding-password"))
+	eng, err := newUnitEngine([]byte("concurrent-object-binding-password"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 func TestRangeDecryptReader_Basic(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024) // 16KB chunks
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, 16*1024) // 16KB chunks
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestRangeDecryptReader_Basic(t *testing.T) {
 }
 
 func TestDecryptRange_RejectsOutOfRangeManifestBeforeSourceRead(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestDecryptRange_ProtectedMetadataValidatesManifestBeforeMetadataDecrypt(t 
 }
 
 func TestRangeDecryptReader_EdgeCases(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

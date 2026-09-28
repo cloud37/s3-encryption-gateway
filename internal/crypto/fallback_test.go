@@ -20,7 +20,7 @@ func TestEngine_MetadataFallback(t *testing.T) {
 		CompactionStrategy:  "base64url",
 	}
 
-	encEngine, err := NewEngineWithProvider([]byte("test-password-123456789"), "", nil, "default")
+	encEngine, err := newUnitEngine([]byte("test-password-123456789"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestBufferedFallback_RecordingKeyManagerAndMissingEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	km := &recordingFallbackKeyManager{delegate: base}
-	enc, err := NewEngine([]byte("fallback-kms-password-123"))
+	enc, err := newUnitEngine([]byte("fallback-kms-password-123"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestBufferedFallback_RecordingKeyManagerAndMissingEnvelope(t *testing.T) {
 }
 
 func TestBufferedFallback_LegacyV1Compatibility(t *testing.T) {
-	e0, err := NewEngine([]byte("legacy-fallback-password-123"))
+	e0, err := newUnitEngine([]byte("legacy-fallback-password-123"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestBufferedFallback_LegacyV1Compatibility(t *testing.T) {
 }
 
 func TestBufferedFallback_BindsRelocationAndFailsClosed(t *testing.T) {
-	encEngine, err := NewEngineWithProvider([]byte("test-password-123456789"), "", nil, "default")
+	encEngine, err := newUnitEngine([]byte("test-password-123456789"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestBufferedFallback_BindsRelocationAndFailsClosed(t *testing.T) {
 	if _, _, err := e.Decrypt(context.Background(), wrongBucket, bytes.NewReader(body), storedMeta); err == nil {
 		t.Fatal("relocated fallback accepted under wrong bucket")
 	}
-	wrongPassword, err := NewEngine([]byte("wrong-password-123456789"))
+	wrongPassword, err := newUnitEngine([]byte("wrong-password-123456789"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestBufferedFallback_BindsRelocationAndFailsClosed(t *testing.T) {
 }
 
 func TestBufferedFallback_DeclaredBoundFormatDoesNotFallbackToV1(t *testing.T) {
-	encEngine, err := NewEngine([]byte("test-password-123456789"))
+	encEngine, err := newUnitEngine([]byte("test-password-123456789"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestBufferedFallback_KeyManagerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, err := NewEngine([]byte("test-password-123456789"))
+	decrypted, err := newUnitEngine([]byte("test-password-123456789"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestEngine_FallbackDetection(t *testing.T) {
 }
 
 func TestEngine_IsFallbackMode(t *testing.T) {
-	encEngine, err := NewEngine([]byte("test-password-123"))
+	encEngine, err := newUnitEngine([]byte("test-password-123"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

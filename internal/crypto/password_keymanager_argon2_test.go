@@ -82,7 +82,7 @@ func TestPasswordKM_Argon2id_TamperedCiphertext(t *testing.T) {
 }
 
 func TestPasswordKM_Argon2id_BackwardCompat_PBKDF2(t *testing.T) {
-	pbkdf2KM, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	pbkdf2KM, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	arKM, err := NewPasswordKeyManager(testPassword, WithPasswordKMArgon2id(2, 19456, 1))
@@ -106,7 +106,7 @@ func TestPasswordKM_PBKDF2_BackwardCompat_Argon2id(t *testing.T) {
 	arKM, err := NewPasswordKeyManager(testPassword, WithPasswordKMArgon2id(2, 19456, 1))
 	require.NoError(t, err)
 
-	pbkdf2KM, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	pbkdf2KM, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	dek := make([]byte, 32)

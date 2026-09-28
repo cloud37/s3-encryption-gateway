@@ -87,7 +87,7 @@ func TestBuildAAD_CanonicalOrder(t *testing.T) {
 // with the legacy pipe-delimited AAD format can still be decrypted after the
 // V1.0-SEC-H01 fix.
 func TestDecrypt_BackwardCompatibility_LegacyAAD(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-123456"))
+	eng, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("NewEngine() error: %v", err)
 	}

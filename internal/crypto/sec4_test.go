@@ -11,7 +11,7 @@ import (
 // TestEncrypt_DoesNotSetLegacyNoAADFlag verifies that newly encrypted objects
 // never carry the MetaLegacyNoAAD marker.
 func TestEncrypt_DoesNotSetLegacyNoAADFlag(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-123456"))
+	eng, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("NewEngine() error: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestEncrypt_DoesNotSetLegacyNoAADFlag(t *testing.T) {
 // tampers with metadata (changing AAD-bound fields), decryption fails because
 // the no-AAD blind fallback is disabled for objects without MetaLegacyNoAAD.
 func TestAADFallback_NewObjectTamperedFails(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-123456"))
+	eng, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("NewEngine() error: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestAADFallback_NewObjectTamperedFails(t *testing.T) {
 // TestAADFallback_LegacyObjectWithFlagSucceeds confirms that a legacy object
 // (encrypted without AAD) can still be decrypted when MetaLegacyNoAAD is "true".
 func TestAADFallback_LegacyObjectWithFlagSucceeds(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-123456"))
+	eng, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("NewEngine() error: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestAADFallback_LegacyObjectWithFlagSucceeds(t *testing.T) {
 // TestAADFallback_LegacyObjectWithoutFlagFails confirms that a legacy object
 // encrypted without AAD fails to decrypt when MetaLegacyNoAAD is absent.
 func TestAADFallback_LegacyObjectWithoutFlagFails(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-123456"))
+	eng, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("NewEngine() error: %v", err)
 	}

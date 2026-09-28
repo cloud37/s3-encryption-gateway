@@ -183,7 +183,7 @@ func TestEncryptChunked_MetadataKeyPreservesAllSixProtectedStandardHeaders(t *te
 	}
 	for _, chunked := range []bool{false, true} {
 		t.Run(fmt.Sprintf("chunked=%t", chunked), func(t *testing.T) {
-			engine, err := NewEngineWithOpts([]byte("metadata-key-standard-password"), WithChunking(chunked), WithChunkSize(MinChunkSize), WithMetadataKey(bytes.Repeat([]byte{0x42}, 32)))
+			engine, err := NewEngineWithOpts([]byte("metadata-key-standard-password"), WithChunking(chunked), WithChunkSize(MinChunkSize), WithMetadataKey(bytes.Repeat([]byte{0x42}, 32)), WithPBKDF2Iterations(MinPBKDF2Iterations))
 			if err != nil {
 				t.Fatal(err)
 			}

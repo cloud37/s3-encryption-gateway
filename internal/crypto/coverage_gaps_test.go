@@ -15,7 +15,7 @@ import (
 // TestChunkedEncryptReader_Close verifies that Close returns nil and is safe
 // to call multiple times.
 func TestChunkedEncryptReader_Close(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345678"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestChunkedEncryptReader_Close(t *testing.T) {
 // TestChunkedDecryptReader_Close verifies that the decrypt reader's Close
 // returns nil.
 func TestChunkedDecryptReader_Close(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345678"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestMemoryKeyManager_AdditionalCoverage(t *testing.T) {
 // ---- range_decrypt.Close ---------------------------------------------------
 
 func TestRangeDecryptReader_Close(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345678"), "", nil, true, 16*1024)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345678"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestEngine_EncryptDecrypt_WithInMemoryKeyManager(t *testing.T) {
 
 func TestEngine_EncryptDecrypt_LegacyMode(t *testing.T) {
 	// Use non-chunked engine to exercise the legacy buffered decrypt path.
-	eng, err := NewEngine([]byte("test-password-legacy-mode-long12345"))
+	eng, err := newUnitEngine([]byte("test-password-legacy-mode-long12345"))
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestEngine_EncryptDecrypt_LegacyMode(t *testing.T) {
 
 func TestEngine_Encrypt_MultiChunk(t *testing.T) {
 	chunkSize := 16 * 1024 // 16KB chunks
-	eng, err := NewEngineWithChunking([]byte("test-password-multichunk-123456"), "", nil, true, chunkSize)
+	eng, err := newUnitChunkedEngine([]byte("test-password-multichunk-123456"), "", nil, true, chunkSize)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunking: %v", err)
 	}

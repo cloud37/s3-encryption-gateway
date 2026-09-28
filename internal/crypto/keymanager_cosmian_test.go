@@ -56,7 +56,7 @@ func TestEncryptionEngineWithCosmianKMIP(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 
-	engine, err := NewEngine([]byte("fallback-password-123"))
+	engine, err := newUnitEngine([]byte("fallback-password-123"))
 	require.NoError(t, err)
 	SetKeyManager(engine, manager)
 

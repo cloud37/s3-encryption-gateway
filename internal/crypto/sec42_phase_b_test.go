@@ -92,7 +92,7 @@ func TestChunkedV2_CrossDomainReplayFails(t *testing.T) {
 }
 
 func TestChunkedV2_TagFailureDoesNotFallbackToV1(t *testing.T) {
-	e, err := NewEngineWithChunking([]byte("phase-b-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("phase-b-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestChunkedV2_TagFailureDoesNotFallbackToV1(t *testing.T) {
 }
 
 func TestChunkedV2_DeclaredMarkerDoesNotDispatchToLegacyFormats(t *testing.T) {
-	e, err := NewEngineWithChunking([]byte("phase-b-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("phase-b-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestChunkedV2_DeclaredMarkerDoesNotDispatchToLegacyFormats(t *testing.T) {
 }
 
 func TestChunkedV2_UnmarkedLegacyDualReadNormalAndRange(t *testing.T) {
-	e, err := NewEngineWithChunking([]byte("legacy-v2-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("legacy-v2-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestChunkedV2_UnmarkedLegacyDualReadNormalAndRange(t *testing.T) {
 }
 
 func TestAuthenticateChunkedTrailer_V2RequiresDeclaredMarker(t *testing.T) {
-	e, err := NewEngineWithChunking([]byte("trailer-marker-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("trailer-marker-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestChunkedV1_DualRead(t *testing.T) {
 
 func TestDecryptRangeV2_FirstMiddleLastChunk(t *testing.T) {
 	plain := bytes.Repeat([]byte("x"), MinChunkSize*2+7)
-	e, err := NewEngineWithChunking([]byte("range-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("range-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestDecryptRangeV2_FirstMiddleLastChunk(t *testing.T) {
 
 func TestDecryptRangeV2_CrossChunkAndSuffix(t *testing.T) {
 	plain := bytes.Repeat([]byte("q"), MinChunkSize*2+9)
-	e, err := NewEngineWithChunking([]byte("suffix-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("suffix-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestDecryptRangeV2_CrossChunkAndSuffix(t *testing.T) {
 }
 
 func TestDecryptRangeV2_WrongObjectContextFails(t *testing.T) {
-	e, err := NewEngineWithChunking([]byte("wrong-context"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("wrong-context"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestDecryptRangeV2_WrongObjectContextFails(t *testing.T) {
 
 func TestDecryptRangeOptimizedV2_ValidAndRejectedSources(t *testing.T) {
 	plain := bytes.Repeat([]byte("z"), MinChunkSize+17)
-	e, err := NewEngineWithChunking([]byte("optimized-range-password"), "", nil, true, MinChunkSize)
+	e, err := newUnitChunkedEngine([]byte("optimized-range-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}

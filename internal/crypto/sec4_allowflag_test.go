@@ -13,7 +13,7 @@ import (
 // WITHOUT the MetaLegacyNoAAD marker fails to decrypt — preserving the
 // SEC-4 invariant.
 func TestDecrypt_UnmarkedNoAAD_FlagOff_FailsClosed(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-sec4-closed-1234567"))
+	eng, err := newUnitEngine([]byte("test-password-sec4-closed-1234567"))
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
 	}
@@ -29,6 +29,7 @@ func TestDecrypt_UnmarkedNoAAD_FlagOn_Recovers(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-sec4-recover-1234567"),
 		WithAllowUnmarkedNoAADFallback(true),
+		WithPBKDF2Iterations(MinPBKDF2Iterations),
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)

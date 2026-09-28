@@ -50,7 +50,7 @@ func TestObjectContextValidate_RejectsEmptyOrOversizeIdentity(t *testing.T) {
 }
 
 func TestBufferedV2_BindsBucketAndKey(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-long-enough"))
+	eng, err := newUnitEngine([]byte("test-password-long-enough"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestBufferedV2_BindsBucketAndKey(t *testing.T) {
 }
 
 func TestBufferedV2_TamperedTagDoesNotFallback(t *testing.T) {
-	engine, err := NewEngine([]byte("test-password-long-enough"))
+	engine, err := newUnitEngine([]byte("test-password-long-enough"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestBufferedV2_TamperedTagDoesNotFallback(t *testing.T) {
 }
 
 func TestBufferedV2_RejectsChunkedMetadataBeforeDecrypt(t *testing.T) {
-	good, err := NewEngineWithChunking([]byte("good-password-long-enough"), "", nil, true, MinChunkSize)
+	good, err := newUnitChunkedEngine([]byte("good-password-long-enough"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestBufferedV2_RejectsChunkedMetadataBeforeDecrypt(t *testing.T) {
 		t.Fatal(err)
 	}
 	meta[MetaObjectFormatVersion] = "buffered-v2"
-	wrong, err := NewEngine([]byte("wrong-password-long-enough"))
+	wrong, err := newUnitEngine([]byte("wrong-password-long-enough"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestParseObjectBindingID_RequiresCanonicalRawURL(t *testing.T) {
 }
 
 func TestBufferedLegacy_DualRead(t *testing.T) {
-	eng, err := NewEngine([]byte("test-password-long-enough"))
+	eng, err := newUnitEngine([]byte("test-password-long-enough"))
 	if err != nil {
 		t.Fatal(err)
 	}

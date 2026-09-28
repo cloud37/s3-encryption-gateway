@@ -10,7 +10,7 @@ import (
 )
 
 func TestObjectBinding_FIPS_BufferedChunkedAndMPU(t *testing.T) {
-	eng, err := NewEngineWithChunking([]byte("fips-object-binding-password"), "", nil, true, MinChunkSize)
+	eng, err := newUnitChunkedEngine([]byte("fips-object-binding-password"), "", nil, true, MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}

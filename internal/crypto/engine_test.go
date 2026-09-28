@@ -10,7 +10,7 @@ import (
 )
 
 func TestEngine_StandardObjectMetadataRoundTrip(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("metadata-round-trip-password"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("metadata-round-trip-password"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestNewEngine(t *testing.T) {
 }
 
 func TestEngine_EncryptDecrypt(t *testing.T) {
-	engine, err := NewEngine([]byte("test-password-123456"))
+	engine, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestEngine_EncryptDecrypt(t *testing.T) {
 }
 
 func TestEngine_IsEncrypted(t *testing.T) {
-	engine, err := NewEngine([]byte("test-password-123456"))
+	engine, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestEngine_IsEncrypted(t *testing.T) {
 }
 
 func TestEngine_DecryptUnencrypted(t *testing.T) {
-	engine, err := NewEngine([]byte("test-password-123456"))
+	engine, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestEngine_DecryptUnencrypted(t *testing.T) {
 
 func TestEngine_WrongPassword(t *testing.T) {
 	// Encrypt with one password
-	engine1, err := NewEngine([]byte("password-123456"))
+	engine1, err := newUnitEngine([]byte("password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestEngine_WrongPassword(t *testing.T) {
 	}
 
 	// Try to decrypt with wrong password
-	engine2, err := NewEngine([]byte("wrong-password-123456"))
+	engine2, err := newUnitEngine([]byte("wrong-password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestEngine_WrongPassword(t *testing.T) {
 }
 
 func TestEngine_DifferentSaltPerEncryption(t *testing.T) {
-	engine, err := NewEngine([]byte("test-password-123456"))
+	engine, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestEngine_DifferentSaltPerEncryption(t *testing.T) {
 }
 
 func TestEngine_OriginalETagPreservation(t *testing.T) {
-	engine, err := NewEngine([]byte("test-password-123456"))
+	engine, err := newUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestEncrypt_WritesKDFParamsMetadata_CustomIter(t *testing.T) {
 }
 
 func TestChunked_EncryptDecrypt_KDFParams(t *testing.T) {
-	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithChunking(true))
+	eng, err := NewEngineWithOpts([]byte("test-password-12345"), WithChunking(true), WithPBKDF2Iterations(MinPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -948,6 +948,7 @@ func TestEncryptDecrypt_ChaCha20Poly1305(t *testing.T) {
 	eng, err := NewEngineWithOpts(
 		[]byte("test-password-chacha20poly1305"),
 		WithPreferredAlgorithm(AlgorithmChaCha20Poly1305),
+		WithPBKDF2Iterations(MinPBKDF2Iterations),
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)
@@ -986,6 +987,7 @@ func TestEncryptDecrypt_ChaCha20Poly1305_NonChunked(t *testing.T) {
 		[]byte("test-password-chacha20-nonchunked"),
 		WithPreferredAlgorithm(AlgorithmChaCha20Poly1305),
 		WithChunking(false),
+		WithPBKDF2Iterations(MinPBKDF2Iterations),
 	)
 	if err != nil {
 		t.Fatalf("NewEngineWithOpts() error: %v", err)

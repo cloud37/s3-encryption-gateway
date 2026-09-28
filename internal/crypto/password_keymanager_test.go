@@ -31,7 +31,7 @@ func TestNewPasswordKeyManager_WriteCostExceedsDecryptLimit(t *testing.T) {
 var testPassword = []byte("a-sufficiently-long-test-password")
 
 func TestPasswordKeyManager_WrapUnwrap_RoundTrip(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	dek := make([]byte, 32)
@@ -59,7 +59,7 @@ func TestPasswordKeyManager_WrapUnwrap_RoundTrip(t *testing.T) {
 // TestPasswordKeyManager_DifferentSaltPerWrap verifies two wraps of the same
 // DEK produce different ciphertexts (random salt per wrap).
 func TestPasswordKeyManager_DifferentSaltPerWrap(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	dek := make([]byte, 32)
@@ -76,7 +76,7 @@ func TestPasswordKeyManager_DifferentSaltPerWrap(t *testing.T) {
 // TestPasswordKeyManager_WrongPassword verifies that a different password
 // cannot unwrap the envelope.
 func TestPasswordKeyManager_WrongPassword(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	dek := make([]byte, 32)
@@ -84,7 +84,7 @@ func TestPasswordKeyManager_WrongPassword(t *testing.T) {
 	env, err := km.WrapKey(ctx, dek, nil)
 	require.NoError(t, err)
 
-	km2, err := NewPasswordKeyManager([]byte("totally-different-password!!"), WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km2, err := NewPasswordKeyManager([]byte("totally-different-password!!"), WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 	_, err = km2.UnwrapKey(ctx, env, nil)
 	require.Error(t, err)
@@ -94,7 +94,7 @@ func TestPasswordKeyManager_WrongPassword(t *testing.T) {
 // TestPasswordKeyManager_TamperedCiphertext verifies authentication failure
 // when the ciphertext is modified.
 func TestPasswordKeyManager_TamperedCiphertext(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	dek := make([]byte, 32)
@@ -114,7 +114,7 @@ func TestPasswordKeyManager_TamperedCiphertext(t *testing.T) {
 
 // TestPasswordKeyManager_ProviderMismatch verifies rejection of foreign envelopes.
 func TestPasswordKeyManager_ProviderMismatch(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	env := &KeyEnvelope{Provider: "cosmian-kmip", Ciphertext: []byte{1, 2, 3}}
@@ -124,7 +124,7 @@ func TestPasswordKeyManager_ProviderMismatch(t *testing.T) {
 
 // TestPasswordKeyManager_InvalidEnvelope verifies ErrInvalidEnvelope on nil/empty.
 func TestPasswordKeyManager_InvalidEnvelope(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 	ctx := context.Background()
 
@@ -137,13 +137,13 @@ func TestPasswordKeyManager_InvalidEnvelope(t *testing.T) {
 
 // TestPasswordKeyManager_ShortPassword verifies rejection of short passwords.
 func TestPasswordKeyManager_ShortPassword(t *testing.T) {
-	_, err := NewPasswordKeyManager([]byte("short"), WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	_, err := NewPasswordKeyManager([]byte("short"), WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.Error(t, err)
 }
 
 // TestPasswordKeyManager_HealthCheck verifies HealthCheck passes while open.
 func TestPasswordKeyManager_HealthCheck(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 	assert.NoError(t, km.HealthCheck(context.Background()))
 
@@ -153,7 +153,7 @@ func TestPasswordKeyManager_HealthCheck(t *testing.T) {
 
 // TestPasswordKeyManager_ClosedRejectsAllOps verifies the closed state.
 func TestPasswordKeyManager_ClosedRejectsAllOps(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 	km.Close(context.Background())
 
@@ -167,7 +167,7 @@ func TestPasswordKeyManager_ClosedRejectsAllOps(t *testing.T) {
 
 // TestIsPasswordKeyManager confirms the type predicate.
 func TestIsPasswordKeyManager(t *testing.T) {
-	km, _ := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, _ := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	assert.True(t, IsPasswordKeyManager(km))
 	assert.False(t, IsPasswordKeyManager(nil))
 }
@@ -267,7 +267,7 @@ func TestPasswordKM_BackwardCompat_OldEnvelope(t *testing.T) {
 }
 
 func TestPasswordKM_NewEnvelopeFormat_HasPrefix(t *testing.T) {
-	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(DefaultPBKDF2Iterations))
+	km, err := NewPasswordKeyManager(testPassword, WithPasswordKMPBKDF2(MinPBKDF2Iterations))
 	require.NoError(t, err)
 
 	dek := make([]byte, 32)

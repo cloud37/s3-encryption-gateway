@@ -15,7 +15,7 @@ import (
 )
 
 func TestChunkedEncryptDecrypt_SmallData(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestNewChunkedDecryptReader_AcceptsManifestChunkSizeBounds(t *testing.T) {
 }
 
 func TestChunkedEncryptDecrypt_LargeData(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestChunkedEncryptDecrypt_LargeData(t *testing.T) {
 
 func TestChunkedEncryptDecrypt_ExactChunkSize(t *testing.T) {
 	chunkSize := 64 * 1024 // 64KB
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, chunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, chunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestChunkedEncryptDecrypt_ExactChunkSize(t *testing.T) {
 }
 
 func TestChunkedEncryptDecrypt_MultipleSizes(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestChunkedEncryptDecrypt_MultipleSizes(t *testing.T) {
 }
 
 func TestChunkedEncryptDecrypt_StreamingBehavior(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 16*1024) // 16KB chunks for faster test
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, 16*1024) // 16KB chunks for faster test
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestChunkedEncryptDecrypt_ManifestEncoding(t *testing.T) {
 
 func TestChunkedEncryptDecrypt_BackwardCompatibility(t *testing.T) {
 	// Test that chunked mode can be disabled (backward compatibility)
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, false, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, false, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -457,7 +457,7 @@ func (rt *readTracker) Read(p []byte) (int, error) {
 // V1.0-SEC-14 — peak heap must be bounded by the chunk pipeline, not the
 // object size.
 func TestChunkedEncrypt_DoesNotPreRead(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestChunkedDecrypt_HKDFFlagCannotUseXOR(t *testing.T) {
 // path sets both the manifest IVDerivation field and the outer metadata flag
 // (V1.0-SEC-2).
 func TestChunkedEncrypt_MetadataHasIVDerivationFlag(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, DefaultChunkSize)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -745,7 +745,7 @@ func TestChunkedEncrypt_MetadataHasIVDerivationFlag(t *testing.T) {
 // V1.0-SEC-2 (without IVDerivation in manifest and without MetaIVDerivation in
 // metadata) still decrypt correctly via the full engine path (dual-read window).
 func TestChunkedEngineDecrypt_LegacyObject(t *testing.T) {
-	engine, err := NewEngineWithChunking([]byte("test-password-12345"), "", nil, true, 64*1024)
+	engine, err := newUnitChunkedEngine([]byte("test-password-12345"), "", nil, true, 64*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
