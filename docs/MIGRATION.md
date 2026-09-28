@@ -7,12 +7,20 @@
 
 ## Overview
 
-## 0.12.0 upgrade notice
+## 0.12 upgrade notice (including 0.12.1)
 
-This release changes encryption write formats and deployment prerequisites.
-Plan a coordinated upgrade rather than a rolling mix of old and new writers.
-The procedure below applies when upgrading from the stable `0.11.10` release
-or any `0.12.0` release candidate. The stable release no longer carries the
+The 0.12 release line changes encryption write formats and deployment
+prerequisites. Plan a coordinated upgrade rather than a rolling mix of old and
+new writers.
+
+**If the currently deployed version is earlier than `0.12.0-rc1`, these full
+instructions remain mandatory when upgrading directly to `0.12.1`.** The
+`0.12.1` hotfix restores authenticated HTTPS upload compatibility and fixes the
+Helm chart's default writable spool storage; it does not change the format,
+state-v2 writer, KDF-limit, rollback, or location-binding requirements below.
+
+The procedure also applies when upgrading from the stable `0.11.10` release or
+any `0.12.0` release candidate. The stable release no longer carries the
 release-candidate restriction, but the format and rollback constraints remain.
 
 1. Ensure build and runtime environments use Go 1.27.1 or later.
@@ -73,10 +81,12 @@ expected verified-body workload; the default aggregate spool budget is 10 GiB
 per gateway process. After rollout, verify a signed ListObjects request through
 the gateway as well as `/ready`.
 
-The `0.12.1` chart provides the `/tmp` `emptyDir` and spool setting by default.
-Existing `extraVolumeMounts` entries at `/tmp` take precedence; keep them
-writable. The explicit values above remain necessary for the published
-`0.12.0` chart.
+The `0.12.1` chart provides the `/tmp` `emptyDir` and spool setting by default,
+so this specific workaround is unnecessary when installing or upgrading with
+the `0.12.1` chart. Existing `extraVolumeMounts` entries at `/tmp` take
+precedence; keep them writable. The explicit values above remain necessary for
+the published `0.12.0` chart. They do not replace any of the coordinated
+upgrade steps above for installations earlier than `0.12.0-rc1`.
 
 For a Helm-managed upgrade, install or upgrade the chart at `0.12.0` and use
 the image tag `0.12.0` (or `0.12.0-fips` with the FIPS values overlay). Keep

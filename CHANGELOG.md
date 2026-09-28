@@ -12,6 +12,18 @@ This hotfix release restores authenticated HTTPS upload compatibility for
 current AWS CLI and boto3 clients, and fixes the default Helm deployment's
 writable verified-body spool storage.
 
+### ⚠️ Upgrading from versions before 0.12.0-rc1 ⚠️
+
+`0.12.1` is a hotfix on the 0.12 release line; it does **not** remove the
+coordinated-upgrade requirements introduced by `0.12.0`. If the currently
+deployed version is earlier than `0.12.0-rc1`, follow the complete
+[0.12.0 upgrade instructions](docs/MIGRATION.md)
+and the authoritative migration procedure there.
+In particular, preserve the staged writer rollout, encrypted-MPU state-v2,
+KDF-limit, and object-location-binding precautions. The `0.12.1` Helm chart
+only eliminates the separate writable `/tmp` spool-volume workaround required
+by the published `0.12.0` chart.
+
 ### Fixed
 
 - **Authenticated unsigned AWS-chunked trailers (GH-329):** Valid
