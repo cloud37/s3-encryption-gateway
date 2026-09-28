@@ -63,6 +63,21 @@ by the published `0.12.0` chart.
 - Updated the supported-release policy to identify the current 0.12 release
   line as the security-fix target.
 
+- **B1:** Hide encrypted markers, wrapped keys, KMS identifiers, KDF parameters, and format/binding metadata from HEAD and GET responses.
+- **B2:** Delete v1/v2 MPU companion manifests with their primary objects, including version-aware cleanup.
+- **B3:** Translate completed encrypted-MPU ListObjects sizes from authenticated manifest totals.
+- **B4:** Project stored content metadata, user metadata, ETag, and version headers on full and ranged MPU GET responses.
+- **B5:** Cache only complete bounded plaintext bodies, compare every hit with the current backend ETag, and re-project current response overrides.
+- **Client-visible (B6):** CopyObject COPY inherits source metadata; REPLACE uses request metadata and excludes request Content-Length/ETag.
+- **B7:** Preserve native standard headers for passthrough/bypass writes.
+- **B8:** Preserve Content-Encoding, Content-Language, and Expires across encrypted writes, copies, multipart creation, HEAD, and GET.
+- **Client-visible (B9):** Apply authenticated `response-*` overrides to GET responses.
+- **Client-visible (B10):** Reject gateway-reserved canonical, compact, and legacy metadata names on writes.
+- **B11:** Persist exact plaintext size after unknown-length streaming writes using a metadata-replacing backend copy.
+- **B12:** Return stable 500 XML and error metrics for every MPU ranged-GET failure branch.
+- Centralize encrypted-object classification, metadata aliases, size resolution, error mapping, and response projection.
+- Reject every canonical, compact, and legacy gateway-owned metadata key in request user metadata, including `x-amz-meta-e`, `x-amz-meta-a`, `x-amz-meta-s`, `x-amz-meta-i`, `x-amz-meta-os`, `x-amz-meta-oe`, `x-amz-meta-ct`, `x-amz-meta-ccache`, `x-amz-meta-cdisp`, `x-amz-meta-cenc`, `x-amz-meta-clang`, `x-amz-meta-cexp`, `x-amz-meta-c`, `x-amz-meta-cs`, `x-amz-meta-cc`, `x-amz-meta-m`, `x-amz-meta-kv`, `x-amz-meta-wk`, `x-amz-meta-kid`, `x-amz-meta-kp`, `x-amz-meta-kdf`, `x-amz-meta-fb`, `x-amz-meta-fbv`, `x-amz-meta-fmt`, `x-amz-meta-bid`, and `x-amz-meta-em`, plus registered long-form and legacy aliases.
+
 ## [0.12.0] — 2026-09-21
 
 This stable release includes the changes from `0.12.0-rc1`, `0.12.0-rc2`, and

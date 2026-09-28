@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-local benchmark-list benchmark-rclone-ncdu lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-object-metadata benchmark-local benchmark-list benchmark-rclone-ncdu lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -308,6 +308,11 @@ bench-macro-seaweedfs:
 
 bench-baseline: bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs
 	@echo "bench-baseline: complete. Artefacts under docs/perf/v0.6-qa-1/."
+
+# Reproducible microbenchmarks for the centralized object-metadata response path.
+# Run from the repository root; no provider or Docker services are required.
+benchmark-object-metadata:
+	@go test ./internal/api -run '^$$' -bench '^(BenchmarkProjectObjectHeaders|BenchmarkHeadObject_Chunked)$$' -benchmem -count=5
 
 # benchmark-local — full local encryption benchmark matrix.
 #

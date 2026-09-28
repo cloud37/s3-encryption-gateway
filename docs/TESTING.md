@@ -380,10 +380,71 @@ MinIO/RustFS (~30 req/s) due to SeaweedFS's multi-component architecture.
    No build tag; runs under `go test ./...`.
 3. **Tier 2**: add a `testXxx(t *testing.T, inst provider.Instance)` function
    in the appropriate `test/conformance/*.go` file, then register it in
-   `test/conformance/suite.go`'s `cases` slice with the required capability
+   `test/conformance/suite_test.go`'s `cases` slice with the required capability
    bit (or `0` if no capability is needed).
 4. **Tier 3**: add to `test/load/`, `test/soak/`, or `test/chaos/` with the
    corresponding build tag.
+
+The metadata model and response-precedence contract are documented in
+[`METADATA_MODEL.md`](METADATA_MODEL.md). Legacy object-format fixtures belong
+in `internal/api/testdata/objectformats/`. The object-format golden fixtures
+contain authentic encrypted backend bodies and are exercised through the
+production handlers, as detailed below.
+
+Metadata conformance coverage includes PUT, COPY, COPY REPLACE, encrypted MPU,
+UploadPartCopy, all six standard fields, two user metadata keys, full/HEAD/fixed
+(`bytes=1-9`), open-ended, and suffix reads, bypass persistence, reserved-key
+rejection, presigned response overrides, cache-hit body replay and backend-ETag
+mismatch refresh, and encrypted-MPU plaintext-size listing and companion
+deletion through DeleteObjects. Encrypted MPU and UploadPartCopy matrices each run self-contained
+chunked and non-chunked variants. Each asserts HEAD status, plaintext
+Content-Length, ETag, all six standard headers, two user metadata fields, plus
+full/fixed/open/suffix GET status, body, Content-Range, Content-Length, ETag,
+and the same eight metadata fields. Cases are registered in
+`test/conformance/suite_test.go` with capability masks and remain
+provider-agnostic. The encrypted MPU and UploadPartCopy variants both configure
+an AES KEK manager. The non-versioned `DeleteObject_EncryptedMPUv2` case is
+registered separately with `CapEncryptedMPU`; versioned manifest deletion
+requires both `CapVersioning` and `CapEncryptedMPU`.
+
+The cache case populates the bounded response cache, verifies a subsequent
+response from the cached body, changes the object directly at the backend, and
+then verifies that the ETag mismatch evicts the entry and returns fresh bytes.
+
+The committed `internal/api/testdata/objectformats/*.json` files contain
+deterministic test-only encrypted object bodies (and encrypted MPU companion
+manifests where applicable), backend metadata, and expected response fields.
+The fixture generator invokes the production crypto engine for current formats
+and deterministic test primitives for explicitly legacy read-only formats.
+`TestObjectHeaders_GoldenPerFormat` seeds the mock S3 backend with those bytes
+and exercises production HEAD, full GET, and ranged GET handlers. It checks
+plaintext, status, ETag, all six standard headers, reserved metadata filtering,
+and range headers. `serveMPURangedGet` has separate handler coverage for
+success, failures, and response projection. Golden fixtures assert exact
+fallback full-GET, HEAD, and ranged-GET `Content-Length` values.
+
+Regenerate fixtures with this exact command from the repository root:
+
+```bash
+UPDATE_OBJECTFORMAT_GOLDENS=1 go test ./internal/api -run '^TestGenerateObjectFormatFixtures$' -count=1
+```
+
+The helper supplies a deterministic test-only entropy reader for the engine's
+supported random inputs; generated outputs are reviewed and committed. Run the
+golden test without the environment variable to validate the committed corpus:
+`go test ./internal/api -run '^TestObjectHeaders_GoldenPerFormat$' -count=1`.
+
+Tier 1 also runs production-source AST ownership checks for object errors and
+metrics, response headers and aliases, MPU markers/suffixes, and the crypto
+metadata literal registry. The real-router route parity test checks routing,
+instrumentation, and authorization permissions against an independent test
+oracle. Manual benchmarks `BenchmarkProjectObjectHeaders` and
+`BenchmarkHeadObject_Chunked` report allocations and bytes processed.
+Run them reproducibly without Docker using `make benchmark-object-metadata`; it
+executes both benchmarks with `-benchmem -count=5` and reports observations only
+when explicitly run.
+The API suite also includes `TestGetObject_CacheFillConcurrentReaders` to verify
+concurrent cache-hit body serving.
 
 **The conformance contract**: test bodies must never branch on provider names.
 Use capability bits. The `TestConformance_NoProviderNameLiterals` AST check in

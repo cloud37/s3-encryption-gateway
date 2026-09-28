@@ -299,6 +299,26 @@ Credentials are stored in an atomic snapshot compiled from `config.yaml`, enviro
 
 ## Header and Metadata Handling
 
+The canonical encrypted-object metadata inventory, field ownership, and
+response precedence rules are documented in
+[`docs/METADATA_MODEL.md`](METADATA_MODEL.md).
+
+The shared response projector restores the six standard fields
+(`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`,
+`Content-Language`, and `Expires`) across HEAD, full/ranged GET, MPU, and cache
+responses. It filters all registered reserved metadata; authenticated GET
+`response-*` overrides precede encrypted protected metadata; backend version
+IDs precede the requested `versionId` fallback. The Tier 2 matrix asserts PUT,
+COPY, COPY REPLACE, encrypted MPU, and UploadPartCopy in chunked/non-chunked
+self-contained configurations, along with real cache hit and ETag-mismatch
+refresh behavior. See `docs/TESTING.md` for fixtures and the full validation
+matrix.
+
+For response ETags, encrypted single-object formats restore the quoted original
+ETag when recorded; MPU responses retain the backend multipart ETag and
+plaintext objects retain their backend ETag. ListObjects continues to expose
+backend ETags as documented separately below.
+
 ### Preserved Headers
 - `Content-Type`
 - `Content-Length` (modified for encryption overhead)

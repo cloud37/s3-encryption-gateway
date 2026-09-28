@@ -228,7 +228,10 @@ Where:
 
 ### ETag Preservation
 
-Range responses include the original object ETag (not the encrypted ETag) to maintain S3 API compatibility. The ETag is restored from metadata stored during encryption.
+Encrypted single-object responses include the quoted original object ETag when
+the format stores it; encrypted MPU responses retain their multipart ETag, and
+plaintext responses retain the backend ETag. The shared response projector
+applies the same rules to full and ranged GETs.
 
 ### Error Handling
 
@@ -296,11 +299,21 @@ Range decryption uses streaming with bounded buffers, preventing memory exhausti
 
 ## Metadata Handling
 
+For the complete write/read path inventory and precedence table, see
+[`docs/METADATA_MODEL.md`](METADATA_MODEL.md) and ADR
+[`0018-centralized-object-metadata.md`](adr/0018-centralized-object-metadata.md).
+The model covers six standard headers, user metadata filtering, protected
+metadata aliases, plaintext-size and MPU-manifest resolution, response
+projection, cache freshness, and format compatibility. Standard-header
+precedence is decrypted metadata > canonical > compact > legacy > native backend
+fallback for encrypted single-object responses; authenticated GET `response-*`
+overrides take precedence, while HEAD does not apply overrides.
+
 ### S3 Metadata Strategy
 - **Encryption markers**: Clear indicators of encrypted objects
 - **Original preservation**: Store original metadata for restoration
 - **Size tracking**: Track original vs encrypted sizes
-- **ETag handling**: Store original ETag, provide encrypted ETag to clients
+- **ETag handling**: Store and restore the original ETag for encrypted single objects; preserve backend ETags for plaintext and MPU objects
 
 ### Metadata Keys
 ```go
