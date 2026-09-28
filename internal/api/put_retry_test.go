@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
-	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -84,7 +83,7 @@ func newRetryHandler(t *testing.T, backendURL string, chunked bool) (*mux.Router
 	if err != nil {
 		t.Fatalf("NewBackendClient: %v", err)
 	}
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-retry-123456"), "", nil, chunked, 0)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-retry-123456"), "", nil, chunked, 0)
 	if err != nil {
 		t.Fatalf("NewEngineWithChunking: %v", err)
 	}

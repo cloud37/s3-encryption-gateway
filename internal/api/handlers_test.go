@@ -251,7 +251,7 @@ func newCopySpyHandler(t *testing.T) (*Handler, *atomic.Int64, *failOnAnyCallS3C
 	t.Helper()
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
-	mockEngine, err := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, err := newAPIUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -673,7 +673,7 @@ func newListObjectsTestHandlerWithSizeCache(t *testing.T, lsc config.ListSizeTra
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	mockEngine, err := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 	require.NoError(t, err)
 
 	cfg := &config.Config{
@@ -693,7 +693,7 @@ func newListObjectsTestHandlerWithSizeCache(t *testing.T, lsc config.ListSizeTra
 func TestHandler_HandleHealth(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(newMockS3Client(), mockEngine, logger, getTestMetrics())
 
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -711,7 +711,7 @@ func TestHandler_HandleHealth(t *testing.T) {
 func TestHandler_CompatibleHealthAliases(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(newMockS3Client(), mockEngine, logger, getTestMetrics())
 
 	router := mux.NewRouter()
@@ -734,7 +734,7 @@ func TestHandler_HandlePutObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// For missing bucket test, simulate NoSuchBucket error
@@ -842,7 +842,7 @@ func TestHandlePutObject_AllSixStandardHeadersRoundTrip(t *testing.T) {
 
 func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	engine, err := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 	require.NoError(t, err)
 	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
 	router := mux.NewRouter()
@@ -874,7 +874,7 @@ func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newMockS3Client()
-			engine, e := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+			engine, e := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 			require.NoError(t, e)
 			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
 			router := mux.NewRouter()
@@ -929,7 +929,7 @@ func TestHandlePutObject_AuthenticatedUnsignedTrailerRoundTrip(t *testing.T) {
 
 func TestHandlePutObject_ConcretePayloadHashMismatch_NoBackendEncryptionOrCacheMutation(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	engine, err := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 	require.NoError(t, err)
 	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
 	router := mux.NewRouter()
@@ -1016,7 +1016,7 @@ func TestHandlePutObject_StreamingAtomicityMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newMockS3Client()
-			engine, e := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+			engine, e := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 			require.NoError(t, e)
 			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
 			router := mux.NewRouter()
@@ -1048,7 +1048,7 @@ func TestHandlePutObject_StreamingAtomicityMatrix(t *testing.T) {
 	for bad := range append(data, nil) {
 		t.Run([]string{"first signature", "middle signature", "final signature", "zero signature"}[bad], func(t *testing.T) {
 			client := newMockS3Client()
-			engine, e := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+			engine, e := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 			require.NoError(t, e)
 			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
 			router := mux.NewRouter()
@@ -1070,7 +1070,7 @@ func TestHandlePutObject_ChunkedV2ContentLengthIncludesTerminal(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("create chunked engine: %v", err)
 	}
@@ -1177,7 +1177,7 @@ func TestHandlePutObject_CannedACL_ForwardedToBackend(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1205,7 +1205,7 @@ func TestHandlePutObject_GrantFullControl_ForwardedToBackend(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1233,7 +1233,7 @@ func TestHandlePutObject_NoCannedACL_NoACLHeader(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1268,7 +1268,7 @@ func TestHandlePutObject_TaggingAndACL_BothForwarded(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1297,7 +1297,7 @@ func TestHandleCreateMultipartUpload_CannedACL_ForwardedToBackend(t *testing.T) 
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1325,7 +1325,7 @@ func TestHandleCreateMultipartUpload_NoCannedACL_NoACLHeader(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1352,7 +1352,7 @@ func TestHandler_HandlePutObject_InvalidACL_Forwarded(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1380,7 +1380,7 @@ func TestHandler_HandleGetObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with test data
@@ -1407,7 +1407,7 @@ func TestGetObject_InvalidManifestChunkSizeFailsBeforeCiphertextRead(t *testing.
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, crypto.DefaultChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, crypto.DefaultChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1467,7 +1467,7 @@ func TestHandler_HandleGetObject_PassthroughRangeWithOffset(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	data := bytes.Repeat([]byte("0123456789"), 100)
@@ -1503,7 +1503,7 @@ func TestHandler_HandleDeleteObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with test data
@@ -1532,7 +1532,7 @@ func TestHandler_HandleHeadObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	metadata := map[string]string{"content-type": "text/plain"}
@@ -1555,7 +1555,7 @@ func TestHandler_HandleHeadBucket(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	router := mux.NewRouter()
@@ -1575,7 +1575,7 @@ func TestHandler_HandleHeadBucket_NotFound(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	mockClient.errors["missing-bucket/list"] = &mockAPIError{code: "NoSuchBucket", message: "The specified bucket does not exist"}
 
@@ -1596,7 +1596,7 @@ func TestHandler_HeadBucketTrailingSlash_NotRoutedAsHeadObject(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	router := mux.NewRouter()
@@ -1616,7 +1616,7 @@ func TestHandler_HandleListObjects(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with test data
@@ -1644,7 +1644,7 @@ func TestHandler_HandleListObjects_Delimiter(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with test data for delimiter testing
@@ -1738,7 +1738,7 @@ func TestHandler_HandleListObjects_ContinuationToken(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with many objects for pagination testing
@@ -1775,7 +1775,7 @@ func TestHandler_HandleListObjects_Prefix(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with test data
@@ -1854,7 +1854,7 @@ func TestHandler_HandleListObjects_MaxKeys(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with test data
@@ -1896,7 +1896,7 @@ func TestHandler_HandleListObjects_Marker(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	keys := []string{"aaa.txt", "bbb.txt", "ccc.txt"}
@@ -1973,7 +1973,7 @@ func TestHandler_HandleListObjects_MarkerNotDuplicated(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	mockClient.PutObject(context.Background(), "test-bucket", "first.txt", strings.NewReader("1"), nil, nil, "", nil, "", "", "", "", "")
@@ -2003,7 +2003,7 @@ func TestHandler_HandleListObjects_MarkerNotDuplicated(t *testing.T) {
 // TestContentRangeMapping tests Content-Range and Content-Length header mapping for range requests
 func TestContentRangeMapping(t *testing.T) {
 	// Create a crypto engine that supports chunking and range decryption
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -2472,7 +2472,7 @@ func TestHandler_HandleCreateBucket(t *testing.T) {
 			logger := logrus.New()
 			logger.SetLevel(logrus.ErrorLevel)
 			mockClient := newMockS3Client()
-			mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+			mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 
 			// Setup mock client
 			tt.setupMock(mockClient)
@@ -2593,7 +2593,7 @@ func TestDeleteObject_CleansUpMPUManifest(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with primary object AND its MPU manifest
@@ -2645,7 +2645,7 @@ func TestGetObjectMissingMPUManifestReturnsDedicatedError(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, err := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, err := newAPIUnitEngine([]byte("test-password-123456"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2679,7 +2679,7 @@ func TestDeleteObject_ManifestNotFoundIsNoop(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with an MPU-marked primary object only (NO manifest).
@@ -2710,7 +2710,7 @@ func TestDeleteObject_NonMPUDoesNotProbeOrDeleteManifest(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 	mockClient.PutObject(context.Background(), "test-bucket", "test-key", bytes.NewReader([]byte("test data")), nil, nil, "", nil, "", "", "", "", "")
 	mockClient.PutObject(context.Background(), "test-bucket", "test-key.mpu-manifest", bytes.NewReader([]byte("manifest")), nil, nil, "", nil, "", "", "", "", "")
@@ -2734,7 +2734,7 @@ func TestDeleteObject_ManifestCleanupFailureDoesNotAffectPrimary(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with primary object
@@ -2766,7 +2766,7 @@ func TestDeleteObjects_CleansUpMPUManifests(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with objects AND their manifests
@@ -2812,7 +2812,7 @@ func TestDeleteObjects_ManifestNotFoundIsNoop(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with primary objects only (NO manifests)
@@ -2841,7 +2841,7 @@ func TestDeleteObjects_PartialManifestCleanupFailure(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	// Pre-populate with objects AND their manifests
@@ -2953,7 +2953,7 @@ func TestHandleDeleteBucket(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -2985,7 +2985,7 @@ func TestHandleDeleteBucket_WithPolicyManager(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -3026,7 +3026,7 @@ func TestHandleListBuckets(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -3057,7 +3057,7 @@ func TestHandleSelectObjectContent_501(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	router := mux.NewRouter()
@@ -3089,7 +3089,7 @@ func TestHandleCORSPreflight_OPTIONS(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -3131,7 +3131,7 @@ func TestHandlePassthrough_Proxy(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -3227,7 +3227,7 @@ func TestObjectKeyPassthrough_RoutingVars(t *testing.T) {
 			logger := logrus.New()
 			logger.SetLevel(logrus.ErrorLevel)
 			mockClient := newMockS3Client()
-			mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+			mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 			cfg := &config.Config{
 				Backend: config.BackendConfig{
 					Endpoint: backend.URL,
@@ -3263,7 +3263,7 @@ func TestHandler_ListObjects_ReturnsCiphertextSize(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	plaintext := "hello world this is some plaintext"
@@ -3326,7 +3326,7 @@ func TestHandler_HeadObject_ReturnsDecryptedSize(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	plaintext := "hello world this is some plaintext for headobject test"
@@ -3374,7 +3374,7 @@ func TestHandler_HeadObject_ReturnsDecryptedSize(t *testing.T) {
 
 func TestHandler_HeadObject_HidesEveryReservedRegistryKey(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("head-reserved-test-password"))
+	engine, err := newAPIUnitEngine([]byte("head-reserved-test-password"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3461,7 +3461,7 @@ func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	handler := NewHandler(mockClient, mockEngine, logger, getTestMetrics())
 
 	plaintext := "hello world this is plaintext for getobject test"
@@ -3518,7 +3518,7 @@ func TestGetObject_ProjectsBackendETagForPlaintextAndEncrypted(t *testing.T) {
 			logger := logrus.New()
 			logger.SetLevel(logrus.ErrorLevel)
 			client := newMockS3Client()
-			engine, err := crypto.NewEngine([]byte("test-password-123456"))
+			engine, err := newAPIUnitEngine([]byte("test-password-123456"))
 			require.NoError(t, err)
 			body := []byte("metadata")
 			metadata := map[string]string{"ETag": `"backend-etag"`, "Content-Length": strconv.Itoa(len(body))}
@@ -3586,7 +3586,7 @@ func TestGetObject_CacheCapturesCompletePlaintextAndRequiresFreshETag(t *testing
 			logger := logrus.New()
 			logger.SetLevel(logrus.ErrorLevel)
 			client := newMockS3Client()
-			engine, err := crypto.NewEngine([]byte("test-password-123456"))
+			engine, err := newAPIUnitEngine([]byte("test-password-123456"))
 			require.NoError(t, err)
 			cfg := &config.Config{Cache: config.CacheConfig{MaxSize: 1024}}
 			responseCache := cache.NewMemoryCache(4096, 10, time.Minute)
@@ -3646,7 +3646,7 @@ func TestGetObject_CacheCapturesCompletePlaintextAndRequiresFreshETag(t *testing
 
 func TestObjectHandlers_PropagateVersionIDToBackend(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("test-password-version-propagation"))
+	engine, err := newAPIUnitEngine([]byte("test-password-version-propagation"))
 	require.NoError(t, err)
 	plain := []byte("versioned handler payload")
 	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "version-bucket", Key: "version-key"}, bytes.NewReader(plain), nil)
@@ -3767,7 +3767,7 @@ func TestGetObject_IncompleteIntegrityStreamIsNotCached(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	client := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("test-password-123456"))
+	engine, err := newAPIUnitEngine([]byte("test-password-123456"))
 	require.NoError(t, err)
 	responseCache := cache.NewMemoryCache(4096, 10, time.Minute)
 	cfg := &config.Config{Cache: config.CacheConfig{MaxSize: 1024}}
@@ -4318,7 +4318,7 @@ func TestHandleListBuckets_ExactScopeFiltersXML(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4370,7 +4370,7 @@ func TestHandleListBuckets_WildcardScopeFiltersXML(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4423,7 +4423,7 @@ func TestHandleListBuckets_ExplicitEmptyScopeReturnsEmptyBuckets(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4468,7 +4468,7 @@ func TestHandleListBuckets_MalformedBackendXMLFailsClosed(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4519,7 +4519,7 @@ func TestHandleListBuckets_ProxiedBucketIntersection(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4648,7 +4648,7 @@ func TestUploadPartCopy_AuthorizationAppliesToAllSourceClasses(t *testing.T) {
 				mockClient := newMockS3Client()
 				logger := logrus.New()
 				logger.SetLevel(logrus.ErrorLevel)
-				mockEngine, err := crypto.NewEngine([]byte("test-password-123456"))
+				mockEngine, err := newAPIUnitEngine([]byte("test-password-123456"))
 				if err != nil {
 					t.Fatalf("engine: %v", err)
 				}
@@ -4705,7 +4705,7 @@ func TestHandleListBuckets_NoCredentialReturns403(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4744,7 +4744,7 @@ func TestHandleListBuckets_DirectDenialsEmitSingleAuditEvent(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4814,7 +4814,7 @@ func TestHandleListBuckets_ReadOnlyCredentialAllowed(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4850,7 +4850,7 @@ func TestHandleListBuckets_BackendErrorReturns502(t *testing.T) {
 	var logs bytes.Buffer
 	logger.SetOutput(&logs)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint:  "http://127.0.0.1:1",
@@ -4905,7 +4905,7 @@ func TestHandleListBuckets_PermissionAndScopeMatrix(t *testing.T) {
 		for _, grants := range [][]config.BucketPermission{nil, {config.BucketPermissionCreate}, {config.BucketPermissionDelete}, {config.BucketPermissionCreate, config.BucketPermissionDelete}} {
 			for _, scope := range [][]string{nil, {}} {
 				requests = 0
-				engine, err := crypto.NewEngine([]byte("test-password-123456"))
+				engine, err := newAPIUnitEngine([]byte("test-password-123456"))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -4939,7 +4939,7 @@ func TestHandleListBuckets_BackendNon2xxProxiesThrough(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -4980,7 +4980,7 @@ func TestHandleListBuckets_OversizedBackendResponseReturns502(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -5032,7 +5032,7 @@ func TestHandleListBuckets_StructuredXMLParsing(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,
@@ -5135,7 +5135,7 @@ func TestHandleListBuckets_EmptyScopeReturnsStructurallyEmptyBuckets(t *testing.
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	mockEngine, _ := crypto.NewEngine([]byte("test-password-123456"))
+	mockEngine, _ := newAPIUnitEngine([]byte("test-password-123456"))
 	cfg := &config.Config{
 		Backend: config.BackendConfig{
 			Endpoint: backend.URL,

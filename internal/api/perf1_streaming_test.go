@@ -38,7 +38,7 @@ func newHandlerWithConfig(t *testing.T, cfg *config.Config) (*Handler, *mockS3Cl
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
 	mockClient := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("test-password-perf1-123456"))
+	engine, err := newAPIUnitEngine([]byte("test-password-perf1-123456"))
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 	// the mock store.  We need the metadata to look like a legacy encrypted
 	// object (x-amz-meta-encryption-algorithm is set, but NOT
 	// x-amz-meta-encryption-chunked).
-	legacyEngine, _ := crypto.NewEngine([]byte("test-password-perf1-123456"))
+	legacyEngine, _ := newAPIUnitEngine([]byte("test-password-perf1-123456"))
 	plain := bytes.Repeat([]byte("P"), 100) // 100 bytes — exceeds cap of 1
 	encReader, encMeta, err := legacyEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(plain), nil)
 	if err != nil {
@@ -213,7 +213,7 @@ func TestHandleCopyObject_Legacy_CapEnforced(t *testing.T) {
 // for the heap-bound assertion; the actual allocation bound is enforced at the
 // crypto unit level by TestMPUEncryptReader_Streaming_BoundedHeap).
 func TestHandleGetObject_Streaming_BoundedHeap(t *testing.T) {
-	chunkedEngine, err := crypto.NewEngineWithChunking(
+	chunkedEngine, err := newAPIUnitChunkedEngine(
 		[]byte("test-password-perf1-123456"),
 		"", nil, true, 0,
 	)
@@ -304,7 +304,7 @@ func TestHandleUploadPart_Plaintext_SeekableWrapper(t *testing.T) {
 // request copying a chunked-encrypted source produces a correctly decryptable
 // destination object (functional correctness of the Phase C streaming pipeline).
 func TestHandleCopyObject_Chunked_Streams_Bounded(t *testing.T) {
-	chunkedEngine, err := crypto.NewEngineWithChunking(
+	chunkedEngine, err := newAPIUnitChunkedEngine(
 		[]byte("test-password-perf1-123456"),
 		"", nil, true, 0,
 	)

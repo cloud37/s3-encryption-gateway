@@ -55,7 +55,7 @@ encrypt_multipart_uploads: true
 	}
 
 	// Password-mode KeyManager — mirrors what cmd/server/main.go does.
-	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.MinPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("password keymanager: %v", err)
 	}
@@ -78,6 +78,11 @@ encrypt_multipart_uploads: true
 	t.Cleanup(func() { _ = stateStore.Close() })
 
 	handler := NewHandlerWithFeatures(mockClient, engine, logger, getTestMetrics(), km, nil, nil, cfg, pm)
+	policyEngine, err := crypto.NewEngineWithOpts([]byte(mpuTestPassword), crypto.WithChunking(true), crypto.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations))
+	if err != nil {
+		t.Fatalf("policy engine: %v", err)
+	}
+	handler.engineCache.GetOrStore("test-mpu-chacha20", policyEngine)
 	handler.WithMPUStateStore(stateStore)
 
 	router := mux.NewRouter()
@@ -147,7 +152,7 @@ encrypt_multipart_uploads: true
 	}
 
 	// Password-mode KeyManager — mirrors what cmd/server/main.go does.
-	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.DefaultPBKDF2Iterations))
+	km, err := crypto.NewPasswordKeyManager([]byte(mpuTestPassword), crypto.WithPasswordKMPBKDF2(crypto.MinPBKDF2Iterations))
 	if err != nil {
 		t.Fatalf("password keymanager: %v", err)
 	}
@@ -170,6 +175,11 @@ encrypt_multipart_uploads: true
 	t.Cleanup(func() { _ = stateStore.Close() })
 
 	handler := NewHandlerWithFeatures(mockClient, engine, logger, getTestMetrics(), km, nil, nil, cfg, pm)
+	policyEngine, err := crypto.NewEngineWithOpts([]byte(mpuTestPassword), crypto.WithChunking(true), crypto.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations))
+	if err != nil {
+		t.Fatalf("policy engine: %v", err)
+	}
+	handler.engineCache.GetOrStore("test-mpu-chacha20", policyEngine)
 	handler.WithMPUStateStore(stateStore)
 
 	router := mux.NewRouter()

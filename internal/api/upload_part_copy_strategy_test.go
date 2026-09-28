@@ -279,13 +279,13 @@ func (c *countingMPUClient) UploadPart(ctx context.Context, bucket, key, uploadI
 
 func setupStrategySource(t *testing.T, client *mpuMockS3Client) (string, string, crypto.EncryptionEngine) {
 	t.Helper()
-	engine, err := crypto.NewEngineWithChunking([]byte(mpuTestPassword), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte(mpuTestPassword), "", nil, true, crypto.MinChunkSize)
 	require.NoError(t, err)
 	tmp := newMockS3Client()
 	putSEC37Object(t, tmp, engine, "chunked", []byte("chunked strategy source"))
 	client.objects["src/chunked"] = tmp.objects["test-bucket/chunked"]
 	client.metadata["src/chunked"] = tmp.metadata["test-bucket/chunked"]
-	legacy, err := crypto.NewEngine([]byte(mpuTestPassword))
+	legacy, err := newAPIUnitEngine([]byte(mpuTestPassword))
 	require.NoError(t, err)
 	legacyReader, legacyMetadata, err := legacy.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("legacy strategy source")), nil)
 	require.NoError(t, err)

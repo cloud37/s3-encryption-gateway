@@ -393,12 +393,9 @@ func newMPUTestHandler(t *testing.T, bucketPattern string) (*Handler, *mpuMockS3
 	t.Helper()
 	mockClient := newMPUMockS3Client()
 
-	// SEC-42 has many isolated handler fixtures. Keep their KDF work bounded
-	// under -race without changing the production/default test configuration.
-	pbkdf2Iterations := crypto.DefaultPBKDF2Iterations
-	if strings.HasPrefix(bucketPattern, "sec42-") {
-		pbkdf2Iterations = 100000
-	}
+	// Handler tests exercise MPU behavior, not the production KDF cost. Keep
+	// both encryption and decryption at the supported minimum for -race runs.
+	pbkdf2Iterations := crypto.MinPBKDF2Iterations
 	engine, err := crypto.NewEngineWithChunkingAndProvider([]byte(mpuTestPassword), "", nil, false, crypto.DefaultChunkSize, "default", pbkdf2Iterations)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
@@ -434,6 +431,15 @@ encrypt_multipart_uploads: true
 	}
 
 	handler := NewHandlerWithFeatures(mockClient, engine, logger, getTestMetrics(), km, nil, nil, cfg, pm)
+	// The production policy factory uses the default 600k-iteration KDF.
+	// Populate its normal cache with an equivalent chunked test engine so
+	// these MPU handler cases exercise policy routing without deriving a
+	// production-cost key on every manifest read and completion.
+	policyEngine, err := crypto.NewEngineWithChunkingAndProvider([]byte(mpuTestPassword), "", nil, true, crypto.DefaultChunkSize, "default", pbkdf2Iterations)
+	if err != nil {
+		t.Fatalf("policy engine: %v", err)
+	}
+	handler.engineCache.GetOrStore("test-mpu", policyEngine)
 
 	// Valkey state store (miniredis).
 	mr := miniredis.RunT(t)
@@ -1051,11 +1057,15 @@ func assertMPUResponseSet(t *testing.T, router *mux.Router, bucket, key string, 
 	}
 }
 
-// TestMPU_LargeObjectGoldenPath verifies that a large MPU object (many parts,
-// totalling ~400 MiB) can be uploaded and downloaded successfully.
-// This is the golden-path / best-case regression test for issue #135 where
-// large encrypted multipart-upload restores failed mid-stream.
-func TestMPU_LargeObjectGoldenPath(t *testing.T) {
+// TestMPU_MultipartRoundTrip exercises the issue #135 cross-part streaming
+// path with several chunks per part, without putting a 400 MiB load test in
+// the default unit-test gate. The full-size case uses the load build tag.
+func TestMPU_MultipartRoundTrip(t *testing.T) {
+	runMPUMultipartRoundTrip(t, 3, 256*1024)
+}
+
+func runMPUMultipartRoundTrip(t *testing.T, partCount, partSize int) {
+	t.Helper()
 	handler, _, _ := newMPUTestHandler(t, "lg-*")
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1071,10 +1081,7 @@ func TestMPU_LargeObjectGoldenPath(t *testing.T) {
 	}
 	uploadID := extractUploadID(t, w.Body.String())
 
-	// Upload 80 parts of 5 MiB each = ~400 MiB total.  Each part uses a
-	// distinct byte pattern so a cross-part corruption is detectable.
-	const partCount = 80
-	const partSize = 5 * 1024 * 1024 // 5 MiB, S3 minimum per part
+	// Each part uses a distinct byte pattern so a cross-part corruption is detectable.
 	var etags []string
 	var want []byte
 	for i := 0; i < partCount; i++ {

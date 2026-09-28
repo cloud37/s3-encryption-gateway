@@ -61,7 +61,7 @@ func newSEC37Router(t *testing.T, client s3.Client, engine crypto.EncryptionEngi
 
 func TestSEC37_FullGET_PreflightRejectsTruncatedV2(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestSEC37_FullGET_PreflightRejectsTruncatedV2(t *testing.T) {
 
 func TestSEC37_RangeGET_PreflightRejectsTruncatedV2(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestSEC37_RangeGET_PreflightRejectsTruncatedV2(t *testing.T) {
 
 func TestSEC37_HEAD_PreflightRejectsTruncatedV2(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestSEC37_APIUnknownVersion_ReturnsInternalError(t *testing.T) {
 	for _, version := range []int{0, 3, 255} {
 		t.Run(fmt.Sprintf("version-%d", version), func(t *testing.T) {
 			client := newMockS3Client()
-			engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+			engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -219,7 +219,7 @@ func unknownSEC37Manifest(t *testing.T, metadata map[string]string) {
 
 func TestSEC37_FullGET_VerifiesAgainAfterPreflight(t *testing.T) {
 	client := &sec37TOCTOUClient{mockS3Client: newMockS3Client()}
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestSEC37_CompactedV2Truncated_APIPreflight(t *testing.T) {
 	for _, tc := range methods {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newMockS3Client()
-			engine, err := crypto.NewEngineWithOpts([]byte("sec37-password"), crypto.WithProvider("aws"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)), crypto.WithChunking(true), crypto.WithChunkSize(crypto.MinChunkSize))
+			engine, err := crypto.NewEngineWithOpts([]byte("sec37-password"), crypto.WithProvider("aws"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)), crypto.WithChunking(true), crypto.WithChunkSize(crypto.MinChunkSize), crypto.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -349,7 +349,7 @@ func TestSEC37_CompactedV2Truncated_APIPreflight(t *testing.T) {
 
 func TestSEC37_V1GETAndHEAD_RemainReadable(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestSEC37_V1GETAndHEAD_RemainReadable(t *testing.T) {
 
 func TestSEC37_CopyObject_RejectsInvalidTrailerBeforeDestinationWrite(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestSEC37_CopyObject_RejectsInvalidTrailerBeforeDestinationWrite(t *testing
 
 func TestSEC37_Preflight_PreservesSourceVersionID(t *testing.T) {
 	client := &sec37VersionClient{mockS3Client: newMockS3Client()}
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestSEC37_Preflight_PreservesSourceVersionID(t *testing.T) {
 
 func TestSEC37_VersionedGET_PreservesSourceVersionIDAcrossReads(t *testing.T) {
 	client := &sec37VersionClient{mockS3Client: newMockS3Client()}
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestSEC37_VersionedGET_PreservesSourceVersionIDAcrossReads(t *testing.T) {
 
 func TestSEC37_CompactedV2Truncated_EncryptedMPUDestination(t *testing.T) {
 	handler, client, _ := newMPUTestHandler(t, "sec37-compact-mpu-bucket")
-	engine, err := crypto.NewEngineWithOpts([]byte(mpuTestPassword), crypto.WithProvider("aws"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)), crypto.WithChunking(true), crypto.WithChunkSize(crypto.MinChunkSize))
+	engine, err := crypto.NewEngineWithOpts([]byte(mpuTestPassword), crypto.WithProvider("aws"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)), crypto.WithChunking(true), crypto.WithChunkSize(crypto.MinChunkSize), crypto.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestSEC37_CompactedV2Truncated_EncryptedMPUDestination(t *testing.T) {
 
 func TestSEC37_PreflightHelper_ErrorAndCompatibilityBranches(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +521,7 @@ func TestSEC37_PreflightHelper_ErrorAndCompatibilityBranches(t *testing.T) {
 }
 
 func TestSEC37_PreflightChunkedCompleteness_BranchMatrix(t *testing.T) {
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func (c *sec37VersionClient) GetObject(ctx context.Context, bucket, key string, 
 
 func TestSEC37_UploadPartCopy_Chunked_RejectsInvalidTrailerBeforeUploadPart(t *testing.T) {
 	client := &sec37CountingS3Client{mockS3Client: newMockS3Client()}
-	engine, err := crypto.NewEngineWithChunking([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte("sec37-password"), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestSEC37_UploadPartCopy_Chunked_RejectsInvalidTrailerBeforeUploadPart(t *t
 
 func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsInvalidTrailerBeforeUploadPart(t *testing.T) {
 	handler, client, _ := newMPUTestHandler(t, "sec37-mpu-bucket")
-	chunkedEngine, err := crypto.NewEngineWithChunking([]byte(mpuTestPassword), "", nil, true, crypto.MinChunkSize)
+	chunkedEngine, err := newAPIUnitChunkedEngine([]byte(mpuTestPassword), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +745,7 @@ func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsInvalidTrailerBeforeUploadPart
 
 func TestSEC37_UploadPartCopy_ReencryptMPU_RejectsUnknownManifestVersion(t *testing.T) {
 	handler, client, _ := newMPUTestHandler(t, "sec37-unknown-mpu-bucket")
-	engine, err := crypto.NewEngineWithChunking([]byte(mpuTestPassword), "", nil, true, crypto.MinChunkSize)
+	engine, err := newAPIUnitChunkedEngine([]byte(mpuTestPassword), "", nil, true, crypto.MinChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}

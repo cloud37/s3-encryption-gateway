@@ -681,7 +681,7 @@ func TestPlanObjectRead_LegacyChunkedRangeUsesFullFetch(t *testing.T) {
 
 func TestOptimizedEncryptedRange_PreflightsTamperedFirstChunk(t *testing.T) {
 	client := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("optimized-range-password"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("optimized-range-password"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatal(err)
 	}

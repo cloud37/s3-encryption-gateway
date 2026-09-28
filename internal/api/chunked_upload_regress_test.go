@@ -86,7 +86,7 @@ func TestLegacyChunkedRangeGetFallsBackToFullFetch(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
 
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestLegacyChunkedGetReportsDecryptedContentLength(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
 
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestChunkedGetUsesExactSizeWhenChunkCountIsPresent(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestChunkedRangeGetOverridesStaleOriginalSize(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestLegacyChunkedListObjectsReportsPlaintextSize(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
 
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestChunkedRangeGetClampsFinalCiphertextChunk(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 	mockClient := newMockS3Client()
 
-	engine, err := crypto.NewEngineWithChunking([]byte("test-password-123456"), "", nil, true, 16*1024)
+	engine, err := newAPIUnitChunkedEngine([]byte("test-password-123456"), "", nil, true, 16*1024)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

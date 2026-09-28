@@ -17,7 +17,6 @@ import (
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
-	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -445,7 +444,7 @@ func TestSEC41SpoolOperationFailures(t *testing.T) {
 	// This follows the real authenticated PUT path through the error mapper.
 	streamingSpoolOps.createTemp = func(string, string) (*os.File, error) { return nil, errors.New("handler create") }
 	client := newMockS3Client()
-	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	engine, err := newAPIUnitEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)
 	}
