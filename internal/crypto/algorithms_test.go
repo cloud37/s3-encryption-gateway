@@ -47,6 +47,18 @@ func TestCreateAEADCipher_InvalidKeySize(t *testing.T) {
 	}
 }
 
+func TestAEADOverheadForAlgorithm(t *testing.T) {
+	for _, algorithm := range []string{AlgorithmAES256GCM, AlgorithmChaCha20Poly1305} {
+		got, err := AEADOverheadForAlgorithm(algorithm)
+		if err != nil || got != tagSize {
+			t.Errorf("overhead(%q)=%d err=%v", algorithm, got, err)
+		}
+	}
+	if _, err := AEADOverheadForAlgorithm("unsupported"); err == nil {
+		t.Fatal("unsupported AEAD got a guessed overhead")
+	}
+}
+
 func TestGetNonceSize(t *testing.T) {
 	tests := []struct {
 		algorithm string

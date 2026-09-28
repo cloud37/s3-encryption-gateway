@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // MetadataCompactor handles compaction of encryption metadata
@@ -15,15 +16,7 @@ type MetadataCompactor struct {
 // backend before an API handler classifies an encrypted object. API callers do
 // not own an engine/profile, but the aliases are protocol-stable.
 func ExpandMetadataForAPI(metadata map[string]string) (map[string]string, error) {
-	compactKeys := []string{"x-amz-meta-e", "x-amz-meta-a", "x-amz-meta-s", "x-amz-meta-i", "x-amz-meta-c", "x-amz-meta-cs", "x-amz-meta-cc", "x-amz-meta-m", "x-amz-meta-kdf", MetaEncryptedMetadataCompact}
-	found := false
-	for _, key := range compactKeys {
-		if _, ok := metadata[key]; ok {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !HasCompactAlias(metadata) {
 		return metadata, nil
 	}
 	// API classification must understand aliases emitted by provider profiles;
@@ -46,9 +39,15 @@ func (c *MetadataCompactor) CompactMetadata(metadata map[string]string) (map[str
 
 	// Copy non-encryption metadata as-is
 	for key, value := range metadata {
-		if !IsEncryptionMetadata(key) {
+		if !IsEncryptionMetadata(key) && !strings.EqualFold(key, MetaEncrypted) {
 			compacted[key] = value
 		}
+	}
+	// The clear encryption marker is intentionally not part of the metadata
+	// blob, but it must survive provider compaction so API reads classify the
+	// payload as encrypted before decrypting that blob.
+	if marker, ok := metadataValue(metadata, MetaEncrypted); ok {
+		compacted[MetaEncrypted] = marker
 	}
 
 	// Compact encryption metadata
@@ -75,6 +74,9 @@ func (c *MetadataCompactor) ExpandMetadata(metadata map[string]string) (map[stri
 			expanded[key] = value
 		}
 	}
+	if marker, ok := metadataValue(metadata, MetaEncrypted); ok {
+		expanded[MetaEncrypted] = marker
+	}
 
 	// Expand compacted encryption metadata
 	encMeta, err := c.expandEncryptionMetadata(metadata)
@@ -96,79 +98,24 @@ func (c *MetadataCompactor) compactEncryptionMetadata(metadata map[string]string
 
 	// Use short key aliases for base64url strategy
 	if c.profile.CompactionStrategy == "base64url" {
-		// Core encryption metadata with short keys
-		if v := metadata[MetaEncrypted]; v != "" {
-			compacted["x-amz-meta-e"] = v // encrypted
-		}
-		if v := metadata[MetaAlgorithm]; v != "" {
-			compacted["x-amz-meta-a"] = v // algorithm
-		}
-		if v := metadata[MetaKeySalt]; v != "" {
-			compacted["x-amz-meta-s"] = v // salt
-		}
-		if v := metadata[MetaIV]; v != "" {
-			compacted["x-amz-meta-i"] = v // iv
-		}
-		if v := metadata[MetaOriginalSize]; v != "" {
-			compacted["x-amz-meta-os"] = v // original size
-		}
-		if v := metadata[MetaOriginalETag]; v != "" {
-			compacted["x-amz-meta-oe"] = v // original etag
-		}
-		if v := metadata[MetaContentType]; v != "" {
-			compacted["x-amz-meta-ct"] = v // content type
-		}
-		if v := metadata[MetaCacheControl]; v != "" {
-			compacted["x-amz-meta-ccache"] = v // cache control
-		}
-		if v := metadata[MetaContentDisposition]; v != "" {
-			compacted["x-amz-meta-cdisp"] = v // content disposition
-		}
-
-		// Chunked encryption metadata
-		if v := metadata[MetaChunkedFormat]; v != "" {
-			compacted["x-amz-meta-c"] = v // chunked
-		}
-		if v := metadata[MetaChunkSize]; v != "" {
-			compacted["x-amz-meta-cs"] = v // chunk size
-		}
-		if v := metadata[MetaChunkCount]; v != "" {
-			compacted["x-amz-meta-cc"] = v // chunk count
-		}
-		if v := metadata[MetaManifest]; v != "" {
-			compacted["x-amz-meta-m"] = v // manifest
-		}
-		if v := metadata[MetaKeyVersion]; v != "" {
-			compacted["x-amz-meta-kv"] = v // key version
-		}
-		if v := metadata[MetaWrappedKeyCiphertext]; v != "" {
-			compacted["x-amz-meta-wk"] = v // wrapped key
-		}
-		if v := metadata[MetaKMSKeyID]; v != "" {
-			compacted["x-amz-meta-kid"] = v // kms key id
-		}
-		if v := metadata[MetaKMSProvider]; v != "" {
-			compacted["x-amz-meta-kp"] = v // kms provider
-		}
-		if v := metadata[MetaKDFParams]; v != "" {
-			compacted["x-amz-meta-kdf"] = v // kdf params
-		}
-		if v := metadata[MetaFallbackMode]; v != "" {
-			compacted["x-amz-meta-fb"] = v
-		}
-		if v := metadata[MetaFallbackVersion]; v != "" {
-			compacted["x-amz-meta-fbv"] = v
-		}
-		if v := metadata[MetaObjectFormatVersion]; v != "" {
-			compacted["x-amz-meta-fmt"] = v
-		}
-		if v := metadata[MetaObjectBindingID]; v != "" {
-			compacted["x-amz-meta-bid"] = v
-		}
-
-		// V1.0-CRYPTO-3: encrypted metadata blob
-		if v := metadata[MetaEncryptedMetadata]; v != "" {
-			compacted[MetaEncryptedMetadataCompact] = v // encrypted metadata blob
+		// Compact every registry entry with an alias, including structural
+		// entries such as the encrypted metadata blob.  The frozen
+		// LegacyEncryptionPredicate controls the historical public predicate;
+		// it must not decide which gateway-owned fields are serialized.
+		for _, spec := range MetaKeys() {
+			if spec.Compact == "" {
+				continue
+			}
+			v, ok := metadataValue(metadata, spec.Canonical)
+			if !ok {
+				// Compaction is intentionally idempotent. API tests and some
+				// adapters may hand us metadata that is already in its compact
+				// spelling.
+				v, ok = metadataValue(metadata, spec.Compact)
+			}
+			if ok && v != "" {
+				compacted[spec.Compact] = v
+			}
 		}
 
 	} else {
@@ -188,76 +135,13 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 	expanded := make(map[string]string)
 
 	if c.profile.CompactionStrategy == "base64url" {
-		// Expand short keys back to full keys
-		if v := metadata["x-amz-meta-e"]; v != "" {
-			expanded[MetaEncrypted] = v
-		}
-		if v := metadata["x-amz-meta-a"]; v != "" {
-			expanded[MetaAlgorithm] = v
-		}
-		if v := metadata["x-amz-meta-s"]; v != "" {
-			expanded[MetaKeySalt] = v
-		}
-		if v := metadata["x-amz-meta-i"]; v != "" {
-			expanded[MetaIV] = v
-		}
-		if v := metadata["x-amz-meta-os"]; v != "" {
-			expanded[MetaOriginalSize] = v
-		}
-		if v := metadata["x-amz-meta-oe"]; v != "" {
-			expanded[MetaOriginalETag] = v
-		}
-		if v := metadata["x-amz-meta-ct"]; v != "" {
-			expanded[MetaContentType] = v
-		}
-		if v := metadata["x-amz-meta-ccache"]; v != "" {
-			expanded[MetaCacheControl] = v
-		}
-		if v := metadata["x-amz-meta-cdisp"]; v != "" {
-			expanded[MetaContentDisposition] = v
-		}
-		if v := metadata["x-amz-meta-c"]; v != "" {
-			expanded[MetaChunkedFormat] = v
-		}
-		if v := metadata["x-amz-meta-cs"]; v != "" {
-			expanded[MetaChunkSize] = v
-		}
-		if v := metadata["x-amz-meta-cc"]; v != "" {
-			expanded[MetaChunkCount] = v
-		}
-		if v := metadata["x-amz-meta-m"]; v != "" {
-			expanded[MetaManifest] = v
-		}
-		if v := metadata["x-amz-meta-kv"]; v != "" {
-			expanded[MetaKeyVersion] = v
-		}
-		if v := metadata["x-amz-meta-wk"]; v != "" {
-			expanded[MetaWrappedKeyCiphertext] = v
-		}
-		if v := metadata["x-amz-meta-kid"]; v != "" {
-			expanded[MetaKMSKeyID] = v
-		}
-		if v := metadata["x-amz-meta-kp"]; v != "" {
-			expanded[MetaKMSProvider] = v
-		}
-		if v := metadata["x-amz-meta-kdf"]; v != "" {
-			expanded[MetaKDFParams] = v
-		}
-		if v := metadata["x-amz-meta-fb"]; v != "" {
-			expanded[MetaFallbackMode] = v
-		}
-		if v := metadata["x-amz-meta-fbv"]; v != "" {
-			expanded[MetaFallbackVersion] = v
-		}
-		if v := metadata["x-amz-meta-fmt"]; v != "" {
-			expanded[MetaObjectFormatVersion] = v
-		}
-		if v := metadata["x-amz-meta-bid"]; v != "" {
-			expanded[MetaObjectBindingID] = v
-		}
-		// V1.0-CRYPTO-3: encrypted metadata blob expansion
-		if v := metadata[MetaEncryptedMetadataCompact]; v != "" {
-			expanded[MetaEncryptedMetadata] = v
+		for _, spec := range MetaKeys() {
+			if spec.Compact == "" {
+				continue
+			}
+			if v, ok := metadataValue(metadata, spec.Compact); ok && v != "" {
+				expanded[spec.Canonical] = v
+			}
 		}
 	} else {
 		// No expansion needed - copy encryption metadata as-is
@@ -271,23 +155,23 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 	return expanded, nil
 }
 
+func metadataValue(metadata map[string]string, name string) (string, bool) {
+	for key, value := range metadata {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
 // isCompactedKey returns true if the key is a compacted short key
 func (c *MetadataCompactor) isCompactedKey(key string) bool {
 	if c.profile.CompactionStrategy != "base64url" {
 		return false
 	}
 
-	compactedKeys := []string{
-		"x-amz-meta-e", "x-amz-meta-a", "x-amz-meta-s", "x-amz-meta-i",
-		"x-amz-meta-os", "x-amz-meta-oe", "x-amz-meta-c", "x-amz-meta-cs",
-		"x-amz-meta-cc", "x-amz-meta-m", "x-amz-meta-kv", "x-amz-meta-wk",
-		"x-amz-meta-kid", "x-amz-meta-kp", "x-amz-meta-kdf",
-		"x-amz-meta-fb", "x-amz-meta-fbv", "x-amz-meta-fmt", "x-amz-meta-bid",
-		MetaEncryptedMetadataCompact,
-	}
-
-	for _, ck := range compactedKeys {
-		if key == ck {
+	for _, spec := range MetaKeys() {
+		if spec.Compact != "" && strings.EqualFold(key, spec.Compact) {
 			return true
 		}
 	}

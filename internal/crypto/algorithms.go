@@ -83,6 +83,18 @@ func createAESGCMCipher(key []byte) (AEADCipher, error) {
 	return &aesGCMCipher{AEAD: gcm}, nil
 }
 
+// AEADOverheadForAlgorithm returns the ciphertext tag overhead for a
+// supported algorithm without requiring a key. It is used only for legacy
+// metadata-only size estimation; unsupported algorithms fail closed.
+func AEADOverheadForAlgorithm(algorithm string) (int, error) {
+	switch algorithm {
+	case AlgorithmAES256GCM, AlgorithmChaCha20Poly1305:
+		return tagSize, nil
+	default:
+		return 0, fmt.Errorf("unsupported algorithm: %s", algorithm)
+	}
+}
+
 // getNonceSize returns the nonce size for the given algorithm.
 func getNonceSize(algorithm string) (int, error) {
 	switch algorithm {

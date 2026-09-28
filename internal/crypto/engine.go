@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/debug"
 	"go.opentelemetry.io/otel"
@@ -48,6 +49,9 @@ const (
 	MetaContentType          = "x-amz-meta-encryption-content-type"
 	MetaCacheControl         = "x-amz-meta-encryption-cache-control"
 	MetaContentDisposition   = "x-amz-meta-encryption-content-disposition"
+	MetaContentEncoding      = "x-amz-meta-encryption-content-encoding"
+	MetaContentLanguage      = "x-amz-meta-encryption-content-language"
+	MetaExpires              = "x-amz-meta-encryption-expires"
 	// MetaKDFParams stores the KDF algorithm and parameters used to derive the
 	// per-object encryption key. Format: "pbkdf2-sha256:<iterations>" or
 	// "argon2id:<time>:<memory_kib>:<threads>".
@@ -217,7 +221,11 @@ func (e *engine) APIExpandedMetadata(metadata map[string]string) (map[string]str
 	if err != nil {
 		return nil, err
 	}
-	if blob := expanded[MetaEncryptedMetadata]; blob != "" && e.metadataKey != nil {
+	blobKey := MetaEncryptedMetadata
+	if blob := expanded[MetaEncryptedMetadataCompact]; blob != "" {
+		blobKey = MetaEncryptedMetadataCompact
+	}
+	if blob := expanded[blobKey]; blob != "" && e.metadataKey != nil {
 		protected, err := e.decryptMetadata(blob)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt metadata: %w", err)
@@ -225,6 +233,7 @@ func (e *engine) APIExpandedMetadata(metadata map[string]string) (map[string]str
 		for key, value := range protected {
 			expanded[key] = value
 		}
+		delete(expanded, blobKey)
 	}
 	return expanded, nil
 }
@@ -666,7 +675,9 @@ func (e *engine) Encrypt(ctx context.Context, object ObjectContext, reader io.Re
 	encMetadata := make(map[string]string)
 	if metadata != nil {
 		for k, v := range metadata {
-			encMetadata[k] = v
+			if !IsGatewayReservedKey(k) {
+				encMetadata[k] = v
+			}
 		}
 	}
 	encMetadata[MetaEncrypted] = "true"
@@ -685,12 +696,16 @@ func (e *engine) Encrypt(ctx context.Context, object ObjectContext, reader io.Re
 	if contentType != "" {
 		encMetadata[MetaContentType] = contentType
 	}
+	stampProtectedStandard(encMetadata, metadata)
 	if metadata != nil {
-		if value := metadata["Cache-Control"]; value != "" {
-			encMetadata[MetaCacheControl] = value
-		}
-		if value := metadata["Content-Disposition"]; value != "" {
-			encMetadata[MetaContentDisposition] = value
+		// Internal callers and compatibility tests may already provide registry
+		// names instead of native HTTP headers. Preserve protected values while
+		// still excluding all other gateway-owned control metadata from the
+		// caller-controlled envelope.
+		for _, spec := range ProtectedStandardKeys() {
+			if value := metadataValueFold(metadata, spec.Canonical); value != "" {
+				encMetadata[spec.Canonical] = value
+			}
 		}
 	}
 	if envelope != nil {
@@ -710,34 +725,9 @@ func (e *engine) Encrypt(ctx context.Context, object ObjectContext, reader io.Re
 	// This replaces all individual encryption metadata keys with a single
 	// AES-256-GCM sealed blob under MetaEncryptedMetadata.
 	if e.metadataKey != nil {
-		contentTypeMetadata := encMetadata[MetaContentType]
-		cacheControlMetadata := encMetadata[MetaCacheControl]
-		contentDispositionMetadata := encMetadata[MetaContentDisposition]
-		blob, err := e.encryptMetadata(encMetadata)
-		if err != nil {
+		if err := e.sealMetadataBlob(encMetadata); err != nil {
 			span.SetStatus(codes.Error, err.Error())
-			return nil, nil, fmt.Errorf("encrypt metadata: %w", err)
-		}
-		// Remove all encryption keys from the cleartext map.
-		for k := range encMetadata {
-			if IsEncryptionMetadata(k) {
-				delete(encMetadata, k)
-			}
-		}
-		// MetaEncrypted (x-amz-meta-encrypted) MUST remain outside the blob
-		// so that IsEncrypted works even without the metadata key (§2.6).
-		encMetadata[MetaEncrypted] = "true"
-		encMetadata[MetaEncryptedMetadata] = blob
-		// Keep client-visible standard headers outside the encrypted blob so
-		// HEAD and copy paths can restore them without reading the object body.
-		if contentTypeMetadata != "" {
-			encMetadata[MetaContentType] = contentTypeMetadata
-		}
-		if cacheControlMetadata != "" {
-			encMetadata[MetaCacheControl] = cacheControlMetadata
-		}
-		if contentDispositionMetadata != "" {
-			encMetadata[MetaContentDisposition] = contentDispositionMetadata
+			return nil, nil, err
 		}
 	}
 
@@ -931,6 +921,12 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 				expandedMetadata[k] = v
 			}
 			delete(expandedMetadata, blobKey)
+		}
+		if IsEncryptedMetadata(expandedMetadata) {
+			// The metadata key intentionally seals the encryption marker too.
+			// Expose it to the rest of Decrypt after authenticating the blob so
+			// the object follows the encrypted branch with empty/non-empty blobs.
+			expandedMetadata[MetaEncrypted] = "true"
 		}
 	}
 	// Check if this is fallback mode (metadata stored in object body). This is
@@ -1150,23 +1146,8 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 
 	var finalReader io.Reader = bytes.NewReader(plaintext)
 
-	// Prepare decrypted metadata (strip encryption markers).
-	decMetadata := make(map[string]string)
-	for k, v := range expandedMetadata {
-		if IsEncryptionMetadata(k) {
-			continue
-		}
-		decMetadata[k] = v
-	}
-	if v := expandedMetadata[MetaContentType]; v != "" {
-		decMetadata["Content-Type"] = v
-	}
-	if v := expandedMetadata[MetaCacheControl]; v != "" {
-		decMetadata["Cache-Control"] = v
-	}
-	if v := expandedMetadata[MetaContentDisposition]; v != "" {
-		decMetadata["Content-Disposition"] = v
-	}
+	// Restore protected standard headers through the shared registry view.
+	decMetadata := plaintextMetadataView(expandedMetadata, -1, expandedMetadata[MetaOriginalETag])
 
 	// Restore original size if available
 	// The ciphertext was just read, so its length is more authoritative than
@@ -1224,7 +1205,9 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 	encMetadata := make(map[string]string)
 	if metadata != nil {
 		for k, v := range metadata {
-			encMetadata[k] = v
+			if !IsGatewayReservedKey(k) {
+				encMetadata[k] = v
+			}
 		}
 	}
 	// Add basic encryption markers for size check
@@ -1239,12 +1222,12 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 	if contentType != "" {
 		encMetadata[MetaContentType] = contentType
 	}
+	stampProtectedStandard(encMetadata, metadata)
 	if metadata != nil {
-		if value := metadata["Cache-Control"]; value != "" {
-			encMetadata[MetaCacheControl] = value
-		}
-		if value := metadata["Content-Disposition"]; value != "" {
-			encMetadata[MetaContentDisposition] = value
+		for _, spec := range ProtectedStandardKeys() {
+			if value := metadataValueFold(metadata, spec.Canonical); value != "" {
+				encMetadata[spec.Canonical] = value
+			}
 		}
 	}
 	// Add chunked-specific metadata
@@ -1256,23 +1239,6 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 	encMetadata[MetaObjectFormatVersion] = "chunked-v2"
 	encMetadata[MetaObjectBindingID] = base64.RawURLEncoding.EncodeToString(bindingID)
 	encMetadata[MetaChunkSize] = fmt.Sprintf("%d", e.chunkSize)
-
-	// V1.0-CRYPTO-3: encrypt metadata blob if metadata key is configured.
-	if e.metadataKey != nil {
-		blob, err := e.encryptMetadata(encMetadata)
-		if err != nil {
-			return nil, nil, fmt.Errorf("encrypt metadata: %w", err)
-		}
-		for k := range encMetadata {
-			if IsEncryptionMetadata(k) {
-				delete(encMetadata, k)
-			}
-		}
-		// MetaEncrypted (x-amz-meta-encrypted) MUST remain outside the blob
-		// so that IsEncrypted works even without the metadata key (§2.6).
-		encMetadata[MetaEncrypted] = "true"
-		encMetadata[MetaEncryptedMetadata] = blob
-	}
 
 	// Check if we need fallback metadata storage
 	if e.needsMetadataFallback(encMetadata) {
@@ -1373,9 +1339,12 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 
 	// Prepare encryption metadata
 	if metadata != nil {
-		// Copy original metadata
+		// Copy caller metadata but do not allow caller-supplied gateway keys to
+		// override the values stamped above.
 		for k, v := range metadata {
-			encMetadata[k] = v
+			if !IsGatewayReservedKey(k) {
+				encMetadata[k] = v
+			}
 		}
 	}
 
@@ -1410,6 +1379,23 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 		encMetadata[MetaWrappedKeyCiphertext] = encodeBase64(envelope.Ciphertext)
 	} else if kv, ok := metadata[MetaKeyVersion]; ok && kv != "" {
 		encMetadata[MetaKeyVersion] = kv
+	}
+	if e.metadataKey != nil {
+		structural := map[string]string{
+			MetaChunkedFormat:       encMetadata[MetaChunkedFormat],
+			MetaObjectFormatVersion: encMetadata[MetaObjectFormatVersion],
+			MetaObjectBindingID:     encMetadata[MetaObjectBindingID],
+			MetaChunkSize:           encMetadata[MetaChunkSize],
+			MetaManifest:            encMetadata[MetaManifest],
+		}
+		if err := e.sealMetadataBlob(encMetadata); err != nil {
+			return nil, nil, err
+		}
+		for key, value := range structural {
+			if value != "" {
+				encMetadata[key] = value
+			}
+		}
 	}
 
 	// Compact metadata according to provider profile
@@ -1539,6 +1525,20 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, object 
 		}
 		fullMetadata[MetaWrappedKeyCiphertext] = encodeBase64(envelope.Ciphertext)
 	}
+	// Keep structural chunk metadata in native headers so API preflight can
+	// authenticate the terminal without decrypting the body metadata blob.
+	structuralHeaders := map[string]string{
+		MetaChunkedFormat:       fullMetadata[MetaChunkedFormat],
+		MetaObjectFormatVersion: fullMetadata[MetaObjectFormatVersion],
+		MetaObjectBindingID:     fullMetadata[MetaObjectBindingID],
+		MetaChunkSize:           fullMetadata[MetaChunkSize],
+		MetaManifest:            fullMetadata[MetaManifest],
+	}
+	if e.metadataKey != nil {
+		if err := e.sealMetadataBlob(fullMetadata); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	// Serialize full metadata to JSON (stored in the object body as a prefix)
 	metadataJSON, err := encodeMetadataToJSON(fullMetadata)
@@ -1593,20 +1593,24 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, object 
 
 	// Copy original user metadata (non-encryption keys).
 	for k, v := range fullMetadata {
-		if !IsEncryptionMetadata(k) {
+		if !isEncryptionPayloadMetadata(k) {
 			minimalMetadata[k] = v
 		}
 	}
 
 	// Preserve MetaContentType in minimal headers for AAD reconstruction.
-	if ct := fullMetadata[MetaContentType]; ct != "" {
-		minimalMetadata[MetaContentType] = ct
+	for _, spec := range ProtectedStandardKeys() {
+		if value := fullMetadata[spec.Canonical]; value != "" {
+			minimalMetadata[spec.Canonical] = value
+		}
 	}
-	if value := fullMetadata[MetaCacheControl]; value != "" {
-		minimalMetadata[MetaCacheControl] = value
+	if blob := fullMetadata[MetaEncryptedMetadata]; blob != "" {
+		minimalMetadata[MetaEncryptedMetadata] = blob
 	}
-	if value := fullMetadata[MetaContentDisposition]; value != "" {
-		minimalMetadata[MetaContentDisposition] = value
+	for key, value := range structuralHeaders {
+		if value != "" {
+			minimalMetadata[key] = value
+		}
 	}
 
 	return streamingReader, minimalMetadata, nil
@@ -1749,33 +1753,9 @@ func (e *engine) decryptChunked(ctx context.Context, object ObjectContext, reade
 		return nil, nil, fmt.Errorf("failed to create chunked decrypt reader: %w", err)
 	}
 
-	// Prepare decrypted metadata (remove encryption markers)
-	decMetadata := make(map[string]string)
-	for k, v := range metadata {
-		// Skip encryption-related metadata
-		if IsEncryptionMetadata(k) {
-			continue
-		}
-		// For chunked encryption, skip ETag and Content-Length from GetObject
-		// (they're for the encrypted object, not the plaintext)
-		// We'll restore them below from original values
-		if k == "ETag" || k == "Content-Length" {
-			continue
-		}
-		decMetadata[k] = v
-	}
-	if v := metadata[MetaContentType]; v != "" {
-		decMetadata["Content-Type"] = v
-	}
-	if v := metadata[MetaCacheControl]; v != "" {
-		decMetadata["Cache-Control"] = v
-	}
-	if v := metadata[MetaContentDisposition]; v != "" {
-		decMetadata["Content-Disposition"] = v
-	}
-	if v := metadata["encryption-content-type"]; v != "" {
-		decMetadata["Content-Type"] = v
-	}
+	// Use the registry-backed projector so fallback/chunked metadata restores
+	// canonical, compact and legacy protected standard keys consistently.
+	decMetadata := plaintextMetadataView(metadata, -1, metadata[MetaOriginalETag])
 	if v := metadata["encryption-cache-control"]; v != "" {
 		decMetadata["Cache-Control"] = v
 	}
@@ -1793,11 +1773,7 @@ func (e *engine) decryptChunked(ctx context.Context, object ObjectContext, reade
 		// derive the exact plaintext length so callers do not accidentally
 		// forward the ciphertext length alongside decrypted bytes.
 		if ct, parseErr := strconv.ParseInt(ciphertextSize, 10, 64); parseErr == nil && ct > 0 {
-			chunkSize := int64(manifest.ChunkSize)
-			if chunkSize <= 0 {
-				chunkSize = int64(DefaultChunkSize)
-			}
-			if plainSize, _, sizeErr := ChunkedPlaintextSize(ct, int(chunkSize), ChunkedFormatV2); sizeErr == nil && plainSize > 0 {
+			if plainSize, _, sizeErr := PlaintextSizeForCiphertext(metadata, ct); sizeErr == nil && plainSize > 0 {
 				decMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
 			}
 		}
@@ -2208,23 +2184,8 @@ func (e *engine) decryptRange(ctx context.Context, object ObjectContext, reader 
 		}
 	}
 
-	// Prepare decrypted metadata
-	decMetadata := make(map[string]string)
-	for k, v := range expandedMetadata {
-		if IsEncryptionMetadata(k) {
-			continue
-		}
-		decMetadata[k] = v
-	}
-	if v := expandedMetadata[MetaContentType]; v != "" {
-		decMetadata["Content-Type"] = v
-	}
-	if v := expandedMetadata[MetaCacheControl]; v != "" {
-		decMetadata["Cache-Control"] = v
-	}
-	if v := expandedMetadata[MetaContentDisposition]; v != "" {
-		decMetadata["Content-Disposition"] = v
-	}
+	// Restore protected standard headers through the shared registry view.
+	decMetadata := plaintextMetadataView(expandedMetadata, -1, expandedMetadata[MetaOriginalETag])
 
 	// Set Content-Length to the range size
 	rangeSize := plaintextEnd - plaintextStart + 1
@@ -2331,14 +2292,10 @@ func (e *engine) encryptWithMetadataFallback(ctx context.Context, object ObjectC
 
 	// Preserve MetaContentType in minimal headers so the decrypt path can
 	// reconstruct AAD without falling back to the S3 Content-Type header.
-	if ct := fullMetadata[MetaContentType]; ct != "" {
-		minimalMetadata[MetaContentType] = ct
-	}
-	if value := fullMetadata[MetaCacheControl]; value != "" {
-		minimalMetadata[MetaCacheControl] = value
-	}
-	if value := fullMetadata[MetaContentDisposition]; value != "" {
-		minimalMetadata[MetaContentDisposition] = value
+	for _, spec := range ProtectedStandardKeys() {
+		if value := fullMetadata[spec.Canonical]; value != "" {
+			minimalMetadata[spec.Canonical] = value
+		}
 	}
 
 	compactedMetadata, err := e.compactor.CompactMetadata(minimalMetadata)
@@ -2468,21 +2425,7 @@ func (e *engine) decryptFallbackBound(ctx context.Context, object ObjectContext,
 	if err != nil {
 		return nil, nil, fmt.Errorf("fallback-v2: failed to decode metadata: %w", err)
 	}
-	decMetadata := make(map[string]string)
-	for k, v := range fullMetadata {
-		if !IsEncryptionMetadata(k) {
-			decMetadata[k] = v
-		}
-	}
-	if v := fullMetadata[MetaContentType]; v != "" {
-		decMetadata["Content-Type"] = v
-	}
-	if v := fullMetadata[MetaCacheControl]; v != "" {
-		decMetadata["Cache-Control"] = v
-	}
-	if v := fullMetadata[MetaContentDisposition]; v != "" {
-		decMetadata["Content-Disposition"] = v
-	}
+	decMetadata := plaintextMetadataView(fullMetadata, -1, fullMetadata[MetaOriginalETag])
 	if v := fullMetadata[MetaOriginalSize]; v != "" {
 		decMetadata["Content-Length"] = v
 	}
@@ -2520,6 +2463,23 @@ func (e *engine) decryptFallbackV2(ctx context.Context, object ObjectContext, re
 	fullMetadata, err := decodeMetadataFromJSON(metadataJSON)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fallback-v2: failed to decode in-body metadata: %w", err)
+	}
+	// Legacy fallback-v1 stored protected standard values under their native
+	// header names. Normalize those values into the registry view before the
+	// shared plaintext projector restores client-visible metadata.
+	for _, spec := range ProtectedStandardKeys() {
+		if fullMetadata[spec.Canonical] == "" {
+			if value := fullMetadata[spec.Header]; value != "" {
+				fullMetadata[spec.Canonical] = value
+			} else {
+				for _, legacy := range spec.Legacy {
+					if value := fullMetadata[legacy]; value != "" {
+						fullMetadata[spec.Canonical] = value
+						break
+					}
+				}
+			}
+		}
 	}
 
 	// The remainder of reader is the raw chunked ciphertext stream. Delegate
@@ -2646,26 +2606,27 @@ func (e *engine) decryptFallbackV1(reader io.Reader, metadata map[string]string)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to decode metadata from fallback: %w", err)
 	}
+	for _, spec := range ProtectedStandardKeys() {
+		if fullMetadata[spec.Canonical] != "" {
+			continue
+		}
+		if value := fullMetadata[spec.Header]; value != "" {
+			fullMetadata[spec.Canonical] = value
+			continue
+		}
+		for _, legacy := range spec.Legacy {
+			if value := fullMetadata[legacy]; value != "" {
+				fullMetadata[spec.Canonical] = value
+				break
+			}
+		}
+	}
 
 	var finalReader io.Reader = bytes.NewReader(actualData)
 
-	// Prepare decrypted metadata (strip encryption markers).
-	decMetadata := make(map[string]string)
-	for k, v := range fullMetadata {
-		if IsEncryptionMetadata(k) {
-			continue
-		}
-		decMetadata[k] = v
-	}
-
-	// Restore original size if available
-	if originalSize, ok := fullMetadata[MetaOriginalSize]; ok {
+	decMetadata := plaintextMetadataView(fullMetadata, -1, fullMetadata[MetaOriginalETag])
+	if originalSize := fullMetadata[MetaOriginalSize]; originalSize != "" {
 		decMetadata["Content-Length"] = originalSize
-	}
-
-	// Restore original ETag if available
-	if originalETag, ok := fullMetadata[MetaOriginalETag]; ok {
-		decMetadata["ETag"] = originalETag
 	}
 
 	return finalReader, decMetadata, nil
@@ -2685,12 +2646,13 @@ func IsEncryptedMetadata(meta map[string]string) bool {
 		return false
 	}
 
-	if encrypted, ok := meta[MetaEncrypted]; ok && encrypted == "true" {
-		return true
-	}
-
-	if encrypted, ok := meta["x-amz-meta-e"]; ok && encrypted == "true" {
-		return true
+	for key, encrypted := range meta {
+		if encrypted != "true" {
+			continue
+		}
+		if spec, ok := LookupMetaKey(key); ok && strings.EqualFold(spec.Canonical, MetaEncrypted) {
+			return true
+		}
 	}
 
 	return false
@@ -2699,37 +2661,6 @@ func IsEncryptedMetadata(meta map[string]string) bool {
 // computeETag is implemented in etag_default.go (non-FIPS) and etag_fips.go (FIPS build).
 // S3 treats ETags as opaque identifiers; both MD5 and SHA-256 are functionally equivalent
 // for this gateway's purposes.
-
-// IsEncryptionMetadata checks if a metadata key is related to encryption.
-func IsEncryptionMetadata(key string) bool {
-	return key == MetaEncrypted ||
-		key == MetaAlgorithm ||
-		key == MetaKeySalt ||
-		key == MetaIV ||
-		key == MetaAuthTag ||
-		key == MetaOriginalSize ||
-		key == MetaOriginalETag ||
-		key == MetaContentType ||
-		key == MetaCacheControl ||
-		key == MetaContentDisposition ||
-		key == MetaChunkedFormat ||
-		key == MetaChunkSize ||
-		key == MetaChunkCount ||
-		key == MetaManifest ||
-		key == MetaKeyVersion ||
-		key == MetaWrappedKeyCiphertext ||
-		key == MetaKMSKeyID ||
-		key == MetaKMSProvider ||
-		key == MetaFallbackMode ||
-		key == MetaFallbackPointer ||
-		key == MetaFallbackVersion ||
-		key == MetaIVDerivation ||
-		key == MetaLegacyNoAAD ||
-		key == MetaKDFParams ||
-		key == MetaObjectFormatVersion ||
-		key == MetaObjectBindingID ||
-		key == MetaMPUManifestVersion
-}
 
 // buildAADLegacy is the old pipe-delimited AAD format.
 // Kept for backward compatibility when decrypting objects created

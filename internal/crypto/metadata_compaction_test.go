@@ -36,7 +36,8 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 	expectedCompacted := map[string]string{
 		"Content-Type":        "application/json",
 		"x-amz-meta-user-key": "user-value",
-		"x-amz-meta-e":        "true",                 // encrypted
+		MetaEncrypted:         "true",                 // clear encryption marker
+		"x-amz-meta-e":        "true",                 // compact encrypted marker
 		"x-amz-meta-a":        "AES256-GCM",           // algorithm
 		"x-amz-meta-s":        "dGVzdC1zYWx0",         // salt
 		"x-amz-meta-i":        "dGVzdC1pdg==",         // iv
@@ -63,7 +64,7 @@ func TestMetadataCompactor_ExpandMetadata(t *testing.T) {
 	compactedMetadata := map[string]string{
 		"Content-Type":        "application/json",
 		"x-amz-meta-user-key": "user-value",
-		"x-amz-meta-e":        "true",                 // encrypted
+		"x-amz-meta-e":        "true",                 // compact encrypted marker
 		"x-amz-meta-a":        "AES256-GCM",           // algorithm
 		"x-amz-meta-s":        "dGVzdC1zYWx0",         // salt
 		"x-amz-meta-i":        "dGVzdC1pdg==",         // iv

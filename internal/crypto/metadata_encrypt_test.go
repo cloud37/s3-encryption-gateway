@@ -1,25 +1,33 @@
 package crypto
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
+	"io"
 	"testing"
 )
 
 func TestEncryptDecryptMetadata_RoundTrip(t *testing.T) {
 	engine := newTestEngine(t)
+	engine.compactor = NewMetadataCompactor(ProviderAWS)
 
 	// Build a representative encMetadata map.
 	encMeta := map[string]string{
-		MetaEncrypted:    "true",
-		MetaAlgorithm:    "AES256-GCM",
-		MetaKeySalt:      "abc123+def456=",
-		MetaIV:           "nonce12345678",
-		MetaOriginalSize: "4096",
-		MetaOriginalETag: `"abc123def456"`,
-		MetaKDFParams:    "pbkdf2-sha256:600000",
-		"Content-Type":   "application/octet-stream",
-		"x-amz-meta-foo": "user-visible-header", // should remain outside blob
+		MetaEncrypted:       "true",
+		MetaAlgorithm:       "AES256-GCM",
+		MetaKeySalt:         "abc123+def456=",
+		MetaIV:              "nonce12345678",
+		MetaOriginalSize:    "4096",
+		MetaOriginalETag:    `"abc123def456"`,
+		MetaKDFParams:       "pbkdf2-sha256:600000",
+		"Content-Type":      "application/octet-stream",
+		"x-amz-meta-foo":    "user-visible-header", // should remain outside blob
+		MetaContentEncoding: "gzip",
+		MetaContentLanguage: "en-GB",
+		MetaExpires:         "Mon, 21 Oct 2030 07:28:00 GMT",
 	}
 
 	blob, err := engine.encryptMetadata(encMeta)
@@ -57,6 +65,11 @@ func TestEncryptDecryptMetadata_RoundTrip(t *testing.T) {
 	}
 	if decrypted[MetaKDFParams] != "pbkdf2-sha256:600000" {
 		t.Errorf("MetaKDFParams = %q, want %q", decrypted[MetaKDFParams], "pbkdf2-sha256:600000")
+	}
+	for key, want := range map[string]string{MetaContentEncoding: "gzip", MetaContentLanguage: "en-GB", MetaExpires: "Mon, 21 Oct 2030 07:28:00 GMT"} {
+		if decrypted[key] != want {
+			t.Errorf("%s = %q, want %q", key, decrypted[key], want)
+		}
 	}
 
 	// User-visible headers should NOT be in the encrypted subset.
@@ -116,6 +129,7 @@ func TestEncryptDecryptMetadata_TamperedCiphertext(t *testing.T) {
 
 func TestEncryptDecryptMetadata_EmptySubset(t *testing.T) {
 	engine := newTestEngine(t)
+	engine.compactor = NewMetadataCompactor(ProviderAWS)
 
 	// Metadata with no encryption/compression keys should still produce a
 	// valid blob containing an empty JSON object.
@@ -133,8 +147,69 @@ func TestEncryptDecryptMetadata_EmptySubset(t *testing.T) {
 		t.Fatalf("decryptMetadata failed: %v", err)
 	}
 
-	if len(decrypted) != 0 {
-		t.Errorf("expected empty decrypted map, got %v", decrypted)
+	if len(decrypted) != 1 || decrypted[MetaEncrypted] != "true" {
+		t.Errorf("expected empty subset plus clear encryption marker, got %v", decrypted)
+	}
+	compacted, err := engine.compactor.CompactMetadata(map[string]string{
+		MetaEncrypted: "true", MetaEncryptedMetadata: blob,
+	})
+	if err != nil {
+		t.Fatalf("CompactMetadata: %v", err)
+	}
+	if compacted[MetaEncrypted] != "true" {
+		t.Errorf("compaction dropped clear marker: %v", compacted)
+	}
+	expanded, err := engine.compactor.ExpandMetadata(compacted)
+	if err != nil {
+		t.Fatalf("ExpandMetadata: %v", err)
+	}
+	if expanded[MetaEncrypted] != "true" || expanded[MetaEncryptedMetadata] != blob {
+		t.Errorf("compaction expansion lost marker/blob: %v", expanded)
+	}
+	apiExpanded, err := engine.APIExpandedMetadata(compacted)
+	if err != nil {
+		t.Fatalf("APIExpandedMetadata: %v", err)
+	}
+	if apiExpanded[MetaEncrypted] != "true" || apiExpanded[MetaEncryptedMetadata] != "" {
+		t.Errorf("API metadata expansion did not retain marker and consume blob: %v", apiExpanded)
+	}
+}
+
+func TestEncryptChunked_MetadataKeyPreservesAllSixProtectedStandardHeaders(t *testing.T) {
+	standard := map[string]string{
+		"Content-Type": "application/example", "Cache-Control": "private",
+		"Content-Disposition": "attachment", "Content-Encoding": "gzip",
+		"Content-Language": "en-GB", "Expires": "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
+	for _, chunked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("chunked=%t", chunked), func(t *testing.T) {
+			engine, err := NewEngineWithOpts([]byte("metadata-key-standard-password"), WithChunking(chunked), WithChunkSize(MinChunkSize), WithMetadataKey(bytes.Repeat([]byte{0x42}, 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ciphertext, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "bucket", Key: "key"}, bytes.NewReader([]byte("payload")), standard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ciphertextBytes, err := io.ReadAll(ciphertext)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, spec := range ProtectedStandardKeys() {
+				if got := metadata[spec.Canonical]; got != standard[spec.Header] {
+					t.Errorf("protected %s=%q want %q", spec.Header, got, standard[spec.Header])
+				}
+			}
+			_, restored, err := engine.Decrypt(context.Background(), ObjectContext{Bucket: "bucket", Key: "key"}, bytes.NewReader(ciphertextBytes), metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, want := range standard {
+				if got := restored[name]; got != want {
+					t.Errorf("decrypted %s=%q want %q", name, got, want)
+				}
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/cipher"
+	"encoding/binary"
 	"io"
 	"testing"
 )
@@ -38,8 +39,8 @@ func TestEngine_MetadataFallback(t *testing.T) {
 	largeMetadata := map[string]string{
 		"Content-Type": "application/json",
 		"x-amz-meta-very-long-user-metadata-key-that-exceeds-limits": "very-long-user-metadata-value-that-will-cause-header-overflow",
-		"x-amz-meta-another-key":                                     "another-value",
-		"x-amz-meta-third-key":                                       "third-value",
+		"x-amz-meta-another-key": "another-value",
+		"x-amz-meta-third-key":   "third-value",
 	}
 
 	// Test data
@@ -210,16 +211,29 @@ func TestBufferedFallback_LegacyV1Compatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	gcm := aead.(cipher.AEAD)
-	full := map[string]string{MetaEncrypted: "true", MetaOriginalSize: "9", MetaOriginalETag: "legacy-etag", MetaContentType: "text/plain", "x-amz-meta-user": "restored"}
+	full := map[string]string{
+		MetaEncrypted: "true", MetaOriginalSize: "9", MetaOriginalETag: "legacy-etag",
+		MetaContentType: "text/plain", MetaCacheControl: "no-cache", MetaContentDisposition: "attachment",
+		MetaContentEncoding: "gzip", MetaContentLanguage: "en-GB", MetaExpires: "Mon, 21 Oct 2030 07:28:00 GMT",
+		"x-amz-meta-user": "restored",
+	}
 	encoded, err := encodeMetadataToJSON(full)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pt := append([]byte{0, 0, 0, byte(len(encoded))}, encoded...)
+	lengthPrefix := make([]byte, 4)
+	binary.BigEndian.PutUint32(lengthPrefix, uint32(len(encoded)))
+	pt := append(lengthPrefix, encoded...)
 	pt = append(pt, []byte("legacy-v1")...)
 	aad := buildAAD(AlgorithmAES256GCM, salt, iv, map[string]string{"Content-Type": "text/plain", MetaOriginalSize: "9"})
 	body := gcm.Seal(nil, iv, pt, aad)
-	meta := map[string]string{MetaEncrypted: "true", MetaFallbackMode: "true", MetaAlgorithm: AlgorithmAES256GCM, MetaKeySalt: encodeBase64(salt), MetaIV: encodeBase64(iv), MetaKDFParams: FormatKDFParams(e.defaultKDFParams()), MetaOriginalSize: "9", MetaContentType: "text/plain"}
+	meta := map[string]string{
+		MetaEncrypted: "true", MetaFallbackMode: "true", MetaAlgorithm: AlgorithmAES256GCM,
+		MetaKeySalt: encodeBase64(salt), MetaIV: encodeBase64(iv), MetaKDFParams: FormatKDFParams(e.defaultKDFParams()),
+		MetaOriginalSize: "9", MetaContentType: "text/plain", MetaCacheControl: "no-cache",
+		MetaContentDisposition: "attachment", MetaContentEncoding: "gzip", MetaContentLanguage: "en-GB",
+		MetaExpires: "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
 	r, restored, err := e.Decrypt(context.Background(), ObjectContext{Bucket: "legacy", Key: "object"}, bytes.NewReader(body), meta)
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +244,14 @@ func TestBufferedFallback_LegacyV1Compatibility(t *testing.T) {
 	}
 	if restored["x-amz-meta-user"] != "restored" {
 		t.Fatal("legacy user metadata not restored")
+	}
+	for header, want := range map[string]string{
+		"Content-Type": "text/plain", "Cache-Control": "no-cache", "Content-Disposition": "attachment",
+		"Content-Encoding": "gzip", "Content-Language": "en-GB", "Expires": "Mon, 21 Oct 2030 07:28:00 GMT",
+	} {
+		if restored[header] != want {
+			t.Errorf("fallback-v1 %s=%q want %q", header, restored[header], want)
+		}
 	}
 }
 

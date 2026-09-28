@@ -25,7 +25,8 @@ func (e *engine) encryptMetadata(encMeta map[string]string) (string, error) {
 	// Extract encryption metadata subset.
 	subset := make(map[string]string)
 	for k, v := range encMeta {
-		if IsEncryptionMetadata(k) {
+		spec, registered := LookupMetaKey(k)
+		if isEncryptionPayloadMetadata(k) || (registered && spec.Class == MetaClassProtectedStandard) {
 			subset[k] = v
 		}
 	}
@@ -100,5 +101,9 @@ func (e *engine) decryptMetadata(blob string) (map[string]string, error) {
 	if err := json.Unmarshal(plaintext, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
+	// The clear marker is returned even when the encrypted subset is empty.
+	// Empty plaintext objects still have valid buffered-v2 metadata and must be
+	// recognized as encrypted so their authentication tag is not served as data.
+	result[MetaEncrypted] = "true"
 	return result, nil
 }

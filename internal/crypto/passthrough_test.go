@@ -149,6 +149,14 @@ func TestIsEncryptedMetadata_CompactedKey(t *testing.T) {
 	}
 }
 
+func TestIsEncryptedMetadata_CaseInsensitiveKeys(t *testing.T) {
+	for _, key := range []string{"X-Amz-Meta-Encrypted", "X-Amz-Meta-E"} {
+		if !IsEncryptedMetadata(map[string]string{key: "true"}) {
+			t.Errorf("IsEncryptedMetadata should recognize %q", key)
+		}
+	}
+}
+
 func TestIsEncryptedMetadata_FalseValue(t *testing.T) {
 	if IsEncryptedMetadata(map[string]string{MetaEncrypted: "false"}) {
 		t.Fatal("IsEncryptedMetadata should return false for false value")

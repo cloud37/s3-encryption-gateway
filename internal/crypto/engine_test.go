@@ -18,6 +18,9 @@ func TestEngine_StandardObjectMetadataRoundTrip(t *testing.T) {
 		"Content-Type":        "text/plain",
 		"Cache-Control":       "max-age=3600",
 		"Content-Disposition": `attachment; filename="test.txt"`,
+		"Content-Encoding":    "gzip",
+		"Content-Language":    "en-GB",
+		"Expires":             "Mon, 21 Oct 2030 07:28:00 GMT",
 	}
 	ciphertext, metadata, err := engine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader([]byte("metadata")), original)
 	if err != nil {
@@ -34,6 +37,9 @@ func TestEngine_StandardObjectMetadataRoundTrip(t *testing.T) {
 		"Content-Type":        "text/plain",
 		"Cache-Control":       original["Cache-Control"],
 		"Content-Disposition": original["Content-Disposition"],
+		"Content-Encoding":    original["Content-Encoding"],
+		"Content-Language":    original["Content-Language"],
+		"Expires":             original["Expires"],
 	} {
 		if restored[key] != want {
 			t.Errorf("%s = %q, want %q", key, restored[key], want)
