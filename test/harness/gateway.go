@@ -2,7 +2,15 @@ package harness
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -47,6 +55,7 @@ type Gateway struct {
 
 	server   *http.Server
 	listener net.Listener
+	tls      bool
 }
 
 // headObjectOverrideClient wraps an s3.Client and overrides Content-Length in
@@ -110,6 +119,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			},
 		},
 	}
+	cfg.TLS.Enabled = o.useTLS
 	cfg.Encryption.KDF.DecryptLimits = config.KDFDecryptLimitsConfig{PBKDF2: config.PBKDF2DecryptLimitsConfig{MaxIterations: o.kdfDecryptLimits.PBKDF2MaxIterations}, Argon2id: config.Argon2idDecryptLimitsConfig{MaxTime: o.kdfDecryptLimits.Argon2idMaxTime, MaxMemory: o.kdfDecryptLimits.Argon2idMaxMemory, MaxThreads: o.kdfDecryptLimits.Argon2idMaxThreads}}
 
 	// Apply WithAuth credentials before extraConfig so extraConfig can override.
@@ -138,7 +148,18 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	}
 
 	addr := listener.Addr().String()
-	url := "http://" + addr
+	scheme := "http"
+	serveListener := listener
+	if o.useTLS {
+		cert, certErr := gatewayTestCertificate()
+		if certErr != nil {
+			listener.Close()
+			t.Fatalf("harness.StartGateway: create TLS certificate: %v", certErr)
+		}
+		serveListener = tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+		scheme = "https"
+	}
+	url := scheme + "://" + addr
 
 	// Logger.
 	logger := logrus.New()
@@ -321,7 +342,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	}
 
 	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(serveListener); err != nil && err != http.ErrServerClosed {
 			t.Logf("harness gateway server error: %v", err)
 		}
 	}()
@@ -336,7 +357,8 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			listener.Close()
 			t.Fatal("harness.StartGateway: timeout waiting for gateway to become ready")
 		default:
-			resp, err := http.Get(url + "/health")
+			readyClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: o.useTLS}}} // #nosec G402 -- the test-only TLS certificate is self-signed
+			resp, err := readyClient.Get(url + "/health")
 			if err == nil {
 				resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
@@ -354,6 +376,7 @@ ready:
 		Metrics:  reg,
 		server:   server,
 		listener: listener,
+		tls:      o.useTLS,
 	}
 
 	// Optional admin listener — wire when WithAdminServer was requested.
@@ -450,5 +473,43 @@ ready:
 // abort mid-stream because of a client-side deadline.  The overall test-run
 // timeout is still governed by go test's -timeout flag.
 func (g *Gateway) HTTPClient() *http.Client {
-	return &http.Client{Timeout: 5 * time.Minute}
+	transport := &http.Transport{}
+	if g.tls {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- test-only self-signed certificate
+	}
+	return &http.Client{Timeout: 5 * time.Minute, Transport: transport}
+}
+
+func gatewayTestCertificate() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	now := time.Now()
+	template := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "s3-encryption-gateway test"},
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+	)
 }

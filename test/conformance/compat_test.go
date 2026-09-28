@@ -289,6 +289,28 @@ func testCompatSmoke_AWSCLI(t *testing.T, inst provider.Instance) {
 	_ = gw
 }
 
+// testCompat_HTTPSUnsignedTrailer ensures the CI conformance matrix covers the
+// authenticated HTTPS aws-chunked mode selected by current AWS CLI v2 and
+// boto3. Its single-part and multipart uploads exercise PutObject and
+// UploadPart, respectively (issue #329).
+func testCompat_HTTPSUnsignedTrailer(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	credential := config.GatewayCredential{AccessKey: inst.AccessKey, SecretKey: inst.SecretKey}
+	gw := harness.StartGateway(t, inst, harness.WithTLS(true), harness.WithAuth(credential))
+	env := sdkTestEnv{
+		Endpoint: gw.URL, Region: inst.Region, AccessKey: inst.AccessKey, SecretKey: inst.SecretKey,
+		Bucket: inst.Bucket, Key: compatUniqueKey(t),
+	}
+	if err := runToolContainer(ctx, t, &awscliUnsignedTrailerRunner{}, env); err != nil {
+		t.Fatalf("awscli HTTPS unsigned trailer: %v", err)
+	}
+	if err := runToolContainer(ctx, t, &boto3UnsignedTrailerRunner{}, env); err != nil {
+		t.Fatalf("boto3 HTTPS unsigned trailer: %v", err)
+	}
+}
+
 // testCompatSmoke_S5cmd exercises the smoke-test baseline using s5cmd.
 func testCompatSmoke_S5cmd(t *testing.T, inst provider.Instance) {
 	t.Helper()

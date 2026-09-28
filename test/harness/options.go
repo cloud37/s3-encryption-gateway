@@ -50,6 +50,7 @@ type options struct {
 	// authCredentials holds credentials configured via WithAuth.
 	authCredentials     []config.GatewayCredential
 	allowBucketCreation bool
+	useTLS              bool
 
 	// adminEnabled, when true, starts an admin listener alongside the gateway.
 	// The bearer token is adminToken (plain inline — test-only). The admin
@@ -218,6 +219,14 @@ func WithAuth(creds ...config.GatewayCredential) Option {
 	return func(o *options) {
 		o.authCredentials = append(o.authCredentials, creds...)
 	}
+}
+
+// WithTLS serves the in-process gateway over HTTPS with a test-only,
+// self-signed certificate. Gateway.HTTPClient trusts that certificate for the
+// lifetime of the test. External client compatibility tests should explicitly
+// disable certificate verification when using this option.
+func WithTLS(enabled bool) Option {
+	return func(o *options) { o.useTLS = enabled }
 }
 
 // WithMetadataEncryptionKey sets the 32-byte AES key used for encrypting

@@ -69,6 +69,42 @@ func (r *boto3Runner) Script(env sdkTestEnv) string {
 		"python3 /tmp/test_boto3.py"
 }
 
+// boto3UnsignedTrailerRunner exercises the HTTPS streaming mode used by
+// current boto3 releases. The large body forces multipart UploadPart requests
+// in addition to the single-part PutObject request.
+type boto3UnsignedTrailerRunner struct{}
+
+func (r *boto3UnsignedTrailerRunner) Name() string  { return "boto3-unsigned-trailer" }
+func (r *boto3UnsignedTrailerRunner) Image() string { return pythonImage }
+func (r *boto3UnsignedTrailerRunner) Script(env sdkTestEnv) string {
+	return "set -e\npip install -q boto3==" + boto3Version + "\n" +
+		"cat > /tmp/test_boto3_unsigned_trailer.py << 'PYEOF'\n" +
+		"import os, boto3\n" +
+		"from boto3.s3.transfer import TransferConfig\n" +
+		"from botocore.config import Config\n" +
+		"s3 = boto3.client('s3', endpoint_url=os.environ['GATEWAY_ENDPOINT'], aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'], region_name=os.environ['AWS_DEFAULT_REGION'], verify=False, config=Config(s3={'addressing_style': 'path'}))\n" +
+		"bucket, key = os.environ['GATEWAY_BUCKET'], os.environ['GATEWAY_KEY']\n" +
+		"single = b'boto3 authenticated unsigned trailer put' * 4096\n" +
+		"s3.put_object(Bucket=bucket, Key=key, Body=single)\n" +
+		"assert s3.get_object(Bucket=bucket, Key=key)['Body'].read() == single\n" +
+		"multi = b'boto3 authenticated unsigned trailer multipart' * (6 * 1024 * 1024 // 46 + 1)\n" +
+		"open('/tmp/multipart.bin', 'wb').write(multi)\n" +
+		"s3.upload_file('/tmp/multipart.bin', bucket, key + '-mp', Config=TransferConfig(multipart_threshold=5 * 1024 * 1024, multipart_chunksize=5 * 1024 * 1024))\n" +
+		"assert s3.get_object(Bucket=bucket, Key=key + '-mp')['Body'].read() == multi\n" +
+		"s3.delete_objects(Bucket=bucket, Delete={'Objects': [{'Key': key}, {'Key': key + '-mp'}], 'Quiet': True})\n" +
+		"print('boto3-unsigned-trailer:OK')\n" +
+		"PYEOF\npython3 /tmp/test_boto3_unsigned_trailer.py"
+}
+func (r *boto3UnsignedTrailerRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("boto3 unsigned trailer exited %d", code)
+	}
+	if !strings.Contains(out, "boto3-unsigned-trailer:OK") {
+		return fmt.Errorf("boto3 unsigned trailer: expected OK marker in stdout")
+	}
+	return nil
+}
+
 func (r *boto3Runner) AssertOutput(code int, out, _ string) error {
 	if code != 0 {
 		return fmt.Errorf("boto3 exited %d", code)
@@ -94,6 +130,36 @@ func (r *awscliListBucketsRunner) Name() string  { return "awscli-list-buckets" 
 func (r *awscliListBucketsRunner) Image() string { return awsCLIImage }
 func (r *awscliListBucketsRunner) Script(env sdkTestEnv) string {
 	return fmt.Sprintf("set -e\naws s3 ls --endpoint-url \"$GATEWAY_ENDPOINT\" | grep -q %[1]s\necho 'awscli-list-buckets:OK'\n", env.Bucket)
+}
+
+// awscliUnsignedTrailerRunner exercises the authenticated HTTPS upload mode
+// used by AWS CLI v2. A >8 MiB file makes `aws s3 cp` use UploadPart.
+type awscliUnsignedTrailerRunner struct{}
+
+func (r *awscliUnsignedTrailerRunner) Name() string  { return "awscli-unsigned-trailer" }
+func (r *awscliUnsignedTrailerRunner) Image() string { return awsCLIImage }
+func (r *awscliUnsignedTrailerRunner) Script(env sdkTestEnv) string {
+	return fmt.Sprintf("set -e\n"+
+		"dd if=/dev/zero of=/tmp/single.bin bs=1M count=1 status=none\n"+
+		"aws s3api put-object --bucket %[1]s --key %[2]s --body /tmp/single.bin --endpoint-url \"$GATEWAY_ENDPOINT\" --no-verify-ssl > /dev/null\n"+
+		"aws s3api get-object --bucket %[1]s --key %[2]s /tmp/single-download.bin --endpoint-url \"$GATEWAY_ENDPOINT\" --no-verify-ssl > /dev/null\n"+
+		"test \"$(sha256sum /tmp/single.bin | awk '{print $1}')\" = \"$(sha256sum /tmp/single-download.bin | awk '{print $1}')\"\n"+
+		"dd if=/dev/zero of=/tmp/multipart.bin bs=1M count=9 status=none\n"+
+		"aws s3 cp /tmp/multipart.bin s3://%[1]s/%[2]s-mp --endpoint-url \"$GATEWAY_ENDPOINT\" --no-verify-ssl\n"+
+		"aws s3 cp s3://%[1]s/%[2]s-mp /tmp/multipart-download.bin --endpoint-url \"$GATEWAY_ENDPOINT\" --no-verify-ssl\n"+
+		"test \"$(sha256sum /tmp/multipart.bin | awk '{print $1}')\" = \"$(sha256sum /tmp/multipart-download.bin | awk '{print $1}')\"\n"+
+		"aws s3 rm s3://%[1]s/%[2]s --endpoint-url \"$GATEWAY_ENDPOINT\" --no-verify-ssl\n"+
+		"aws s3 rm s3://%[1]s/%[2]s-mp --endpoint-url \"$GATEWAY_ENDPOINT\" --no-verify-ssl\n"+
+		"echo 'awscli-unsigned-trailer:OK'\n", env.Bucket, env.Key)
+}
+func (r *awscliUnsignedTrailerRunner) AssertOutput(code int, out, _ string) error {
+	if code != 0 {
+		return fmt.Errorf("awscli unsigned trailer exited %d", code)
+	}
+	if !strings.Contains(out, "awscli-unsigned-trailer:OK") {
+		return fmt.Errorf("awscli unsigned trailer: expected OK marker in stdout")
+	}
+	return nil
 }
 func (r *awscliListBucketsRunner) AssertOutput(code int, out, _ string) error {
 	if code != 0 {
