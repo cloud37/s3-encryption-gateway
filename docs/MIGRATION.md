@@ -73,9 +73,9 @@ expected verified-body workload; the default aggregate spool budget is 10 GiB
 per gateway process. After rollout, verify a signed ListObjects request through
 the gateway as well as `/ready`.
 
-The chart after `0.12.0` provides the `/tmp` `emptyDir` and spool setting by
-default. Existing `extraVolumeMounts` entries at `/tmp` take precedence; keep
-them writable. The explicit values above remain necessary for the published
+The `0.12.1` chart provides the `/tmp` `emptyDir` and spool setting by default.
+Existing `extraVolumeMounts` entries at `/tmp` take precedence; keep them
+writable. The explicit values above remain necessary for the published
 `0.12.0` chart.
 
 For a Helm-managed upgrade, install or upgrade the chart at `0.12.0` and use

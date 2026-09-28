@@ -3,7 +3,9 @@
 This document describes the steps required to publish a new release of
 `s3-encryption-gateway`. The CI pipeline (`.github/workflows/helm.yml`) handles
 most automation; this checklist covers the manual preparation steps that
-maintainers must complete before tagging a release.
+maintainers must complete before releasing a new chart version from `main` or
+`master`. The workflow derives the release tag from `Chart.yaml` as
+`s3-encryption-gateway-<version>`.
 
 ## Pre-Release Checklist
 
@@ -72,7 +74,8 @@ if the version has already been published.
 
 ## CI Pipeline
 
-After tagging, the `helm.yml` release workflow:
+After a push to `main` or `master` with a new chart version, the `helm.yml`
+release workflow:
 
 1. Runs `chart-releaser-action` to publish the Helm chart to the `gh-pages`
    branch (skipped if version already published).

@@ -6,10 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
-- **Helm writable spool default:** The gateway chart mounts a disk-backed
-  `emptyDir` at `/tmp` and sets the spool directory there, so signed requests
-  work with the default read-only root filesystem. Existing `/tmp` mounts
-  supplied through `extraVolumeMounts` take precedence.
+## [0.12.1] — 2026-09-28
+
+This hotfix release restores authenticated HTTPS upload compatibility for
+current AWS CLI and boto3 clients, and fixes the default Helm deployment's
+writable verified-body spool storage.
+
+### Fixed
+
+- **Authenticated unsigned AWS-chunked trailers (GH-329):** Valid
+  `STREAMING-UNSIGNED-PAYLOAD-TRAILER` PutObject and UploadPart requests no
+  longer fail with `400 InvalidRequest` when gateway credentials and TLS are
+  enabled. The gateway now requires per-chunk signatures only for the two
+  signed streaming modes; unsigned-trailer requests retain SigV4 header
+  authentication and trailer-checksum validation.
+
+- **Helm writable verified-body spool:** The chart now mounts a disk-backed
+  `emptyDir` at `/tmp` and configures that directory as the verified-body spool
+  location. Signed requests therefore work with the default read-only root
+  filesystem. Operator-provided `/tmp` mounts through `extraVolumeMounts` take
+  precedence.
+
+### Changed
+
+- **HTTPS client compatibility coverage:** Tier 2 conformance now exercises
+  authenticated TLS single-part and multipart uploads using the pinned AWS CLI
+  and boto3 compatibility clients, covering the unsigned AWS-chunked trailer
+  path before release.
+
+### Dependencies
+
+- Updated the AWS SDK for Go v2 monorepo, including `config`, `credentials`,
+  and S3 service modules, to the latest compatible patch releases.
+- Updated the AWS CLI compatibility image to v2.37.4.
+- Updated boto3 compatibility testing to v1.43.103.
+- Updated the OpenBao compatibility image to v2.7.0.
+
+### Documentation
+
+- Documented the writable-spool upgrade requirement for the published 0.12.0
+  chart and the default spool behavior in 0.12.1.
+- Archived completed 0.12 implementation records, including the ListBuckets
+  forwarding work, in the versioned issue history.
 
 ## [0.12.0] — 2026-09-21
 
