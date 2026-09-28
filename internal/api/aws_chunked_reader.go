@@ -24,13 +24,18 @@ func verifyAWSChunked(b *bufio.Reader, dst io.Writer, signing *V4SigningContext,
 
 func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningContext, decodedLength int64, trailers bool, done <-chan struct{}) (total int64, final [32]byte, err error) {
 	var previous [32]byte
+	// STREAMING-UNSIGNED-PAYLOAD-TRAILER is authenticated by the request's
+	// SigV4 header signature and its declared trailer checksum. Its AWS-chunked
+	// framing deliberately has no chunk-signature extensions. Only the two
+	// signed streaming modes carry a chained signature on every chunk.
+	verifyChunkSignatures := signing != nil && signing.mode != streamingUnsignedPayloadTrailer
 	defer func() {
 		clearAuthBytes(previous[:])
 		if err != nil {
 			clearAuthBytes(final[:])
 		}
 	}()
-	if signing != nil {
+	if verifyChunkSignatures {
 		signing.closeMu.Lock()
 		closed := signing.closed || len(signing.signingKey) == 0
 		signing.closeMu.Unlock()
@@ -60,7 +65,7 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 		line = line[:len(line)-2]
 		sizeText := line
 		supplied := ""
-		if signing != nil {
+		if verifyChunkSignatures {
 			const marker = ";chunk-signature="
 			i := indexByteString(line, marker)
 			if i < 1 || indexByteString(line[i+len(marker):], ";") >= 0 {
@@ -70,10 +75,11 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 			if !validLowerHex(supplied, 64) {
 				return total, previous, ErrStreamingFraming
 			}
-		} else if i := indexByteString(line, ";chunk-signature="); i >= 1 {
+		} else if signing == nil && indexByteString(line, ";chunk-signature=") >= 1 {
 			// Authentication is optional at the gateway boundary. Decode the
 			// standard signed framing even when no signing context is available;
 			// the signature remains verified whenever authentication is enabled.
+			i := indexByteString(line, ";chunk-signature=")
 			if indexByteString(line[i+len(";chunk-signature="):], ";") >= 0 || !validLowerHex(line[i+len(";chunk-signature="):], 64) {
 				return total, previous, ErrStreamingFraming
 			}
@@ -95,7 +101,7 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 			return total, previous, ErrStreamingFraming
 		}
 		if size == 0 {
-			if signing != nil {
+			if verifyChunkSignatures {
 				if err := verifyChunkSignature(signing, previous, supplied, nil); err != nil {
 					return total, previous, err
 				}
@@ -138,7 +144,7 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 			}
 		}
 		var dataHash hashWriter
-		if signing != nil {
+		if verifyChunkSignatures {
 			dataHash.h = sha256.New()
 		}
 		// Stage the chunk on disk until its signature has been accepted. This
@@ -162,7 +168,7 @@ func verifyAWSChunkedContext(b *bufio.Reader, dst io.Writer, signing *V4SigningC
 			cleanupChunk()
 			return total, previous, ErrStreamingFraming
 		}
-		if signing != nil {
+		if verifyChunkSignatures {
 			if err := verifyChunkSignatureHash(signing, previous, supplied, dataHash.h.Sum(nil)); err != nil {
 				cleanupChunk()
 				return total, previous, err

@@ -161,6 +161,9 @@ func sec41AuthRequestBody(method, rawURL, mode, body string, decoded int, traile
 		r.Header.Set("X-Amz-Trailer", trailer)
 	}
 	signed := []string{"content-encoding", "host", "x-amz-content-sha256", "x-amz-date", "x-amz-decoded-content-length"}
+	if trailer != "" {
+		signed = append(signed, "x-amz-trailer")
+	}
 	canonical := sec41CanonicalRequest(r, signed)
 	hash := sec41Hash([]byte(canonical))
 	key := sec41SigningKey(secret, date, "us-east-1", "s3")
@@ -169,14 +172,36 @@ func sec41AuthRequestBody(method, rawURL, mode, body string, decoded int, traile
 	return r
 }
 
+// sec41AuthUnsignedTrailerRequest independently creates the authenticated wire
+// form produced by AWS clients for STREAMING-UNSIGNED-PAYLOAD-TRAILER. Unlike
+// signed streaming payloads, neither data chunks nor the terminal chunk carry
+// chunk-signature extensions; integrity is supplied by the declared trailer
+// checksum.
+func sec41AuthUnsignedTrailerRequest(method, rawURL string, payload []byte, badChecksum bool) *http.Request {
+	digest := sha256.Sum256(payload)
+	if badChecksum {
+		digest = [sha256.Size]byte{}
+	}
+	checksum := base64.StdEncoding.EncodeToString(digest[:])
+	var body strings.Builder
+	for _, chunk := range [][]byte{payload[:len(payload)/2], payload[len(payload)/2:]} {
+		if len(chunk) == 0 {
+			continue
+		}
+		fmt.Fprintf(&body, "%x\r\n", len(chunk))
+		body.Write(chunk)
+		body.WriteString("\r\n")
+	}
+	fmt.Fprintf(&body, "0\r\nx-amz-checksum-sha256: %s\r\n\r\n", checksum)
+	return sec41AuthRequestBody(method, rawURL, "STREAMING-UNSIGNED-PAYLOAD-TRAILER", body.String(), len(payload), "x-amz-checksum-sha256")
+}
+
 // sec41AuthSignedTrailerRequest builds the wire body and signs only the HTTP
 // request headers here. The trailer signature is deliberately calculated in
 // this test helper rather than through production signing code.
 func sec41AuthSignedTrailerRequest(method, rawURL string, payload []byte, badChecksum, badHMAC bool) *http.Request {
 	if badChecksum {
-		bad := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, sha256.Size))
-		body := fmt.Sprintf("%x\r\n%s\r\n0\r\nx-amz-checksum-sha256: %s\r\n\r\n", len(payload), payload, bad)
-		return sec41AuthRequestBody(method, rawURL, "STREAMING-UNSIGNED-PAYLOAD-TRAILER", body, len(payload), "x-amz-checksum-sha256")
+		return sec41AuthUnsignedTrailerRequest(method, rawURL, payload, true)
 	}
 	_, secret := "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 	// Use the independent header signer, then replace only the wire body.

@@ -800,7 +800,7 @@ func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
 		name, code, message  string
 		badChecksum, badHMAC bool
 	}{
-		{"signed trailer checksum mismatch", "InvalidRequest", "The AWS-chunked request body is invalid.", true, false},
+		{"unsigned trailer checksum mismatch", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", true, false},
 		{"signed trailer HMAC mismatch", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -822,6 +822,39 @@ func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
 				t.Fatalf("invalid signed trailer mutated backend: calls=%d objects=%d metadata=%d", client.putObjectCallCount, len(client.objects), len(client.metadata))
 			}
 		})
+	}
+}
+
+// Issue #329: AWS CLI and boto3 use unsigned aws-chunked payload trailers for
+// authenticated HTTPS uploads. The header signature authenticates the request;
+// individual chunks intentionally have no chunk-signature extension.
+func TestHandlePutObject_AuthenticatedUnsignedTrailerRoundTrip(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
+	require.NoError(t, err)
+	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+
+	data := []byte("authenticated unsigned trailer payload")
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, sec41AuthUnsignedTrailerRequest(http.MethodPut, "/bucket/unsigned-trailer", data, false))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status/body = %d/%s", w.Code, w.Body.String())
+	}
+	if client.putObjectCallCount != 1 {
+		t.Fatalf("PutObject called %d times, want 1", client.putObjectCallCount)
+	}
+	stored, ok := client.objects["bucket/unsigned-trailer"]
+	if !ok {
+		t.Fatal("object was not stored")
+	}
+	plain, _, err := engine.Decrypt(context.Background(), crypto.ObjectContext{Bucket: "bucket", Key: "unsigned-trailer"}, bytes.NewReader(stored), client.metadata["bucket/unsigned-trailer"])
+	require.NoError(t, err)
+	got, err := io.ReadAll(plain)
+	require.NoError(t, err)
+	if !bytes.Equal(got, data) {
+		t.Fatalf("stored plaintext = %q, want %q", got, data)
 	}
 }
 

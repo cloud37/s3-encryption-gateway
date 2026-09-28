@@ -289,6 +289,15 @@ func TestSEC41R7SpoolAndResponseBranches(t *testing.T) {
 	if _, err := verifyAndSpoolAWSBody(trailer, nil); err == nil {
 		t.Fatal("missing trailer block accepted")
 	}
+	unsignedSignedChunk := httptest.NewRequest("PUT", "http://example.test", strings.NewReader("1;chunk-signature="+strings.Repeat("0", 64)+"\r\nx\r\n0;chunk-signature="+strings.Repeat("0", 64)+"\r\nx-amz-checksum-sha256: LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7qqmEpAQE0d5Vw=\r\n\r\n"))
+	unsignedSignedChunk.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	unsignedSignedChunk.Header.Set("Content-Encoding", "aws-chunked")
+	unsignedSignedChunk.Header.Set("X-Amz-Decoded-Content-Length", "1")
+	unsignedSignedChunk.Header.Set("X-Amz-Trailer", "x-amz-checksum-sha256")
+	unsignedSigning := &V4SigningContext{mode: streamingUnsignedPayloadTrailer}
+	if _, err := verifyAndSpoolAWSBody(unsignedSignedChunk, unsignedSigning); !errors.Is(err, ErrStreamingFraming) {
+		t.Fatalf("unsigned trailer accepted chunk signatures: %v", err)
+	}
 	for _, tc := range []struct{ sha, encoding, length string }{
 		{"STREAMING-UNSIGNED-PAYLOAD-TRAILER", "aws-chunked", ""},
 		{"STREAMING-UNSIGNED-PAYLOAD-TRAILER", "aws-chunked", "1"},

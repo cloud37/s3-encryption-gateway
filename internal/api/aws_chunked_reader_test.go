@@ -259,7 +259,7 @@ func TestAWSChunkedVerifier_StrictCRLFAndHeaderBounds(t *testing.T) {
 func TestAWSChunkedVerifier_SignedChain(t *testing.T) {
 	key := []byte("independent-test-signing-key")
 	seed := sha256.Sum256([]byte("seed signature"))
-	c := &V4SigningContext{timestamp: "20130524T000000Z", credentialScope: "20130524/us-east-1/s3/aws4_request", signingKey: append([]byte(nil), key...), seedSignature: seed}
+	c := &V4SigningContext{timestamp: "20130524T000000Z", credentialScope: "20130524/us-east-1/s3/aws4_request", signingKey: append([]byte(nil), key...), seedSignature: seed, mode: streamingSignedPayload}
 	defer c.Close()
 	parts := [][]byte{[]byte("first chunk"), []byte("middle chunk"), []byte("final chunk")}
 	var body strings.Builder

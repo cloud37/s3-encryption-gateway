@@ -1611,9 +1611,9 @@ func TestHandleUploadPart_InvalidStreamingBody_NoBackendOrStateCommit(t *testing
 					r.Body = io.NopCloser(strings.NewReader("3\r\nabc\r\n0\r\nextra"))
 					return r
 				}, "400", "InvalidRequest", "The AWS-chunked request body is invalid."},
-				{"signed trailer checksum mismatch", func(u, _ string) *http.Request {
+				{"unsigned trailer checksum mismatch", func(u, _ string) *http.Request {
 					return sec41AuthSignedTrailerRequest("PUT", u, []byte("trailer payload"), true, false)
-				}, "400", "InvalidRequest", "The AWS-chunked request body is invalid."},
+				}, "403", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method."},
 				{"signed trailer HMAC mismatch", func(u, _ string) *http.Request {
 					return sec41AuthSignedTrailerRequest("PUT", u, []byte("trailer payload"), false, true)
 				}, "403", "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method."},
@@ -1678,6 +1678,36 @@ func TestHandleUploadPart_InvalidStreamingBody_NoBackendOrStateCommit(t *testing
 				})
 			}
 		})
+	}
+}
+
+// Issue #329: UploadPart must accept the unsigned aws-chunked trailer framing
+// emitted by authenticated AWS SDK clients over HTTPS.
+func TestHandleUploadPart_AuthenticatedUnsignedTrailerRoundTrip(t *testing.T) {
+	handler, client, _ := newMPUTestHandler(t, "issue329-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	bucket, key := "issue329-bucket", "unsigned-trailer-part"
+	create := httptest.NewRecorder()
+	router.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/"+bucket+"/"+key+"?uploads", nil))
+	if create.Code != http.StatusOK {
+		t.Fatalf("initiate status/body = %d/%s", create.Code, create.Body.String())
+	}
+	uploadID := extractUploadID(t, create.Body.String())
+	t.Cleanup(func() {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/"+bucket+"/"+key+"?uploadId="+url.QueryEscape(uploadID), nil))
+	})
+
+	data := []byte("authenticated unsigned trailer multipart payload")
+	w := httptest.NewRecorder()
+	sec41AuthedRouter(router).ServeHTTP(w, sec41AuthUnsignedTrailerRequest(http.MethodPut, "/"+bucket+"/"+key+"?partNumber=1&uploadId="+url.QueryEscape(uploadID), data, false))
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload part status/body = %d/%s", w.Code, w.Body.String())
+	}
+	partKey := bucket + "|" + key + "|" + uploadID + "|1"
+	if _, ok := client.parts[partKey]; !ok {
+		t.Fatalf("accepted part %q was not stored", partKey)
 	}
 }
 
