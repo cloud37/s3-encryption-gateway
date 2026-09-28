@@ -32,7 +32,7 @@ Install a specific chart version with:
 
 ```bash
 helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway-helm \
-  --version 0.12.0
+  --version 0.12.1
 ```
 
 For strongest artifact pinning, install by the immutable manifest digest:
@@ -389,6 +389,14 @@ Use the built-in Valkey subchart for development or point at an external cluster
 > same value. Do not use this upgrade path with multiple old replicas, because
 > legacy writers cannot be detected by the new release.
 
+> **Writable spool storage:** The published `0.12.0` chart requires an explicit
+> writable mount for signed requests when using the default read-only root
+> filesystem; see the [chart values example](../../docs/MIGRATION.md#temporary-spool-storage-for-helm-deployments).
+> Version `0.12.1` mounts a disk-backed `emptyDir` at `/tmp` and sets
+> `config.server.spoolDirectory.value: /tmp` by default. An existing
+> `extraVolumeMounts` entry at `/tmp` takes precedence over the built-in mount.
+> If you set the spool directory to another path, supply a writable mount there.
+
 **ListObjects size cache (`config.listSizeTranslate.*`)** — V1.0-S3-3. Reuses the
 Valkey instance above; no separate deployment. All fields use the
 `configValue` shape (`.value` / `.valueFrom`).
@@ -512,7 +520,7 @@ Valkey instance above; no separate deployment. All fields use the
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
-| `image.tag` | Container image tag | `"0.12.0"` |
+| `image.tag` | Container image tag | `"0.12.1"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override the chart name portion of resource names | `""` |
@@ -1204,7 +1212,7 @@ helm install gw-blue . \
 
 # Green side (new version):
 helm install gw-green . \
-  --set image.tag=0.12.0 \
+  --set image.tag=0.12.1 \
   --values examples/values-green.yaml \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
 
@@ -1299,7 +1307,7 @@ changes.
 
 5. **TLS**: Enable TLS on the gateway listener (`config.tls.enabled`) and use cert-manager for automatic certificate rotation.
 
-6. **FIPS**: Use `image.tag: 0.12.0-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
+6. **FIPS**: Use `image.tag: 0.12.1-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
 
 ## Troubleshooting
 
