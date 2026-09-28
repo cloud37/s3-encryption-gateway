@@ -22,6 +22,7 @@ import (
 
 	"github.com/cloud37/s3-encryption-gateway/internal/admin"
 	"github.com/cloud37/s3-encryption-gateway/internal/api"
+	"github.com/cloud37/s3-encryption-gateway/internal/cache"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
@@ -294,6 +295,9 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		s3Client, encryptionEngine, logger, m,
 		o.keyManager, nil, o.auditLogger, cfg, o.policyManager,
 	).WithSpoolManager(spoolManager)
+	if cfg.Cache.Enabled {
+		handler.WithCache(cache.NewMemoryCache(cfg.Cache.MaxSize, cfg.Cache.MaxItems, cfg.Cache.DefaultTTL))
+	}
 	if o.mpuStore != nil {
 		handler.WithMPUStateStore(o.mpuStore)
 		stopHealthCheck := mpu.StartHealthCheck(context.Background(), o.mpuStore, cfg.MultipartState.Valkey.HealthCheckInterval, m.SetMPUValkeyUp)

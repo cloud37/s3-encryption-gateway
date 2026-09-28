@@ -224,56 +224,95 @@ func testDeleteVersionedEncryptedMPU(t *testing.T, inst provider.Instance) {
 		t.Skipf("versioning unavailable: %v", err)
 	}
 
-	gw := harness.StartGateway(t, inst)
-	key := uniqueKey(t)
+	gw := harness.StartGateway(t, inst, harness.WithValkeyAddr(provider.StartValkey(ctx, t).Addr), harness.WithEncryptedMPUForBucket(inst.Bucket), harness.WithKeyManager(makeAESKEKManager(t)))
 	backend := newS3Client(t, inst)
-	if _, err := backend.PutObject(ctx, inst.Bucket, key, strings.NewReader("versioned-delete"), map[string]string{
-		"x-amz-meta-encrypted-mpu": "true",
-	}, nil, "", nil, "", "", "", "", ""); err != nil {
-		t.Fatalf("put primary object: %v", err)
-	}
-	if _, err := backend.PutObject(ctx, inst.Bucket, key+".mpu-manifest", strings.NewReader("manifest"), nil, nil, "", nil, "", "", "", "", ""); err != nil {
-		t.Fatalf("put manifest object: %v", err)
-	}
-
-	req, _ := http.NewRequest("DELETE", objectURL(gw, inst.Bucket, key), nil)
-	resp, err := gw.HTTPClient().Do(req)
-	if err != nil {
-		t.Fatalf("DELETE: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		t.Fatalf("DELETE returned %d", resp.StatusCode)
-	}
-
-	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(inst.Bucket), Prefix: aws.String(key)})
-	if err != nil {
-		t.Fatalf("ListObjectVersions: %v", err)
-	}
-	markers := 0
-	for _, marker := range versions.DeleteMarkers {
-		if marker.Key != nil && *marker.Key == key {
-			markers++
-		}
-	}
-	if markers != 1 {
-		t.Fatalf("delete markers for primary object = %d, want 1", markers)
-	}
-	manifestVersions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
-		Bucket: aws.String(inst.Bucket),
-		Prefix: aws.String(key + ".mpu-manifest"),
-	})
-	if err != nil {
-		t.Fatalf("ListObjectVersions manifest: %v", err)
-	}
-	manifestMarkers := 0
-	for _, marker := range manifestVersions.DeleteMarkers {
-		if marker.Key != nil && *marker.Key == key+".mpu-manifest" {
-			manifestMarkers++
-		}
-	}
-	if manifestMarkers != 0 {
-		t.Fatalf("delete markers for manifest = %d, want 0", manifestMarkers)
+	for _, marker := range []string{"true", "v2"} {
+		t.Run("marker="+marker, func(t *testing.T) {
+			key := uniqueKey(t)
+			if marker == "v2" {
+				uploadID := initiateMultipartUploadWithMetadata(t, gw, inst.Bucket, key, metadataValues())
+				t.Cleanup(func() { abortMultipartUpload(t, gw, inst.Bucket, key, uploadID) })
+				part := bytes.Repeat([]byte("v"), 5*1024*1024)
+				etag := uploadPart(t, gw, inst.Bucket, key, uploadID, 1, part)
+				completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, []mpuPart{{1, etag}})
+				manifest, err := backend.HeadObject(ctx, inst.Bucket, key+".mpu-manifest", nil)
+				if err != nil {
+					t.Fatalf("real encrypted MPU manifest missing: %v", err)
+				}
+				if _, ok := manifest["ETag"]; !ok {
+					t.Fatal("real MPU manifest metadata has no ETag")
+				}
+				req, _ := http.NewRequest("DELETE", objectURL(gw, inst.Bucket, key), nil)
+				resp, err := gw.HTTPClient().Do(req)
+				if err != nil {
+					t.Fatalf("gateway DELETE real MPU: %v", err)
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+					t.Fatalf("gateway DELETE real MPU returned %d", resp.StatusCode)
+				}
+				if _, err := backend.HeadObject(ctx, inst.Bucket, key+".mpu-manifest", nil); err == nil {
+					t.Fatal("gateway left real v2 MPU manifest behind")
+				}
+				manifestVersions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(inst.Bucket), Prefix: aws.String(key + ".mpu-manifest")})
+				if err != nil {
+					t.Fatalf("ListObjectVersions for real v2 manifest: %v", err)
+				}
+				if len(manifestVersions.Versions) != 0 || len(manifestVersions.DeleteMarkers) != 0 {
+					t.Fatalf("real v2 manifest versions remain: versions=%d markers=%d", len(manifestVersions.Versions), len(manifestVersions.DeleteMarkers))
+				}
+				primaryVersions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(inst.Bucket), Prefix: aws.String(key)})
+				if err != nil {
+					t.Fatalf("ListObjectVersions for real v2 primary: %v", err)
+				}
+				var primaryDeleteMarkers int
+				for _, item := range primaryVersions.DeleteMarkers {
+					if item.Key != nil && *item.Key == key {
+						primaryDeleteMarkers++
+					}
+				}
+				if primaryDeleteMarkers != 1 {
+					t.Fatalf("real v2 MPU primary delete markers=%d want=1", primaryDeleteMarkers)
+				}
+				return
+			}
+			metadata := map[string]string{"x-amz-meta-encrypted-mpu": marker}
+			if _, err := backend.PutObject(ctx, inst.Bucket, key, strings.NewReader("versioned-delete"), metadata, nil, "", nil, "", "", "", "", ""); err != nil {
+				t.Fatalf("put primary object: %v", err)
+			}
+			if _, err := backend.PutObject(ctx, inst.Bucket, key+".mpu-manifest", strings.NewReader("manifest"), nil, nil, "", nil, "", "", "", "", ""); err != nil {
+				t.Fatalf("put manifest object: %v", err)
+			}
+			req, _ := http.NewRequest("DELETE", objectURL(gw, inst.Bucket, key), nil)
+			resp, err := gw.HTTPClient().Do(req)
+			if err != nil {
+				t.Fatalf("DELETE: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+				t.Fatalf("DELETE returned %d", resp.StatusCode)
+			}
+			versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(inst.Bucket), Prefix: aws.String(key)})
+			if err != nil {
+				t.Fatalf("ListObjectVersions: %v", err)
+			}
+			markers := 0
+			for _, item := range versions.DeleteMarkers {
+				if item.Key != nil && *item.Key == key {
+					markers++
+				}
+			}
+			if markers != 1 {
+				t.Fatalf("delete markers for primary object = %d, want 1", markers)
+			}
+			manifestVersions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(inst.Bucket), Prefix: aws.String(key + ".mpu-manifest")})
+			if err != nil {
+				t.Fatalf("ListObjectVersions manifest: %v", err)
+			}
+			if len(manifestVersions.DeleteMarkers) != 0 || len(manifestVersions.Versions) != 0 {
+				t.Fatalf("manifest versions remain after cleanup: versions=%d markers=%d", len(manifestVersions.Versions), len(manifestVersions.DeleteMarkers))
+			}
+		})
 	}
 
 }

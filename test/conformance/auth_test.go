@@ -420,6 +420,10 @@ func signV4Headers(t *testing.T, req *http.Request, accessKey, secretKey string,
 }
 
 func presignV4GET(t *testing.T, gw *harness.Gateway, bucket, key, accessKey, secretKey string, expiry time.Duration) string {
+	return presignV4GETWithQuery(t, gw, bucket, key, accessKey, secretKey, expiry, nil)
+}
+
+func presignV4GETWithQuery(t *testing.T, gw *harness.Gateway, bucket, key, accessKey, secretKey string, expiry time.Duration, extra url.Values) string {
 	t.Helper()
 	now := time.Now().UTC()
 	timestamp := now.Format("20060102T150405Z")
@@ -433,6 +437,11 @@ func presignV4GET(t *testing.T, gw *harness.Gateway, bucket, key, accessKey, sec
 	}
 
 	q := u.Query()
+	for key, values := range extra {
+		for _, value := range values {
+			q.Add(key, value)
+		}
+	}
 	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
 	q.Set("X-Amz-Credential", accessKey+"/"+credScope)
 	q.Set("X-Amz-Date", timestamp)
