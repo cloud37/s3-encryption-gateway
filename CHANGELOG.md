@@ -48,6 +48,8 @@ writable verified-body spool storage.
   chart and the default spool behavior in 0.12.1.
 - Archived completed 0.12 implementation records, including the ListBuckets
   forwarding work, in the versioned issue history.
+- Updated the supported-release policy to identify the current 0.12 release
+  line as the security-fix target.
 
 ## [0.12.0] — 2026-09-21
 
