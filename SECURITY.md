@@ -20,8 +20,8 @@ temporary, warned, default-off setting `MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS=tr
 
 | Version | Supported |
 |---|---|
-| 0.11.x (latest) | ✅ |
-| < 0.11 | ❌ |
+| 0.12.x (latest) | ✅ |
+| < 0.12 | ❌ |
 
 We provide security fixes for the current minor release only. Older versions do not receive backports.
 
