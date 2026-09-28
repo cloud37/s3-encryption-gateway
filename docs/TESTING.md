@@ -24,7 +24,7 @@ Tests are divided into three tiers. A test lives in **exactly one** tier.
 ├──────────────────────────────────────────────────────────────────┤
 │ Tier 1 — Unit                                                     │
 │ No build tag.                                                     │
-│ Every `go test ./...`, every PR, every push. Budget: < 60 s.     │
+│ Every `go test ./...`, every PR, every push. Baseline: main.      │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,6 +49,9 @@ Key rules:
 # Standard run with race detector.
 go test -race ./...
 
+# Inspect individual test durations if the Tier 1 gate slows down.
+go test -race -count=1 -json ./internal/api > /tmp/api-tier1.json
+
 # FIPS build.
 GOFIPS140=v1.0.0 go test -race -tags=fips ./...
 
@@ -59,6 +62,22 @@ GOFIPS140=v1.0.0 go test -race -tags=fips ./...
 # this command as part of that work:
 # go test -race -tags=hsm ./...
 ```
+
+**Tier 1 runtime is evaluated against previous `main` behavior, not a fixed
+60-second limit.** Compare uncached runs of the same command on the same
+machine (or comparable CI workers); use package timings to identify regressions.
+For example, run `go test -race -count=1 -timeout 20m ./...` on both the branch
+and `main`, then compare the slowest packages. Cached runs and runs with
+different flags, hardware, or concurrent workloads are not comparable. Treat
+a substantial slowdown relative to the recent `main` baseline as something to
+investigate, even if the suite still passes; the figures below are observations,
+not a new hard budget.
+
+On 2026-09-28, an uncached race run on the same machine measured
+`internal/api` at ~603 s and `internal/crypto` at ~268 s on `main` (`a275e2c`),
+compared with ~130 s and ~102 s respectively on `v1.0-S3-6` after the Tier 1
+fixture optimizations. Rerun the comparison when `main` or the test suite
+changes rather than treating these numbers as permanent thresholds.
 
 ### Tier 2 — conformance tests
 
@@ -104,6 +123,10 @@ make test-comprehensive
 ```bash
 # Load tests (requires Docker).
 go test -tags=load -timeout 1h ./test/load/...
+
+# In-process 400 MiB encrypted MPU round-trip (no Docker; intentionally
+# excluded from Tier 1 because its 80 x 5 MiB parts are a load workload).
+go test -tags=load -timeout 1h ./internal/api -run '^TestMPU_LargeObjectGoldenPath$' -count=1
 
 # Soak tests.
 go test -tags=soak -timeout 1h ./test/soak/...
@@ -445,6 +468,13 @@ executes both benchmarks with `-benchmem -count=5` and reports observations only
 when explicitly run.
 The API suite also includes `TestGetObject_CacheFillConcurrentReaders` to verify
 concurrent cache-hit body serving.
+Handler metadata/MPU unit fixtures use the supported minimum PBKDF2 work factor
+to keep `-race` feedback bounded; production defaults and KDF limits remain
+covered by the crypto and config tests. `TestMPU_MultipartRoundTrip` checks
+cross-part integrity in Tier 1; the 400 MiB `TestMPU_LargeObjectGoldenPath`
+uses the `load` tag instead.
+Crypto object-format fixtures likewise use the minimum work factor unless the
+test explicitly verifies KDF defaults, cross-iteration reads, or cost limits.
 
 **The conformance contract**: test bodies must never branch on provider names.
 Use capability bits. The `TestConformance_NoProviderNameLiterals` AST check in
