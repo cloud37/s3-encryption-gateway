@@ -505,7 +505,7 @@ func TestSEC37_PreflightHelper_ErrorAndCompatibilityBranches(t *testing.T) {
 		{"malformed manifest", map[string]string{crypto.MetaChunkedFormat: "true", crypto.MetaManifest: "%%%"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, gotErr := h.preflightChunkedCompletenessIfV2(context.Background(), client, "test-bucket", "missing", nil, tc.metadata)
+			_, gotErr := h.preflightChunkedCompleteness(context.Background(), client, "test-bucket", "missing", nil, tc.metadata)
 			if (gotErr != nil) != tc.wantErr {
 				t.Fatalf("error = %v, want error %v", gotErr, tc.wantErr)
 			}

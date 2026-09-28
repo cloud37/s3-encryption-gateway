@@ -526,7 +526,7 @@ func TestIsValidTagChars_InvalidChars_ReturnsFalse(t *testing.T) {
 	// The function returns true for empty input.
 }
 
-// --- forwardSignatureV4Request edge case (backend errors) -------------------
+// --- passthrough edge case (backend errors) ----------------------------------
 
 // TestHandlePassthrough_BackendConnectionRefused verifies the gateway returns
 // a BadGateway error when the backend is unreachable.
@@ -545,7 +545,7 @@ func TestHandlePassthrough_BackendConnectionRefused(t *testing.T) {
 		metrics: getTestMetrics(),
 	}
 
-	// GET request that triggers forwardSignatureV4Request path.
+	// GET request that triggers the generic passthrough path.
 	req := httptest.NewRequest("GET", "/test-bucket/test-key", nil)
 	w := httptest.NewRecorder()
 	h.handlePassthrough(w, req, "GetObject", "test-bucket", "test-key")

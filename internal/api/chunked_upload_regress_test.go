@@ -142,7 +142,7 @@ func TestLegacyChunkedRangeGetFallsBackToFullFetch(t *testing.T) {
 		t.Fatalf("GET body mismatch: got %d bytes, want %d", len(w.Body.Bytes()), len(plaintext))
 	}
 	if mockClient.lastGetRange != nil {
-		t.Fatalf("expected full backend fetch for legacy chunked object, got backend range %q", *mockClient.lastGetRange)
+		t.Fatalf("expected full backend fetch for legacy chunked object, got backend range %q (final range %q)", *mockClient.lastGetRange, mockClient.lastGetRangeString)
 	}
 }
 
@@ -352,7 +352,19 @@ func TestChunkedRangeGetClampsFinalCiphertextChunk(t *testing.T) {
 	if len(w.Body.Bytes()) != 1 || w.Body.Bytes()[0] != plaintext[len(plaintext)-1] {
 		t.Fatalf("GET final byte mismatch: got %v, want %v", w.Body.Bytes(), plaintext[len(plaintext)-1])
 	}
-	if got := mockClient.lastGetRange; got == nil || !strings.HasSuffix(*got, strconv.Itoa(len(encryptedData)-1)) {
-		t.Fatalf("backend range was not clamped to ciphertext end: got %v, ciphertext size %d", got, len(encryptedData))
+	// Chunked-v2 authenticates its 32-byte terminal separately during HEAD
+	// preflight; the backend data range must end at the last ciphertext record,
+	// before that terminal, rather than fetching terminal bytes as chunk data.
+	wantEncryptedEnd := len(encryptedData) - crypto.ChunkedTerminalSize - 1
+	wantRange := fmt.Sprintf("bytes=16400-%d", wantEncryptedEnd)
+	foundClampedRange := false
+	for _, got := range mockClient.getRangeHistory {
+		if got == wantRange {
+			foundClampedRange = true
+			break
+		}
+	}
+	if !foundClampedRange {
+		t.Fatalf("backend ranges %v did not include clamped final-record range %q (ciphertext size %d)", mockClient.getRangeHistory, wantRange, len(encryptedData))
 	}
 }

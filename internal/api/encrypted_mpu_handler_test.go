@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -46,6 +47,7 @@ type mpuMockS3Client struct {
 	partsMeta       map[string]map[string]string // metadata frozen at CreateMultipartUpload
 	maxRangedRead   int
 	rangedReadCount int
+	omitGetStandard bool
 }
 
 type sec38CountingClient struct {
@@ -175,6 +177,11 @@ func (m *mpuMockS3Client) GetObject(ctx context.Context, bucket, key string, ver
 	metaCopy := map[string]string{}
 	for k, v := range meta {
 		metaCopy[k] = v
+	}
+	if m.omitGetStandard {
+		for _, name := range []string{"Content-Type", "Cache-Control", "Content-Disposition", "Content-Encoding", "Content-Language", "Expires"} {
+			delete(metaCopy, name)
+		}
 	}
 	m.mu.Unlock()
 
@@ -695,6 +702,25 @@ func TestMPU_Issue219_RangedGETStreaming(t *testing.T) {
 	}
 }
 
+func TestMPU_RangedGET_InvalidRangeReturnsSingleError(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "mpu-invalid-range-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	bucket, key := "mpu-invalid-range-bucket", "object"
+	part := bytes.Repeat([]byte("R"), 64*1024)
+	doCompleteUploadWithParts(t, router, bucket, key, [][]byte{part})
+	req := httptest.NewRequest(http.MethodGet, "/"+bucket+"/"+key, nil)
+	req.Header.Set("Range", "bytes=999999-")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Content-Range") == "" || w.Body.Len() != 0 {
+		t.Fatalf("invalid range projection headers=%v body=%q", w.Header(), w.Body.String())
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Issue #4 regression: full-object GET is streaming.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -724,6 +750,305 @@ func TestMPU_Issue4_FullGETStreaming(t *testing.T) {
 	// The MPU streaming decrypt reader is verified functionally here; explicit
 	// heap-bound assertions live in TestNewMPUDecryptReader_Streaming at the
 	// crypto package level (internal/crypto/mpu_encrypter_test.go).
+}
+
+func TestMPU_FullGET_ProjectsStandardHeadersFromHeadMetadata(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "mpu-projection-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	bucket, key := "mpu-projection-bucket", "object.bin"
+	want := map[string]string{
+		"Content-Type":        "application/example",
+		"Cache-Control":       "private, max-age=60",
+		"Content-Disposition": "attachment; filename=object.bin",
+		"Content-Encoding":    "br",
+		"Content-Language":    "en-GB",
+		"Expires":             "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
+	userMetadata := map[string]string{"x-amz-meta-owner": "team", "x-amz-meta-project": "gateway"}
+
+	create := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads=", nil)
+	for name, value := range want {
+		create.Header.Set(name, value)
+	}
+	for name, value := range userMetadata {
+		create.Header.Set(name, value)
+	}
+	created := httptest.NewRecorder()
+	router.ServeHTTP(created, create)
+	if created.Code != http.StatusOK {
+		t.Fatalf("CreateMultipartUpload: %d %s", created.Code, created.Body.String())
+	}
+	uploadID := extractUploadID(t, created.Body.String())
+
+	partData := []byte("full MPU metadata projection")
+	partReq := httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID), bytes.NewReader(partData))
+	partReq.Header.Set("Content-Length", fmt.Sprint(len(partData)))
+	part := httptest.NewRecorder()
+	router.ServeHTTP(part, partReq)
+	if part.Code != http.StatusOK {
+		t.Fatalf("UploadPart: %d %s", part.Code, part.Body.String())
+	}
+
+	completeReq := httptest.NewRequest("POST", fmt.Sprintf("/%s/%s?uploadId=%s", bucket, key, uploadID), strings.NewReader(fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, part.Header().Get("ETag"))))
+	complete := httptest.NewRecorder()
+	router.ServeHTTP(complete, completeReq)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("CompleteMultipartUpload: %d %s", complete.Code, complete.Body.String())
+	}
+
+	mockClient.mu.Lock()
+	storedMetadata := mockClient.metadata[bucket+"/"+key]
+	storedMetadata["ETag"] = `"final-etag"`
+	storedMetadata["Content-Length"] = strconv.Itoa(len(mockClient.objects[bucket+"/"+key]))
+	mockClient.omitGetStandard = true
+	mockClient.mu.Unlock()
+
+	get := httptest.NewRecorder()
+	router.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/"+bucket+"/"+key, nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("full GET: %d %s", get.Code, get.Body.String())
+	}
+	if !bytes.Equal(get.Body.Bytes(), partData) {
+		t.Fatalf("full GET body = %q, want %q", get.Body.Bytes(), partData)
+	}
+	for name, value := range want {
+		if got := get.Header().Get(name); got != value {
+			t.Errorf("full GET %s = %q, want %q", name, got, value)
+		}
+	}
+	assertMPUUserMetadata(t, get.Header(), userMetadata)
+	if got := get.Header().Get("Content-Length"); got != fmt.Sprint(len(partData)) {
+		t.Errorf("full GET Content-Length = %q, want %d", got, len(partData))
+	}
+	if got := get.Header().Get("ETag"); got != `"final-etag"` {
+		t.Errorf("full GET ETag = %q, want %q", got, `"final-etag"`)
+	}
+	for _, name := range []string{crypto.MetaMPUEncrypted, crypto.MetaFallbackPointer, crypto.MetaObjectBindingID, crypto.MetaMPUManifestVersion} {
+		if got := get.Header().Get(name); got != "" {
+			t.Errorf("full GET leaked reserved metadata %s=%q", name, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		method, rangeHeader string
+		status              int
+		body                string
+		contentRange        string
+	}{
+		{method: http.MethodGet, rangeHeader: "bytes=1-6", status: http.StatusPartialContent, body: string(partData[1:7]), contentRange: fmt.Sprintf("bytes 1-6/%d", len(partData))},
+		{method: http.MethodHead, status: http.StatusOK},
+	} {
+		req := httptest.NewRequest(tc.method, "/"+bucket+"/"+key, nil)
+		if tc.rangeHeader != "" {
+			req.Header.Set("Range", tc.rangeHeader)
+		}
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+		if resp.Code != tc.status {
+			t.Fatalf("%s %s status=%d body=%s", tc.method, tc.rangeHeader, resp.Code, resp.Body.String())
+		}
+		if tc.method == http.MethodGet && resp.Body.String() != tc.body {
+			t.Errorf("ranged GET body=%q want %q", resp.Body.String(), tc.body)
+		}
+		if got := resp.Header().Get("Content-Range"); got != tc.contentRange {
+			t.Errorf("%s Content-Range=%q want %q", tc.method, got, tc.contentRange)
+		}
+		if resp.Header().Get("ETag") != `"final-etag"` {
+			t.Errorf("%s ETag=%q", tc.method, resp.Header().Get("ETag"))
+		}
+		assertMPUUserMetadata(t, resp.Header(), userMetadata)
+		for _, name := range []string{crypto.MetaMPUEncrypted, crypto.MetaFallbackPointer, crypto.MetaObjectBindingID, crypto.MetaMPUManifestVersion} {
+			if resp.Header().Get(name) != "" {
+				t.Errorf("%s leaked reserved metadata %s", tc.method, name)
+			}
+		}
+	}
+}
+
+func TestMPURangedGet_ResponseOverrides(t *testing.T) {
+	handler, _, _ := newMPUTestHandler(t, "mpu-range-overrides-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	bucket, key := "mpu-range-overrides-bucket", "object.bin"
+	stored := map[string]string{
+		"Content-Type": "application/stored", "Cache-Control": "private", "Content-Disposition": "inline",
+		"Content-Encoding": "br", "Content-Language": "en", "Expires": "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
+	create := httptest.NewRequest(http.MethodPost, "/"+bucket+"/"+key+"?uploads=", nil)
+	for name, value := range stored {
+		create.Header.Set(name, value)
+	}
+	created := httptest.NewRecorder()
+	router.ServeHTTP(created, create)
+	if created.Code != http.StatusOK {
+		t.Fatalf("CreateMultipartUpload: %d %s", created.Code, created.Body.String())
+	}
+	uploadID := extractUploadID(t, created.Body.String())
+	plain := []byte("multipart-range-override")
+	partRequest := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, key, uploadID), bytes.NewReader(plain))
+	partRequest.Header.Set("Content-Length", fmt.Sprint(len(plain)))
+	part := httptest.NewRecorder()
+	router.ServeHTTP(part, partRequest)
+	if part.Code != http.StatusOK {
+		t.Fatalf("UploadPart: %d %s", part.Code, part.Body.String())
+	}
+	completeRequest := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/%s?uploadId=%s", bucket, key, uploadID), strings.NewReader(fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, part.Header().Get("ETag"))))
+	complete := httptest.NewRecorder()
+	router.ServeHTTP(complete, completeRequest)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("CompleteMultipartUpload: %d %s", complete.Code, complete.Body.String())
+	}
+	overrides := map[string]string{
+		"response-content-type": "text/plain", "response-cache-control": "no-cache",
+		"response-content-disposition": "attachment", "response-content-encoding": "gzip",
+		"response-content-language": "fr", "response-expires": "Tue, 22 Oct 2030 07:28:00 GMT",
+	}
+	query := url.Values{}
+	for name, value := range overrides {
+		query.Set(name, value)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/"+bucket+"/"+key+"?"+query.Encode(), nil)
+	request.Header.Set("Range", "bytes=1-5")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusPartialContent || response.Body.String() != string(plain[1:6]) {
+		t.Fatalf("ranged response status=%d body=%q", response.Code, response.Body.String())
+	}
+	headerForOverride := map[string]string{
+		"response-content-type": "Content-Type", "response-cache-control": "Cache-Control",
+		"response-content-disposition": "Content-Disposition", "response-content-encoding": "Content-Encoding",
+		"response-content-language": "Content-Language", "response-expires": "Expires",
+	}
+	for queryName, want := range overrides {
+		header := headerForOverride[queryName]
+		if got := response.Header().Get(header); got != want {
+			t.Errorf("override %s: header %s=%q want %q", queryName, header, got, want)
+		}
+	}
+	if got, want := response.Header().Get("Content-Range"), fmt.Sprintf("bytes 1-5/%d", len(plain)); got != want {
+		t.Errorf("Content-Range=%q want %q", got, want)
+	}
+}
+
+func TestMPU_UploadPartCopy_PreservesUserMetadataResponses(t *testing.T) {
+	handler, mockClient, _ := newMPUTestHandler(t, "mpu-upc-meta-*")
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	bucket, source, destination := "mpu-upc-meta-bucket", "source.bin", "destination.bin"
+	userMetadata := map[string]string{"x-amz-meta-owner": "team", "x-amz-meta-project": "gateway"}
+	wantStandard := map[string]string{
+		"Content-Type": "application/example", "Cache-Control": "private, max-age=60",
+		"Content-Disposition": "attachment; filename=object.bin", "Content-Encoding": "br",
+		"Content-Language": "en-GB", "Expires": "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
+
+	plain := []byte("metadata")
+	if _, err := mockClient.PutObject(context.Background(), bucket, source, bytes.NewReader(plain), map[string]string{
+		"Content-Length": strconv.Itoa(len(plain)), "Content-Type": wantStandard["Content-Type"],
+		"x-amz-meta-owner": userMetadata["x-amz-meta-owner"], "x-amz-meta-project": userMetadata["x-amz-meta-project"],
+	}, nil, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	create := httptest.NewRequest(http.MethodPost, "/"+bucket+"/"+destination+"?uploads=", nil)
+	for name, value := range wantStandard {
+		create.Header.Set(name, value)
+	}
+	for name, value := range userMetadata {
+		create.Header.Set(name, value)
+	}
+	created := httptest.NewRecorder()
+	router.ServeHTTP(created, create)
+	if created.Code != http.StatusOK {
+		t.Fatalf("CreateMultipartUpload: %d %s", created.Code, created.Body.String())
+	}
+	uploadID := extractUploadID(t, created.Body.String())
+
+	copyReq := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", bucket, destination, uploadID), nil)
+	copyReq.Header.Set("x-amz-copy-source", "/"+bucket+"/"+source)
+	copied := httptest.NewRecorder()
+	router.ServeHTTP(copied, copyReq)
+	if copied.Code != http.StatusOK {
+		t.Fatalf("UploadPartCopy: %d %s", copied.Code, copied.Body.String())
+	}
+	var copyResult struct {
+		ETag string `xml:"ETag"`
+	}
+	if err := xml.Unmarshal(copied.Body.Bytes(), &copyResult); err != nil {
+		t.Fatalf("parse UploadPartCopy result: %v", err)
+	}
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, copyResult.ETag)
+	complete := httptest.NewRecorder()
+	router.ServeHTTP(complete, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/%s?uploadId=%s", bucket, destination, uploadID), strings.NewReader(completeXML)))
+	if complete.Code != http.StatusOK {
+		t.Fatalf("CompleteMultipartUpload: %d %s", complete.Code, complete.Body.String())
+	}
+	mockClient.mu.Lock()
+	mockClient.metadata[bucket+"/"+destination]["ETag"] = `"final-etag"`
+	mockClient.mu.Unlock()
+
+	assertMPUResponseSet(t, router, bucket, destination, plain, userMetadata, wantStandard)
+}
+
+func assertMPUUserMetadata(t *testing.T, got http.Header, want map[string]string) {
+	t.Helper()
+	for name, value := range want {
+		if actual := got.Get(name); actual != value {
+			t.Errorf("%s=%q want %q", name, actual, value)
+		}
+	}
+}
+
+func assertMPUResponseSet(t *testing.T, router *mux.Router, bucket, key string, body []byte, user, standard map[string]string) {
+	t.Helper()
+	for _, tc := range []struct {
+		method, rangeHeader string
+		status              int
+		start, end          int
+		contentRange        string
+	}{
+		{method: http.MethodGet, status: http.StatusOK, start: 0, end: len(body)},
+		{method: http.MethodGet, rangeHeader: "bytes=1-6", status: http.StatusPartialContent, start: 1, end: 7, contentRange: "bytes 1-6/8"},
+		{method: http.MethodHead, status: http.StatusOK, start: 0, end: len(body)},
+	} {
+		req := httptest.NewRequest(tc.method, "/"+bucket+"/"+key, nil)
+		if tc.rangeHeader != "" {
+			req.Header.Set("Range", tc.rangeHeader)
+		}
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+		if resp.Code != tc.status {
+			t.Fatalf("%s %s status=%d body=%s", tc.method, tc.rangeHeader, resp.Code, resp.Body.String())
+		}
+		if tc.method == http.MethodHead {
+			if resp.Body.Len() != 0 {
+				t.Errorf("HEAD returned %d body bytes", resp.Body.Len())
+			}
+		} else if !bytes.Equal(resp.Body.Bytes(), body[tc.start:tc.end]) {
+			t.Errorf("%s body=%q want=%q", tc.method, resp.Body.Bytes(), body[tc.start:tc.end])
+		}
+		assertMPUUserMetadata(t, resp.Header(), user)
+		for name, value := range standard {
+			if got := resp.Header().Get(name); got != value {
+				t.Errorf("%s %s=%q want %q", tc.method, name, got, value)
+			}
+		}
+		if got := resp.Header().Get("ETag"); got != `"final-etag"` {
+			t.Errorf("%s ETag=%q", tc.method, got)
+		}
+		if got := resp.Header().Get("Content-Range"); got != tc.contentRange {
+			t.Errorf("%s Content-Range=%q want %q", tc.method, got, tc.contentRange)
+		}
+		wantLength := tc.end - tc.start
+		if tc.rangeHeader != "" {
+			wantLength = 6
+		}
+		if got := resp.Header().Get("Content-Length"); got != strconv.Itoa(wantLength) {
+			t.Errorf("%s Content-Length=%q want %d", tc.method, got, wantLength)
+		}
+	}
 }
 
 // TestMPU_LargeObjectGoldenPath verifies that a large MPU object (many parts,
@@ -2362,6 +2687,10 @@ func TestMPU_ListObjects_InProgressReturnsPlaintextSize(t *testing.T) {
 //	ListObjectsV2(max-keys=1,prefix=...data) → <Size> must be plaintext.
 func TestMPU_ListObjects_CompletedReturnsPlaintextSize(t *testing.T) {
 	handler, _, _ := newMPUTestHandler(t, "lstc-*")
+	// Completed uploads no longer have live Valkey part state. Enable the
+	// bounded HEAD fallback used by ListObjects to classify the completed MPU
+	// and resolve its authenticated companion manifest.
+	handler.config.ListSizeTranslate.FallbackHeadEnabled = true
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 

@@ -133,11 +133,11 @@ func TestSEC37_Copy_Strategy_ChunkedDirect(t *testing.T) {
 		want []byte
 		err  error
 	}{
-		{"range", &s3.CopyPartRange{First: 2, Last: 5}, crypto.ChunkedObjectInfo{}, "10", plain[2:6], nil},
-		{"full", nil, crypto.ChunkedObjectInfo{}, "10", plain, nil},
+		{"range", &s3.CopyPartRange{First: 2, Last: 5}, crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, "10", plain[2:6], nil},
+		{"full", nil, crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, "10", plain, nil},
 		{"authenticated", nil, crypto.ChunkedObjectInfo{Authenticated: true, PlaintextSize: 4}, "10", plain[:4], nil},
-		{"clamp", &s3.CopyPartRange{First: 7, Last: 99}, crypto.ChunkedObjectInfo{}, "10", plain[7:], nil},
-		{"416", &s3.CopyPartRange{First: 10, Last: 11}, crypto.ChunkedObjectInfo{}, "10", nil, errRangeNotSatisfiable},
+		{"clamp", &s3.CopyPartRange{First: 7, Last: 99}, crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, "10", plain[7:], nil},
+		{"416", &s3.CopyPartRange{First: 10, Last: 11}, crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, "10", nil, errRangeNotSatisfiable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := newMockS3Client()
@@ -175,17 +175,18 @@ func TestSEC37_Copy_Strategy_ChunkedDirectErrors(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(c)
 			}
-			_, _, err := strategyHandler(c, tc.engine).uploadPartCopyChunked(context.Background(), c, "d", "k", "u", 1, "src", "key", nil, nil, 100, crypto.ChunkedObjectInfo{})
+			_, _, err := strategyHandler(c, tc.engine).uploadPartCopyChunked(context.Background(), c, "d", "k", "u", 1, "src", "key", nil, nil, 100, crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1})
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
 	c := newMockS3Client()
-	c.metadata["src/key"] = map[string]string{}
+	c.metadata["src/key"] = map[string]string{crypto.MetaChunkedFormat: "true", crypto.MetaOriginalSize: "4"}
 	c.objects["src/key"] = []byte("data")
-	_, _, err := strategyHandler(c, &mockEngine{}).uploadPartCopyChunked(context.Background(), c, "d", "k", "u", 1, "src", "key", nil, nil, 100, crypto.ChunkedObjectInfo{})
-	require.ErrorContains(t, err, "cannot determine plaintext size")
+	_, _, err := strategyHandler(c, &mockEngine{}).uploadPartCopyChunked(context.Background(), c, "d", "k", "u", 1, "src", "key", nil, nil, 100, crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1})
+	require.Error(t, err, "missing/invalid chunked size metadata must fail closed")
 	client := &strategyClient{mockS3Client: c, uploadErr: errors.New("upload")}
-	c.metadata["src/key"][crypto.MetaOriginalSize] = "4"
+	c.metadata["src/key"] = map[string]string{crypto.MetaChunkedFormat: "true", crypto.MetaOriginalSize: "4"}
+	c.objects["src/key"] = make([]byte, 20) // one 4-byte v1 chunk plus its AEAD tag
 	_, _, err = strategyHandler(client, &mockEngine{}).uploadPartCopyChunked(context.Background(), client, "d", "k", "u", 1, "src", "key", nil, nil, 100, crypto.ChunkedObjectInfo{})
 	require.ErrorContains(t, err, "upload")
 }
@@ -496,7 +497,7 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_Bounds(t *testing.T) {
 	require.ErrorIs(t, err, errLegacySourceTooLarge)
 
 	base.objects["src/chunked"] = []byte("ciphertext")
-	base.metadata["src/chunked"] = map[string]string{crypto.MetaOriginalSize: "9"}
+	base.metadata["src/chunked"] = map[string]string{crypto.MetaOriginalSize: "9", crypto.MetaChunkedFormat: "true"}
 	oversized := &oversizedDecryptEngine{EncryptionEngine: &mockEngine{}, returnBytes: 5}
 	h.encryptionEngine = oversized
 	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client, "d", "k", "u", 1, "src", "chunked", nil, nil, &CopySourceMetadata{Class: SourceClassChunked, IsChunked: true, ChunkedInfo: crypto.ChunkedObjectInfo{Authenticated: true, PlaintextSize: 9}}, 100, 4)
@@ -514,19 +515,20 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_EncryptError(t *testing.T) {
 
 func TestSEC37_Copy_Strategy_ReencryptMPU_SourceErrors(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		class  SourceClass
-		setup  func(*mockS3Client)
-		engine crypto.EncryptionEngine
-		want   string
+		name        string
+		class       SourceClass
+		setup       func(*mockS3Client)
+		engine      crypto.EncryptionEngine
+		want        string
+		chunkedInfo crypto.ChunkedObjectInfo
 	}{
-		{"plaintext get", SourceClassPlaintext, func(c *mockS3Client) { c.errors["src/key/get"] = errors.New("get plaintext") }, &mockEngine{}, "get plaintext source"},
-		{"chunked head", SourceClassChunked, func(c *mockS3Client) { c.errors["src/key/head"] = errors.New("head chunked") }, &mockEngine{}, "head chunked"},
-		{"chunked get", SourceClassChunked, func(c *mockS3Client) { c.errors["src/key/get"] = errors.New("get chunked") }, &mockEngine{}, "get chunked source"},
-		{"chunked decrypt", SourceClassChunked, nil, &strategyDecryptError{err: errors.New("decrypt chunked")}, "decrypt chunked source"},
-		{"legacy get", SourceClassLegacy, func(c *mockS3Client) { c.errors["src/key/get"] = errors.New("get legacy") }, &mockEngine{}, "get legacy"},
-		{"legacy decrypt", SourceClassLegacy, nil, &strategyDecryptError{err: errors.New("decrypt legacy")}, "decrypt legacy source"},
-		{"mpu manifest", SourceClassMPUEncrypted, nil, &mockEngine{}, "read mpu source range"},
+		{"plaintext get", SourceClassPlaintext, func(c *mockS3Client) { c.errors["src/key/get"] = errors.New("get plaintext") }, &mockEngine{}, "get plaintext source", crypto.ChunkedObjectInfo{}},
+		{"chunked head", SourceClassChunked, func(c *mockS3Client) { c.errors["src/key/head"] = errors.New("head chunked") }, &mockEngine{}, "head chunked", crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}},
+		{"chunked get", SourceClassChunked, func(c *mockS3Client) { c.errors["src/key/get"] = errors.New("get chunked source") }, &mockEngine{}, "get chunked source", crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}},
+		{"chunked decrypt", SourceClassChunked, nil, &strategyDecryptError{err: errors.New("decrypt chunked")}, "decrypt chunked source", crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1, Authenticated: true, PlaintextSize: 6}},
+		{"legacy get", SourceClassLegacy, func(c *mockS3Client) { c.errors["src/key/get"] = errors.New("get legacy") }, &mockEngine{}, "get legacy", crypto.ChunkedObjectInfo{}},
+		{"legacy decrypt", SourceClassLegacy, nil, &strategyDecryptError{err: errors.New("decrypt legacy")}, "decrypt legacy source", crypto.ChunkedObjectInfo{}},
+		{"mpu manifest", SourceClassMPUEncrypted, nil, &mockEngine{}, "read mpu source range", crypto.ChunkedObjectInfo{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newMockS3Client()
@@ -535,7 +537,12 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_SourceErrors(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(client)
 			}
-			_, _, err := strategyHandler(client, tc.engine).uploadPartCopyReencryptMPU(context.Background(), client, "d", "k", "u", 1, "src", "key", nil, nil, &CopySourceMetadata{Class: tc.class, IsChunked: tc.class == SourceClassChunked}, 100, 100)
+			if tc.class == SourceClassChunked {
+				client.metadata["src/key"][crypto.MetaChunkedFormat] = "true"
+				client.metadata["src/key"][crypto.MetaManifest] = encodeTestChunkedManifest(t, crypto.ChunkedFormatV1)
+				client.metadata["src/key"]["Content-Length"] = "64"
+			}
+			_, _, err := strategyHandler(client, tc.engine).uploadPartCopyReencryptMPU(context.Background(), client, "d", "k", "u", 1, "src", "key", nil, nil, &CopySourceMetadata{Class: tc.class, IsChunked: tc.class == SourceClassChunked, ChunkedInfo: tc.chunkedInfo}, 100, 100)
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
@@ -545,9 +552,10 @@ func TestSEC37_Copy_Strategy_ReencryptMPU_SourceErrors(t *testing.T) {
 
 	client2 := newMockS3Client()
 	client2.objects["src/key"] = []byte("source")
-	client2.metadata["src/key"] = map[string]string{}
+	client2.metadata["src/key"] = map[string]string{crypto.MetaChunkedFormat: "true", crypto.MetaObjectFormatVersion: "chunked-v2", crypto.MetaManifest: encodeTestChunkedManifest(t, crypto.ChunkedFormatV2), "Content-Length": "32"}
 	h := strategyHandler(client2, &mockEngine{})
-	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client2, "d", "k", "u", 1, "src", "key", nil, nil, &CopySourceMetadata{Class: SourceClassChunked, IsChunked: true}, 100, 100)
+	h.destinationEncryptionReader = func(r io.Reader, n int64) (io.Reader, int64, error) { return io.LimitReader(r, n), n, nil }
+	_, _, err = h.uploadPartCopyReencryptMPU(context.Background(), client2, "d", "k", "u", 1, "src", "key", nil, nil, &CopySourceMetadata{Class: SourceClassChunked, IsChunked: true, ChunkedInfo: crypto.ChunkedObjectInfo{}}, 100, 100)
 	require.ErrorContains(t, err, "cannot determine plaintext size")
 }
 

@@ -112,8 +112,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" || uploadID == "" || partNumberStr == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		return
 	}
 
@@ -125,8 +124,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		return
 	}
 
@@ -143,8 +141,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		return
 	}
 
@@ -158,7 +155,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	destinationEncrypted := destinationState != nil && destinationState.PolicySnapshot.EncryptMultipartUploads
 	if destinationEncrypted {
 		if identityErr := validateMPURouteIdentity(destinationState, bucket, key); identityErr != nil {
-			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+			h.writeObjectError(w, r, "UploadPartCopy", (&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}), start)
 			return
 		}
 	}
@@ -172,8 +169,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		return
 	}
 
@@ -185,8 +181,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		return
 	}
 
@@ -204,8 +199,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusBadRequest,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		}
 		return
 	}
@@ -229,8 +223,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusBadRequest,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 			return
 		}
 		if end64-start64+1 > maxCopyPartRangeBytes {
@@ -240,8 +233,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusBadRequest,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 			return
 		}
 		srcRange = &s3.CopyPartRange{
@@ -256,23 +248,18 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	sourceClass, err := h.classifyCopySource(ctx, s3Client, srcBucket, srcKey, srcVersionID)
 	if err != nil {
 		if errors.Is(err, crypto.ErrChunkedObjectIncomplete) || errors.Is(err, crypto.ErrUnsupportedChunkedVersion) || strings.Contains(err.Error(), "chunked manifest") {
-			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "chunked_completeness_failed")
-			s3Err := &S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectIntegrityError(w, r, "UploadPartCopy", srcBucket, srcKey, err, start)
 			return
 		}
+		h.recordObjectDecryptFailure(r, srcBucket, srcKey, err)
 		s3Err := TranslateError(err, srcBucket, srcKey)
-		s3Err.WriteXML(w)
+		h.writeObjectErrorForBucket(w, r, "UploadPartCopy", srcBucket, s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"src_bucket": srcBucket,
 			"src_key":    srcKey,
 		}).Error("Failed to classify copy source")
 		// Source-scoped error: record with the source bucket label for
 		// debuggability.
-		h.metrics.RecordS3Error(r.Context(), "UploadPartCopy", srcBucket, s3Err.Code)
-		h.metrics.RecordUploadPartCopy("unknown", "error", 0, time.Since(start))
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -285,9 +272,8 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		h.metrics.RecordUploadPartCopy(sourceClass.Class.String(), "error", 0, time.Since(start))
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -311,7 +297,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusInternalServerError,
 		}
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		// Audit the refusal so operators see config-drift incidents.
 		if h.auditLogger != nil {
 			h.auditLogger.LogAccessWithMetadata(
@@ -329,9 +315,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 				},
 			)
 		}
-		h.metrics.RecordS3Error(r.Context(), "UploadPartCopy", bucket, s3Err.Code)
 		h.metrics.RecordUploadPartCopy("plaintext", "error", 0, time.Since(start))
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -351,7 +335,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		state := destinationState
 		if state.StateVersion != mpu.CurrentStateVersion {
 			h.metrics.RecordMPUPartClaim("legacy_rejected")
-			(&S3Error{Code: "OperationAborted", Message: "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
+			h.writeObjectError(w, r, "UploadPartCopy", (&S3Error{Code: "OperationAborted", Message: "This encrypted multipart upload predates nonce-safety state; abort it and create a new upload.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}), start)
 			return
 		}
 		copyResult, bytesCopied, strategyErr = h.uploadPartCopyReencryptMPU(ctx, s3Client, bucket, key, uploadID,
@@ -414,7 +398,7 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			h.metrics.RecordMPUPartClaim(claimResult)
 			s3Err = &S3Error{Code: code, Message: message, Resource: r.URL.Path, HTTPStatus: status}
 		}
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		h.logger.WithError(strategyErr).WithFields(logrus.Fields{
 			"bucket":      bucket,
 			"key":         key,
@@ -425,9 +409,6 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			"source_mode": sourceMode,
 			"duration_ms": time.Since(start).Milliseconds(),
 		}).Error("UploadPartCopy strategy failed")
-		h.metrics.RecordS3Error(r.Context(), "UploadPartCopy", bucket, s3Err.Code)
-		h.metrics.RecordUploadPartCopy(sourceMode, "error", 0, time.Since(start))
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -483,7 +464,6 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = xml.NewEncoder(w).Encode(result)
 
-	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
 // copyPartClaimError preserves the UploadPart reservation error contract for
@@ -517,10 +497,11 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		Class: SourceClassPlaintext,
 	}
 
-	// Check MPU before the generic encrypted marker. MPU objects may carry
-	// MetaEncrypted as well as MetaMPUEncrypted, but they are not legacy
-	// single-AEAD objects and must use the manifest-backed MPU path.
-	if metadata[crypto.MetaMPUEncrypted] == "true" || metadata[crypto.MetaMPUEncrypted] == "v2" {
+	view, viewErr := h.loadObjectView(bucket, key, versionID, metadata)
+	if viewErr != nil {
+		return nil, viewErr
+	}
+	if view.Class.Format == crypto.FormatMPUV1 || view.Class.Format == crypto.FormatMPUV2 {
 		// Object was assembled via the gateway's encrypted multipart upload
 		// path. Its ciphertext is a concatenation of AEAD-encrypted chunks;
 		// the plaintext DEK and manifest live in a companion .mpu-manifest
@@ -528,15 +509,11 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		sourceClass.Class = SourceClassMPUEncrypted
 		sourceClass.IsEncrypted = true
 	} else {
-		expandedMetadata, expandErr := h.expandMetadataForAPI(bucket, metadata)
-		if expandErr != nil {
-			return nil, expandErr
-		}
-		if crypto.IsChunkedFormat(expandedMetadata) {
+		if view.Class.Format == crypto.FormatChunkedV1 || view.Class.Format == crypto.FormatChunkedV2 {
 			sourceClass.Class = SourceClassChunked
 			sourceClass.IsChunked = true
 			sourceClass.IsEncrypted = true
-			info, err := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
+			info, err := h.preflightChunkedCompleteness(ctx, s3Client, bucket, key, versionID, metadata)
 			if err != nil {
 				return nil, err
 			}
@@ -544,25 +521,18 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 			if info.Authenticated && info.PlaintextSize <= uint64(^uint64(0)>>1) {
 				sourceClass.Size = int64(info.PlaintextSize)
 			}
-		} else if expandedMetadata[crypto.MetaEncrypted] == "true" {
+		} else if view.Class.Encrypted {
 			sourceClass.Class = SourceClassLegacy
 			sourceClass.IsEncrypted = true
 		}
 	}
 
-	// Object size is available from Content-Length or OriginalSize (chunked)
-	// depending on the source format.
-	if sizeStr, ok := metadata["Content-Length"]; ok && (!sourceClass.IsChunked || !sourceClass.ChunkedInfo.Authenticated) {
-		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
-			sourceClass.Size = size
-		}
+	size, sizeErr := h.resolvePlaintextSize(ctx, s3Client, view)
+	if sizeErr != nil {
+		return nil, sizeErr
 	}
-	if sourceClass.Size == 0 {
-		if origSize, ok := metadata[crypto.MetaOriginalSize]; ok {
-			if size, err := strconv.ParseInt(origSize, 10, 64); err == nil {
-				sourceClass.Size = size
-			}
-		}
+	if size.Exact {
+		sourceClass.Size = size.Size
 	}
 
 	return sourceClass, nil
@@ -590,9 +560,27 @@ func (h *Handler) uploadPartCopyChunked(ctx context.Context, s3Client s3.Client,
 
 	// Determine plaintext range. When no source range is specified, copy
 	// the full object (bounded by plaintext size from metadata).
-	plaintextSize, _ := crypto.GetPlaintextSizeFromMetadata(srcMetadata)
+	view, viewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, srcMetadata)
+	if viewErr != nil {
+		return nil, 0, viewErr
+	}
+	plaintextSize := int64(-1)
+	sizeExact := chunkedInfo.Authenticated
 	if chunkedInfo.Authenticated && chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
 		plaintextSize = int64(chunkedInfo.PlaintextSize)
+	} else {
+		resolvedSize, sizeErr := h.resolvePlaintextSize(ctx, s3Client, view)
+		if sizeErr != nil {
+			return nil, 0, sizeErr
+		}
+		plaintextSize = resolvedSize.Size
+		sizeExact = resolvedSize.Exact
+	}
+	if !sizeExact && !chunkedInfo.Authenticated {
+		return nil, 0, fmt.Errorf("cannot determine plaintext size for chunked source")
+	}
+	if !sizeExact {
+		return nil, 0, fmt.Errorf("cannot determine plaintext size for chunked source")
 	}
 	var plaintextStart, plaintextEnd int64
 	if srcRange != nil {
@@ -859,9 +847,27 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		if err != nil {
 			return nil, 0, err
 		}
-		plaintextSize, _ := crypto.GetPlaintextSizeFromMetadata(srcMeta)
+		view, viewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, srcMeta)
+		if viewErr != nil {
+			return nil, 0, viewErr
+		}
+		if view.Class.Format != crypto.FormatChunkedV1 && view.Class.Format != crypto.FormatChunkedV2 {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: source metadata is not chunked")
+		}
+		plaintextSize := int64(-1)
+		sizeExact := sourceClass.ChunkedInfo.Authenticated
 		if sourceClass.ChunkedInfo.Authenticated && sourceClass.ChunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
 			plaintextSize = int64(sourceClass.ChunkedInfo.PlaintextSize)
+		} else {
+			resolvedSize, sizeErr := h.resolvePlaintextSize(ctx, s3Client, view)
+			if sizeErr != nil {
+				return nil, 0, sizeErr
+			}
+			plaintextSize = resolvedSize.Size
+			sizeExact = resolvedSize.Exact
+		}
+		if !sizeExact {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: cannot determine plaintext size")
 		}
 		var pStart, pEnd int64
 		if srcRange != nil {
@@ -875,6 +881,12 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			}
 			pEnd = plaintextSize - 1
 		}
+		if sourceClass.ChunkedInfo.Authenticated && sourceClass.ChunkedInfo.PlaintextSize > 0 {
+			if srcRange == nil {
+				pStart = 0
+				pEnd = int64(sourceClass.ChunkedInfo.PlaintextSize) - 1
+			}
+		}
 		// DecryptRange expects the source reader to contain the FULL encrypted
 		// object — see uploadPartCopyChunked for rationale.
 		r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
@@ -882,6 +894,9 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get chunked source: %w", err)
 		}
 		defer r.Close()
+		if plaintextSize <= 0 && srcRange == nil {
+			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: cannot determine plaintext size")
+		}
 		decR, _, err := srcEngine.DecryptRange(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, r, srcMeta, pStart, pEnd)
 		if err != nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypt chunked source: %w", err)
@@ -1073,63 +1088,20 @@ func (h *Handler) readMPUPlaintextRange(
 	if err != nil {
 		return nil, fmt.Errorf("head source: %w", err)
 	}
-	manifestKey := meta[crypto.MetaFallbackPointer]
-	if manifestKey == "" {
-		manifestKey = key + ".mpu-manifest"
-	}
-	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get manifest: %w", err)
-	}
-	defer manifestReader.Close()
-	engine, err := h.getEncryptionEngine(bucket)
+	view, err := h.loadObjectView(bucket, key, versionID, meta)
 	if err != nil {
 		return nil, err
 	}
-	rawManifest, readErr := io.ReadAll(manifestReader)
-	if readErr != nil {
-		return nil, readErr
+	if view.Class.Format != crypto.FormatMPUV1 && view.Class.Format != crypto.FormatMPUV2 {
+		return nil, fmt.Errorf("source is not an encrypted MPU")
 	}
-	var bindingID [16]byte
-	isV2 := meta[crypto.MetaMPUEncrypted] == "v2"
-	if isV2 {
-		mainBinding, bindErr := base64.RawURLEncoding.DecodeString(meta[crypto.MetaObjectBindingID])
-		if bindErr != nil || len(mainBinding) != 16 {
-			return nil, fmt.Errorf("invalid main binding")
-		}
-		copy(bindingID[:], mainBinding)
-	}
-	if !isV2 && manifestMeta[crypto.MetaMPUManifestVersion] == "2" {
-		return nil, fmt.Errorf("legacy MPU manifest cannot declare v2 marker")
-	}
-	var manifestJSON []byte
-	if isV2 {
-		if manifestMeta[crypto.MetaMPUManifestVersion] != "2" {
-			return nil, fmt.Errorf("invalid companion marker")
-		}
-		manifestJSON, err = crypto.DecryptMPUManifest(ctx, engine, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID, rawManifest, manifestMeta)
-	} else {
-		plainManifest, _, decErr := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bytes.NewReader(rawManifest), manifestMeta)
-		err = decErr
-		if err == nil {
-			manifestJSON, err = io.ReadAll(plainManifest)
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("decrypt manifest: %w", err)
-	}
+	loaded, err := h.loadMPUManifest(ctx, s3Client, bucket, key, view.Class)
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
-	if err != nil {
-		return nil, err
-	}
-	if isV2 {
-		if err := manifest.ValidateFor(crypto.ObjectContext{Bucket: bucket, Key: key}, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID); err != nil {
-			return nil, err
-		}
-	}
+	manifest := loaded.Manifest
+	bindingID := loaded.BindingID
+	isV2 := loaded.IsV2
 	if srcRange == nil {
 		srcRange = &s3.CopyPartRange{First: 0, Last: manifest.TotalPlainSize - 1}
 	}

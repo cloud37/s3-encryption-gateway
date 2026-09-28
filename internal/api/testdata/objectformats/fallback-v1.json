@@ -1,0 +1,38 @@
+{
+  "format": "fallback-v1",
+  "metadata": {
+    "Content-Length": "900",
+    "ETag": "backend-cipher-etag",
+    "x-amz-meta-encrypted": "true",
+    "x-amz-meta-encryption-algorithm": "AES256-GCM",
+    "x-amz-meta-encryption-cache-control": "private, max-age=37",
+    "x-amz-meta-encryption-content-disposition": "attachment; filename=\"golden.txt\"",
+    "x-amz-meta-encryption-content-encoding": "identity",
+    "x-amz-meta-encryption-content-language": "en-CA",
+    "x-amz-meta-encryption-content-type": "application/x-golden",
+    "x-amz-meta-encryption-expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-encryption-fallback": "true",
+    "x-amz-meta-encryption-iv": "JycnJycnJycnJycn",
+    "x-amz-meta-encryption-kdf-params": "pbkdf2-sha256:100000",
+    "x-amz-meta-encryption-key-salt": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+    "x-amz-meta-encryption-original-etag": "1b58689ef891fa131ae690d387a3fa53",
+    "x-amz-meta-encryption-original-size": "34",
+    "x-amz-meta-encryption-wrapped-key": "internal-must-not-leak",
+    "x-amz-meta-user-a": "golden-user-value"
+  },
+  "plaintext_size": 34,
+  "headers": {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "\"1b58689ef891fa131ae690d387a3fa53\"",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT"
+  },
+  "ciphertext_base64": "OYxpqHMCbhJibh928Aw1+DXRe1SVgAm0rKbN/NiZe8rbF8Ur0vUMsxEkMzECkeAQrVlZD05chQbeM4IkjMH7yyR7mZkP5Qr9k4c0K16H949MaIiQ57gyyUoFQYNDvreJHA+rokYvX7whwu7GeauefxqMnjuhbAiGdyy7DgMtU3HmkEAKT+zm+lJ90txuMIK/VCp2znWboClHAUcgJ7yEQTxQa9EyVF+i/+Hhrqj69/5ETw6jrZWNpr0zSbLCu0HcjRIN72vKqh8HtpY4xaw0WmHvdoaeq0BzWLUxSXLaNM7W9DtdLyxna6epivCU6FfZldOsrNEBE1gTJCr0RSCtSK0sDyIxsww4KnaVdDxNrkfxYzzc2OJCjYTnCTOOh4iromj6D0qjw4ZyRMwKkOQo0yqyTbRBkw16d2SMSUUnXX18ID4osibU0+hzZjBTePLlpxEbYA88yPwj+Oe0FU5i74yrnUq0gyw8XQ0i4lsajWXckmeoKQYZXE+3EopPzONaaLuDt2jZ0ciEC6nNpIIH64Tz+PBlcL0RvDqDoXxFXaMFb/RwVpGBFR1Uq9krovF7YGagW1uf8/dCQTXCDk/HA9eFSw96yMksXHg5aQKxP57iHY1QhmnQprvYEuAXb00wnlNryIdGLR8WUOg0KeXc79DRkmNU4nrXn9R3489J3L7fGrLjbBhK53Co8yrOU9bsG8fgF7mmOqqUdVcfLHxQutLi7+r88sBlZ0y+i3Bp+uRo+GDbdjUoTwgsxKEEGIhxEdFYjWbPq1291NKJRksSmK4z+sXnSgvx5rtnMmAnkPl6rYMJbQzt8OkswvkqY7lG73Bli0ASNkMAwmtQLN0S5Ye0+co2etA3awhpjlDPorCNMdLn9y3rJciNquZeawK4typFTfbU+1HQBmNgyEpvhyYabnS19C3mxAul1ZhpyCcYlkI3dgG8nQCEoE0Tf3U2ybPwQC0T4b6UC6k8RfwW1xfV1bfhJ5tcloWW9tiACMBq/cQ5PXHITcXHfChALUxpSKmQvAlkXDH3b5etVe3qC1vIPSOPCC9wrT3eJadehUFrGUwbasFFFMsg2le4Ne7Ua4R1spNU0n8vaIolu3ejDs5ECcllFQugap9iPE2dr7uQ3u5HxEudoWj4qY9Rkm4TUFl+gG6tRdwzZNrAfgVyWymYN/J0DZFV6ycf30NN+Lnx4Na+",
+  "body_base64": "OYxpqHMCbhJibh928Aw1+DXRe1SVgAm0rKbN/NiZe8rbF8Ur0vUMsxEkMzECkeAQrVlZD05chQbeM4IkjMH7yyR7mZkP5Qr9k4c0K16H949MaIiQ57gyyUoFQYNDvreJHA+rokYvX7whwu7GeauefxqMnjuhbAiGdyy7DgMtU3HmkEAKT+zm+lJ90txuMIK/VCp2znWboClHAUcgJ7yEQTxQa9EyVF+i/+Hhrqj69/5ETw6jrZWNpr0zSbLCu0HcjRIN72vKqh8HtpY4xaw0WmHvdoaeq0BzWLUxSXLaNM7W9DtdLyxna6epivCU6FfZldOsrNEBE1gTJCr0RSCtSK0sDyIxsww4KnaVdDxNrkfxYzzc2OJCjYTnCTOOh4iromj6D0qjw4ZyRMwKkOQo0yqyTbRBkw16d2SMSUUnXX18ID4osibU0+hzZjBTePLlpxEbYA88yPwj+Oe0FU5i74yrnUq0gyw8XQ0i4lsajWXckmeoKQYZXE+3EopPzONaaLuDt2jZ0ciEC6nNpIIH64Tz+PBlcL0RvDqDoXxFXaMFb/RwVpGBFR1Uq9krovF7YGagW1uf8/dCQTXCDk/HA9eFSw96yMksXHg5aQKxP57iHY1QhmnQprvYEuAXb00wnlNryIdGLR8WUOg0KeXc79DRkmNU4nrXn9R3489J3L7fGrLjbBhK53Co8yrOU9bsG8fgF7mmOqqUdVcfLHxQutLi7+r88sBlZ0y+i3Bp+uRo+GDbdjUoTwgsxKEEGIhxEdFYjWbPq1291NKJRksSmK4z+sXnSgvx5rtnMmAnkPl6rYMJbQzt8OkswvkqY7lG73Bli0ASNkMAwmtQLN0S5Ye0+co2etA3awhpjlDPorCNMdLn9y3rJciNquZeawK4typFTfbU+1HQBmNgyEpvhyYabnS19C3mxAul1ZhpyCcYlkI3dgG8nQCEoE0Tf3U2ybPwQC0T4b6UC6k8RfwW1xfV1bfhJ5tcloWW9tiACMBq/cQ5PXHITcXHfChALUxpSKmQvAlkXDH3b5etVe3qC1vIPSOPCC9wrT3eJadehUFrGUwbasFFFMsg2le4Ne7Ua4R1spNU0n8vaIolu3ejDs5ECcllFQugap9iPE2dr7uQ3u5HxEudoWj4qY9Rkm4TUFl+gG6tRdwzZNrAfgVyWymYN/J0DZFV6ycf30NN+Lnx4Na+",
+  "plaintext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA=="
+}

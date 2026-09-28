@@ -8,9 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -70,31 +68,6 @@ func TestSEC39_HandleGetObject_KDFErrorFailsClosed(t *testing.T) {
 			if strings.Contains(w.Body.String(), "backend-ciphertext") {
 				t.Fatal("ciphertext was returned")
 			}
-		})
-	}
-}
-
-func TestSEC39_ForwardedGet_KDFErrorFailsClosed(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Amz-Meta-Encrypted", "true")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("backend-ciphertext"))
-	}))
-	defer backend.Close()
-	for _, tc := range []struct {
-		name string
-		err  error
-	}{
-		{"invalid", &crypto.ErrInvalidKDFParams{Algorithm: crypto.KDFAlgArgon2id, Parameter: "time", Value: 0}},
-		{"cost", &crypto.ErrKDFCostTooHigh{Algorithm: crypto.KDFAlgArgon2id, Parameter: "memory", Requested: 2000000, Maximum: 65536}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler(nil, &sec39ErrorEngine{err: fmt.Errorf("decrypt failed: %w", tc.err)}, logrus.New(), getTestMetrics())
-			h.config = &config.Config{Backend: config.BackendConfig{Endpoint: backend.URL, AccessKey: "a", SecretKey: "b", Region: "us-east-1"}}
-			w := httptest.NewRecorder()
-			r := httptest.NewRequest("GET", "/bucket/key", nil)
-			h.forwardSignatureV4Request(w, r, "GET", "bucket", "key", time.Now())
-			assertSEC39InternalError(t, w, "backend-ciphertext")
 		})
 	}
 }

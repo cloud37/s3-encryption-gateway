@@ -1,13 +1,19 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
+	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -142,6 +148,76 @@ func TestHandler_RecordRotatedRead(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandler_GetObjectRecordsRotatedReadWithCompactedMetadata(t *testing.T) {
+	keyV1 := bytes.Repeat([]byte{0x01}, 32)
+	keyV2 := bytes.Repeat([]byte{0x02}, 32)
+	oldKeyManager, err := crypto.NewInMemoryKeyManager(keyV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newKeyManager, err := crypto.NewInMemoryKeyManager(keyV1, crypto.WithMemoryVersions([]struct {
+		Version int
+		Key     []byte
+	}{{Version: 1, Key: keyV1}, {Version: 2, Key: keyV2}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = oldKeyManager.Close(context.Background())
+		_ = newKeyManager.Close(context.Background())
+	})
+
+	oldEngine, err := crypto.NewEngineWithOpts([]byte("rotation-metric-test-password"), crypto.WithKeyManager(oldKeyManager), crypto.WithProvider("aws"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newEngine, err := crypto.NewEngineWithOpts([]byte("rotation-metric-test-password"), crypto.WithKeyManager(newKeyManager), crypto.WithProvider("aws"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const bucket, key = "rotation-metric-bucket", "object"
+	plaintext := []byte("rotated object")
+	encrypted, metadata, err := oldEngine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: bucket, Key: key}, bytes.NewReader(plaintext), map[string]string{"Content-Type": "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedBytes, err := io.ReadAll(encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata["x-amz-meta-kv"] != "1" {
+		t.Fatalf("AWS compacted key version=%q, want alias value 1 (metadata=%v)", metadata["x-amz-meta-kv"], metadata)
+	}
+	client := newMockS3Client()
+	contentLength := int64(len(encryptedBytes))
+	if _, err := client.PutObject(context.Background(), bucket, key, bytes.NewReader(encryptedBytes), metadata, &contentLength, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := prometheus.NewRegistry()
+	metricsSink := metrics.NewMetricsWithRegistry(registry)
+	handler := NewHandlerWithFeatures(client, newEngine, logrus.New(), metricsSink, newKeyManager, nil, nil, nil, nil)
+	router := mux.NewRouter()
+	router.Handle("/metrics", metricsSink.Handler()).Methods(http.MethodGet)
+	handler.RegisterRoutes(router)
+
+	get := httptest.NewRecorder()
+	router.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/"+bucket+"/"+key, nil))
+	if get.Code != http.StatusOK || get.Body.String() != string(plaintext) {
+		t.Fatalf("GET status=%d body=%q; want 200 and plaintext", get.Code, get.Body.String())
+	}
+
+	scrape := httptest.NewRecorder()
+	router.ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if scrape.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status=%d: %s", scrape.Code, scrape.Body.String())
+	}
+	wantSample := `kms_rotated_reads_total{active_version="2",key_version="1"} 1`
+	if !strings.Contains(scrape.Body.String(), wantSample) {
+		t.Fatalf("rotated-read metric sample missing; want %q in /metrics output:\n%s", wantSample, scrape.Body.String())
 	}
 }
 

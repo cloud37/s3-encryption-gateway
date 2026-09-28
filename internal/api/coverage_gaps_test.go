@@ -16,6 +16,8 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Ensure audit is used.
@@ -96,64 +98,6 @@ func TestApplyRangeRequest_Errors(t *testing.T) {
 		if !strings.Contains(err.Error(), tc.wantErr) {
 			t.Errorf("applyRangeRequest(%q) error = %q, want %q", tc.header, err.Error(), tc.wantErr)
 		}
-	}
-}
-
-// ---- decryptedSizeForMPU ----------------------------------------------------
-
-func TestDecryptedSizeForMPU(t *testing.T) {
-	tests := []struct {
-		name string
-		meta map[string]string
-		want int64
-	}{
-		{
-			name: "nil metadata",
-			meta: nil,
-			want: 0,
-		},
-		{
-			name: "empty metadata",
-			meta: map[string]string{},
-			want: 0,
-		},
-		{
-			name: "x-amz-meta-original-content-length",
-			meta: map[string]string{"x-amz-meta-original-content-length": "12345"},
-			want: 12345,
-		},
-		{
-			name: "crypto.MetaOriginalSize",
-			meta: map[string]string{crypto.MetaOriginalSize: "99999"},
-			want: 99999,
-		},
-		{
-			name: "invalid size string",
-			meta: map[string]string{"x-amz-meta-original-content-length": "not-a-number"},
-			want: 0,
-		},
-		{
-			name: "negative size falls through to zero",
-			meta: map[string]string{"x-amz-meta-original-content-length": "-1"},
-			want: 0,
-		},
-		{
-			name: "prefers crypto.MetaOriginalSize over legacy key",
-			meta: map[string]string{
-				crypto.MetaOriginalSize:              "11111",
-				"x-amz-meta-original-content-length": "22222",
-			},
-			want: 11111,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := decryptedSizeForMPU(tt.meta)
-			if got != tt.want {
-				t.Errorf("decryptedSizeForMPU() = %d, want %d", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -482,6 +426,9 @@ func TestHandleCopyObject_PreservesStandardMetadata(t *testing.T) {
 		"Content-Type":        "text/plain",
 		"Cache-Control":       "max-age=60",
 		"Content-Disposition": `attachment; filename="source.txt"`,
+		"Content-Encoding":    "gzip",
+		"Content-Language":    "en-GB",
+		"Expires":             "Mon, 21 Oct 2030 07:28:00 GMT",
 	}
 	req := httptest.NewRequest("PUT", "/dstbucket/destination", nil)
 	req.Header.Set("x-amz-copy-source", "srcbucket/source")
@@ -496,10 +443,42 @@ func TestHandleCopyObject_PreservesStandardMetadata(t *testing.T) {
 		crypto.MetaContentType:        "text/plain",
 		crypto.MetaCacheControl:       "max-age=60",
 		crypto.MetaContentDisposition: `attachment; filename="source.txt"`,
+		crypto.MetaContentEncoding:    "gzip",
+		crypto.MetaContentLanguage:    "en-GB",
+		crypto.MetaExpires:            "Mon, 21 Oct 2030 07:28:00 GMT",
 	} {
 		if got := metadata[key]; got != want {
 			t.Errorf("destination %s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestHandleCopyObject_ReplaceAllSixStandardHeaders(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngineWithOpts([]byte("copy-replace-six-password"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)))
+	require.NoError(t, err)
+	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	client.objects["srcbucket/source"] = []byte("copy payload")
+	client.metadata["srcbucket/source"] = map[string]string{"Content-Type": "text/plain", "x-amz-meta-owner": "source"}
+	want := map[string]string{
+		"Content-Type": "application/example", "Cache-Control": "private",
+		"Content-Disposition": "attachment", "Content-Encoding": "gzip",
+		"Content-Language": "en-GB", "Expires": "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
+	req := httptest.NewRequest(http.MethodPut, "/dstbucket/destination", nil)
+	req.Header.Set("x-amz-copy-source", "srcbucket/source")
+	req.Header.Set("x-amz-metadata-directive", "REPLACE")
+	for name, value := range want {
+		req.Header.Set(name, value)
+	}
+	attachTestCredential(req)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	for _, spec := range crypto.ProtectedStandardKeys() {
+		assert.Equal(t, want[spec.Header], client.metadata["dstbucket/destination"][spec.Canonical], "protected %s", spec.Header)
 	}
 }
 
@@ -1376,7 +1355,7 @@ func TestFilterS3Metadata(t *testing.T) {
 	}
 
 	t.Run("no filter keys", func(t *testing.T) {
-		filtered := filterS3Metadata(metadata, nil)
+		filtered := buildPersistPlan(metadata, crypto.ObjectClass{}, nil).Metadata
 		if _, ok := filtered["x-amz-meta-foo"]; !ok {
 			t.Error("expected x-amz-meta-foo to be kept")
 		}
@@ -1386,7 +1365,7 @@ func TestFilterS3Metadata(t *testing.T) {
 	})
 
 	t.Run("with filter keys", func(t *testing.T) {
-		filtered := filterS3Metadata(metadata, []string{"x-amz-meta-foo"})
+		filtered := buildPersistPlan(metadata, crypto.ObjectClass{}, []string{"x-amz-meta-foo"}).Metadata
 		if _, ok := filtered["x-amz-meta-foo"]; ok {
 			t.Error("expected x-amz-meta-foo to be filtered out")
 		}
@@ -1505,7 +1484,7 @@ func TestIsEncryptionMetadata(t *testing.T) {
 		{"x-amz-meta-custom-user-data", false},
 	}
 	for _, tt := range tests {
-		got := isEncryptionMetadata(tt.key)
+		got := crypto.IsEncryptionMetadata(tt.key)
 		if got != tt.want {
 			t.Errorf("isEncryptionMetadata(%q) = %v, want %v", tt.key, got, tt.want)
 		}

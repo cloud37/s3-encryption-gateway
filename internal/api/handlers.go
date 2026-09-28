@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +28,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/gorilla/mux"
@@ -163,6 +163,13 @@ func (h *Handler) WithSizeCache(c sizecache.SizeCache) {
 	h.sizeCache = c
 }
 
+// WithCache replaces the optional object response cache. It is primarily used
+// by the conformance harness to exercise the production cache path.
+func (h *Handler) WithCache(c cache.Cache) *Handler {
+	h.cache = c
+	return h
+}
+
 // Close stops the per-policy engine cache sweeper and calls Close() on every
 // cached engine so that password bytes are zeroised (V1.0-SEC-20).
 func (h *Handler) Close() {
@@ -211,10 +218,11 @@ func (h *Handler) writeMissingMPUState(w http.ResponseWriter, r *http.Request, e
 	if err == nil {
 		return false
 	}
+	start := time.Now()
 	if errors.Is(err, mpu.ErrUploadNotFound) {
-		(&S3Error{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist.", Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+		h.writeObjectError(w, r, "MultipartUpload", &S3Error{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist.", Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}, start)
 	} else {
-		(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the request", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+		h.writeObjectError(w, r, "MultipartUpload", &S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the request", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}, start)
 	}
 	return true
 }
@@ -262,8 +270,7 @@ func (h *Handler) mpuGuardMisconfig(w http.ResponseWriter, r *http.Request, buck
 		Resource:   r.URL.Path,
 		HTTPStatus: http.StatusServiceUnavailable,
 	}
-	s3Err.WriteXML(w)
-	h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+	h.writeObjectError(w, r, "MultipartUpload", s3Err, start)
 	return true
 }
 
@@ -456,8 +463,7 @@ func (h *Handler) writeS3ClientError(w http.ResponseWriter, r *http.Request, err
 	if err != nil {
 		h.logger.WithError(err).WithField("response_code", s3Err.Code).Debug("auth error classified")
 	}
-	s3Err.WriteXML(w)
-	h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+	h.writeObjectError(w, r, method, s3Err, start)
 }
 
 // classifyAuthError maps an error returned from getS3Client to a fixed
@@ -511,282 +517,6 @@ func classifyAuthError(err error, resource string) *S3Error {
 			HTTPStatus: http.StatusInternalServerError,
 		}
 	}
-}
-
-// forwardSignatureV4Request forwards a Signature V4 request directly to the backend,
-// preserving the original Authorization header and other headers.
-func (h *Handler) forwardSignatureV4Request(w http.ResponseWriter, r *http.Request, method, bucket, key string, start time.Time) {
-	if h.config == nil || h.config.Backend.Endpoint == "" {
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Backend endpoint not configured",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
-		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		return
-	}
-
-	// Build backend URL
-	backendEndpoint := h.config.Backend.Endpoint
-	if !strings.HasPrefix(backendEndpoint, "http://") && !strings.HasPrefix(backendEndpoint, "https://") {
-		if h.config.Backend.UseSSL {
-			backendEndpoint = "https://" + backendEndpoint
-		} else {
-			backendEndpoint = "http://" + backendEndpoint
-		}
-	}
-	backendEndpoint = strings.TrimSuffix(backendEndpoint, "/")
-
-	// For Signature V4 forwarding, always use path-style addressing
-	// This is more compatible when forwarding signed requests because:
-	// 1. The Host header can remain as the gateway's hostname (for signature validation)
-	// 2. The backend endpoint hostname is used for the actual connection
-	// 3. Path-style is more forgiving with Host header mismatches
-	backendPath := fmt.Sprintf("/%s", bucket)
-	if key != "" {
-		backendPath = fmt.Sprintf("/%s/%s", bucket, key)
-	}
-	backendURL := backendEndpoint + backendPath
-
-	if r.URL.RawQuery != "" {
-		if strings.Contains(backendURL, "?") {
-			backendURL += "&" + r.URL.RawQuery
-		} else {
-			backendURL += "?" + r.URL.RawQuery
-		}
-	}
-
-	// Create request to backend
-	backendReq, err := http.NewRequestWithContext(r.Context(), method, backendURL, r.Body) // #nosec G704 — S3 proxy: forward to configured backend
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to create backend request")
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to forward request",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
-		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		return
-	}
-
-	// Extract backend hostname from URL
-	backendURLParsed, err := url.Parse(backendURL)
-	if err == nil {
-		backendHostname := backendURLParsed.Host
-
-		// For Signature V4, the signature includes the Host header
-		// We need to use the backend's hostname, but this may cause signature validation to fail
-		// Some S3-compatible backends are lenient and will accept it
-		// Copy all headers from original request (including Authorization)
-		for k, v := range r.Header {
-			// Skip Host - we'll set it to backend hostname
-			if strings.EqualFold(k, "Host") {
-				continue
-			}
-			backendReq.Header[k] = v
-		}
-
-		// Set Host to backend hostname (without port if default)
-		backendReq.Host = backendHostname
-		h.logger.WithFields(logrus.Fields{
-			"original_host": r.Host,
-			"backend_host":  backendHostname,
-		}).Debug("Setting Host header to backend hostname for Signature V4 forwarding")
-	} else {
-		// Fallback: preserve original Host if URL parsing fails
-		originalHost := r.Host
-		if originalHost == "" {
-			originalHost = r.Header.Get("Host")
-		}
-		for k, v := range r.Header {
-			backendReq.Header[k] = v
-		}
-		backendReq.Host = originalHost
-	}
-
-	// Set Content-Length if present
-	if r.ContentLength > 0 {
-		backendReq.ContentLength = r.ContentLength
-	}
-
-	// Log forwarding details for debugging
-	originalHost := r.Host
-	if originalHost == "" {
-		originalHost = r.Header.Get("Host")
-	}
-	h.logger.WithFields(logrus.Fields{
-		"backend_url":   backendURL,
-		"original_host": originalHost,
-		"backend_host":  backendReq.Host,
-		"method":        method,
-	}).Debug("Forwarding Signature V4 request to backend")
-
-	// Make request to backend
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			// V1.0-SEC-F6: enforce minimum TLS 1.2 and restricted cipher
-			// suites consistent with the main S3 client and Cosmian KMS
-			// client. The bare &http.Client{} default uses Go's
-			// http.DefaultTransport which has no cipher restrictions.
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				CipherSuites: []uint16{
-					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-				},
-				CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
-			},
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
-			MaxIdleConnsPerHost:   10,
-		},
-	}
-	backendResp, err := httpClient.Do(backendReq) // #nosec G704 — S3 proxy: forward to configured backend
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to forward request to backend")
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to connect to backend",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusBadGateway,
-		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		return
-	}
-	defer func() { _ = backendResp.Body.Close() }()
-
-	// Log backend response for debugging
-	h.logger.WithFields(logrus.Fields{
-		"status_code": backendResp.StatusCode,
-		"backend_url": backendURL,
-	}).Debug("Backend response received")
-
-	// If backend returned an error, log the response body
-	if backendResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(backendResp.Body)
-		backendResp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		h.logger.WithFields(logrus.Fields{
-			"status_code": backendResp.StatusCode,
-			"response":    string(bodyBytes),
-		}).Warn("Backend returned error response")
-	}
-
-	// Check if response is encrypted (before copying headers)
-	metadata := make(map[string]string)
-	if backendResp.StatusCode >= 200 && backendResp.StatusCode < 300 && method == "GET" {
-		for k, v := range backendResp.Header {
-			if len(v) > 0 {
-				// Convert header names to lowercase for metadata check
-				metadata[strings.ToLower(k)] = v[0]
-			}
-		}
-	}
-
-	engine, err := h.getEncryptionEngine(bucket)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to get encryption engine")
-		// Fallback to forwarding as-is if engine fails
-		engine = h.encryptionEngine
-	}
-
-	isEncrypted := engine.IsEncrypted(metadata)
-	var decMetadata map[string]string
-	var decryptedReader io.Reader
-
-	if isEncrypted && backendResp.StatusCode >= 200 && backendResp.StatusCode < 300 && method == "GET" {
-		// Try to decrypt - read body first, then decrypt
-		bodyBytes, err := io.ReadAll(backendResp.Body)
-		if err == nil {
-			decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), crypto.ObjectContext{Bucket: bucket, Key: key}, bytes.NewReader(bodyBytes), metadata)
-			if err != nil {
-				var invalidKDF *crypto.ErrInvalidKDFParams
-				var costlyKDF *crypto.ErrKDFCostTooHigh
-				if errors.As(err, &invalidKDF) || errors.As(err, &costlyKDF) {
-					s3Err := &S3Error{Code: "InternalError", Message: "We encountered an internal error. Please try again.", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-					s3Err.WriteXML(w)
-					h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-					return
-				}
-				if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
-					h.logger.WithError(err).Warn("Encrypted object in bypass bucket (forwarded)")
-					s3Err := &S3Error{
-						Code:       "EncryptionConfigurationMismatch",
-						Message:    "The object was encrypted when stored but the bucket policy now disables encryption. Use the migration tool to convert the object.",
-						Resource:   r.URL.Path,
-						HTTPStatus: http.StatusConflict,
-					}
-					s3Err.WriteXML(w)
-					h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-					return
-				}
-				h.logger.WithError(err).Warn("Failed to decrypt forwarded response, returning as-is")
-				isEncrypted = false // Fall back to forwarding encrypted
-				backendResp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			} else {
-				backendResp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			}
-		} else {
-			isEncrypted = false
-		}
-	}
-
-	// Copy response headers (before WriteHeader)
-	for k, v := range backendResp.Header {
-		// Skip headers that shouldn't be forwarded
-		if strings.EqualFold(k, "Connection") || strings.EqualFold(k, "Transfer-Encoding") {
-			continue
-		}
-		// Remove encryption metadata if we decrypted
-		if isEncrypted && strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
-			continue
-		}
-		w.Header()[k] = v
-	}
-
-	// Update headers if we decrypted
-	if isEncrypted && decMetadata != nil {
-		if decMetadata["ETag"] != "" {
-			decMetadata["ETag"] = quoteETag(decMetadata["ETag"])
-		}
-		if cl, ok := decMetadata["Content-Length"]; ok {
-			w.Header().Set("Content-Length", cl)
-		}
-		// Add decrypted metadata
-		for k, v := range decMetadata {
-			if strings.HasPrefix(k, "x-amz-meta-") || isStandardMetadata(k) {
-				w.Header().Set(k, v)
-			}
-		}
-	}
-
-	// Write status code
-	w.WriteHeader(backendResp.StatusCode)
-
-	// Write response body
-	var proxyWriteTimeout time.Duration
-	if h.config != nil {
-		proxyWriteTimeout = h.config.Server.WriteTimeout
-	}
-	if isEncrypted && decryptedReader != nil {
-		copyWithDeadlineRefresh(w, decryptedReader, proxyWriteTimeout)
-	} else {
-		copyWithDeadlineRefresh(w, backendResp.Body, proxyWriteTimeout)
-	}
-
-	// Record metrics - use 0 if ContentLength is unknown (-1)
-	contentLength := backendResp.ContentLength
-	if contentLength < 0 {
-		contentLength = 0
-	}
-	h.metrics.RecordHTTPRequest(r.Context(), method, r.URL.Path, backendResp.StatusCode, time.Since(start), contentLength)
 }
 
 // getS3Client returns the configured backend S3 client.
@@ -974,8 +704,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		return
 	}
 
@@ -1003,13 +732,12 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusInternalServerError,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		return
 	}
 
 	// Check cache first if enabled and no range request
-	if h.cache != nil && rangeHeader == nil && versionID == nil {
+	if h.cache != nil && objectCacheRequestEligible(rangeHeader, versionID) {
 		if cachedEntry, ok := h.cache.Get(ctx, bucket, key); ok {
 			// Cached plaintext is only reusable after the current backend object
 			// has passed v2 completeness preflight. Do not let stale cache state
@@ -1019,50 +747,32 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 				h.writeChunkedCompletenessError(w, r, bucket, clientErr, start)
 				return
 			}
-			meta, headErr := s3Client.HeadObject(ctx, bucket, key, nil)
-			if headErr != nil {
-				h.writeChunkedCompletenessError(w, r, bucket, headErr, start)
+			cachePlan, planErr := h.planCachedObjectRead(ctx, s3Client, bucket, key)
+			if planErr != nil {
+				h.writeObjectDecryptError(w, r, "GET", bucket, key, planErr, start)
 				return
 			}
-			if expandedMeta, expandErr := h.expandMetadataForAPI(bucket, meta); expandErr != nil {
-				h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
-				return
-			} else if crypto.IsChunkedFormat(expandedMeta) {
-				if _, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, nil, meta); preflightErr != nil {
-					h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+			meta := cachePlan.View.Raw
+			// A cache entry is valid only when both its source and freshness token
+			// were stored atomically with the complete plaintext body.
+			if cachedEntry.BackendETag != "" && len(cachedEntry.Source) > 0 && meta["ETag"] != "" && cachedEntry.BackendETag == meta["ETag"] {
+				var cachedSource objectResponseSource
+				if err := json.Unmarshal(cachedEntry.Source, &cachedSource); err == nil && int64(len(cachedEntry.Data)) == cachedSource.PlainSize {
+					cachedSource.BackendETag = cachedEntry.BackendETag
+					readPlan := h.cachedObjectResponsePlan(cachePlan, cachedSource, cachedEntry.Data, r)
+					readPlan.Started = start
+					_, streamErr := h.serveObjectBody(w, r, readPlan)
+					if streamErr != nil {
+						h.logger.WithError(streamErr).Warn("Failed to write cached object response")
+					}
 					return
 				}
 			}
-			// Serve from cache
-			for k, v := range cachedEntry.Metadata {
-				w.Header().Set(k, v)
-			}
-			w.WriteHeader(http.StatusOK)
-			w.Write(cachedEntry.Data)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(len(cachedEntry.Data)))
-			if h.auditLogger != nil {
-				h.auditLogger.LogAccess("get", bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), true, nil, time.Since(start))
-			}
-			return
+			_ = h.cache.Delete(ctx, bucket, key)
 		}
 	}
 
-	// If Range is requested, optimize for chunked encryption format
-	// For chunked encryption: calculate encrypted byte range and fetch only needed chunks
-	// For legacy/buffered encryption: fetch full object, decrypt, then apply range
-	var backendRange *string
-	var useRangeOptimization bool
-	var passthroughRange bool
-	var passthroughRangeStart, passthroughRangeEnd, passthroughObjectSize int64
-	var plaintextStart, plaintextEnd int64
-	// derivedPlaintextSize holds the MetaOriginalSize value computed from the
-	// ciphertext Content-Length when the object lacks MetaOriginalSize in its
-	// stored metadata. It is propagated into the GetObject metadata map so all
-	// downstream decryption paths (DecryptRangeOptimized, full decrypt) can
-	// also use the correct plaintext size.
-	var derivedPlaintextSize string
-	var forceFullFetch bool
-
+	// Fetch decisions are centralized in the object read planner.
 	// Get S3 client (may use client credentials if enabled)
 	// For Signature V4 requests, s3Client may be nil - we'll forward the request directly
 	s3Client, err := h.getS3Client(r)
@@ -1082,741 +792,16 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		return
 	}
 
-	if rangeHeader != nil {
-		// Determine the backend byte range to request. The decision depends on
-		// the encryption format of the object:
-		//
-		//  MPU-encrypted  → fetch entire concatenated ciphertext (backendRange=nil);
-		//                    decryptMPUObject decrypts all parts then slices the
-		//                    plaintext to the requested range.
-		//  Chunked (single-PUT) → translate plaintext range to encrypted chunk range.
-		//  Legacy / unencrypted  → forward the client range directly.
-		//
-		// IsEncrypted only knows MetaEncrypted; MPU objects carry MetaMPUEncrypted
-		// instead. Both must be detected before falling through to the forward path,
-		// otherwise the plaintext-space range is sent to the backend as a
-		// ciphertext-space range, fetching the wrong bytes.
-		headMeta, headErr := s3Client.HeadObject(ctx, bucket, key, versionID)
-		rawHeadMeta := headMeta
-		if headErr == nil && (headMeta[crypto.MetaMPUEncrypted] == "true" || headMeta[crypto.MetaMPUEncrypted] == "v2") {
-			// MPU-encrypted ranged GET: serve via a dedicated path that maps
-			// the plaintext range to backend ciphertext offsets from the
-			// manifest and fetches only those bytes.
-			h.serveMPURangedGet(w, r, ctx, bucket, key, versionID, headMeta, *rangeHeader, s3Client, start)
-			return
-		} else if headErr == nil && !crypto.IsEncryptedMetadata(headMeta) {
-			backendRange = rangeHeader
-			if size, sizeErr := strconv.ParseInt(rawHeadMeta["Content-Length"], 10, 64); sizeErr == nil && size > 0 {
-				if rangeStart, rangeEnd, rangeErr := crypto.ParseHTTPRangeHeader(*rangeHeader, size); rangeErr == nil {
-					passthroughRange = true
-					passthroughRangeStart, passthroughRangeEnd = rangeStart, rangeEnd
-					passthroughObjectSize = size
-				}
-			}
-		} else if headErr == nil {
-			headMeta, expandErr := h.expandMetadataForAPI(bucket, headMeta)
-			if expandErr != nil {
-				h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
-				return
-			}
-			if engine.IsEncrypted(headMeta) {
-				// Single-PUT chunked or legacy encrypted object.
-				if crypto.IsChunkedFormat(headMeta) {
-					missingOriginalSize := headMeta[crypto.MetaOriginalSize] == "" || headMeta[crypto.MetaChunkCount] == ""
-					forceFullFetch = missingOriginalSize
-					if forceFullFetch {
-						useRangeOptimization = false
-					}
-					chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, rawHeadMeta)
-					if preflightErr != nil {
-						h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
-						return
-					}
-					if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) && chunkedInfo.PlaintextSize > 0 {
-						headMeta[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
-						derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
-					}
-					// Get plaintext size for range parsing
-					plaintextSize, err := crypto.GetPlaintextSizeFromMetadata(headMeta)
-					if exactSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(headMeta); sizeErr == nil {
-						plaintextSize = exactSize
-						err = nil
-						// The backend ciphertext length is authoritative. Replace
-						// stale original-size metadata, but keep optimized ranges
-						// enabled when the stored value already agrees.
-						storedSize, parseErr := strconv.ParseInt(headMeta[crypto.MetaOriginalSize], 10, 64)
-						headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", exactSize)
-						if parseErr != nil || storedSize != exactSize {
-							derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
-						}
-					}
-					if err == nil {
-						// Parse range header to get plaintext byte range
-						start, end, err := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
-						if err == nil {
-							plaintextStart, plaintextEnd = start, end
-							// A range covering the complete plaintext object does not
-							// benefit from ciphertext range optimisation. Fetch and
-							// decrypt the complete object instead; this avoids making
-							// Harbor's common `bytes=0-` request depend on range-reader
-							// chunk-boundary bookkeeping.
-							if start == 0 && end == plaintextSize-1 {
-								backendRange = nil
-								useRangeOptimization = false
-							} else {
-								// Calculate encrypted byte range for needed chunks
-								encryptedStart, encryptedEnd, err := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, start, end)
-								if err == nil {
-									encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, headMeta["Content-Length"])
-								}
-								if err == nil {
-									encryptedRange := fmt.Sprintf("bytes=%d-%d", encryptedStart, encryptedEnd)
-									backendRange = &encryptedRange
-									useRangeOptimization = true
-									h.logger.WithFields(logrus.Fields{
-										"bucket":          bucket,
-										"key":             key,
-										"plaintext_range": fmt.Sprintf("%d-%d", start, end),
-										"encrypted_range": encryptedRange,
-									}).Debug("Using optimized range request for chunked encryption")
-								} else {
-									h.logger.WithError(err).Warn("Failed to calculate encrypted range, falling back to full fetch")
-									backendRange = nil
-								}
-							}
-						} else {
-							h.logger.WithError(err).Warn("Failed to parse range header, falling back to full fetch")
-							backendRange = nil
-						}
-					} else {
-						// GetPlaintextSizeFromMetadata failed (no MetaOriginalSize or
-						// MetaChunkCount). Derive exact plaintext size from ciphertext
-						// Content-Length + MetaChunkSize so range optimization still works.
-						// Formula: plaintext = ciphertext - ceil(ciphertext/(chunkSize+16))*16
-						h.logger.WithFields(logrus.Fields{
-							"bucket":               bucket,
-							"key":                  key,
-							"headmeta_content_len": headMeta["Content-Length"],
-							"headmeta_chunk_size":  headMeta[crypto.MetaChunkSize],
-						}).Debug("chunked object missing MetaOriginalSize — deriving from ciphertext size")
-						if ctStr, ok2 := headMeta["Content-Length"]; ok2 {
-							if ct, ctErr := strconv.ParseInt(ctStr, 10, 64); ctErr == nil && ct > 0 {
-								chunkSize := int64(crypto.DefaultChunkSize)
-								if csStr, ok3 := headMeta[crypto.MetaChunkSize]; ok3 {
-									if cs, csErr := strconv.ParseInt(csStr, 10, 64); csErr == nil && cs > 0 {
-										chunkSize = cs
-									}
-								}
-								version, versionErr := chunkedFormatVersion(headMeta)
-								if versionErr != nil {
-									err = versionErr
-								}
-								if err == nil {
-									if ps, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), version); sizeErr == nil && ps > 0 {
-										plaintextSize = ps
-										err = nil
-										// Inject derived size into headMeta so that
-										// CalculateEncryptedRangeForPlaintextRange and
-										// DecryptRangeOptimized can also use it.
-										headMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", ps)
-										// Also record for propagation into GetObject metadata.
-										derivedPlaintextSize = headMeta[crypto.MetaOriginalSize]
-									}
-								}
-							}
-						}
-						if err != nil {
-							h.logger.WithError(err).Warn("Failed to get plaintext size, falling back to full fetch")
-							backendRange = nil
-						} else {
-							// Retry range parsing with derived plaintext size.
-							parsedStart, parsedEnd, parseErr := crypto.ParseHTTPRangeHeader(*rangeHeader, plaintextSize)
-							if parseErr == nil {
-								plaintextStart, plaintextEnd = parsedStart, parsedEnd
-								encStart, encEnd, encErr := crypto.CalculateEncryptedRangeForPlaintextRange(headMeta, parsedStart, parsedEnd)
-								if encErr == nil {
-									encEnd, encErr = clampEncryptedRangeEnd(encStart, encEnd, headMeta["Content-Length"])
-								}
-								if encErr == nil {
-									encRange := fmt.Sprintf("bytes=%d-%d", encStart, encEnd)
-									backendRange = &encRange
-									useRangeOptimization = true
-									h.logger.WithFields(logrus.Fields{
-										"bucket":          bucket,
-										"key":             key,
-										"client_range":    *rangeHeader,
-										"plaintext_size":  plaintextSize,
-										"plaintext_range": fmt.Sprintf("%d-%d", parsedStart, parsedEnd),
-										"encrypted_range": encRange,
-										"decrypted_size":  parsedEnd - parsedStart + 1,
-									}).Debug("range-optimized GET: derived ranges")
-								} else {
-									backendRange = nil
-								}
-							} else {
-								backendRange = nil
-							}
-						}
-					}
-					// v1 has no authenticated terminal and older objects may not have
-					// persisted original-size metadata. Do not issue a trailer/data
-					// range for that format; the full ciphertext is required for the
-					// established decrypt-and-slice path. Explicit v2 objects retain
-					// the optimized range path and its preflight above.
-					if missingOriginalSize {
-						backendRange = nil
-						useRangeOptimization = false
-					}
-				} else {
-					// Legacy format: must fetch full object, decrypt, then apply range.
-					backendRange = nil
-				}
-			}
-		} else {
-			// Not encrypted or HEAD failed: forward range to backend as-is.
-			backendRange = rangeHeader
-			if _, encryptedMarker := rawHeadMeta[crypto.MetaEncrypted]; !encryptedMarker && rawHeadMeta[crypto.MetaMPUEncrypted] != "true" {
-				// The backend will apply this range. Do not apply it again to
-				// the already-sliced response below.
-				if size, sizeErr := strconv.ParseInt(rawHeadMeta["Content-Length"], 10, 64); sizeErr == nil && size > 0 {
-					if rangeStart, rangeEnd, rangeErr := crypto.ParseHTTPRangeHeader(*rangeHeader, size); rangeErr == nil {
-						passthroughRange = true
-						passthroughRangeStart = rangeStart
-						passthroughRangeEnd = rangeEnd
-						passthroughObjectSize = size
-					}
-				}
-			}
-		}
-	}
-
-	// Legacy chunked objects can be served correctly once their plaintext size
-	// is derived, but keep them on the full-fetch path. Their stored metadata is
-	// incomplete, so avoiding DecryptRangeOptimized here prevents the range
-	// reader from relying on a manifest that lacks a persisted chunk count.
-	if derivedPlaintextSize != "" {
-		backendRange = nil
-		useRangeOptimization = false
-	}
-	if forceFullFetch {
-		backendRange = nil
-		useRangeOptimization = false
-	}
-
-	if forceFullFetch {
-		backendRange = nil
-	}
-	reader, metadata, err := s3Client.GetObject(ctx, bucket, key, versionID, backendRange)
-	if err != nil {
-		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
-		h.logger.WithError(err).WithFields(logrus.Fields{
-			"bucket": bucket,
-			"key":    key,
-		}).Error("Failed to get object")
-		h.metrics.RecordS3Error(r.Context(), "GetObject", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+	objectRead, planErr := h.prepareGetObjectRead(ctx, s3Client, bucket, key, versionID, rangeHeader, objectReadSupportsOptimizedDecrypt(engine), r)
+	if planErr != nil {
+		h.writeObjectDecryptError(w, r, "GET", bucket, key, planErr, start)
 		return
 	}
-	defer func() { _ = reader.Close() }()
-
-	// Authenticate the v2 terminal before any success headers or plaintext are
-	// exposed. Ranged GETs already performed this check during HEAD planning.
-	if expandedMetadata, expandErr := h.expandMetadataForAPI(bucket, metadata); expandErr != nil {
-		h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
-		return
-	} else if crypto.IsChunkedFormat(expandedMetadata) && (rangeHeader == nil || !useRangeOptimization) && !forceFullFetch {
-		chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
-		if preflightErr != nil {
-			h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
-			return
-		}
-		if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) && chunkedInfo.PlaintextSize > 0 {
-			metadata[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
-		}
-	}
-
-	// If the range pre-processing derived the plaintext size from the ciphertext,
-	// propagate it into the GetObject metadata so that DecryptRangeOptimized and
-	// the full-object decrypt path both have access to it.
-	if derivedPlaintextSize != "" {
-		metadata[crypto.MetaOriginalSize] = derivedPlaintextSize
-	}
-
-	if passthroughRange {
-		for k, v := range metadata {
-			if !isEncryptionMetadata(k) {
-				w.Header().Set(k, v)
-			}
-		}
-		if versionID != nil && *versionID != "" {
-			w.Header().Set("x-amz-version-id", *versionID)
-		}
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", passthroughRangeStart, passthroughRangeEnd, passthroughObjectSize))
-		w.Header().Set("Content-Length", strconv.FormatInt(passthroughRangeEnd-passthroughRangeStart+1, 10))
-		w.WriteHeader(http.StatusPartialContent)
-		var writeTimeout time.Duration
-		if h.config != nil {
-			writeTimeout = h.config.Server.WriteTimeout
-		}
-		written, copyErr := copyWithDeadlineRefresh(w, reader, writeTimeout)
-		if copyErr != nil {
-			h.logger.WithError(copyErr).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Warn("Failed to write passthrough range response")
-		}
-		h.metrics.RecordS3Operation(r.Context(), "GetObject", bucket, time.Since(start))
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), written)
-		return
-	}
-
-	// For MPU-encrypted objects, delegate to the MPU decrypt path.
-	if metadata[crypto.MetaMPUEncrypted] == "true" || metadata[crypto.MetaMPUEncrypted] == "v2" {
-		decryptStart := time.Now()
-		decryptedReader, err := h.decryptMPUObject(ctx, bucket, key, metadata, reader, s3Client)
-		decryptDuration := time.Since(decryptStart)
-		if err != nil {
-			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_decryption_failed")
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"bucket": bucket,
-				"key":    key,
-			}).Error("Failed to decrypt MPU object")
-			message := "Failed to decrypt multipart encrypted object"
-			if errors.Is(err, ErrMissingMPUManifest) {
-				message = "Encrypted multipart object metadata is missing; the gateway MPU manifest could not be found"
-			}
-			s3Err := &S3Error{
-				Code:       "InternalError",
-				Message:    message,
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusInternalServerError,
-			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-			return
-		}
-		// Read the first chunk up front so any AEAD authentication failure
-		// surfaces as a 5xx response rather than a 200 with partial/empty
-		// bytes. `io.Copy` discards the error after WriteHeader, so we must
-		// catch a tamper at the earliest point.
-		firstChunk := make([]byte, crypto.DefaultChunkSize)
-		n, firstErr := io.ReadFull(decryptedReader, firstChunk)
-		if firstErr != nil && firstErr != io.EOF && firstErr != io.ErrUnexpectedEOF {
-			h.logger.WithError(firstErr).WithFields(logrus.Fields{
-				"bucket": bucket,
-				"key":    key,
-			}).Error("MPU decrypt failed on first chunk (tamper or corruption)")
-			h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected")
-			if h.auditLogger != nil {
-				_ = h.auditLogger.Log(&audit.AuditEvent{
-					EventType: audit.EventTypeMPUTamperDetected,
-					Timestamp: time.Now().UTC(),
-					Bucket:    bucket,
-					Key:       key,
-					Success:   false,
-					Metadata:  map[string]interface{}{"status": "tamper_detected"},
-				})
-			}
-			s3Err := &S3Error{
-				Code:       "InternalError",
-				Message:    "Object integrity check failed",
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusInternalServerError,
-			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-			return
-		}
-		firstChunk = firstChunk[:n]
-		// Forward safe metadata headers.
-		for k, v := range metadata {
-			if k != crypto.MetaMPUEncrypted && k != crypto.MetaFallbackMode && k != crypto.MetaFallbackPointer && strings.ToLower(k) != "content-length" {
-				w.Header().Set(k, v)
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		written, _ := w.Write(firstChunk)
-		if firstErr == nil { // more data to stream
-			var writeTimeout time.Duration
-			if h.config != nil {
-				writeTimeout = h.config.Server.WriteTimeout
-			}
-			extra, copyErr := copyWithDeadlineRefresh(w, decryptedReader, writeTimeout)
-			if copyErr != nil {
-				if isNetworkError(copyErr) {
-					// Client disconnect or network timeout — not a tamper event.
-					h.logger.WithError(copyErr).WithFields(logrus.Fields{
-						"bucket": bucket,
-						"key":    key,
-					}).Warn("MPU stream aborted by network error after 200 OK")
-				} else {
-					// Can't change the status code after WriteHeader; log and
-					// record a tamper metric so operators see the integrity
-					// failure even though the client already got 200 headers.
-					h.logger.WithError(copyErr).WithFields(logrus.Fields{
-						"bucket": bucket,
-						"key":    key,
-					}).Error("MPU decrypt failed mid-stream after 200 OK; connection terminated")
-					h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected_midstream")
-					if h.auditLogger != nil {
-						_ = h.auditLogger.Log(&audit.AuditEvent{
-							EventType: audit.EventTypeMPUTamperDetected,
-							Timestamp: time.Now().UTC(),
-							Bucket:    bucket,
-							Key:       key,
-							Success:   false,
-							Metadata:  map[string]interface{}{"status": "tamper_detected_midstream"},
-						})
-					}
-				}
-			}
-			written += int(extra)
-		}
-		h.metrics.RecordEncryptionOperation(r.Context(), "decrypt", decryptDuration, decryptedSizeForMPU(metadata))
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(written))
-		return
-	}
-
-	// Decrypt if encrypted
-	decryptStart := time.Now()
-	var decryptedReader io.Reader
-	var decMetadata map[string]string
-
-	if useRangeOptimization && engine.IsEncrypted(metadata) {
-		// Use range-optimized decryption (only decrypts needed chunks).
-		// The source reader is already positioned at the correct encrypted
-		// byte range (backendRange was applied), so we need the variant
-		// that does NOT skip leading chunks.
-		if eng, ok := engine.(interface {
-			DecryptRangeOptimized(ctx context.Context, object crypto.ObjectContext, reader io.Reader, metadata map[string]string, plaintextStart, plaintextEnd int64) (io.Reader, map[string]string, error)
-		}); ok {
-			decryptedReader, decMetadata, err = eng.DecryptRangeOptimized(r.Context(), crypto.ObjectContext{Bucket: bucket, Key: key}, reader, metadata, plaintextStart, plaintextEnd)
-			if err != nil {
-				if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
-					h.logger.WithError(err).Warn("Encrypted object in bypass bucket (range-optimized)")
-					s3Err := &S3Error{
-						Code:       "EncryptionConfigurationMismatch",
-						Message:    "The object was encrypted when stored but the bucket policy now disables encryption. Use the migration tool to convert the object.",
-						Resource:   r.URL.Path,
-						HTTPStatus: http.StatusConflict,
-					}
-					s3Err.WriteXML(w)
-					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-					return
-				}
-				h.logger.WithError(err).Error("Range-optimized decryption failed")
-				h.metrics.RecordEncryptionError(r.Context(), "decrypt", "range_optimized_decryption_failed")
-				s3Err := &S3Error{
-					Code:       "InternalError",
-					Message:    "Failed to decrypt object",
-					Resource:   r.URL.Path,
-					HTTPStatus: http.StatusInternalServerError,
-				}
-				s3Err.WriteXML(w)
-				h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-				return
-			}
-		} else {
-			// Engine doesn't support DecryptRangeOptimized, fall back
-			h.logger.Warn("Engine doesn't support DecryptRangeOptimized, falling back to full decrypt")
-			decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), crypto.ObjectContext{Bucket: bucket, Key: key}, reader, metadata)
-			useRangeOptimization = false
-		}
-	} else {
-		// Standard decryption (full object)
-		decryptedReader, decMetadata, err = engine.Decrypt(r.Context(), crypto.ObjectContext{Bucket: bucket, Key: key}, reader, metadata)
-	}
-	decryptDuration := time.Since(decryptStart)
-	if err != nil {
-		var invalidKDF *crypto.ErrInvalidKDFParams
-		var costlyKDF *crypto.ErrKDFCostTooHigh
-		if errors.As(err, &invalidKDF) || errors.As(err, &costlyKDF) {
-			s3Err := &S3Error{Code: "InternalError", Message: "We encountered an internal error. Please try again.", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-			return
-		}
-		if errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket) {
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"bucket": bucket,
-				"key":    key,
-			}).Warn("Encrypted object in bypass bucket")
-			s3Err := &S3Error{
-				Code:       "EncryptionConfigurationMismatch",
-				Message:    "The object was encrypted when stored but the bucket policy now disables encryption. Use the migration tool to convert the object.",
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusConflict,
-			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-			return
-		}
-		h.logger.WithError(err).WithFields(logrus.Fields{
-			"bucket": bucket,
-			"key":    key,
-		}).Error("Failed to decrypt object")
-		h.metrics.RecordEncryptionError(r.Context(), "decrypt", "decryption_failed")
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to decrypt object",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
-		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		return
-	}
-	if rangeHeader == nil {
-		if plaintextSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata); sizeErr == nil {
-			decMetadata["Content-Length"] = strconv.FormatInt(plaintextSize, 10)
-		}
-	}
-	if decMetadata["ETag"] != "" {
-		decMetadata["ETag"] = quoteETag(decMetadata["ETag"])
-	}
-
-	// For range optimization, we already have the exact range in decryptedReader
-	// For non-optimized ranges, we need to buffer and apply range
-	var decryptedData []byte
-	var decryptedSize int64
-	if rangeHeader != nil && *rangeHeader != "" && !useRangeOptimization {
-		// Buffer for range processing (only if not using optimization)
-		dd, err := io.ReadAll(decryptedReader)
-		if err != nil {
-			h.logger.WithError(err).Error("Failed to read decrypted data")
-			s3Err := &S3Error{
-				Code:       "InternalError",
-				Message:    "Failed to read decrypted data",
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusInternalServerError,
-			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-			if h.auditLogger != nil {
-				alg := metadata[crypto.MetaAlgorithm]
-				if alg == "" {
-					alg = crypto.AlgorithmAES256GCM
-				}
-				h.auditLogger.LogDecrypt(bucket, key, alg, 0, false, err, decryptDuration, nil)
-			}
-			return
-		}
-		decryptedData = dd
-		decryptedSize = int64(len(decryptedData))
-	} else if useRangeOptimization {
-		// For optimized range, the reader already contains only the range
-		// But we still need to read it to send it
-		decryptedSize = plaintextEnd - plaintextStart + 1
-	} else {
-		// Full-object decrypt (no range request): try to get plaintext size
-		// from encryption metadata so the byte counter is accurate.
-		if ps, err := crypto.GetPlaintextSizeFromMetadata(metadata); err == nil && ps > 0 {
-			decryptedSize = ps
-		}
-	}
-	h.metrics.RecordEncryptionOperation(r.Context(), "decrypt", decryptDuration, decryptedSize)
-
-	// Get algorithm and key version from metadata for audit logging
-	algorithm := metadata[crypto.MetaAlgorithm]
-	if algorithm == "" {
-		algorithm = crypto.AlgorithmAES256GCM
-	}
-
-	// Extract actual key version used for decryption from metadata
-	keyVersionUsed := 0
-	if kvStr, ok := metadata[crypto.MetaKeyVersion]; ok && kvStr != "" {
-		if kv, err := strconv.Atoi(kvStr); err == nil {
-			keyVersionUsed = kv
-		}
-	}
-
-	// Get active key version and check for rotated read
-	activeKeyVersion := 0
-	if h.keyManager != nil {
-		activeKeyVersion = h.currentKeyVersion(r.Context())
-		// Track rotated read if key version used differs from active version
-		if keyVersionUsed > 0 && activeKeyVersion > 0 && keyVersionUsed != activeKeyVersion {
-			h.metrics.RecordRotatedRead(r.Context(), keyVersionUsed, activeKeyVersion)
-		}
-	}
-
-	// Use keyVersionUsed for audit logging (actual version used, not active)
-	keyVersion := keyVersionUsed
-	if keyVersion == 0 && h.keyManager != nil {
-		// Fallback to active version if metadata doesn't have version
-		keyVersion = activeKeyVersion
-	}
-
-	// Audit logging with metadata indicating rotated read if applicable
-	auditMetadata := make(map[string]interface{})
-	if keyVersionUsed > 0 && activeKeyVersion > 0 && keyVersionUsed != activeKeyVersion {
-		auditMetadata["rotated_read"] = true
-		auditMetadata["key_version_used"] = keyVersionUsed
-		auditMetadata["active_key_version"] = activeKeyVersion
-	}
-	if h.auditLogger != nil {
-		h.auditLogger.LogDecrypt(bucket, key, algorithm, keyVersion, true, nil, decryptDuration, auditMetadata)
-	}
-
-	// Store in cache if enabled and no range/version request
-	if h.cache != nil && rangeHeader == nil && versionID == nil {
-		if err := h.cache.Set(ctx, bucket, key, decryptedData, decMetadata, 0); err != nil {
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"bucket": bucket,
-				"key":    key,
-			}).Warn("Failed to cache object")
-		}
-	}
-
-	// Apply range request if present (after decryption) and set headers BEFORE WriteHeader
-	outputData := decryptedData
-	if rangeHeader != nil && *rangeHeader != "" {
-		if useRangeOptimization {
-			// V0.6-PERF-1 Phase B: Optimized range — stream directly to the
-			// response writer without buffering the entire range into memory.
-			// Content-Length is known from the plaintext range (already computed
-			// above at decryptedSize). This eliminates one full-range allocation.
-
-			// Get total size for Content-Range header
-			totalSize, _ := crypto.GetPlaintextSizeFromMetadata(metadata)
-			if totalSize == 0 {
-				// Fallback to approximate from decryptedData if available
-				totalSize = int64(len(decryptedData))
-			}
-
-			// Set decrypted metadata headers
-			for k, v := range decMetadata {
-				if !isEncryptionMetadata(k) {
-					w.Header().Set(k, v)
-				}
-			}
-			if versionID != nil && *versionID != "" {
-				w.Header().Set("x-amz-version-id", *versionID)
-			}
-			h.logger.WithFields(logrus.Fields{
-				"bucket":         bucket,
-				"key":            key,
-				"content_range":  fmt.Sprintf("bytes %d-%d/%d", plaintextStart, plaintextEnd, totalSize),
-				"content_length": decryptedSize,
-				"client_range":   *rangeHeader,
-			}).Info("serving range-optimized response")
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", plaintextStart, plaintextEnd, totalSize))
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", decryptedSize))
-			w.WriteHeader(http.StatusPartialContent)
-
-			// Stream range bytes directly — no intermediate buffer.
-			pool := crypto.GetGlobalBufferPool()
-			buf := pool.Get64K()
-			defer pool.Put(buf)
-			n64, copyErr := io.CopyBuffer(w, decryptedReader, buf)
-			if copyErr != nil {
-				h.logger.WithError(copyErr).Error("Failed to write optimized range data")
-				// Headers already sent; log only.
-			}
-			if n64 != decryptedSize {
-				h.logger.WithFields(logrus.Fields{
-					"bucket":          bucket,
-					"key":             key,
-					"promised_bytes":  decryptedSize,
-					"written_bytes":   n64,
-					"plaintext_range": fmt.Sprintf("%d-%d", plaintextStart, plaintextEnd),
-				}).Error("BYTES MISMATCH: Content-Length promised != bytes actually written")
-			}
-			h.metrics.RecordS3Operation(r.Context(), "GetObject", bucket, time.Since(start))
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), n64)
-			return
-		} else {
-			// Non-optimized: apply range to buffered data
-			outputData, err = applyRangeRequest(decryptedData, *rangeHeader)
-			if err != nil {
-				s3Err := &S3Error{
-					Code:       "InvalidRange",
-					Message:    fmt.Sprintf("Invalid range request: %v", err),
-					Resource:   r.URL.Path,
-					HTTPStatus: http.StatusRequestedRangeNotSatisfiable,
-				}
-				s3Err.WriteXML(w)
-				h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-				return
-			}
-
-			// Parse the original range to get correct Content-Range header
-			rangeStart, rangeEnd, err := crypto.ParseHTTPRangeHeader(*rangeHeader, int64(len(decryptedData)))
-			if err != nil {
-				// This shouldn't happen since applyRangeRequest succeeded, but handle gracefully
-				h.logger.WithError(err).Warn("Failed to parse range header for Content-Range")
-				rangeStart, rangeEnd = 0, int64(len(outputData)-1)
-			}
-
-			// Set decrypted metadata headers
-			for k, v := range decMetadata {
-				if !isEncryptionMetadata(k) {
-					w.Header().Set(k, v)
-				}
-			}
-			if versionID != nil && *versionID != "" {
-				w.Header().Set("x-amz-version-id", *versionID)
-			}
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rangeStart, rangeEnd, len(decryptedData)))
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(outputData)))
-			w.WriteHeader(http.StatusPartialContent)
-		}
-	} else {
-		// Set decrypted metadata headers and stream body
-		for k, v := range decMetadata {
-			if !isEncryptionMetadata(k) {
-				w.Header().Set(k, v)
-			}
-		}
-		// The backend Content-Length is ciphertext length. The decrypted
-		// reader contains plaintext, so never allow a stale backend length to
-		// survive when the engine did not provide a replacement.
-		if _, ok := decMetadata["Content-Length"]; !ok {
-			w.Header().Del("Content-Length")
-		}
-		if versionID != nil && *versionID != "" {
-			w.Header().Set("x-amz-version-id", *versionID)
-		}
-		w.WriteHeader(http.StatusOK)
-		var writeTimeout time.Duration
-		if h.config != nil {
-			writeTimeout = h.config.Server.WriteTimeout
-		}
-		n64, err := copyWithDeadlineRefresh(w, decryptedReader, writeTimeout)
-		if err != nil {
-			if isNetworkError(err) {
-				h.logger.WithError(err).WithFields(logrus.Fields{
-					"bucket": bucket,
-					"key":    key,
-				}).Warn("Object stream aborted by network error after 200 OK")
-			} else {
-				h.logger.WithError(err).WithFields(logrus.Fields{
-					"bucket": bucket,
-					"key":    key,
-				}).Error("Failed to write response")
-			}
-			// Can't change status code after WriteHeader; still record the bytes sent.
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), n64)
-			return
-		}
-		h.metrics.RecordS3Operation(r.Context(), "GetObject", bucket, time.Since(start))
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), n64)
-		return
-	}
-
-	// For ranged responses, write buffered bytes
-	n, err := w.Write(outputData)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to write response")
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), int64(n))
-		return
-	}
-
-	h.metrics.RecordS3Operation(r.Context(), "GetObject", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(n))
+	h.servePlannedGetObject(w, r, s3Client, engine, versionID, objectRead, start)
 }
 
 // handlePutObject handles PUT object requests.
@@ -1834,8 +819,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "PutObject", s3Err, start)
 		return
 	}
 
@@ -1858,8 +842,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 					Resource:   r.URL.Path,
 					HTTPStatus: http.StatusBadRequest,
 				}
-				s3Err.WriteXML(w)
-				h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+				h.writeObjectError(w, r, "PutObject", s3Err, start)
 			}
 			return
 		}
@@ -1891,11 +874,18 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "PutObject", s3Err, start)
 		return
 	}
-
+	// Parse request metadata once so all standard fields and user keys flow
+	// through the shared write model.
+	writeMeta, writeMetaErr := parseWriteMetadata(r.Header)
+	if writeMetaErr != nil {
+		writeMetaErr.Resource = r.URL.Path
+		h.writeObjectError(w, r, "PutObject", writeMetaErr, start)
+		return
+	}
+	metadata := writeMeta.engineInput(0, false)
 	// Extract canned ACL header (x-amz-acl) and fine-grained grant headers.
 	// Forward verbatim to the backend; the gateway does not validate ACL values
 	// because it is a transparent proxy and different backends support different
@@ -1906,29 +896,9 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	grantReadACP := r.Header.Get("x-amz-grant-read-acp")
 	grantWriteACP := r.Header.Get("x-amz-grant-write-acp")
 
-	// Extract metadata from headers (preserve original metadata)
-	// Only include x-amz-meta-* headers - standard headers should NOT be included
-	// as they will cause S3 API errors when sent as metadata.
-	//
-	// Go canonicalises HTTP header keys on parse (X-Amz-Meta-Foo), so the
-	// prefix comparison must be case-insensitive and the map key lower-cased
-	// for consistency with the backend client and downstream metadata code.
-	metadata := make(map[string]string)
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
-				metadata[strings.ToLower(k)] = v[0]
-			}
-		}
-	}
-
-	// Pass the original content length to the encryption engine via
-	// Content-Length in the metadata map.  The engine reads this to
-	// compute x-amz-meta-encryption-original-size, then
-	// filterS3Metadata strips Content-Length (standard header) before
-	// sending to S3.  For AWS Chunked Uploads we use
-	// x-amz-decoded-content-length as that represents the actual object
-	// size, while the HTTP Content-Length includes chunk overhead.
+	// Pass all six standard headers and normalized user metadata to the engine.
+	// Content-Length is added separately for size derivation and removed by the
+	// persistence plan before backend metadata is sent.
 	// haveContentLength distinguishes a declared length from an absent one:
 	// originalBytes is 0 for both "Content-Length: 0" and no header at all, but
 	// only the latter is an unknown-length stream.
@@ -1949,20 +919,15 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract Content-Type for encryption engine (for compression decisions)
-	// The encryption engine reads it from metadata, but we'll filter it out before S3
-	// This is a temporary inclusion - filterS3Metadata will remove it
-	contentType := r.Header.Get("Content-Type")
+	contentType := writeMeta.Standard.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream" // Default to match MinIO's behavior
 	}
-	metadata["Content-Type"] = contentType
-	if cacheControl := r.Header.Get("Cache-Control"); cacheControl != "" {
-		metadata[crypto.MetaCacheControl] = cacheControl
+	standard := writeMeta.Standard
+	if standard.ContentType == "" {
+		standard.ContentType = contentType
 	}
-	if contentDisposition := r.Header.Get("Content-Disposition"); contentDisposition != "" {
-		metadata[crypto.MetaContentDisposition] = contentDisposition
-	}
+	standard.ApplyTo(metadata)
 	var inputReader io.Reader = r.Body
 	if mode, modeErr := classifyStreamingPayloadMode(r.Header.Get("x-amz-content-sha256")); modeErr != nil {
 		writeStreamingPayloadError(w, r.URL.Path, modeErr)
@@ -1997,8 +962,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusInternalServerError,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "PutObject", s3Err, start)
 		return
 	}
 
@@ -2035,14 +999,21 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusInternalServerError,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "PutObject", s3Err, start)
+		return
+	}
+	class, classErr := crypto.ClassifyObject(key, encMetadata)
+	if classErr != nil {
+		h.writeObjectError(w, r, "PutObject", decryptFailure(classErr, r.URL.Path), start)
 		return
 	}
 
 	// Audit logging for successful encryption
 	if h.auditLogger != nil {
 		h.auditLogger.LogEncrypt(bucket, key, algorithm, keyVersion, true, nil, encryptDuration, nil)
+	}
+	if class.Format == crypto.FormatPlaintext {
+		standard.ApplyTo(encMetadata)
 	}
 
 	// Invalidate cache for this object if cache is enabled
@@ -2077,14 +1048,15 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		"key":           key,
 		"metadata_keys": metadataKeys,
 	}).Debug("Metadata keys before filtering")
-
 	// Filter out standard HTTP headers from metadata before sending to S3
 	// S3 metadata should only contain x-amz-meta-* headers, not standard headers like Content-Length
 	var filterKeys []string
 	if h.config != nil {
 		filterKeys = h.config.Backend.FilterMetadataKeys
 	}
-	s3Metadata := filterS3Metadata(encMetadata, filterKeys)
+	persist := buildPersistPlan(encMetadata, class, filterKeys)
+	s3Metadata := persist.Metadata
+	persist.Native.ApplyTo(s3Metadata)
 
 	h.logger.WithFields(logrus.Fields{
 		"bucket": bucket,
@@ -2122,31 +1094,30 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Keyed on haveContentLength, not originalBytes > 0: a declared zero is a
 	// known length and must not be mistaken for an unknown-length stream.
 	var contentLengthPtr *int64
-	if haveContentLength && encMetadata[crypto.MetaEncrypted] != "true" {
+	if haveContentLength && class.Format == crypto.FormatPlaintext {
 		// Bypass / passthrough mode: plaintext is stored as-is.
 		contentLengthPtr = &originalBytes
-	} else if encMetadata[crypto.MetaChunkedFormat] == "true" && haveContentLength {
-		// Determine chunk size from metadata
-		chunkSize := crypto.DefaultChunkSize
-		if csStr, ok := encMetadata[crypto.MetaChunkSize]; ok && csStr != "" {
-			if cs, err := strconv.Atoi(csStr); err == nil && cs > 0 {
-				chunkSize = cs
-			}
-		}
-		version, versionErr := chunkedFormatVersion(encMetadata)
-		if versionErr != nil {
-			return
-		}
-		encLen, sizeErr := crypto.ChunkedCiphertextSize(originalBytes, chunkSize, version)
+	} else if (class.Format == crypto.FormatChunkedV1 || class.Format == crypto.FormatChunkedV2) && haveContentLength {
+		encLen, sizeErr := crypto.CiphertextSizeForPlaintext(encMetadata, originalBytes)
 		if sizeErr == nil {
 			contentLengthPtr = &encLen
+		}
+	}
+	if seeker, ok := encryptedReader.(io.Seeker); ok {
+		if current, seekErr := seeker.Seek(0, io.SeekCurrent); seekErr == nil {
+			if end, endErr := seeker.Seek(0, io.SeekEnd); endErr == nil {
+				if _, restoreErr := seeker.Seek(current, io.SeekStart); restoreErr == nil && end >= current {
+					length := end - current
+					contentLengthPtr = &length
+				}
+			}
 		}
 	}
 
 	// Extract lock headers
 	lockInput, s3Err := extractObjectLockInput(r)
 	if s3Err != nil {
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "PutObject", s3Err, start)
 		return
 	}
 
@@ -2190,9 +1161,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 					Resource:   r.URL.Path,
 					HTTPStatus: http.StatusInternalServerError,
 				}
-				s3Err.WriteXML(w)
-				h.metrics.RecordS3Error(r.Context(), "PutObject", bucket, s3Err.Code)
-				h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+				h.writeObjectError(w, r, "PutObject", s3Err, start)
 				return
 			}
 			// sb.Len is the exact ciphertext size, so prefer it over the value derived
@@ -2207,14 +1176,12 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	etag, err := s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "PutObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket":        bucket,
 			"key":           key,
 			"metadata_keys": metadataKeys,
 		}).Error("Failed to put object")
-		h.metrics.RecordS3Error(r.Context(), "PutObject", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -2226,27 +1193,20 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// movement on Ceph) so subsequent HEAD/range-GET calls return the correct
 	// Content-Length, enabling the range-optimization path.
 	if ciphertextCounter != nil && ciphertextCounter.n > 0 {
-		chunkSize := int64(crypto.DefaultChunkSize)
-		if csStr, ok := encMetadata[crypto.MetaChunkSize]; ok {
-			if cs, err2 := strconv.ParseInt(csStr, 10, 64); err2 == nil && cs > 0 {
-				chunkSize = cs
-			}
-		}
 		ct := ciphertextCounter.n
-		version, versionErr := chunkedFormatVersion(encMetadata)
-		if versionErr != nil {
-			return
-		}
-		plainSize, _, sizeErr := crypto.ChunkedPlaintextSize(ct, int(chunkSize), version)
+		plainSize, _, sizeErr := crypto.PlaintextSizeForCiphertext(encMetadata, ct)
 		if sizeErr != nil || plainSize <= 0 {
 			return
 		}
 		if plainSize > 0 {
-			updatedMeta := make(map[string]string, len(s3Metadata)+1)
-			for k, v := range s3Metadata {
-				updatedMeta[k] = v
+			updatedMetaInput := make(map[string]string, len(encMetadata)+1)
+			for k, v := range encMetadata {
+				updatedMetaInput[k] = v
 			}
-			updatedMeta[crypto.MetaOriginalSize] = fmt.Sprintf("%d", plainSize)
+			updatedMetaInput[crypto.MetaOriginalSize] = fmt.Sprintf("%d", plainSize)
+			backfillPlan := buildPersistPlan(updatedMetaInput, class, filterKeys)
+			updatedMeta := backfillPlan.Metadata
+			backfillPlan.Native.ApplyTo(updatedMeta)
 			if _, _, copyErr := s3Client.CopyObject(ctx, bucket, key, bucket, key, nil, updatedMeta, nil); copyErr != nil {
 				h.logger.WithError(copyErr).WithFields(logrus.Fields{
 					"bucket":     bucket,
@@ -2263,46 +1223,15 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Populate the size cache after a successful PUT so subsequent ListObjects
-	// can resolve the plaintext size without a HEAD request.
-	if h.sizeCache != nil {
-		var ps int64
-		if psStr, ok := encMetadata[crypto.MetaOriginalSize]; ok && psStr != "" {
-			if parsed, parseErr := strconv.ParseInt(psStr, 10, 64); parseErr == nil && parsed > 0 {
-				ps = parsed
-			}
-		}
-		if ps > 0 {
-			if cacheErr := h.sizeCache.Set(r.Context(), bucket, key, ps); cacheErr != nil {
-				h.logger.WithError(cacheErr).WithFields(logrus.Fields{
-					"bucket": bucket, "key": key,
-				}).Warn("handlePutObject: failed to set size cache; listing may show ciphertext size")
-			}
-		}
+	if n, err := strconv.ParseInt(encMetadata[crypto.MetaOriginalSize], 10, 64); err == nil {
+		h.recordPlaintextSize(r.Context(), bucket, key, plaintextSize{Size: n, Exact: true, Source: "original-size"})
 	}
 
 	if etag != "" {
-		w.Header().Set("ETag", etag)
+		writeObjectHeaders(w, http.Header{"Etag": []string{etag}})
 	}
 	w.WriteHeader(http.StatusOK)
 	h.metrics.RecordS3Operation(r.Context(), "PutObject", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
-}
-
-func isStandardMetadata(key string) bool {
-	key = http.CanonicalHeaderKey(key)
-	standardHeaders := map[string]bool{
-		"Content-Type":        true,
-		"Content-Length":      true,
-		"ETag":                true,
-		"Cache-Control":       true,
-		"Expires":             true,
-		"Content-Encoding":    true,
-		"Content-Language":    true,
-		"Content-Disposition": true,
-		"Last-Modified":       true,
-	}
-	return standardHeaders[key]
 }
 
 // quoteETag serializes an opaque stored ETag as an HTTP entity-tag. Older
@@ -2314,60 +1243,17 @@ func quoteETag(etag string) string {
 	return "\"" + etag + "\""
 }
 
-// restoreEncryptedObjectHeaders maps standard object headers stored inside the
-// encrypted metadata envelope back to the S3 response header names.
-func restoreEncryptedObjectHeaders(dst, encryptedMetadata map[string]string) {
-	if value := encryptedMetadata[crypto.MetaContentType]; value != "" {
-		dst["Content-Type"] = value
-	}
-	if value := encryptedMetadata[crypto.MetaCacheControl]; value != "" {
-		dst["Cache-Control"] = value
-	}
-	if value := encryptedMetadata[crypto.MetaContentDisposition]; value != "" {
-		dst["Content-Disposition"] = value
-	}
-	if value := encryptedMetadata["Content-Type"]; value != "" {
-		dst["Content-Type"] = value
-	}
-	if value := encryptedMetadata["Cache-Control"]; value != "" {
-		dst["Cache-Control"] = value
-	}
-	if value := encryptedMetadata["Content-Disposition"]; value != "" {
-		dst["Content-Disposition"] = value
-	}
-	if value := encryptedMetadata["encryption-content-type"]; value != "" {
-		dst["Content-Type"] = value
-	}
-	if value := encryptedMetadata["encryption-cache-control"]; value != "" {
-		dst["Cache-Control"] = value
-	}
-	if value := encryptedMetadata["encryption-content-disposition"]; value != "" {
-		dst["Content-Disposition"] = value
-	}
-}
-
-func restoreCompactedEncryptedObjectHeaders(dst, metadata map[string]string) {
-	if value := metadata["x-amz-meta-ct"]; value != "" {
-		dst["Content-Type"] = value
-	}
-	if value := metadata["x-amz-meta-ccache"]; value != "" {
-		dst["Cache-Control"] = value
-	}
-	if value := metadata["x-amz-meta-cdisp"]; value != "" {
-		dst["Content-Disposition"] = value
-	}
-}
-
 // cleanupMPUManifest removes the companion manifest only when the primary
 // object is known to be an encrypted MPU object. Resolving the manifest's
 // version first is required because an unversioned DELETE creates a marker on
 // versioned buckets instead of removing the existing manifest version.
-func (h *Handler) cleanupMPUManifest(ctx context.Context, client s3.Client, bucket, key string, metadata map[string]string) {
-	if metadata[crypto.MetaMPUEncrypted] != "true" {
+func (h *Handler) cleanupMPUManifest(ctx context.Context, client s3.Client, view *objectView) {
+	if view == nil || (view.Class.Format != crypto.FormatMPUV1 && view.Class.Format != crypto.FormatMPUV2) {
 		return
 	}
 
-	manifestKey := key + mpuManifestSuffix
+	bucket := view.Bucket
+	manifestKey := view.Class.ManifestKey
 	manifestMetadata, err := client.HeadObject(ctx, bucket, manifestKey, nil)
 	if err != nil {
 		if !isS3NotFoundError(err) {
@@ -2407,8 +1293,7 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "DeleteObject", s3Err, start)
 		return
 	}
 
@@ -2439,9 +1324,9 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 	// Read metadata before deleting the primary object. This adds one backend
 	// request for ordinary deletes but avoids probing/deleting a manifest key
 	// that cannot belong to a non-MPU object.
-	var primaryMetadata map[string]string
+	var primaryView *objectView
 	if metadata, headErr := s3Client.HeadObject(ctx, bucket, key, versionID); headErr == nil {
-		primaryMetadata = metadata
+		primaryView, _ = h.loadObjectView(bucket, key, versionID, metadata)
 	} else if !isS3NotFoundError(headErr) {
 		h.logger.WithError(headErr).WithFields(logrus.Fields{
 			"bucket": bucket,
@@ -2452,13 +1337,11 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 	err = s3Client.DeleteObject(ctx, bucket, key, versionID)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "DeleteObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
 			"key":    key,
 		}).Error("Failed to delete object")
-		h.metrics.RecordS3Error(r.Context(), "DeleteObject", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		if h.auditLogger != nil {
 			h.auditLogger.LogAccess("delete", bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), false, err, time.Since(start))
 		}
@@ -2472,7 +1355,7 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 
 	// Clean up an MPU manifest only when the primary object identified itself as
 	// encrypted MPU. The cleanup is best-effort and never changes the response.
-	h.cleanupMPUManifest(ctx, s3Client, bucket, key, primaryMetadata)
+	h.cleanupMPUManifest(ctx, s3Client, primaryView)
 
 	// Evict from size cache.
 	if h.sizeCache != nil {
@@ -2488,7 +1371,6 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 	h.metrics.RecordS3Operation(r.Context(), "DeleteObject", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, http.StatusNoContent, time.Since(start), 0)
 }
 
 // handleHeadObject handles HEAD object requests.
@@ -2501,8 +1383,7 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "HeadObject", s3Err, start)
 		return
 	}
 
@@ -2524,228 +1405,62 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	metadata, err := s3Client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "HeadObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
 			"key":    key,
 		}).Error("Failed to head object")
-		h.metrics.RecordS3Error(r.Context(), "HeadObject", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
-	expandedMetadata, expandErr := h.expandMetadataForAPI(bucket, metadata)
-	if expandErr != nil {
-		h.writeChunkedCompletenessError(w, r, bucket, expandErr, start)
+	rawMetadata := metadata
+	view, viewErr := h.loadObjectView(bucket, key, versionID, rawMetadata)
+	if viewErr != nil {
+		h.writeObjectError(w, r, "HEAD", decryptFailure(viewErr, r.URL.Path), start)
 		return
 	}
-	if crypto.IsChunkedFormat(expandedMetadata) {
-		chunkedInfo, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, bucket, key, versionID, metadata)
-		if preflightErr != nil {
-			h.writeChunkedCompletenessError(w, r, bucket, preflightErr, start)
+	metadata = view.Expanded
+	resolved, resolveErr := h.resolvePlaintextSize(ctx, s3Client, view)
+	if resolveErr != nil {
+		if view.Class.Format != crypto.FormatMPUV1 && view.Class.Format != crypto.FormatMPUV2 {
+			h.writeObjectError(w, r, "HEAD", decryptFailure(resolveErr, r.URL.Path), start)
 			return
 		}
-		if chunkedInfo.PlaintextSize <= uint64(^uint64(0)>>1) {
-			expandedMetadata[crypto.MetaOriginalSize] = strconv.FormatUint(chunkedInfo.PlaintextSize, 10)
+		// Documented MPU-manifest exception: HEAD remains fail-soft and reports
+		// the backend ciphertext length while GET and copy remain fail-closed.
+		h.logger.WithError(resolveErr).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Warn("HeadObject: failed to read MPU manifest for size translation; returning ciphertext size")
+	} else if resolved.Exact {
+		metadata["Content-Length"] = strconv.FormatInt(resolved.Size, 10)
+	}
+	if originalETag := metadata[crypto.MetaOriginalETag]; originalETag != "" {
+		metadata["ETag"] = quoteETag(originalETag)
+	}
+	filteredMetadata := crypto.PlaintextMetadataView(metadata, -1, "")
+	plainSize := int64(-1)
+	if resolved.Exact && resolveErr == nil {
+		plainSize = resolved.Size
+	} else if !view.Class.Encrypted {
+		if value, parseErr := strconv.ParseInt(rawMetadata["Content-Length"], 10, 64); parseErr == nil {
+			plainSize = value
+		}
+	} else if view.Class.Format == crypto.FormatMPUV1 || view.Class.Format == crypto.FormatMPUV2 {
+		// Documented fail-soft HEAD behavior for a missing MPU manifest.
+		if value, parseErr := strconv.ParseInt(rawMetadata["Content-Length"], 10, 64); parseErr == nil {
+			plainSize = value
 		}
 	}
-	metadata = expandedMetadata
-	// A self-contained envelope stores the original standard headers in the
-	// gateway encryption metadata. The backend Content-Type is only the generic
-	// ciphertext type and must not win during response restoration.
-	if metadata[crypto.MetaContentType] == "" {
-		if value := metadata["encryption-content-type"]; value != "" {
-			metadata[crypto.MetaContentType] = value
-		}
+	versionValue := ""
+	if versionID != nil {
+		versionValue = *versionID
 	}
-	if metadata[crypto.MetaCacheControl] == "" {
-		if value := metadata["encryption-cache-control"]; value != "" {
-			metadata[crypto.MetaCacheControl] = value
-		}
+	projected, projectErr := projectObjectHeaders(objectResponseSource{Class: view.Class, Meta: metadata, Decrypted: filteredMetadata, PlainSize: plainSize, BackendETag: rawMetadata["ETag"]}, responseShape{Method: http.MethodHead, VersionID: versionValue})
+	if projectErr != nil {
+		h.writeObjectError(w, r, "HEAD", decryptFailure(projectErr, r.URL.Path), start)
+		return
 	}
-	if metadata[crypto.MetaContentDisposition] == "" {
-		if value := metadata["encryption-content-disposition"]; value != "" {
-			metadata[crypto.MetaContentDisposition] = value
-		}
-	}
-
-	// Filter out encryption metadata and restore original metadata
-	filteredMetadata := make(map[string]string)
-	for k, v := range metadata {
-		// Skip encryption-related metadata in response
-		if !isEncryptionMetadata(k) {
-			filteredMetadata[k] = v
-		}
-	}
-	restoreEncryptedObjectHeaders(filteredMetadata, metadata)
-	restoreCompactedEncryptedObjectHeaders(filteredMetadata, metadata)
-
-	// Restore original plaintext size if available.
-	// For chunked objects, derive from the backend ciphertext length first. The
-	// stored original-size metadata may be stale (for example after an object
-	// was written through an older gateway version); HEAD must agree with the
-	// plaintext byte count returned by GET.
-	//
-	// Without a correct plaintext Content-Length, clients (Docker, docker-distribution)
-	// compute byte-range requests based on the ciphertext size, which is larger.
-	// The gateway then returns wrong data for those ranges, causing digest mismatches
-	// and "unexpected EOF" on pull.
-	if metadata[crypto.MetaChunkedFormat] == "true" {
-		if plainSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata); sizeErr == nil {
-			filteredMetadata["Content-Length"] = strconv.FormatInt(plainSize, 10)
-		}
-	} else if originalSize, ok := metadata["x-amz-meta-encryption-original-size"]; ok {
-		filteredMetadata["Content-Length"] = originalSize
-	} else if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok {
-		filteredMetadata["Content-Length"] = originalSize
-	} else if metadata[crypto.MetaEncrypted] == "true" {
-		// Legacy single-object AEAD ciphertext contains one authentication tag.
-		// If the original-size metadata is absent or stale, expose the size of
-		// the bytes that GET will return rather than the backend ciphertext size.
-		if ctStr, ok := metadata["Content-Length"]; ok {
-			if ct, parseErr := strconv.ParseInt(ctStr, 10, 64); parseErr == nil && ct > 16 {
-				filteredMetadata["Content-Length"] = strconv.FormatInt(ct-16, 10)
-			}
-		}
-	} else if metadata[crypto.MetaMPUEncrypted] == "true" || metadata[crypto.MetaMPUEncrypted] == "v2" {
-		// MPU-encrypted object: the backend size is the sum of all encrypted
-		// parts (ciphertext). The plaintext total is stored in the companion
-		// .mpu-manifest object. Fetch it and substitute the correct size so
-		// clients (e.g. Docker Distribution / Harbor) can verify blob lengths.
-		manifestKey := metadata[crypto.MetaFallbackPointer]
-		if manifestKey == "" {
-			manifestKey = key + ".mpu-manifest"
-		}
-		if plainSize, manifestErr := h.readMPUManifestTotalPlainSize(ctx, bucket, key, manifestKey, metadata, s3Client); manifestErr == nil {
-			filteredMetadata["Content-Length"] = fmt.Sprintf("%d", plainSize)
-		} else {
-			h.logger.WithError(manifestErr).WithFields(logrus.Fields{
-				"bucket":      bucket,
-				"key":         key,
-				"manifestKey": manifestKey,
-			}).Warn("HeadObject: failed to read MPU manifest for size translation; returning ciphertext size")
-		}
-	}
-
-	// Restore original ETag if available
-	if originalETag, ok := metadata[crypto.MetaOriginalETag]; ok {
-		filteredMetadata["ETag"] = quoteETag(originalETag)
-	}
-
-	// Set headers from filtered metadata
-	for k, v := range filteredMetadata {
-		w.Header().Set(k, v)
-	}
-	// Set restored standard headers after copying backend headers so the
-	// ciphertext Content-Type cannot overwrite the plaintext value.
-	if value := metadata[crypto.MetaContentType]; value != "" {
-		w.Header().Set("Content-Type", value)
-	}
-	if value := metadata[crypto.MetaCacheControl]; value != "" {
-		w.Header().Set("Cache-Control", value)
-	}
-	if value := metadata[crypto.MetaContentDisposition]; value != "" {
-		w.Header().Set("Content-Disposition", value)
-	}
-	if value := metadata["encryption-content-type"]; value != "" {
-		w.Header().Set("Content-Type", value)
-	}
-	if value := metadata["encryption-cache-control"]; value != "" {
-		w.Header().Set("Cache-Control", value)
-	}
-	if value := metadata["encryption-content-disposition"]; value != "" {
-		w.Header().Set("Content-Disposition", value)
-	}
-
-	// Preserve version ID in response if present
-	if versionID != nil && *versionID != "" {
-		w.Header().Set("x-amz-version-id", *versionID)
-	}
+	writeObjectHeaders(w, projected)
 
 	w.WriteHeader(http.StatusOK)
 	h.metrics.RecordS3Operation(r.Context(), "HeadObject", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, http.StatusOK, time.Since(start), 0)
-}
-
-// isEncryptionMetadata checks if a metadata key is related to encryption.
-func isEncryptionMetadata(key string) bool {
-	if strings.HasPrefix(key, "encryption-") {
-		key = "x-amz-meta-" + key
-	}
-	encryptionKeys := []string{
-		"x-amz-meta-encryption-algorithm",
-		"x-amz-meta-encryption-key-salt",
-		"x-amz-meta-encryption-iv",
-		"x-amz-meta-encryption-auth-tag",
-		"x-amz-meta-encryption-original-size",
-		"x-amz-meta-encryption-original-etag",
-		// Chunked encryption metadata
-		"x-amz-meta-encryption-chunked",
-		"x-amz-meta-encryption-chunk-size",
-		"x-amz-meta-encryption-chunk-count",
-		"x-amz-meta-encryption-manifest",
-		"x-amz-meta-enc-iv-deriv",
-		"x-amz-meta-enc-legacy-no-aad",
-		// Original content length (set by gateway)
-		"x-amz-meta-original-content-length",
-	}
-	for _, ek := range encryptionKeys {
-		if key == ek {
-			return true
-		}
-	}
-	return false
-}
-
-func decryptedSizeForMPU(metadata map[string]string) int64 {
-	if metadata == nil {
-		return 0
-	}
-	// Prefer the canonical key written by the crypto engine.
-	if sizeStr, ok := metadata[crypto.MetaOriginalSize]; ok && sizeStr != "" {
-		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && size >= 0 {
-			return size
-		}
-	}
-	// Fall back to the legacy key for objects written before this cleanup.
-	if sizeStr, ok := metadata["x-amz-meta-original-content-length"]; ok && sizeStr != "" {
-		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && size >= 0 {
-			return size
-		}
-	}
-	return 0
-}
-
-// filterS3Metadata filters out standard HTTP headers from metadata map.
-// S3 metadata should only contain x-amz-meta-* headers, not standard headers
-// like Content-Length, Content-Type, ETag, etc. which some S3 providers reject.
-// Additionally filters out any keys specified in filterKeys for backend compatibility.
-func filterS3Metadata(metadata map[string]string, filterKeys []string) map[string]string {
-	s3Metadata := make(map[string]string)
-
-	// Create a set of keys to filter out for efficient lookup
-	filterSet := make(map[string]bool)
-	if filterKeys != nil {
-		for _, key := range filterKeys {
-			filterSet[key] = true
-		}
-	}
-	for k, v := range metadata {
-		// Only include x-amz-meta-* headers as S3 metadata
-
-		// Skip keys that should be filtered out for backend compatibility
-		if filterSet[k] {
-			continue
-		}
-		if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
-			s3Metadata[k] = v
-		} else if !isStandardMetadata(k) {
-			// Include non-standard headers that aren't standard HTTP headers
-			// (though typically only x-amz-meta-* should be here)
-			s3Metadata[k] = v
-		}
-		// Explicitly exclude standard headers: Content-Length, Content-Type, ETag, etc.
-	}
-	return s3Metadata
 }
 
 // handleListObjects handles list objects requests.
@@ -2757,8 +1472,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" {
 		s3Err := ErrInvalidBucketName
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "ListObjects", s3Err, start)
 		return
 	}
 
@@ -2793,13 +1507,11 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	listResult, err := s3Client.ListObjects(ctx, bucket, prefix, opts)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, "")
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "ListObjects", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
 			"prefix": prefix,
 		}).Error("Failed to list objects")
-		h.metrics.RecordS3Error(r.Context(), "ListObjects", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -2857,6 +1569,10 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	// compared against the in-memory plaintext byte counter (w.size), so any
 	// ciphertext inflation causes "blob invalid length".
 	//
+	// Active encrypted uploads use their state-store plaintext sizes. Completed
+	// objects are classified and resolved only when the configured bounded HEAD
+	// fallback is enabled.
+	//
 	// We apply plaintext-size translation in two phases:
 	//   Phase 1 – In-progress uploads: Valkey state store holds per-part
 	//             PlainLen values; sum them up. This covers the PATCH path.
@@ -2865,61 +1581,46 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	//             (written before CompleteMultipartUpload and durable in S3).
 	//             This covers the PUT (validateBlob) path.
 	// Both phases are fail-soft: on any error the original backend size is kept.
+	activeMPUKeys := map[string]struct{}{}
 	if h.mpuStateStore != nil && len(listResult.Objects) > 0 {
 		// Phase 1: in-progress uploads via Valkey.
-		remaining := make(map[int]string) // index → key, for phase-2 fallback
 		if plainSizeByKey, lookupErr := h.listActiveMPUPlainSizes(ctx, bucket); lookupErr == nil {
+			for objectKey := range plainSizeByKey {
+				activeMPUKeys[objectKey] = struct{}{}
+			}
 			for i := range listResult.Objects {
 				if ps, ok := plainSizeByKey[listResult.Objects[i].Key]; ok {
 					listResult.Objects[i].Size = ps
-				} else {
-					remaining[i] = listResult.Objects[i].Key
 				}
-			}
-		} else {
-			for i, obj := range listResult.Objects {
-				remaining[i] = obj.Key
 			}
 		}
 
-		// Phase 2: completed uploads via .mpu-manifest companion object.
-		// To avoid N+1 latency on large listings, only attempt manifest
-		// lookups when the list is small (max-keys ≤ 10) or when the query
-		// looks like Docker Distribution's statList() pattern (max-keys=1).
-		if len(remaining) > 0 && maxKeys <= 10 {
-			for idx, objKey := range remaining {
-				manifestKey := objKey + ".mpu-manifest"
-				if ps, manifestErr := h.readMPUManifestTotalPlainSize(ctx, bucket, objKey, manifestKey, nil, s3Client); manifestErr == nil && ps > 0 {
-					listResult.Objects[idx].Size = ps
-				}
-				// Non-fatal: if manifest doesn't exist or errors, keep backend size.
-			}
-		}
+		// Completed uploads are resolved by lookupListObjectPlaintextSize below,
+		// which classifies each object and delegates size and manifest policy to
+		// the shared resolver. Avoid a second manifest-only policy here.
 	}
 
-	// Docker Distribution's S3 driver also uses ListObjects(max-keys=1) as a
-	// stat fallback for regular objects. Legacy single-PUT chunked-encrypted
-	// objects stored before MetaOriginalSize was persisted still report
-	// ciphertext sizes from the backend, which can poison Harbor's blob
-	// descriptor cache. For these small stat-style listings, translate object
-	// sizes from ciphertext to plaintext exactly like handleHeadObject.
-	if len(listResult.Objects) > 0 && maxKeys <= 10 {
+	// Small stat-style pages preserve their established plaintext-size behavior.
+	// Larger/general pages rely on exact write-time size cache entries or the
+	// configured fallback HEAD batch to avoid unconditional N+1 backend calls.
+	if len(listResult.Objects) > 0 && maxKeys <= 10 && (h.config == nil || h.config.ListSizeTranslate.FallbackHeadEnabled) {
 		for i := range listResult.Objects {
 			obj := &listResult.Objects[i]
-			if active, err := h.listActiveMPUPlainSizes(ctx, bucket); err == nil {
-				if _, ok := active[obj.Key]; ok {
-					continue
-				}
+			if _, isActiveMPU := activeMPUKeys[obj.Key]; isActiveMPU {
+				continue
 			}
 			if ps, ok, translateErr := h.lookupListObjectPlaintextSize(ctx, bucket, obj.Key, obj.Size, s3Client); translateErr == nil && ok {
 				obj.Size = ps
+			} else if translateErr != nil && h.logger != nil {
+				h.logger.WithError(translateErr).WithFields(logrus.Fields{"bucket": bucket, "key": obj.Key}).Warn("ListObjects: unable to resolve plaintext size; preserving backend size")
 			}
 		}
 	}
 
 	// Phase 3: size-cache resolution for general listings.
-	// For each object not yet resolved by the maxKeys<=10 HEAD path above,
-	// look up plaintext size from the write-time size cache.
+	// The size cache is populated only through recordPlaintextSize from an exact
+	// resolver result or a plaintext backend length. Accept these write-time
+	// values without per-object HEADs on general listing pages.
 	if h.sizeCache != nil && h.config != nil && h.config.ListSizeTranslate.Enabled && len(listResult.Objects) > 0 {
 		missKeys := make([]string, len(listResult.Objects))
 		for i := range listResult.Objects {
@@ -2933,6 +1634,9 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 			stillMissIdxs := make([]int, 0, len(listResult.Objects))
 			stillMissKeys := make([]string, 0, len(listResult.Objects))
 			for i := range listResult.Objects {
+				if _, ok := activeMPUKeys[missKeys[i]]; ok {
+					continue
+				}
 				if ps, ok := cached[missKeys[i]]; ok {
 					listResult.Objects[i].Size = ps
 					h.metrics.RecordListSizeCacheHit(ctx, bucket)
@@ -2969,14 +1673,12 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(len(xmlResponse)))
 }
 
-const mpuManifestSuffix = ".mpu-manifest"
-
 // filterMPUManifestObjects removes gateway-owned MPU manifest objects from
 // client-facing listings. The backend still stores them for internal reads.
 func filterMPUManifestObjects(objects []s3.ObjectInfo) []s3.ObjectInfo {
 	filtered := objects[:0]
 	for _, object := range objects {
-		if !strings.HasSuffix(object.Key, mpuManifestSuffix) {
+		if !strings.HasSuffix(object.Key, crypto.MPUManifestSuffix) {
 			filtered = append(filtered, object)
 		}
 	}
@@ -2988,7 +1690,7 @@ func filterMPUManifestObjects(objects []s3.ObjectInfo) []s3.ObjectInfo {
 // ciphertext. It is intentionally used only on small stat-style listings to
 // avoid per-object HEAD amplification on large enumerations.
 func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key string, ciphertextSize int64, s3Client s3.Client) (int64, bool, error) {
-	if ciphertextSize <= 0 {
+	if ciphertextSize < 0 {
 		return 0, false, nil
 	}
 
@@ -2997,48 +1699,24 @@ func (h *Handler) lookupListObjectPlaintextSize(ctx context.Context, bucket, key
 		return 0, false, err
 	}
 
-	if originalSize, ok := metadata[crypto.MetaOriginalSize]; ok && originalSize != "" {
-		ps, parseErr := strconv.ParseInt(originalSize, 10, 64)
-		if parseErr != nil || ps <= 0 {
-			return 0, false, parseErr
-		}
-		return ps, true, nil
+	view, viewErr := h.loadObjectView(bucket, key, nil, metadata)
+	if viewErr != nil {
+		return 0, false, viewErr
 	}
-
-	if originalSize, ok := metadata["x-amz-meta-original-content-length"]; ok && originalSize != "" {
-		ps, parseErr := strconv.ParseInt(originalSize, 10, 64)
-		if parseErr != nil || ps <= 0 {
-			return 0, false, parseErr
+	size, sizeErr := h.resolvePlaintextSize(ctx, s3Client, view)
+	if sizeErr != nil {
+		if view.Class.Format == crypto.FormatMPUV1 || view.Class.Format == crypto.FormatMPUV2 {
+			// Documented MPU-manifest fail-soft exception for HEAD and ListObjects.
+			h.logger.WithError(sizeErr).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Warn("ListObjects: failed to read MPU manifest for size translation; returning ciphertext size")
+			return ciphertextSize, false, nil
 		}
-		return ps, true, nil
+		return 0, false, sizeErr
 	}
-
-	if metadata[crypto.MetaChunkedFormat] == "true" {
-		if plainSize, sizeErr := crypto.GetPlaintextSizeFromMetadata(metadata); sizeErr == nil {
-			return plainSize, true, nil
-		}
-		return 0, false, nil
-	}
-
-	if metadata[crypto.MetaMPUEncrypted] == "true" || metadata[crypto.MetaMPUEncrypted] == "v2" {
-		ps, manifestErr := h.readMPUManifestTotalPlainSize(ctx, bucket, key, key+".mpu-manifest", metadata, s3Client)
-		if manifestErr != nil || ps <= 0 {
-			return 0, false, manifestErr
-		}
-		return ps, true, nil
+	if size.Exact && size.Size >= 0 {
+		return size.Size, true, nil
 	}
 
 	return 0, false, nil
-}
-
-// chunkedFormatVersion treats chunked metadata without a manifest as legacy
-// v1. A decodable manifest is authoritative, including v2 so its terminal
-// preflight is not accidentally bypassed.
-func chunkedFormatVersion(metadata map[string]string) (uint8, error) {
-	if metadata[crypto.MetaManifest] == "" {
-		return crypto.ChunkedFormatV1, nil
-	}
-	return crypto.ChunkedFormatVersion(metadata)
 }
 
 // clampEncryptedRangeEnd limits an optimised ciphertext range to the actual
@@ -3146,9 +1824,7 @@ func (h *Handler) resolveListSizesByHead(
 
 			// Write to cache immediately using bgCtx so the entry is persisted
 			// regardless of whether responseCtx has already expired.
-			if h.sizeCache != nil && sizeToCache > 0 {
-				_ = h.sizeCache.Set(bgCtx, bucket, key, sizeToCache)
-			}
+			h.recordPlaintextSize(bgCtx, bucket, key, plaintextSize{Size: sizeToCache, Exact: sizeToCache >= 0, Source: "original-size"})
 
 			// Send to resolved only if the response deadline hasn't fired yet.
 			// Non-blocking: if responseCtx is already done, drop — the response
@@ -3201,8 +1877,7 @@ func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" {
 		s3Err := ErrInvalidBucketName
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "HeadBucket", s3Err, start)
 		return
 	}
 
@@ -3217,13 +1892,11 @@ func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
 	_, err = s3Client.ListObjects(r.Context(), bucket, "", s3.ListOptions{MaxKeys: 1})
 	if err != nil {
 		s3Err := TranslateError(err, bucket, "")
-		s3Err.WriteXML(w)
+		h.writeObjectErrorForBucket(w, r, "HeadBucket", bucket, s3Err, start)
 		// Log err here: TranslateError no longer echoes err into the response
 		// body, so this is the only place the underlying diagnostic is
 		// recorded for this code path.
 		h.logger.WithError(err).WithField("bucket", bucket).Error("Failed to head bucket")
-		h.metrics.RecordS3Error(r.Context(), "HeadBucket", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "HEAD", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -3241,8 +1914,7 @@ func (h *Handler) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" {
 		s3Err := ErrInvalidBucketName
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CreateBucket", s3Err, start)
 		return
 	}
 
@@ -3251,20 +1923,20 @@ func (h *Handler) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 	}).Debug("Handling bucket creation request")
 	if !h.allowBucketCreation.Load() {
 		s3Err := &S3Error{Code: "NotImplemented", Message: "Bucket creation is not supported.", Resource: r.URL.Path, HTTPStatus: http.StatusNotImplemented}
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CreateBucket", s3Err, start)
 		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
 		return
 	}
 	credential, authorized := CredentialFromContext(r)
 	if !authorized || !credential.AllowsBucket(bucket) || !credential.HasBucketPermission(config.BucketPermissionCreate) || (h.config != nil && h.config.ProxiedBucket != "" && h.config.ProxiedBucket != bucket) {
 		s3Err := &S3Error{Code: "AccessDenied", Message: "Access Denied", Resource: r.URL.Path, HTTPStatus: http.StatusForbidden}
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CreateBucket", s3Err, start)
 		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
 		return
 	}
 	if err := ValidateBucketName(bucket); err != nil {
 		s3Err := &S3Error{Code: "InvalidBucketName", Message: err.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CreateBucket", s3Err, start)
 		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
 		return
 	}
@@ -3407,8 +2079,7 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 	if bucket == "" || key == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CreateMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -3420,8 +2091,7 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CreateMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -3431,6 +2101,16 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 	}
 
 	ctx := r.Context()
+	writeMeta, writeMetaErr := parseWriteMetadata(r.Header)
+	if writeMetaErr != nil {
+		writeMetaErr.Resource = r.URL.Path
+		h.writeObjectError(w, r, "CreateMultipartUpload", writeMetaErr, start)
+		return
+	}
+	metadata := writeMeta.engineInput(0, false)
+	if metadata["Content-Type"] == "" {
+		metadata["Content-Type"] = "application/octet-stream"
+	}
 
 	// Get S3 client (may use client credentials if enabled)
 	s3Client, err := h.getS3Client(r)
@@ -3438,24 +2118,6 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		h.logger.WithError(err).Error("Failed to get S3 client")
 		h.writeS3ClientError(w, r, err, "POST", start)
 		return
-	}
-
-	// Extract metadata from headers
-	metadata := make(map[string]string)
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			// Only include x-amz-meta-* headers as S3 metadata.
-			// Standard headers should not be sent as metadata.
-			// Case-insensitive match because Go canonicalises headers.
-			if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
-				metadata[strings.ToLower(k)] = v[0]
-			}
-		}
-	}
-	for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
-		if value := r.Header.Get(key); value != "" {
-			metadata[key] = value
-		}
 	}
 
 	// Extract canned ACL header (x-amz-acl) and fine-grained grant headers
@@ -3473,27 +2135,33 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		var bindingID [16]byte
 		if _, err := rand.Read(bindingID[:]); err != nil {
 			s3Err := &S3Error{Code: "InternalError", Message: "Failed to generate multipart upload binding", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-			s3Err.WriteXML(w)
-			h.metrics.RecordS3Error(r.Context(), "CreateMultipartUpload", bucket, s3Err.Code)
-			h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "CreateMultipartUpload", s3Err, start)
 			return
 		}
-		metadata[crypto.MetaMPUEncrypted] = "v2"
+		setEncryptedMPUMarker(metadata, "v2")
 		metadata[crypto.MetaObjectBindingID] = base64.RawURLEncoding.EncodeToString(bindingID[:])
 		metadata[crypto.MetaFallbackMode] = "mpu"
-		metadata[crypto.MetaFallbackPointer] = key + ".mpu-manifest"
+		metadata[crypto.MetaFallbackPointer] = key + crypto.MPUManifestSuffix
 	}
+	var filterKeys []string
+	if h.config != nil {
+		filterKeys = h.config.Backend.FilterMetadataKeys
+	}
+	// Multipart payload encryption happens per-part. The initiation metadata's
+	// standard fields are native S3 object headers and remain outside part
+	// ciphertext, so plan the metadata as a passthrough header set.
+	persist := buildPersistPlan(metadata, crypto.ObjectClass{}, filterKeys)
+	persist.Native.ApplyTo(persist.Metadata)
+	metadata = persist.Metadata
 
 	uploadID, err := s3Client.CreateMultipartUpload(ctx, bucket, key, metadata, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CreateMultipartUpload", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
 			"key":    key,
 		}).Error("Failed to create multipart upload")
-		h.metrics.RecordS3Error(r.Context(), "CreateMultipartUpload", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -3540,8 +2208,7 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusServiceUnavailable,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "CreateMultipartUpload", s3Err, start)
 			return
 		}
 
@@ -3579,7 +2246,6 @@ func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 	_ = xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordS3Operation(r.Context(), "CreateMultipartUpload", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
 // initMPUEncryptionState generates a DEK + IV prefix and persists UploadState
@@ -3979,8 +2645,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" || uploadID == "" || partNumberStr == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPart", s3Err, start)
 		return
 	}
 
@@ -3998,8 +2663,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPart", s3Err, start)
 		return
 	}
 
@@ -4016,8 +2680,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPart", s3Err, start)
 		return
 	}
 
@@ -4085,7 +2748,6 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 			"uploadID":   uploadID,
 			"partNumber": partNumber,
 		}).Error("mpu.state.unavailable: cannot determine upload encryption status; failing closed")
-		h.metrics.RecordS3Error(r.Context(), "UploadPart", bucket, "StateUnavailable")
 		if h.auditLogger != nil {
 			_ = h.auditLogger.Log(&audit.AuditEvent{
 				EventType: audit.EventTypeMPUValkeyUnavail,
@@ -4102,12 +2764,11 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusServiceUnavailable,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "UploadPart", s3Err, start)
 		return
 	} else if uploadState != nil && uploadState.PolicySnapshot.EncryptMultipartUploads {
 		if identityErr := validateMPURouteIdentity(uploadState, bucket, key); identityErr != nil {
-			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+			h.writeObjectError(w, r, "UploadPart", (&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}), start)
 			return
 		}
 		// Encrypted multipart path — decision based on PolicySnapshot stored at
@@ -4121,11 +2782,11 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		reserved, reserveErr := h.reserveEncryptedMPUPart(ctx, bucket, uploadID, int32(partNumber), inputReader, uploadState)
 		if reserveErr != nil {
 			reserveErr.Resource = r.URL.Path
-			reserveErr.WriteXML(w)
+			h.writeObjectError(w, r, "UploadPart", reserveErr, start)
 			return
 		}
 		if reserved.reservation.AlreadyDone {
-			w.Header().Set("ETag", reserved.reservation.CommittedETag)
+			writeObjectHeaders(w, http.Header{"Etag": []string{reserved.reservation.CommittedETag}})
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -4158,8 +2819,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusInternalServerError,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "UploadPart", s3Err, start)
 			return
 		}
 		// V0.6-PERF-1 Phase D: use a pooled seekable wrapper bounded by
@@ -4183,8 +2843,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 				msg = sbErr.Error()
 			}
 			s3Err := &S3Error{Code: code, Message: msg, Resource: r.URL.Path, HTTPStatus: status}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "UploadPart", s3Err, start)
 			return
 		}
 		encryptedReader = sb
@@ -4199,7 +2858,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		}
 		if encMPUEncryptDuration >= lease/4 {
 			if renewErr := encMPUClaimStore.RenewPart(ctx, uploadID, encMPUClaim.PartNumber, encMPUReservation.Token); renewErr != nil {
-				(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+				h.writeObjectError(w, r, "UploadPart", (&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}), start)
 				return
 			}
 			h.metrics.RecordMPUPartClaim("lease_renewed")
@@ -4221,8 +2880,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 				msg = sbErr.Error()
 			}
 			s3Err := &S3Error{Code: code, Message: msg, Resource: r.URL.Path, HTTPStatus: status}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "UploadPart", s3Err, start)
 			return
 		}
 		encryptedReader = sb
@@ -4236,15 +2894,13 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	preUploadReservationOwned = false
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "UploadPart", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket":     bucket,
 			"key":        key,
 			"uploadID":   uploadID,
 			"partNumber": partNumber,
 		}).Error("Failed to upload part")
-		h.metrics.RecordS3Error(r.Context(), "UploadPart", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -4260,7 +2916,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	if encMPUState != nil && contentLengthPtr != nil {
 		chunkCount64, countErr := crypto.ChunkedDataChunkCount(encMPUPlainLen, crypto.DefaultChunkSize)
 		if countErr != nil || chunkCount64 > uint64(^uint32(0)>>1) {
-			(&S3Error{Code: "InternalError", Message: "Invalid encrypted multipart part size", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
+			h.writeObjectError(w, r, "UploadPart", (&S3Error{Code: "InternalError", Message: "Invalid encrypted multipart part size", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}), start)
 			return
 		}
 		chunkCount := int32(chunkCount64)
@@ -4270,7 +2926,7 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 				// Do not release a reservation after an uncertain commit. Releasing
 				// could permit a changed plaintext to reuse the deterministic nonce
 				// schedule; the upload must be aborted if ownership is ambiguous.
-				(&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}).WriteXML(w)
+				h.writeObjectError(w, r, "UploadPart", (&S3Error{Code: "ServiceUnavailable", Message: "Multipart encryption state store unavailable; retry the part upload", Resource: r.URL.Path, HTTPStatus: http.StatusServiceUnavailable}), start)
 				return
 			}
 			h.metrics.RecordMPUPart("success")
@@ -4288,10 +2944,9 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("ETag", etag)
+	writeObjectHeaders(w, http.Header{"Etag": []string{etag}})
 	w.WriteHeader(http.StatusOK)
 	h.metrics.RecordS3Operation(r.Context(), "UploadPart", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
 // handleCompleteMultipartUpload handles completing a multipart upload.
@@ -4306,8 +2961,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	if bucket == "" || key == "" || uploadID == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -4319,8 +2973,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -4354,8 +3007,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 				HTTPStatus: http.StatusBadRequest,
 			}
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -4370,7 +3022,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 
 	lockInput, s3Err := extractObjectLockInput(r)
 	if s3Err != nil {
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -4387,7 +3039,6 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 			"key":      key,
 			"uploadID": uploadID,
 		}).Error("mpu.state.unavailable: cannot determine encryption state at Complete; failing closed")
-		h.metrics.RecordS3Error(r.Context(), "CompleteMultipartUpload", bucket, "StateUnavailable")
 		if h.auditLogger != nil {
 			_ = h.auditLogger.Log(&audit.AuditEvent{
 				EventType: audit.EventTypeMPUValkeyUnavail,
@@ -4404,14 +3055,13 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusServiceUnavailable,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 		return
 	}
 	completeIsEnc := completeState != nil && completeState.PolicySnapshot.EncryptMultipartUploads
 	if completeIsEnc {
 		if identityErr := validateMPURouteIdentity(completeState, bucket, key); identityErr != nil {
-			(&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}).WriteXML(w)
+			h.writeObjectError(w, r, "CompleteMultipartUpload", (&S3Error{Code: "NoSuchUpload", Message: identityErr.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusNotFound}), start)
 			return
 		}
 		if claimStore := h.mpuStateStore; claimStore != nil {
@@ -4422,7 +3072,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 				if errors.Is(beginErr, mpu.ErrInvalidPhase) || errors.Is(beginErr, mpu.ErrInvalidStateVersion) || errors.Is(beginErr, mpu.ErrRevisionConflict) {
 					code, status = "OperationAborted", http.StatusConflict
 				}
-				(&S3Error{Code: code, Message: "The selected parts do not match committed encrypted MPU state", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+				h.writeObjectError(w, r, "CompleteMultipartUpload", (&S3Error{Code: code, Message: "The selected parts do not match committed encrypted MPU state", Resource: r.URL.Path, HTTPStatus: status}), start)
 				return
 			}
 		}
@@ -4441,8 +3091,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusInternalServerError,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 			return
 		}
 
@@ -4466,14 +3115,12 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 			}
 		}
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CompleteMultipartUpload", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket":   bucket,
 			"key":      key,
 			"uploadID": uploadID,
 		}).Error("Failed to complete multipart upload")
-		h.metrics.RecordS3Error(r.Context(), "CompleteMultipartUpload", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -4485,7 +3132,7 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 				if errors.Is(finalizeErr, mpu.ErrRevisionConflict) {
 					code, status = "OperationAborted", http.StatusConflict
 				}
-				(&S3Error{Code: code, Message: "Multipart upload lifecycle finalization failed.", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+				h.writeObjectError(w, r, "CompleteMultipartUpload", (&S3Error{Code: code, Message: "Multipart upload lifecycle finalization failed.", Resource: r.URL.Path, HTTPStatus: status}), start)
 				return
 			}
 		}
@@ -4501,16 +3148,12 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 
 	// Populate the size cache after a successful complete so subsequent
 	// ListObjects can resolve the plaintext size without a HEAD request.
-	if h.sizeCache != nil && completeState != nil {
+	if completeState != nil {
 		var totalPlain int64
 		for _, p := range completeState.Parts {
 			totalPlain += p.PlainLen
 		}
-		if totalPlain > 0 {
-			if cacheErr := h.sizeCache.Set(ctx, bucket, key, totalPlain); cacheErr != nil {
-				h.logger.WithError(cacheErr).Warn("handleCompleteMultipartUpload: failed to set size cache")
-			}
-		}
+		h.recordPlaintextSize(ctx, bucket, key, plaintextSize{Size: totalPlain, Exact: totalPlain >= 0, Source: "mpu-manifest"})
 	}
 
 	// Return XML response
@@ -4534,7 +3177,6 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	_ = xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordS3Operation(r.Context(), "CompleteMultipartUpload", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
 // handleAbortMultipartUpload handles aborting a multipart upload.
@@ -4548,8 +3190,7 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 	if bucket == "" || key == "" || uploadID == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "AbortMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -4561,8 +3202,7 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "AbortMultipartUpload", s3Err, start)
 		return
 	}
 
@@ -4596,10 +3236,10 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 			abortRevision, err = store.BeginAbort(ctx, uploadID)
 			if err != nil {
 				if errors.Is(err, mpu.ErrRevisionConflict) || errors.Is(err, mpu.ErrInvalidPhase) || errors.Is(err, mpu.ErrInvalidStateVersion) {
-					(&S3Error{Code: "OperationAborted", Message: "Multipart upload lifecycle transition is in progress.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
+					h.writeObjectError(w, r, "AbortMultipartUpload", (&S3Error{Code: "OperationAborted", Message: "Multipart upload lifecycle transition is in progress.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}), start)
 					return
 				}
-				(&S3Error{Code: "OperationAborted", Message: "Multipart upload lifecycle transition is in progress.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}).WriteXML(w)
+				h.writeObjectError(w, r, "AbortMultipartUpload", (&S3Error{Code: "OperationAborted", Message: "Multipart upload lifecycle transition is in progress.", Resource: r.URL.Path, HTTPStatus: http.StatusConflict}), start)
 				return
 			}
 		}
@@ -4619,14 +3259,12 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 			}
 		}
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "AbortMultipartUpload", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket":   bucket,
 			"key":      key,
 			"uploadID": uploadID,
 		}).Error("Failed to abort multipart upload")
-		h.metrics.RecordS3Error(r.Context(), "AbortMultipartUpload", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 	if abortStore != nil {
@@ -4636,7 +3274,7 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 			if errors.Is(finalizeErr, mpu.ErrRevisionConflict) {
 				code, status = "OperationAborted", http.StatusConflict
 			}
-			(&S3Error{Code: code, Message: "Multipart upload lifecycle finalization failed.", Resource: r.URL.Path, HTTPStatus: status}).WriteXML(w)
+			h.writeObjectError(w, r, "AbortMultipartUpload", (&S3Error{Code: code, Message: "Multipart upload lifecycle finalization failed.", Resource: r.URL.Path, HTTPStatus: status}), start)
 			return
 		}
 		if delErr := abortStore.Delete(ctx, uploadID); delErr != nil {
@@ -4660,7 +3298,6 @@ func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 
 	w.WriteHeader(http.StatusNoContent)
 	h.metrics.RecordS3Operation(r.Context(), "AbortMultipartUpload", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "DELETE", r.URL.Path, http.StatusNoContent, time.Since(start), 0)
 }
 
 // encryptMPUPart encrypts a single multipart part using the per-upload DEK
@@ -4728,122 +3365,44 @@ func (h *Handler) serveMPURangedGet(
 	s3Client s3.Client,
 	start time.Time,
 ) {
-	// ── 1. Fetch and decrypt manifest ────────────────────────────────────────
-	manifestKey := headMeta[crypto.MetaFallbackPointer]
-	if manifestKey == "" {
-		manifestKey = key + ".mpu-manifest"
-	}
-	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
+	readPlan, err := h.planObjectRead(ctx, s3Client, bucket, key, versionID, headMeta, &rangeHeader)
 	if err != nil {
-		if isS3NotFoundError(err) {
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"bucket":      bucket,
-				"key":         key,
-				"manifestKey": manifestKey,
-			}).Error("Encrypted multipart object metadata is missing")
-			(&S3Error{
-				Code:       "InternalError",
-				Message:    "Encrypted multipart object metadata is missing; the gateway MPU manifest could not be found",
-				Resource:   r.URL.Path,
-				HTTPStatus: http.StatusInternalServerError,
-			}).WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-			return
-		}
-		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
 		return
 	}
-	defer manifestReader.Close()
+	h.serveMPURangedGetPlanned(w, r, bucket, key, versionID, readPlan, s3Client, start)
+}
 
-	engine, err := h.getEncryptionEngine(bucket)
-	if err != nil {
-		h.logger.WithError(err).Error("serveMPURangedGet: get engine")
-		(&S3Error{Code: "InternalError", Message: "Failed to load encryption configuration", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+func (h *Handler) serveMPURangedGetPlanned(
+	w http.ResponseWriter,
+	r *http.Request,
+	bucket, key string,
+	versionID *string,
+	readPlan objectReadPlan,
+	s3Client s3.Client,
+	start time.Time,
+) {
+	ctx := r.Context()
+	var err error
+	loaded := readPlan.MPUManifest
+	if !readPlan.validMPURange() {
+		h.writeObjectError(w, r, "GET", decryptFailure(fmt.Errorf("object is not an MPU"), r.URL.Path), start)
 		return
 	}
-	var manifestJSON []byte
-	isV2 := headMeta[crypto.MetaMPUEncrypted] == "v2"
-	if isV2 {
-		if manifestMeta[crypto.MetaMPUManifestVersion] != "2" {
-			h.logger.Error("serveMPURangedGet: invalid companion marker")
-			return
-		}
-		b, bindErr := base64.RawURLEncoding.DecodeString(headMeta[crypto.MetaObjectBindingID])
-		if bindErr != nil || len(b) != 16 {
-			h.logger.Error("serveMPURangedGet: invalid main binding")
-			return
-		}
-		var id [16]byte
-		copy(id[:], b)
-		raw, readErr := io.ReadAll(manifestReader)
-		if readErr != nil {
-			return
-		}
-		manifestJSON, err = crypto.DecryptMPUManifest(r.Context(), engine, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, id, raw, manifestMeta)
-	} else {
-		manifestPlainReader, _, decErr := engine.Decrypt(r.Context(), crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, manifestReader, manifestMeta)
-		err = decErr
-		if err == nil {
-			manifestJSON, err = io.ReadAll(manifestPlainReader)
-		}
-	}
-	if err != nil {
-		h.logger.WithError(err).Error("serveMPURangedGet: decrypt manifest")
-		(&S3Error{Code: "InternalError", Message: "Failed to decrypt manifest", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-		return
-	}
-	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
-	if err != nil {
-		h.logger.WithError(err).Error("serveMPURangedGet: parse manifest")
-		(&S3Error{Code: "InternalError", Message: "Invalid manifest", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-		return
-	}
-	var manifestBinding [16]byte
-	if isV2 {
-		b, bindErr := base64.RawURLEncoding.DecodeString(headMeta[crypto.MetaObjectBindingID])
-		if bindErr != nil || len(b) != 16 || headMeta[crypto.MetaMPUEncrypted] != "v2" {
-			h.logger.Error("serveMPURangedGet: invalid main binding")
-			(&S3Error{Code: "InternalError", Message: "Invalid manifest binding", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-			return
-		}
-		copy(manifestBinding[:], b)
-		if err := manifest.ValidateFor(crypto.ObjectContext{Bucket: bucket, Key: key}, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, manifestBinding); err != nil {
-			h.logger.WithError(err).Error("serveMPURangedGet: manifest relationship")
-			(&S3Error{Code: "InternalError", Message: "Invalid manifest relationship", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-			return
-		}
-	}
+	manifest := loaded.Manifest
 
-	// ── 2. Parse plaintext range ─────────────────────────────────────────────
-	pStart, pEnd, err := crypto.ParseHTTPRangeHeader(rangeHeader, manifest.TotalPlainSize)
-	if err != nil {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", manifest.TotalPlainSize))
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusRequestedRangeNotSatisfiable, time.Since(start), 0)
+	if h.serveUnsatisfiedObjectRange(w, r, readPlan, start) {
 		return
 	}
+	pStart, pEnd := readPlan.RangeStart, readPlan.RangeEnd
 
-	// ── 3. Map plaintext range → backend ciphertext range ───────────────────
-	rangeResult, err := manifest.EncRangeForPlaintextRange(pStart, pEnd)
-	if err != nil {
-		h.logger.WithError(err).Error("serveMPURangedGet: calc enc range")
-		(&S3Error{Code: "InternalError", Message: "Range calculation failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-		return
-	}
+	rangeResult := *readPlan.MPURange
 
 	// ── 4. Fetch only the needed ciphertext bytes ────────────────────────────
-	encRangeHdr := fmt.Sprintf("bytes=%d-%d", rangeResult.EncStart, rangeResult.EncEnd)
-	objReader, _, err := s3Client.GetObject(ctx, bucket, key, versionID, &encRangeHdr)
+	objReader, _, err := s3Client.GetObject(ctx, bucket, key, versionID, readPlan.BackendRange)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		return
 	}
 	defer objReader.Close()
@@ -4852,8 +3411,7 @@ func (h *Handler) serveMPURangedGet(
 	dek, err := h.unwrapMPUDEKFromManifest(ctx, manifest, bucket, key)
 	if err != nil {
 		h.logger.WithError(err).Error("serveMPURangedGet: unwrap DEK")
-		(&S3Error{Code: "InternalError", Message: "Key unwrap failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
 		return
 	}
 	defer zeroBytes(dek)
@@ -4861,138 +3419,61 @@ func (h *Handler) serveMPURangedGet(
 	ivPrefix, err := hexToIVPrefix(manifest.IVPrefix)
 	if err != nil {
 		h.logger.WithError(err).Error("serveMPURangedGet: decode iv prefix")
-		(&S3Error{Code: "InternalError", Message: "Manifest corrupt", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
 		return
 	}
 	uploadIDHash, err := decodeBase64ToFixed32(manifest.UploadIDHash)
 	if err != nil {
 		h.logger.WithError(err).Error("serveMPURangedGet: decode upload id hash")
-		(&S3Error{Code: "InternalError", Message: "Manifest corrupt", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
+		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
 		return
 	}
 
-	// ── 6. Decrypt affected chunks ───────────────────────────────────────────
-	// The backend range starts at the first byte of ChunkStart in
-	// PartStartIdx. Decrypt and write one chunk at a time so memory usage is
-	// bounded by the encryption chunk size rather than the requested range.
-	const encTagSize = 16
+	// ── 6. Decrypt affected chunks through the shared body owner ──────────────
+	// The reader authenticates one chunk at a time and retains at most that
+	// chunk's plaintext. serveObjectBody performs the first-output read-ahead
+	// before committing 206, then owns the entire stream and its accounting.
 	var plaintextOffset int64
 	for i := 0; i < rangeResult.PartStartIdx; i++ {
 		plaintextOffset += manifest.Parts[i].PlainLen
 	}
 	plaintextOffset += int64(rangeResult.ChunkStart) * int64(manifest.ChunkSize)
-
-	responseStarted := false
-	var written int64
-	writeRangeError := func(err error) {
-		if responseStarted {
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"bucket": bucket,
-				"key":    key,
-			}).Error("serveMPURangedGet: response write failed")
-			return
-		}
-		(&S3Error{Code: "InternalError", Message: "Failed to write object", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
+	firstPart := manifest.Parts[rangeResult.PartStartIdx]
+	firstChunkPlainLen := int64(manifest.ChunkSize)
+	if rangeResult.ChunkStart == firstPart.ChunkCount-1 {
+		firstChunkPlainLen = firstPart.PlainLen - int64(rangeResult.ChunkStart)*int64(manifest.ChunkSize)
 	}
-
-	for pi := rangeResult.PartStartIdx; pi <= rangeResult.PartEndIdx; pi++ {
-		part := manifest.Parts[pi]
-		firstChunk := int32(0)
-		if pi == rangeResult.PartStartIdx {
-			firstChunk = rangeResult.ChunkStart
-		}
-		lastChunk := part.ChunkCount - 1
-		if pi == rangeResult.PartEndIdx {
-			lastChunk = rangeResult.ChunkEnd
-		}
-
-		for ci := firstChunk; ci <= lastChunk; ci++ {
-			chunkPlainLen := int64(manifest.ChunkSize)
-			if ci == part.ChunkCount-1 {
-				chunkPlainLen = part.PlainLen - int64(ci)*int64(manifest.ChunkSize)
-			}
-			chunkEncLen := int(chunkPlainLen) + encTagSize
-			chunkCiphertext := make([]byte, chunkEncLen)
-			if _, err := io.ReadFull(objReader, chunkCiphertext); err != nil {
-				h.logger.WithError(err).WithFields(logrus.Fields{
-					"bucket": bucket,
-					"key":    key,
-					"part":   part.PartNumber,
-					"chunk":  ci,
-				}).Error("serveMPURangedGet: read ciphertext chunk")
-				writeRangeError(err)
-				if !responseStarted {
-					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-				}
-				return
-			}
-			var plain []byte
-			if isV2 {
-				plain, err = crypto.DecryptMPUPartRange(crypto.ObjectContext{Bucket: bucket, Key: key}, manifestBinding, chunkCiphertext, dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, ci, manifest.Algorithm)
-			} else {
-				plain, err = crypto.DecryptMPUPartRangeV1(crypto.ObjectContext{Bucket: bucket, Key: key}, chunkCiphertext, dek, uploadIDHash, ivPrefix, part.PartNumber, manifest.ChunkSize, ci, manifest.Algorithm)
-			}
-			if err != nil {
-				h.logger.WithError(err).WithFields(logrus.Fields{
-					"bucket": bucket,
-					"key":    key,
-					"part":   part.PartNumber,
-					"chunk":  ci,
-				}).Error("serveMPURangedGet: tamper detected")
-				h.metrics.RecordEncryptionError(r.Context(), "decrypt", "mpu_tamper_detected")
-				if h.auditLogger != nil {
-					_ = h.auditLogger.Log(&audit.AuditEvent{
-						EventType: audit.EventTypeMPUTamperDetected,
-						Timestamp: time.Now().UTC(),
-						Bucket:    bucket,
-						Key:       key,
-						Success:   false,
-						Metadata:  map[string]interface{}{"status": "tamper_detected_range"},
-					})
-				}
-				if responseStarted {
-					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), written)
-				} else {
-					(&S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}).WriteXML(w)
-					h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusInternalServerError, time.Since(start), 0)
-				}
-				return
-			}
-
-			chunkStart := plaintextOffset
-			chunkEnd := chunkStart + int64(len(plain)) - 1
-			writeStart := pStart
-			if writeStart < chunkStart {
-				writeStart = chunkStart
-			}
-			writeEnd := pEnd
-			if writeEnd > chunkEnd {
-				writeEnd = chunkEnd
-			}
-			if writeStart <= writeEnd {
-				plainStart := writeStart - chunkStart
-				plainEnd := writeEnd - chunkStart + 1
-				if !responseStarted {
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pStart, pEnd, manifest.TotalPlainSize))
-					w.Header().Set("Content-Length", fmt.Sprintf("%d", pEnd-pStart+1))
-					w.Header().Set("Content-Type", "application/octet-stream")
-					w.WriteHeader(http.StatusPartialContent)
-					responseStarted = true
-				}
-				n, writeErr := w.Write(plain[plainStart:plainEnd])
-				written += int64(n)
-				if writeErr != nil {
-					writeRangeError(writeErr)
-					return
-				}
-			}
-			plaintextOffset += chunkPlainLen
-		}
+	firstChunkEnd := plaintextOffset + firstChunkPlainLen - 1
+	firstWriteStart := max(pStart, plaintextOffset)
+	firstWriteEnd := pEnd
+	if firstWriteEnd > firstChunkEnd {
+		firstWriteEnd = firstChunkEnd
 	}
+	preflightLimit := firstWriteEnd - firstWriteStart + 1
 
-	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusPartialContent, time.Since(start), written)
+	body := &mpuPlaintextRangeReader{
+		ciphertext:  objReader,
+		manifest:    manifest,
+		rangeResult: rangeResult,
+		rangeStart:  pStart,
+		rangeEnd:    pEnd,
+		plainOffset: plaintextOffset,
+		partIndex:   rangeResult.PartStartIdx,
+		chunkIndex:  rangeResult.ChunkStart,
+		object:      crypto.ObjectContext{Bucket: bucket, Key: key},
+		dek:         dek,
+		uploadHash:  uploadIDHash,
+		ivPrefix:    ivPrefix,
+		decrypt:     readPlan.MPUDecrypt,
+	}
+	readPlan = readPlan.withExecutionResponse(r, readPlan.Source.Decrypted, readPlan.Size.Size, readPlan.Source.BackendETag, body)
+	readPlan.PreflightBody = true
+	readPlan.PreflightLimit = preflightLimit
+	readPlan.Started = start
+	readPlan.OperationStarted = start
+	if _, err := h.serveObjectBody(w, r, readPlan); err != nil {
+		h.logger.WithError(err).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Error("serveMPURangedGet: failed to stream plaintext range")
+	}
 }
 
 // writeMPUManifestObject builds the MultipartManifest from Valkey state and
@@ -5032,7 +3513,7 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 		ParentBucket:    bucket,
 		ParentKey:       key,
 		CompanionBucket: bucket,
-		CompanionKey:    key + ".mpu-manifest",
+		CompanionKey:    key + crypto.MPUManifestSuffix,
 		BindingID:       state.BindingID,
 		Algorithm:       state.Algorithm,
 		ChunkSize:       state.ChunkSize,
@@ -5068,7 +3549,7 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 		return fmt.Errorf("writeMPUManifest: invalid binding ID")
 	}
 	copy(bindingID[:], b)
-	encBytes, encMeta, err := crypto.EncryptMPUManifest(ctx, engine, crypto.ObjectContext{Bucket: bucket, Key: key + ".mpu-manifest"}, bindingID, manifestJSON)
+	encBytes, encMeta, err := crypto.EncryptMPUManifest(ctx, engine, crypto.ObjectContext{Bucket: bucket, Key: key + crypto.MPUManifestSuffix}, bindingID, manifestJSON)
 	encryptDuration := time.Since(encryptStart)
 	if err != nil {
 		return fmt.Errorf("writeMPUManifest: encrypt manifest: %w", err)
@@ -5076,7 +3557,7 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 	h.metrics.RecordEncryptionOperation(ctx, "encrypt", encryptDuration, manifestPlainLen)
 
 	// Buffer the encrypted output so we can set Content-Length precisely.
-	companionKey := key + ".mpu-manifest"
+	companionKey := key + crypto.MPUManifestSuffix
 	encLen := int64(len(encBytes))
 	_, err = s3Client.PutObject(ctx, bucket, companionKey, bytes.NewReader(encBytes), encMeta, &encLen, "", nil, "", "", "", "", "")
 	return err
@@ -5109,152 +3590,52 @@ func (h *Handler) unwrapMPUDEK(ctx context.Context, state *mpu.UploadState, buck
 // The caller retains ownership of reader and must close it after the returned
 // reader is fully consumed (the caller's defer reader.Close() handles this).
 func (h *Handler) decryptMPUObject(ctx context.Context, bucket, key string, metadata map[string]string, reader io.ReadCloser, s3Client s3.Client) (io.Reader, error) {
-	// Fetch and decrypt the manifest companion object.
-	manifestKey := metadata[crypto.MetaFallbackPointer]
-	if manifestKey == "" {
-		manifestKey = key + ".mpu-manifest"
-	}
-	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
-	if err != nil {
-		if isS3NotFoundError(err) {
-			return nil, fmt.Errorf("decryptMPUObject: %w: %s", ErrMissingMPUManifest, manifestKey)
-		}
-		return nil, fmt.Errorf("decryptMPUObject: fetch manifest: %w", err)
-	}
-	defer manifestReader.Close()
-
-	engine, err := h.getEncryptionEngine(bucket)
-	if err != nil {
-		return nil, fmt.Errorf("decryptMPUObject: get engine: %w", err)
-	}
-	var bindingID [16]byte
-	isV2 := metadata[crypto.MetaMPUEncrypted] == "v2"
-	if isV2 {
-		mainBinding, bindErr := base64.RawURLEncoding.DecodeString(metadata[crypto.MetaObjectBindingID])
-		if bindErr != nil || len(mainBinding) != 16 {
-			return nil, fmt.Errorf("decryptMPUObject: invalid main binding")
-		}
-		copy(bindingID[:], mainBinding)
-	}
-	cipherManifest, readErr := io.ReadAll(manifestReader)
-	if readErr != nil {
-		return nil, readErr
-	}
-	var manifestJSON []byte
-	if isV2 {
-		if manifestMeta[crypto.MetaMPUManifestVersion] != "2" {
-			return nil, fmt.Errorf("decryptMPUObject: invalid companion marker")
-		}
-		manifestJSON, err = crypto.DecryptMPUManifest(ctx, engine, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID, cipherManifest, manifestMeta)
+	var loaded *loadedMPUManifest
+	var loadErr error
+	if view, viewErr := h.loadObjectView(bucket, key, nil, metadata); viewErr != nil {
+		loadErr = viewErr
 	} else {
-		manifestPlainReader, _, decErr := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bytes.NewReader(cipherManifest), manifestMeta)
-		if decErr != nil {
-			return nil, fmt.Errorf("decryptMPUObject: decrypt manifest: %w", decErr)
-		}
-		manifestJSON, err = io.ReadAll(manifestPlainReader)
+		loaded, loadErr = h.loadMPUManifest(ctx, s3Client, bucket, key, view.Class)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("decryptMPUObject: read manifest: %w", err)
+	if loadErr != nil {
+		return nil, loadErr
 	}
-	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
-	if err != nil {
-		return nil, fmt.Errorf("decryptMPUObject: parse manifest: %w", err)
-	}
-	if isV2 {
-		if err := manifest.ValidateFor(crypto.ObjectContext{Bucket: bucket, Key: key}, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID); err != nil {
-			return nil, err
-		}
-	}
-
-	dek, err := h.unwrapMPUDEKFromManifest(ctx, manifest, bucket, key)
-	if err != nil {
-		return nil, fmt.Errorf("decryptMPUObject: unwrap DEK: %w", err)
-	}
-	// dek is owned by the streaming reader from this point — do NOT zero here.
-
-	ivPrefix, err := hexToIVPrefix(manifest.IVPrefix)
-	if err != nil {
-		zeroBytes(dek)
-		return nil, fmt.Errorf("decryptMPUObject: decode iv prefix: %w", err)
-	}
-	uploadIDHash, err := decodeBase64ToFixed32(manifest.UploadIDHash)
-	if err != nil {
-		zeroBytes(dek)
-		return nil, fmt.Errorf("decryptMPUObject: decode upload id hash: %w", err)
-	}
-
-	// Return a streaming reader — no full-object buffering.
-	// dek is zeroed when the streaming reader encounters EOF or the caller
-	// discards it (via the wrapper below).
-	var inner io.Reader
-	if isV2 {
-		inner, err = crypto.NewMPUDecryptReader(crypto.ObjectContext{Bucket: bucket, Key: key}, bindingID, reader, manifest, dek, uploadIDHash, ivPrefix, manifest.Algorithm)
-	} else {
-		inner, err = crypto.NewMPUDecryptReaderV1(crypto.ObjectContext{Bucket: bucket, Key: key}, reader, manifest, dek, uploadIDHash, ivPrefix, manifest.Algorithm)
-	}
-	if err != nil {
-		zeroBytes(dek)
-		return nil, fmt.Errorf("decryptMPUObject: create decrypt reader: %w", err)
-	}
-	// Wrap with a closer that zeros the DEK when the stream ends or is abandoned.
-	return &mpuDecryptCloser{Reader: inner, dek: dek}, nil
+	return h.decryptMPUObjectWithManifest(ctx, bucket, key, reader, loaded)
 }
 
-// readMPUManifestTotalPlainSize fetches, decrypts, and parses the companion
-// .mpu-manifest object, returning the total plaintext size of the encrypted
-// MPU object. It is used by handleHeadObject to return correct Content-Length
-// values to clients that verify object sizes (e.g. Docker Distribution/Harbor).
-//
-// This is a read-only, fail-soft helper: errors are returned to the caller so
-// it can fall back to returning the ciphertext size with a warning log.
-func (h *Handler) readMPUManifestTotalPlainSize(ctx context.Context, bucket, parentKey string, manifestKey string, mainMeta map[string]string, s3Client s3.Client) (int64, error) {
-	manifestReader, manifestMeta, err := s3Client.GetObject(ctx, bucket, manifestKey, nil, nil)
-	if err != nil {
-		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: fetch %q: %w", manifestKey, err)
+func (h *Handler) decryptMPUObjectWithManifest(ctx context.Context, bucket, key string, reader io.ReadCloser, loaded *loadedMPUManifest) (io.Reader, error) {
+	if loaded == nil || loaded.Manifest == nil {
+		return nil, ErrMissingMPUManifest
 	}
-	defer manifestReader.Close()
+	{
+		manifest := loaded.Manifest
+		dek, err := h.unwrapMPUDEKFromManifest(ctx, manifest, bucket, key)
+		if err != nil {
+			return nil, fmt.Errorf("decryptMPUObject: unwrap DEK: %w", err)
+		}
+		ivPrefix, err := hexToIVPrefix(manifest.IVPrefix)
+		if err != nil {
+			zeroBytes(dek)
+			return nil, fmt.Errorf("decryptMPUObject: decode iv prefix: %w", err)
+		}
+		uploadIDHash, err := decodeBase64ToFixed32(manifest.UploadIDHash)
+		if err != nil {
+			zeroBytes(dek)
+			return nil, fmt.Errorf("decryptMPUObject: decode upload id hash: %w", err)
+		}
+		var inner io.Reader
+		if loaded.IsV2 {
+			inner, err = crypto.NewMPUDecryptReader(crypto.ObjectContext{Bucket: bucket, Key: key}, loaded.BindingID, reader, manifest, dek, uploadIDHash, ivPrefix, manifest.Algorithm)
+		} else {
+			inner, err = crypto.NewMPUDecryptReaderV1(crypto.ObjectContext{Bucket: bucket, Key: key}, reader, manifest, dek, uploadIDHash, ivPrefix, manifest.Algorithm)
+		}
+		if err != nil {
+			zeroBytes(dek)
+			return nil, fmt.Errorf("decryptMPUObject: create decrypt reader: %w", err)
+		}
+		return &mpuDecryptCloser{Reader: inner, dek: dek}, nil
+	}
 
-	engine, err := h.getEncryptionEngine(bucket)
-	if err != nil {
-		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: get engine: %w", err)
-	}
-	raw, err := io.ReadAll(manifestReader)
-	if err != nil {
-		return 0, err
-	}
-	var manifestJSON []byte
-	isV2 := mainMeta[crypto.MetaMPUEncrypted] == "v2"
-	var bindingID [16]byte
-	if isV2 {
-		if manifestMeta[crypto.MetaMPUManifestVersion] != "2" {
-			return 0, fmt.Errorf("invalid companion marker")
-		}
-		b, decErr := base64.RawURLEncoding.DecodeString(mainMeta[crypto.MetaObjectBindingID])
-		if decErr != nil || len(b) != 16 {
-			return 0, fmt.Errorf("invalid main binding")
-		}
-		copy(bindingID[:], b)
-		manifestJSON, err = crypto.DecryptMPUManifest(ctx, engine, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID, raw, manifestMeta)
-	} else {
-		plainReader, _, decErr := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bytes.NewReader(raw), manifestMeta)
-		err = decErr
-		if err == nil {
-			manifestJSON, err = io.ReadAll(plainReader)
-		}
-	}
-	if err != nil {
-		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: read: %w", err)
-	}
-	manifest, err := crypto.UnmarshalMultipartManifest(manifestJSON)
-	if err != nil {
-		return 0, fmt.Errorf("readMPUManifestTotalPlainSize: parse: %w", err)
-	}
-	if isV2 {
-		if err := manifest.ValidateFor(crypto.ObjectContext{Bucket: bucket, Key: parentKey}, crypto.ObjectContext{Bucket: bucket, Key: manifestKey}, bindingID); err != nil {
-			return 0, err
-		}
-	}
-	return manifest.TotalPlainSize, nil
 }
 
 // listActiveMPUPlainSizes returns a map of S3 object key → total plaintext
@@ -5408,8 +3789,7 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" || key == "" || uploadID == "" {
 		s3Err := ErrInvalidRequest
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "ListParts", s3Err, start)
 		return
 	}
 
@@ -5421,8 +3801,7 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusNotImplemented,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "ListParts", s3Err, start)
 		return
 	}
 
@@ -5444,14 +3823,12 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 	parts, err := s3Client.ListParts(ctx, bucket, key, uploadID)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "ListParts", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket":   bucket,
 			"key":      key,
 			"uploadID": uploadID,
 		}).Error("Failed to list parts")
-		h.metrics.RecordS3Error(r.Context(), "ListParts", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -5523,6 +3900,18 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 
 // handleCopyObject handles PUT Object Copy requests.
 func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBucket, dstKey, copySource string, start time.Time, s3Client s3.Client) {
+	if directive := strings.TrimSpace(r.Header.Get("x-amz-metadata-directive")); directive != "" && !strings.EqualFold(directive, "COPY") && !strings.EqualFold(directive, "REPLACE") {
+		s3Err := &S3Error{Code: "InvalidArgument", Message: "Unknown metadata directive.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("x-amz-metadata-directive")), "REPLACE") {
+		if _, metadataErr := parseWriteMetadata(r.Header); metadataErr != nil {
+			metadataErr.Resource = r.URL.Path
+			h.writeObjectError(w, r, "CopyObject", metadataErr, start)
+			return
+		}
+	}
 	// Parse copy source: format is "bucket/key" or "bucket/key?versionId=xxx"
 	srcBucket, srcKey, srcVersionID, err := ParseCopySource(copySource)
 	if err != nil {
@@ -5532,8 +3921,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5549,8 +3937,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5559,16 +3946,26 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	sourceHead, headErr := s3Client.HeadObject(ctx, srcBucket, srcKey, srcVersionID)
 	if headErr != nil {
 		s3Err := TranslateError(headErr, srcBucket, srcKey)
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
-	if expandedSourceHead, expandErr := h.expandMetadataForAPI(srcBucket, sourceHead); expandErr != nil {
-		h.writeChunkedCompletenessError(w, r, srcBucket, expandErr, start)
+	sourceView, sourceViewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, sourceHead)
+	if sourceViewErr != nil {
+		h.writeObjectError(w, r, "CopyObject", decryptFailure(sourceViewErr, r.URL.Path), start)
 		return
-	} else if crypto.IsChunkedFormat(expandedSourceHead) && expandedSourceHead[crypto.MetaMPUEncrypted] != "true" {
-		if _, preflightErr := h.preflightChunkedCompletenessIfV2(ctx, s3Client, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
-			h.writeChunkedCompletenessError(w, r, srcBucket, preflightErr, start)
+	}
+	sourceSize, sourceSizeErr := h.resolvePlaintextSize(ctx, s3Client, sourceView)
+	if sourceSizeErr != nil && (sourceView.Class.Format == crypto.FormatMPUV1 || sourceView.Class.Format == crypto.FormatMPUV2) {
+		h.writeObjectError(w, r, "CopyObject", decryptFailure(sourceSizeErr, r.URL.Path), start)
+		return
+	}
+	if sourceSizeErr != nil {
+		h.writeObjectError(w, r, "CopyObject", decryptFailure(sourceSizeErr, r.URL.Path), start)
+		return
+	}
+	if sourceView.Class.Format == crypto.FormatChunkedV1 || sourceView.Class.Format == crypto.FormatChunkedV2 {
+		if _, preflightErr := h.preflightChunkedCompleteness(ctx, s3Client, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
+			h.writeObjectError(w, r, "CopyObject", decryptFailure(preflightErr, r.URL.Path), start)
 			return
 		}
 	}
@@ -5577,15 +3974,13 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	srcReader, srcMetadata, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
 	if err != nil {
 		s3Err := TranslateError(err, srcBucket, srcKey)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"srcBucket": srcBucket,
 			"srcKey":    srcKey,
 			"dstBucket": dstBucket,
 			"dstKey":    dstKey,
 		}).Error("Failed to get source object for copy")
-		h.metrics.RecordS3Error(r.Context(), "CopyObject", dstBucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 	defer srcReader.Close()
@@ -5595,8 +3990,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to get source encryption engine")
 		s3Err := &S3Error{Code: "InternalError", Message: "Failed to load encryption configuration", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5604,14 +3998,9 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	// (mirror of the guard added in V0.6-S3-1 for uploadPartCopyLegacy).
 	// Legacy AEAD cannot be range-decrypted, so the engine buffers the whole
 	// source internally inside Decrypt. Cap the allocation before we start.
-	if srcEngine.IsEncrypted(srcMetadata) && !crypto.IsChunkedFormat(srcMetadata) {
+	if sourceView.Class.Format == crypto.FormatBufferedLegacy || sourceView.Class.Format == crypto.FormatBufferedV2 || sourceView.Class.Format == crypto.FormatBufferedFallback {
 		legacyCap := effectiveCopySourceCap(h.config)
-		srcSizeHint := int64(0)
-		if clStr, ok := srcMetadata["Content-Length"]; ok {
-			if cl, perr := strconv.ParseInt(clStr, 10, 64); perr == nil {
-				srcSizeHint = cl
-			}
-		}
+		srcSizeHint := sourceSize.Size
 		if srcSizeHint > 0 && srcSizeHint > legacyCap {
 			h.logger.WithFields(logrus.Fields{
 				"srcBucket": srcBucket,
@@ -5625,8 +4014,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusBadRequest,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "CopyObject", s3Err, start)
 			return
 		}
 	}
@@ -5640,8 +4028,12 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	// sourceMetadata contains the client-visible metadata recovered from the
 	// plaintext object. Encrypted backends expose only the ciphertext headers,
 	// so the decrypt result is authoritative for standard object metadata.
-	sourceMetadata := srcMetadata
-	if srcMetadata[crypto.MetaMPUEncrypted] == "true" || srcMetadata[crypto.MetaMPUEncrypted] == "v2" {
+	sourceMetadata := make(map[string]string, len(srcMetadata))
+	for key, value := range srcMetadata {
+		sourceMetadata[key] = value
+	}
+	var decryptedSourceMetadata map[string]string
+	if sourceView, viewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, srcMetadata); viewErr == nil && (sourceView.Class.Format == crypto.FormatMPUV1 || sourceView.Class.Format == crypto.FormatMPUV2) {
 		decryptedReader, err = h.decryptMPUObject(ctx, srcBucket, srcKey, srcMetadata, srcReader, s3Client)
 		if err != nil {
 			h.logger.WithError(err).WithFields(logrus.Fields{
@@ -5654,10 +4046,10 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusInternalServerError,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "CopyObject", s3Err, start)
 			return
 		}
+		decryptedSourceMetadata = crypto.PlaintextMetadataView(sourceView.Expanded, -1, "")
 	} else {
 		// V0.6-PERF-1 Phase C: pass srcReader directly to Decrypt — the engine
 		// already handles buffering for legacy AEAD and streams for chunked.
@@ -5672,47 +4064,36 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 				Resource:   r.URL.Path,
 				HTTPStatus: http.StatusInternalServerError,
 			}
-			s3Err.WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.writeObjectError(w, r, "CopyObject", s3Err, start)
 			return
 		}
-		for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
+		decryptedSourceMetadata = decryptedMetadata
+		for _, key := range objectmeta.Names {
 			if value := decryptedMetadata[key]; value != "" {
+				sourceMetadata[key] = value
+			}
+		}
+		for key, value := range decryptedMetadata {
+			if strings.HasPrefix(strings.ToLower(key), "x-amz-meta-") && !crypto.IsGatewayReservedKey(key) {
 				sourceMetadata[key] = value
 			}
 		}
 	}
 
-	// Extract destination metadata from headers.
-	// Case-insensitive x-amz-meta-* match — Go canonicalises headers to
-	// X-Amz-Meta-Foo on parse, so strings.HasPrefix against the lowercase
-	// prefix is the correct comparison.
-	dstMetadata := make(map[string]string)
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") || isStandardMetadata(k) {
-				dstMetadata[http.CanonicalHeaderKey(k)] = v[0]
-			}
-		}
+	resolvedWrite, writeErr := resolveCopyWriteMetadata(r.Header, objectResponseSource{Meta: sourceMetadata, Decrypted: decryptedSourceMetadata, BackendETag: sourceMetadata["ETag"]})
+	if writeErr != nil {
+		writeErr.Resource = r.URL.Path
+		h.writeObjectError(w, r, "CopyObject", writeErr, start)
+		return
 	}
-
-	// Preserve standard object metadata from the source when the copy request
-	// does not override it, matching S3's default metadata-directive behavior.
-	for _, key := range []string{"Content-Type", "Cache-Control", "Content-Disposition"} {
-		if _, overridden := dstMetadata[key]; !overridden {
-			if value := sourceMetadata[key]; value != "" {
-				dstMetadata[key] = value
-			}
-		}
-	}
+	dstMetadata := resolvedWrite.engineInput(0, false)
 
 	// Get destination encryption engine
 	dstEngine, err := h.getEncryptionEngine(dstBucket)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to get destination encryption engine")
 		s3Err := &S3Error{Code: "InternalError", Message: "Failed to load encryption configuration", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5728,8 +4109,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusInternalServerError,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5752,8 +4132,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusInternalServerError,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5762,11 +4141,18 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	if h.config != nil {
 		filterKeys = h.config.Backend.FilterMetadataKeys
 	}
-	s3Metadata := filterS3Metadata(encMetadata, filterKeys)
+	dstClass, classErr := crypto.ClassifyObject(dstKey, encMetadata)
+	if classErr != nil {
+		h.writeObjectError(w, r, "CopyObject", decryptFailure(classErr, r.URL.Path), start)
+		return
+	}
+	persist := buildPersistPlan(encMetadata, dstClass, filterKeys)
+	s3Metadata := persist.Metadata
+	persist.Native.ApplyTo(s3Metadata)
 
 	lockInput, s3Err := extractObjectLockInput(r)
 	if s3Err != nil {
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
 
@@ -5775,15 +4161,13 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	_, err = s3Client.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(encryptedData), s3Metadata, &encLen, tagging, lockInput, "", "", "", "", "")
 	if err != nil {
 		s3Err := TranslateError(err, dstBucket, dstKey)
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"srcBucket": srcBucket,
 			"srcKey":    srcKey,
 			"dstBucket": dstBucket,
 			"dstKey":    dstKey,
 		}).Error("Failed to put copied object")
-		h.metrics.RecordS3Error(r.Context(), "CopyObject", dstBucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -5793,20 +4177,8 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 
 	// Populate the size cache for the destination object so subsequent
 	// ListObjects can resolve the plaintext size without a HEAD request.
-	if h.sizeCache != nil {
-		var ps int64
-		if psStr, ok := srcMetadata[crypto.MetaOriginalSize]; ok && psStr != "" {
-			if parsed, parseErr := strconv.ParseInt(psStr, 10, 64); parseErr == nil && parsed > 0 {
-				ps = parsed
-			}
-		}
-		if ps > 0 {
-			if cacheErr := h.sizeCache.Set(ctx, dstBucket, dstKey, ps); cacheErr != nil {
-				h.logger.WithError(cacheErr).WithFields(logrus.Fields{
-					"dstBucket": dstBucket, "dstKey": dstKey,
-				}).Warn("handleCopyObject: failed to set size cache")
-			}
-		}
+	if sourceSizeErr == nil && sourceSize.Exact {
+		h.recordPlaintextSize(ctx, dstBucket, dstKey, plaintextSize{Size: sourceSize.Size, Exact: true, Source: "copy-source"})
 	}
 
 	// Return CopyObjectResult XML
@@ -5826,13 +4198,12 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordS3Operation(r.Context(), "CopyObject", dstBucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "PUT", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
 // preflightChunkedCompleteness authenticates the fixed v2 terminal record
 // without consuming the object body used by the subsequent operation. v1 is
 // deliberately accepted with an inferred size and no backend suffix request.
-func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
+func (h *Handler) preflightChunkedTerminal(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
 	// API handlers classify the stable compact aliases, but the raw metadata
 	// must reach the engine so it can decrypt protected metadata itself.
 	expandedMetadata, err := h.expandMetadataForAPI(bucket, metadata)
@@ -5863,21 +4234,13 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 	}
 	if version == crypto.ChunkedFormatV1 {
 		if expandedMetadata["Content-Length"] == "" {
-			plain, sizeErr := crypto.GetPlaintextSizeFromMetadata(expandedMetadata)
-			if sizeErr != nil || plain < 0 {
-				return crypto.ChunkedObjectInfo{Version: version}, nil
-			}
-			return crypto.ChunkedObjectInfo{Version: version, PlaintextSize: uint64(plain)}, nil // #nosec G115 -- negative sizes are rejected above
+			return crypto.ChunkedObjectInfo{Version: version}, nil
 		}
 		ciphertextSize, parseErr := strconv.ParseInt(expandedMetadata["Content-Length"], 10, 64)
 		if parseErr != nil || ciphertextSize < 0 {
 			return crypto.ChunkedObjectInfo{}, fmt.Errorf("%w: invalid ciphertext size", crypto.ErrChunkedObjectIncomplete)
 		}
-		chunkSize := int64(crypto.DefaultChunkSize)
-		if value, parseErr := strconv.ParseInt(expandedMetadata[crypto.MetaChunkSize], 10, 64); parseErr == nil && value > 0 {
-			chunkSize = value
-		}
-		plain, count, sizeErr := crypto.ChunkedPlaintextSize(ciphertextSize, int(chunkSize), version)
+		plain, count, sizeErr := crypto.PlaintextSizeForCiphertext(expandedMetadata, ciphertextSize)
 		if sizeErr != nil {
 			return crypto.ChunkedObjectInfo{}, sizeErr
 		}
@@ -5927,16 +4290,40 @@ func (h *Handler) expandMetadataForAPI(bucket string, metadata map[string]string
 	return expanded, nil
 }
 
-// preflightChunkedCompletenessIfV2 preserves the established v1 read path.
-// An explicitly present but unsupported manifest is still sent through the
-// strict helper so it fails closed rather than being treated as v1.
-func (h *Handler) preflightChunkedCompletenessIfV2(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
+// preflightChunkedCompleteness applies shared expanded-metadata format policy
+// and authenticates the v2 terminal where required, while preserving v1 reads.
+func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string, metadata map[string]string) (crypto.ChunkedObjectInfo, error) {
 	expandedMetadata, err := h.expandMetadataForAPI(bucket, metadata)
 	if err != nil {
 		return crypto.ChunkedObjectInfo{}, err
 	}
+	// Fallback-v2 objects carry chunk metadata inside the authenticated body
+	// prefix, while the visible chunked marker is only a format discriminator.
+	// Their full-body decrypt path authenticates the terminal and chunks.
+	if expandedMetadata[crypto.MetaFallbackVersion] == "2" || expandedMetadata[crypto.MetaFallbackMode] == "true" {
+		return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV2}, nil
+	}
 	manifest, present := expandedMetadata[crypto.MetaManifest]
 	if !present {
+		if expandedMetadata[crypto.MetaObjectFormatVersion] == "chunked-v2" {
+			reader, raw, getErr := s3Client.GetObject(ctx, bucket, key, versionID, nil)
+			if getErr != nil {
+				return crypto.ChunkedObjectInfo{}, getErr
+			}
+			defer reader.Close()
+			engine, engineErr := h.getEncryptionEngine(bucket)
+			if engineErr != nil {
+				return crypto.ChunkedObjectInfo{}, engineErr
+			}
+			decrypted, _, decErr := engine.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, reader, raw)
+			if decErr != nil {
+				return crypto.ChunkedObjectInfo{}, decErr
+			}
+			if _, readErr := io.Copy(io.Discard, decrypted); readErr != nil {
+				return crypto.ChunkedObjectInfo{}, readErr
+			}
+			return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV2}, nil
+		}
 		return crypto.ChunkedObjectInfo{Version: crypto.ChunkedFormatV1}, nil
 	}
 	if manifest == "" {
@@ -5949,20 +4336,12 @@ func (h *Handler) preflightChunkedCompletenessIfV2(ctx context.Context, s3Client
 	if version == crypto.ChunkedFormatV1 {
 		return crypto.ChunkedObjectInfo{Version: version}, nil
 	}
-	return h.preflightChunkedCompleteness(ctx, s3Client, bucket, key, versionID, metadata)
+	return h.preflightChunkedTerminal(ctx, s3Client, bucket, key, versionID, metadata)
 }
 
 func (h *Handler) writeChunkedCompletenessError(w http.ResponseWriter, r *http.Request, bucket string, err error, start time.Time) {
-	h.metrics.RecordEncryptionError(r.Context(), "decrypt", "chunked_completeness_failed")
 	h.logger.WithError(err).WithField("bucket", bucket).Error("Chunked object completeness check failed")
-	s3Err := &S3Error{Code: "InternalError", Message: "Object integrity check failed", Resource: r.URL.Path, HTTPStatus: http.StatusInternalServerError}
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusInternalServerError)
-		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		return
-	}
-	s3Err.WriteXML(w)
-	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+	h.writeObjectIntegrityError(w, r, "GetObject", bucket, mux.Vars(r)["key"], err, start)
 }
 
 // handleDeleteObjects handles batch delete requests.
@@ -5974,8 +4353,7 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 	if bucket == "" {
 		s3Err := ErrInvalidBucketName
 		s3Err.Resource = r.URL.Path
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "DeleteObjects", s3Err, start)
 		return
 	}
 
@@ -6014,8 +4392,7 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 			Resource:   r.URL.Path,
 			HTTPStatus: http.StatusBadRequest,
 		}
-		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.writeObjectError(w, r, "DeleteObjects", s3Err, start)
 		return
 	}
 
@@ -6031,7 +4408,7 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 	// Inspect primary metadata concurrently before the batch delete. A bounded
 	// worker pool keeps large DeleteObjects requests from creating an unbounded
 	// burst of backend HEAD requests.
-	primaryMetadata := make(map[string]map[string]string, len(identifiers))
+	primaryViews := make(map[string]*objectView, len(identifiers))
 	var headWG sync.WaitGroup
 	var headMu sync.Mutex
 	sem := make(chan struct{}, 8)
@@ -6048,7 +4425,8 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 			metadata, headErr := s3Client.HeadObject(ctx, bucket, obj.Key, versionID)
 			if headErr == nil {
 				headMu.Lock()
-				primaryMetadata[obj.Key] = metadata
+				view, _ := h.loadObjectView(bucket, obj.Key, versionID, metadata)
+				primaryViews[obj.Key] = view
 				headMu.Unlock()
 			} else if !isS3NotFoundError(headErr) {
 				h.logger.WithError(headErr).WithFields(logrus.Fields{
@@ -6063,12 +4441,10 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 	deleted, errors, err := s3Client.DeleteObjects(ctx, bucket, identifiers)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, "")
-		s3Err.WriteXML(w)
+		h.writeObjectError(w, r, "DeleteObjects", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
 		}).Error("Failed to delete objects")
-		h.metrics.RecordS3Error(r.Context(), "DeleteObjects", bucket, s3Err.Code)
-		h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
 		return
 	}
 
@@ -6082,7 +4458,7 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 	// Clean up manifests only for successfully deleted objects that were
 	// identified as encrypted MPUs before the primary batch delete.
 	for _, del := range deleted {
-		h.cleanupMPUManifest(ctx, s3Client, bucket, del.Key, primaryMetadata[del.Key])
+		h.cleanupMPUManifest(ctx, s3Client, primaryViews[del.Key])
 	}
 
 	// Evict deleted keys from size cache.
@@ -6159,7 +4535,6 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 	xml.NewEncoder(w).Encode(result)
 
 	h.metrics.RecordS3Operation(r.Context(), "DeleteObjects", bucket, time.Since(start))
-	h.metrics.RecordHTTPRequest(r.Context(), "POST", r.URL.Path, http.StatusOK, time.Since(start), 0)
 }
 
 // ParseCopySource extracts bucket, key, and version ID from an x-amz-copy-source header.

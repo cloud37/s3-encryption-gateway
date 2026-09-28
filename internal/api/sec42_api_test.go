@@ -76,11 +76,12 @@ func TestSEC42_MPUV2_HeadRejectsSwappedCompanion(t *testing.T) {
 	doCompleteUpload(t, router, bucket, "b", bytes.Repeat([]byte("b"), 8192))
 	mainMeta := backend.metadata[bucket+"/a"]
 	mainMeta[crypto.MetaFallbackPointer] = "b.mpu-manifest"
+	mainMeta[crypto.MetaMPUEncrypted] = "v2"
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodHead, "/"+bucket+"/a", nil))
-	require.Equal(t, http.StatusOK, w.Code)
-	contentLength := w.Header().Get("Content-Length")
-	require.NotEqual(t, "8192", contentLength)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Empty(t, w.Header().Get("Content-Length"))
+	require.NotContains(t, w.Body.String(), string(bytes.Repeat([]byte("b"), 8192)))
 }
 
 func TestSEC42_MPUV1_LegacyReadStillWorks(t *testing.T) {

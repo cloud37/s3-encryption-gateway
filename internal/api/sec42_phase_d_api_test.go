@@ -248,7 +248,12 @@ func TestMPUV2_ManifestHelpersRejectMalformedSecurityState(t *testing.T) {
 			_, err = h.decryptMPUObject(context.Background(), bucket, key, meta, reader, backend)
 			require.Error(t, err, "malformed MPU security state accepted")
 			if tc.name == "invalid companion marker" || tc.name == "invalid manifest JSON" || tc.name == "manifest relationship" {
-				_, err = h.readMPUManifestTotalPlainSize(context.Background(), bucket, key, manifestKey, mainMeta, backend)
+				view, viewErr := h.loadObjectView(bucket, key, nil, mainMeta)
+				if viewErr == nil {
+					_, err = h.loadMPUManifest(context.Background(), backend, bucket, key, view.Class)
+				} else {
+					err = viewErr
+				}
 				require.Error(t, err)
 			}
 		})
@@ -545,7 +550,12 @@ func TestMPUManifestHelperFailureContracts(t *testing.T) {
 			_, err = h.decryptMPUObject(context.Background(), bucket, key, meta, reader, backend)
 			require.Error(t, err)
 
-			_, err = h.readMPUManifestTotalPlainSize(context.Background(), bucket, key, manifestKey, backend.metadata[bucket+"/"+key], backend)
+			view, viewErr := h.loadObjectView(bucket, key, nil, backend.metadata[bucket+"/"+key])
+			if viewErr == nil {
+				_, err = h.loadMPUManifest(context.Background(), backend, bucket, key, view.Class)
+			} else {
+				err = viewErr
+			}
 			require.Error(t, err)
 		})
 	}

@@ -1,0 +1,40 @@
+{
+  "format": "metadata-blob-buffered",
+  "metadata": {
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "50",
+    "Content-Type": "application/x-golden",
+    "ETag": "backend-cipher-etag",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-enc-metadata": "R0hJSktMTU5PUFFSmPLZjkgRk1AUu4psFUZyUWZoFObtR395XXdDlbg4FxOA7CfcHUmmHU5JIdWd2WeUY9diNQ5Jp0heMlqCoALlzK1Zcft5yw+cxhcX1qXFXC5hmU4Nw7BY9AY/beZzGX0nCPbxUoyNGUzFGLe4hYr5A/0uosXCaOhEsDomCXunXFUVAZNygc3ahlO5mOWRjFwpYqVn6TudraOvuMpE80l14GEQiBzTKNe5/Hr/Vnq+4kzANPpBhHpCOd7TKUhCPrD4CIorzoz2wVBlp6bR9UWfuVZ1v2JrqHRaQF/X27HtKhuV1Wn8joKw5n581vwtafieBiUt8VemhWFL+WG6XYtmwfwEhqfqghnb+vF1xai9N0f+2Hrmyelt+wT6BNm7TseCL19gVluBjROhLnjEYeXZ6v8hJRwz3bozZQiAZVjwlXhKJTt3XUEcpN2RoNP0MbWdCe951cZr63ZrDuJ8AvhYsQOQNOR4LQlSl5zmo3b4iaMO2QUCQxaiDYb/Q0rvrfyRpr7UFoFYoOBueYbDEy1/bPYxn2J04XKE26Z0+f0QW+Bst8dtj5mjtW2+wqzYTLq/ec8GIE+53t11mfbuj6C8Xd/aFW07KcJwEyO/QDnVEYq1UMAQoPEmPrFH2JE0PD4pgYSKuUMPEIdFFZfx2de4g3n0/tKTJCq61zRirq6kUujJJVdamzQrc9EO7E9hX2vmaLjw4oEJmcLq0V9mTrzVkfXhhYW67/+nywZSSIuBd2Ba15Wz6KNupgXU1OFQSPu2J6MUnIgvHa/NQiOKjke57/iZhktY5KPjfSlqf4zS02F6gFK2QyTYL3CkEssoyETvBM0vISNXaZN5QyrAehVOZrd1wDjoOpBe/YeLdF61bBNEQjT421lAm3w6BrHz2JFi55JEmBC4Zxp66mclD37GtegiNCZ6hTIPNr9Hm8Bok2DyZDBX3OUGnRF1Oms+ML39pndYya/NcG4QRF0aUWNZV8krMgRY9cjS6jVRghpKN8QNJ7hJt9ELAKQR4QicL6i3+XrfnSQtPI2aRm4qVnUyzHqcowmPHNWPkdBeHkc0QAXI20M/vvdgE2/VPb5FNHucsBza/SnHY1/iRV1Le7EtHs9XfCIQKSwCr0AIqQ==",
+    "x-amz-meta-encrypted": "true",
+    "x-amz-meta-encryption-cache-control": "private, max-age=37",
+    "x-amz-meta-encryption-content-disposition": "attachment; filename=\"golden.txt\"",
+    "x-amz-meta-encryption-content-encoding": "identity",
+    "x-amz-meta-encryption-content-language": "en-CA",
+    "x-amz-meta-encryption-content-type": "application/x-golden",
+    "x-amz-meta-encryption-expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-encryption-original-etag": "1b58689ef891fa131ae690d387a3fa53",
+    "x-amz-meta-encryption-wrapped-key": "internal-must-not-leak",
+    "x-amz-meta-user-a": "golden-user-value"
+  },
+  "plaintext_size": 34,
+  "headers": {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "\"1b58689ef891fa131ae690d387a3fa53\"",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT"
+  },
+  "ciphertext_base64": "fFzH75qbtywPD0HnYq/VlmL3r5RdIx2SY4sZOKxVlh/lp7GEIRlPs3E91cuZeZLJCps=",
+  "body_base64": "fFzH75qbtywPD0HnYq/VlmL3r5RdIx2SY4sZOKxVlh/lp7GEIRlPs3E91cuZeZLJCps=",
+  "metadata_key": true,
+  "plaintext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA=="
+}

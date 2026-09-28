@@ -1,0 +1,29 @@
+{
+  "format": "plaintext",
+  "metadata": {
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "\"plaintext-golden-etag\"",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-user-a": "golden-user-value"
+  },
+  "plaintext_size": 34,
+  "headers": {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "\"plaintext-golden-etag\"",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT"
+  },
+  "ciphertext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA==",
+  "body_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA==",
+  "plaintext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA=="
+}

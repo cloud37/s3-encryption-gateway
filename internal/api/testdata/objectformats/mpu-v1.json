@@ -1,0 +1,46 @@
+{
+  "format": "mpu-v1",
+  "metadata": {
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "50",
+    "Content-Type": "application/x-golden",
+    "ETag": "backend-mpu-etag",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-encrypted-mpu": "true",
+    "x-amz-meta-encryption-fallback-ptr": "golden-object.mpu-manifest",
+    "x-amz-meta-encryption-wrapped-key": "internal-must-not-leak",
+    "x-amz-meta-user-a": "golden-user-value"
+  },
+  "plaintext_size": 34,
+  "headers": {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "backend-mpu-etag",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT"
+  },
+  "ciphertext_base64": "bq9AMkh7FlhRcKCsm2hPJLTFa5diwdo7x70IFjsBgixIlAtZ9yVheuToiMvRX3jsOIQ=",
+  "body_base64": "bq9AMkh7FlhRcKCsm2hPJLTFa5diwdo7x70IFjsBgixIlAtZ9yVheuToiMvRX3jsOIQ=",
+  "manifest_body_base64": "xspIq99TaxqmSMoV6m/2YxVq8s2AddNb5xPMgD2apeXdxVnNHRwlqqw9cThX6m+MAAlN0W/EQsjr553mLLELPjvjfI1KemM+p1d+AvRteEfg8LJCG3TuSXghTyQQQdnkbJmP4rPLMm8EJbvH6hA11CDRNS8Kxh8GGZsC7V4slBK1dgZqQIg4g0vCb+N+Knm4ui9/KvogiKpDs+rf4Mu/K3Q57krroseDdBVMwrrNqTx86deIFUm8JiUxR+yjEPvP/sCLL/z4lclWCfgkLjBidmNIpQXWKDpIipk0JeEviRpVY4ZpWMRMcFUDM7CM/Mki4a1kHRQCRhfue0FD18HlCbeyUzMEOFaKbQc6pguWZP/mHoE9q2TpycvtV3FcXmrrrVRH3ZJexvUX08EfVOyWMQFfob4WtadeVyrAgpn2Uzuf1n8OcmvMzh+fPhwYu1SS13cExFHSW/d5tobyt2tbzE4IvSmQZ//xysRfWzUyytRkarYHFkrTk3RPzgh8R6QgmsELXGWnU/a9ucrRIKyAf/ZL0v9987i9VqZCDsV1w+8m71TKZ+AIo35N9H9AYPfWJ0ws2hsi6IRCUWIx24Sj2wLiqcTdkALw00ZKYkMpWiopshYrWcf+/Q==",
+  "manifest_metadata": {
+    "Content-Length": "456",
+    "ETag": "manifest-etag",
+    "x-amz-meta-encrypted": "true",
+    "x-amz-meta-encryption-algorithm": "AES256-GCM",
+    "x-amz-meta-encryption-binding-id": "Nzg5Ojs8PT4_QEFCQ0RFRg",
+    "x-amz-meta-encryption-format-version": "buffered-v2",
+    "x-amz-meta-encryption-iv": "Nzg5Ojs8PT4/QEFC",
+    "x-amz-meta-encryption-kdf-params": "pbkdf2-sha256:100000",
+    "x-amz-meta-encryption-key-salt": "Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVTc=",
+    "x-amz-meta-encryption-original-etag": "e59fe8d966ed74870d58868214b6e888",
+    "x-amz-meta-encryption-original-size": "456"
+  },
+  "plaintext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA=="
+}

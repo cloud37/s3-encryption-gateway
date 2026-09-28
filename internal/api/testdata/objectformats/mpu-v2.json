@@ -1,0 +1,44 @@
+{
+  "format": "mpu-v2",
+  "metadata": {
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "50",
+    "Content-Type": "application/x-golden",
+    "ETag": "backend-mpu-etag",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-encrypted-mpu": "v2",
+    "x-amz-meta-encryption-binding-id": "d3d3d3d3d3d3d3d3d3d3dw",
+    "x-amz-meta-encryption-fallback-ptr": "golden-object.mpu-manifest",
+    "x-amz-meta-encryption-wrapped-key": "internal-must-not-leak",
+    "x-amz-meta-user-a": "golden-user-value"
+  },
+  "plaintext_size": 34,
+  "headers": {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "backend-mpu-etag",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT"
+  },
+  "ciphertext_base64": "bq9AMkh7FlhRcKCsm2hPJLTFa5diwdo7x70IFjsBgixIlPTEFTW00aSyNM+Tp7f5Vgs=",
+  "body_base64": "bq9AMkh7FlhRcKCsm2hPJLTFa5diwdo7x70IFjsBgixIlPTEFTW00aSyNM+Tp7f5Vgs=",
+  "manifest_body_base64": "xspIq99Qaxq3Rd9SvjnoRDM7rJ7ZEKo0olCChyvWsraelQqcRRxg/oMscThf90jFX1Jf2n2RHZe/tsP+c+VRbGivbphYeDwx51UyR7l2TkHK+7hUB3TuSUs0SBUUWLzeapaIv4OoagcDeeTywzNxzS24Mgk2nURhLLwZyH8a0By9cio0Fop3hEyOcvJ1J0C5rDB/PPo5veZsv/3x+/75MxI55xzi/tHJPVAZrfzSkS1Tv8rtFAirOGhzOa/1RvWp/tG8E7ikx4FjFpc8XjBsYCwd5kq5MiI4irMrCvk4nghZY9APWM4hYg1iZNfsh7FFpPFmRngKCxSgE3kF0bmOHouyT1UJCUOsPwxukwmHBfDBEO199TqVtN/UTVQ8LRKevFsd4oZx99UPxuEpXe+LV2Nq4uRIzKtRSzmawMnSE27BuStRKXmssEa+Pntfsnyk/yYcoijEHOp45sXu7XhimgMzvVjXbsjmzJpTQDoJysJ3NoZEL1bjiXhFiUATUbJe3cINbmawRIiloKbfQaaYYv1S1bg/tpnCQNgPFv12y94Zw2SbMfcEmCpdoj41V/HGUG5t8hV4/cNmWFgghq2yzxm/qbahlwW/NcxULR0KWLQLjTpMn6zSlRzrWO4E5xRIPal8VseAfGhX7znZFReioEue1JppsrmdjJrF+YRtm/elDzoDYZ4tRAlbf4B/pzcR1KXiund7wD7s9iCgGnhPSOVIZer1OAueam8Z+BToDtbzBdvuAH37f71PyRqL+qBQo0fI7ImqgXJBxQNrux6/nf/dUkg+wRxbV9WtCrB4+B1L1XIcXfJqKu56fJKxB6z/xoNxyPxMRpNn/TpF4+hGTFth4rWckz7Stz9/",
+  "manifest_metadata": {
+    "x-amz-meta-encrypted": "true",
+    "x-amz-meta-encryption-algorithm": "AES256-GCM",
+    "x-amz-meta-encryption-binding-id": "d3d3d3d3d3d3d3d3d3d3dw",
+    "x-amz-meta-encryption-format-version": "mpu-manifest-v2",
+    "x-amz-meta-encryption-iv": "Nzg5Ojs8PT4/QEFC",
+    "x-amz-meta-encryption-kdf-params": "pbkdf2-sha256:100000",
+    "x-amz-meta-encryption-key-salt": "Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVTc=",
+    "x-amz-meta-encryption-mpu-manifest-version": "2"
+  },
+  "plaintext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA=="
+}

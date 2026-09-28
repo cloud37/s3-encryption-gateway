@@ -1,0 +1,37 @@
+{
+  "format": "buffered-legacy",
+  "metadata": {
+    "Content-Length": "50",
+    "ETag": "backend-cipher-etag",
+    "x-amz-meta-encrypted": "true",
+    "x-amz-meta-encryption-algorithm": "AES256-GCM",
+    "x-amz-meta-encryption-cache-control": "private, max-age=37",
+    "x-amz-meta-encryption-content-disposition": "attachment; filename=\"golden.txt\"",
+    "x-amz-meta-encryption-content-encoding": "identity",
+    "x-amz-meta-encryption-content-language": "en-CA",
+    "x-amz-meta-encryption-content-type": "application/x-golden",
+    "x-amz-meta-encryption-expires": "Tue, 15 Nov 2033 08:12:31 GMT",
+    "x-amz-meta-encryption-iv": "JycnJycnJycnJycn",
+    "x-amz-meta-encryption-kdf-params": "pbkdf2-sha256:100000",
+    "x-amz-meta-encryption-key-salt": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+    "x-amz-meta-encryption-original-etag": "1b58689ef891fa131ae690d387a3fa53",
+    "x-amz-meta-encryption-original-size": "34",
+    "x-amz-meta-encryption-wrapped-key": "internal-must-not-leak",
+    "x-amz-meta-user-a": "golden-user-value"
+  },
+  "plaintext_size": 34,
+  "headers": {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=37",
+    "Content-Disposition": "attachment; filename=\"golden.txt\"",
+    "Content-Encoding": "identity",
+    "Content-Language": "en-CA",
+    "Content-Length": "34",
+    "Content-Type": "application/x-golden",
+    "ETag": "\"1b58689ef891fa131ae690d387a3fa53\"",
+    "Expires": "Tue, 15 Nov 2033 08:12:31 GMT"
+  },
+  "ciphertext_base64": "WPkejm1OYlZgIwI08Q0k9zjEeVaOlw2lsbbPtpuUZdDfUeQ1A/YI/p08bFKgAAkyFqs=",
+  "body_base64": "WPkejm1OYlZgIwI08Q0k9zjEeVaOlw2lsbbPtpuUZdDfUeQ1A/YI/p08bFKgAAkyFqs=",
+  "plaintext_base64": "YXV0aGVudGljIGdvbGRlbiBwbGFpbnRleHQgcGF5bG9hZA=="
+}

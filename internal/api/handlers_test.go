@@ -25,10 +25,12 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/aws/smithy-go"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/cache"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/gorilla/mux"
@@ -66,6 +68,8 @@ type mockS3Client struct {
 	metadata             map[string]map[string]string
 	errors               map[string]error
 	lastGetRange         *string
+	lastGetRangeString   string
+	getRangeHistory      []string
 	lastPutContentLength *int64
 
 	// Object-Lock recording (V0.6-S3-2). Readers MUST hold mu; writers
@@ -99,7 +103,14 @@ type mockS3Client struct {
 	deleteObjectsCallCount int
 	deleteObjectCallCount  int
 	getObjectCallCount     int
+	headVersionHistory     []backendVersionCall
+	getVersionHistory      []backendVersionCall
 	bodyReadCount          atomic.Int64
+}
+
+type backendVersionCall struct {
+	key       string
+	versionID *string
 }
 
 func newMockS3Client() *mockS3Client {
@@ -319,6 +330,7 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, key string, reader
 func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
 	m.locksMu.Lock()
 	m.getObjectCallCount++
+	m.getVersionHistory = append(m.getVersionHistory, backendVersionCall{key: bucket + "/" + key, versionID: cloneOptionalString(versionID)})
 	m.locksMu.Unlock()
 	if err := m.errors[bucket+"/"+key+"/get"]; err != nil {
 		return nil, nil, err
@@ -326,8 +338,11 @@ func (m *mockS3Client) GetObject(ctx context.Context, bucket, key string, versio
 	if rangeHeader != nil {
 		rh := *rangeHeader
 		m.lastGetRange = &rh
+		m.lastGetRangeString = rh
+		m.getRangeHistory = append(m.getRangeHistory, rh)
 	} else {
 		m.lastGetRange = nil
+		m.lastGetRangeString = ""
 	}
 	data, ok := m.objects[bucket+"/"+key]
 	if !ok {
@@ -386,6 +401,7 @@ func (m *mockS3Client) DeleteObject(ctx context.Context, bucket, key string, ver
 func (m *mockS3Client) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
 	m.locksMu.Lock()
 	m.headObjectCallCount++
+	m.headVersionHistory = append(m.headVersionHistory, backendVersionCall{key: bucket + "/" + key, versionID: cloneOptionalString(versionID)})
 	m.locksMu.Unlock()
 	if err := m.errors[bucket+"/"+key+"/head"]; err != nil {
 		return nil, err
@@ -403,6 +419,14 @@ func (m *mockS3Client) HeadObject(ctx context.Context, bucket, key string, versi
 		}
 	}
 	return meta, nil
+}
+
+func cloneOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func (m *mockS3Client) ListObjects(ctx context.Context, bucket, prefix string, opts s3.ListOptions) (s3.ListResult, error) {
@@ -771,6 +795,51 @@ func TestHandler_HandlePutObject(t *testing.T) {
 	}
 }
 
+func TestHandlePutObject_AllSixStandardHeadersRoundTrip(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngineWithOpts([]byte("all-six-header-password"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x42}, 32)))
+	require.NoError(t, err)
+	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+	key := "all-six-put"
+	values := map[string]string{
+		"Content-Type":        "application/example",
+		"Cache-Control":       "private, max-age=30",
+		"Content-Disposition": `attachment; filename="all-six.txt"`,
+		"Content-Encoding":    "gzip",
+		"Content-Language":    "en-GB",
+		"Expires":             "Mon, 21 Oct 2030 07:28:00 GMT",
+	}
+	req := httptest.NewRequest(http.MethodPut, "/bucket/"+key, bytes.NewReader([]byte("payload")))
+	for name, value := range values {
+		req.Header.Set(name, value)
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	for _, tc := range []struct{ method, rangeHeader string }{{http.MethodHead, ""}, {http.MethodGet, ""}, {http.MethodGet, "bytes=1-4"}} {
+		req = httptest.NewRequest(tc.method, "/bucket/"+key, nil)
+		if tc.rangeHeader != "" {
+			req.Header.Set("Range", tc.rangeHeader)
+		}
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		wantStatus := http.StatusOK
+		if tc.rangeHeader != "" {
+			wantStatus = http.StatusPartialContent
+		}
+		require.Equal(t, wantStatus, w.Code, w.Body.String())
+		for _, name := range objectmeta.Names {
+			assert.Equal(t, values[name], w.Header().Get(name), "%s after %s %s", name, tc.method, tc.rangeHeader)
+		}
+		if tc.method == http.MethodGet && tc.rangeHeader == "" {
+			assert.Equal(t, "payload", w.Body.String())
+		}
+	}
+}
+
 func TestHandlePutObject_InvalidStreamingBody_NoBackendCommit(t *testing.T) {
 	client := newMockS3Client()
 	engine, err := crypto.NewEngine([]byte("test-password-0123456789abcdef0123456789abcdef"))
@@ -1026,6 +1095,77 @@ func TestHandlePutObject_ChunkedV2ContentLengthIncludesTerminal(t *testing.T) {
 	}
 	if mockClient.lastPutContentLength == nil || *mockClient.lastPutContentLength != int64(want) {
 		t.Fatalf("declared ciphertext length = %v, want %d", mockClient.lastPutContentLength, want)
+	}
+}
+
+func TestHandlePutObject_MetadataEncryptionContentLengthMatchesBody(t *testing.T) {
+	for _, size := range []int{0, 26, 4096} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			client := newMockS3Client()
+			engine, err := crypto.NewEngineWithOpts([]byte("metadata-length-password"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+			router := mux.NewRouter()
+			h.RegisterRoutes(router)
+			r := httptest.NewRequest(http.MethodPut, "/test-bucket/metadata-length", bytes.NewReader(bytes.Repeat([]byte{'x'}, size)))
+			r.Header.Set("Content-Length", strconv.Itoa(size))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			stored := client.objects["test-bucket/metadata-length"]
+			if client.lastPutContentLength == nil || *client.lastPutContentLength != int64(len(stored)) {
+				t.Fatalf("declared=%v stored=%d", client.lastPutContentLength, len(stored))
+			}
+		})
+	}
+}
+
+func TestHandlePutObject_MetadataEncryptionLengthMatchesBackendWireBody(t *testing.T) {
+	for _, size := range []int{0, 26, 4096, 19} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			var gotLength int64 = -1
+			var gotBody []byte
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotLength = r.ContentLength
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("ETag", `"metadata-encrypted-etag"`)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+
+			client, err := s3.NewClientFactory(&config.BackendConfig{
+				Endpoint: backend.URL, Region: "us-east-1", AccessKey: "AKIATEST", SecretKey: "secrettest",
+			}).GetClient()
+			if err != nil {
+				t.Fatalf("create backend client: %v", err)
+			}
+			engine, err := crypto.NewEngineWithOpts([]byte("metadata-length-password"), crypto.WithMetadataKey(bytes.Repeat([]byte{0x37}, 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+			router := mux.NewRouter()
+			h.RegisterRoutes(router)
+
+			data := bytes.Repeat([]byte{'x'}, size)
+			r := httptest.NewRequest(http.MethodPut, "/test-bucket/metadata-encrypted-wire", bytes.NewReader(data))
+			r.Header.Set("Content-Length", strconv.Itoa(size))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("PUT status=%d body=%s", w.Code, w.Body.String())
+			}
+			if got, want := gotLength, int64(size+16); got != want {
+				t.Fatalf("backend Content-Length=%d, want encrypted body length %d", got, want)
+			}
+			if len(gotBody) != size+16 {
+				t.Fatalf("backend received %d body bytes, want %d", len(gotBody), size+16)
+			}
+		})
 	}
 }
 
@@ -3232,6 +3372,89 @@ func TestHandler_HeadObject_ReturnsDecryptedSize(t *testing.T) {
 	}
 }
 
+func TestHandler_HeadObject_HidesEveryReservedRegistryKey(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("head-reserved-test-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]string{"Content-Length": "9", "ETag": "opaque"}
+	for _, spec := range crypto.MetaKeys() {
+		switch spec.Canonical {
+		case crypto.MetaEncrypted, crypto.MetaChunkedFormat, crypto.MetaFallbackMode, crypto.MetaFallbackPointer,
+			crypto.MetaFallbackVersion, crypto.MetaObjectFormatVersion, crypto.MetaObjectBindingID, crypto.MetaMPUEncrypted, crypto.MetaEncryptedMetadata:
+			continue // These fields alter classification or trigger blob decryption.
+		}
+		if spec.Canonical != "" {
+			meta[spec.Canonical] = "internal"
+		}
+		if spec.Compact != "" {
+			meta[spec.Compact] = "internal"
+		}
+		for _, alias := range spec.Legacy {
+			meta[alias] = "internal"
+		}
+	}
+	client.objects["bucket/key"] = []byte("ciphertext")
+	client.metadata["bucket/key"] = meta
+	h := NewHandler(client, engine, logrus.New(), getTestMetrics())
+	w := httptest.NewRecorder()
+	r := mux.SetURLVars(httptest.NewRequest(http.MethodHead, "/bucket/key", nil), map[string]string{"bucket": "bucket", "key": "key"})
+	h.handleHeadObject(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("HEAD status=%d body=%q", w.Code, w.Body.String())
+	}
+	for _, spec := range crypto.MetaKeys() {
+		for _, reserved := range append([]string{spec.Canonical, spec.Compact}, spec.Legacy...) {
+			if reserved != "" && w.Header().Get(reserved) != "" {
+				t.Errorf("reserved metadata %q leaked", reserved)
+			}
+		}
+	}
+}
+
+func TestHeadObject_MalformedEncryptedFormatFailsClosed(t *testing.T) {
+	client := newMockS3Client()
+	client.objects["bucket/key"] = []byte("ciphertext")
+	client.metadata["bucket/key"] = map[string]string{
+		crypto.MetaEncrypted:           "true",
+		crypto.MetaObjectFormatVersion: "future-format",
+		"Content-Length":               "11",
+	}
+	handler := &Handler{s3Client: client, logger: logrus.New(), metrics: getTestMetrics()}
+	req := httptest.NewRequest(http.MethodHead, "/bucket/key", nil)
+	w := httptest.NewRecorder()
+	handler.handleHeadObject(w, mux.SetURLVars(req, map[string]string{"bucket": "bucket", "key": "key"}))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("HEAD status = %d, want 500", w.Code)
+	}
+	if got := w.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("malformed encrypted HEAD projected Content-Length %q", got)
+	}
+}
+
+func TestDeleteObject_EncryptedMPUv2_RemovesCompanionManifest(t *testing.T) {
+	client := newMockS3Client()
+	client.objects["bucket/object"] = []byte("ciphertext")
+	client.objects["bucket/object"+crypto.MPUManifestSuffix] = []byte("manifest")
+	client.metadata["bucket/object"] = map[string]string{
+		crypto.MetaMPUEncrypted:    "v2",
+		crypto.MetaObjectBindingID: "AAECAwQFBgcICQoLDA0ODw",
+		"Content-Length":           "10",
+	}
+	client.metadata["bucket/object"+crypto.MPUManifestSuffix] = map[string]string{"Content-Length": "8"}
+	handler := &Handler{s3Client: client, logger: logrus.New(), metrics: getTestMetrics()}
+	req := httptest.NewRequest(http.MethodDelete, "/bucket/object", nil)
+	w := httptest.NewRecorder()
+	handler.handleDeleteObject(w, mux.SetURLVars(req, map[string]string{"bucket": "bucket", "key": "object"}))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, exists := client.objects["bucket/object"+crypto.MPUManifestSuffix]; exists {
+		t.Fatal("v2 MPU companion manifest remains after DeleteObject")
+	}
+}
+
 // TestHandler_GetObject_ReturnsDecryptedContentLength verifies that GetObject
 // returns Content-Length equal to the original plaintext size for encrypted objects.
 func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
@@ -3287,6 +3510,286 @@ func TestHandler_GetObject_ReturnsDecryptedContentLength(t *testing.T) {
 	if w.Body.String() != plaintext {
 		t.Errorf("GetObject body mismatch: expected %q, got %q", plaintext, w.Body.String())
 	}
+}
+
+func TestGetObject_ProjectsBackendETagForPlaintextAndEncrypted(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plaintext", true: "encrypted"}[encrypted], func(t *testing.T) {
+			logger := logrus.New()
+			logger.SetLevel(logrus.ErrorLevel)
+			client := newMockS3Client()
+			engine, err := crypto.NewEngine([]byte("test-password-123456"))
+			require.NoError(t, err)
+			body := []byte("metadata")
+			metadata := map[string]string{"ETag": `"backend-etag"`, "Content-Length": strconv.Itoa(len(body))}
+			wantETag := metadata["ETag"]
+			if encrypted {
+				reader, encMetadata, encryptErr := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "etag-bucket", Key: "etag-key"}, bytes.NewReader(body), nil)
+				require.NoError(t, encryptErr)
+				wantETag = quoteETag(encMetadata[crypto.MetaOriginalETag])
+				ciphertext, readErr := io.ReadAll(reader)
+				require.NoError(t, readErr)
+				for key, value := range encMetadata {
+					metadata[key] = value
+				}
+				body = ciphertext
+			}
+			_, err = client.PutObject(context.Background(), "etag-bucket", "etag-key", bytes.NewReader(body), metadata, nil, "", nil, "", "", "", "", "")
+			require.NoError(t, err)
+			client.metadata["etag-bucket/etag-key"]["ETag"] = `"backend-etag"`
+			handler := NewHandler(client, engine, logger, getTestMetrics())
+			router := mux.NewRouter()
+			handler.RegisterRoutes(router)
+
+			for _, tc := range []struct {
+				rangeHeader string
+				wantStatus  int
+				wantBody    string
+			}{
+				{wantStatus: http.StatusOK, wantBody: "metadata"},
+				{rangeHeader: "bytes=1-9", wantStatus: http.StatusPartialContent, wantBody: "etadata"},
+			} {
+				req := httptest.NewRequest(http.MethodGet, "/etag-bucket/etag-key", nil)
+				if tc.rangeHeader != "" {
+					req.Header.Set("Range", tc.rangeHeader)
+				}
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				if w.Code != tc.wantStatus {
+					t.Fatalf("GET range=%q status=%d body=%s", tc.rangeHeader, w.Code, w.Body.String())
+				}
+				if got := w.Header().Get("ETag"); got != wantETag {
+					t.Errorf("GET range=%q ETag=%q want=%q", tc.rangeHeader, got, wantETag)
+				}
+				if got := w.Body.String(); got != tc.wantBody {
+					t.Errorf("GET range=%q body=%q want=%q", tc.rangeHeader, got, tc.wantBody)
+				}
+				if tc.rangeHeader != "" {
+					if got := w.Header().Get("Content-Range"); got != "bytes 1-7/8" {
+						t.Errorf("GET Content-Range=%q want=%q", got, "bytes 1-7/8")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGetObject_CacheCapturesCompletePlaintextAndRequiresFreshETag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "non-empty", body: "complete cached plaintext"},
+		{name: "empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := logrus.New()
+			logger.SetLevel(logrus.ErrorLevel)
+			client := newMockS3Client()
+			engine, err := crypto.NewEngine([]byte("test-password-123456"))
+			require.NoError(t, err)
+			cfg := &config.Config{Cache: config.CacheConfig{MaxSize: 1024}}
+			responseCache := cache.NewMemoryCache(4096, 10, time.Minute)
+			handler := NewHandlerWithFeatures(client, engine, logger, getTestMetrics(), nil, responseCache, nil, cfg, nil)
+
+			encReader, encMeta, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "cache-bucket", Key: "cache-key"}, strings.NewReader(tc.body), map[string]string{"Content-Type": "text/plain"})
+			require.NoError(t, err)
+			ciphertext, err := io.ReadAll(encReader)
+			require.NoError(t, err)
+			encMeta["ETag"] = `"backend-v1"`
+			_, err = client.PutObject(context.Background(), "cache-bucket", "cache-key", bytes.NewReader(ciphertext), encMeta, nil, "", nil, "", "", "", "", "")
+			require.NoError(t, err)
+			// The mock backend preserves the supplied ETag in metadata.
+			client.metadata["cache-bucket/cache-key"]["ETag"] = `"backend-v1"`
+
+			serve := func(query string) *httptest.ResponseRecorder {
+				router := mux.NewRouter()
+				handler.RegisterRoutes(router)
+				req := httptest.NewRequest(http.MethodGet, "/cache-bucket/cache-key"+query, nil)
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				return w
+			}
+			first := serve("")
+			require.Equal(t, http.StatusOK, first.Code)
+			assert.Equal(t, tc.body, first.Body.String())
+			entry, ok := responseCache.Get(context.Background(), "cache-bucket", "cache-key")
+			require.True(t, ok, "only a completed full body should be cached")
+			assert.Equal(t, tc.body, string(entry.Data))
+			assert.Equal(t, `"backend-v1"`, entry.BackendETag)
+			assert.NotEmpty(t, entry.Source)
+
+			getsBeforeHit := client.getObjectCallCount
+			second := serve("?response-content-type=application%2Fx-cache-override")
+			require.Equal(t, http.StatusOK, second.Code)
+			assert.Equal(t, tc.body, second.Body.String())
+			assert.Equal(t, "application/x-cache-override", second.Header().Get("Content-Type"), "cache hit must re-project current response-* overrides")
+			assert.Equal(t, getsBeforeHit, client.getObjectCallCount, "fresh cache hit should serve cached body")
+
+			client.metadata["cache-bucket/cache-key"]["ETag"] = `"backend-v2"`
+			third := serve("")
+			require.Equal(t, http.StatusOK, third.Code)
+			assert.Equal(t, tc.body, third.Body.String())
+			assert.Greater(t, client.getObjectCallCount, getsBeforeHit, "stale ETag must fall through to backend GET")
+
+			// An absent backend ETag is not an authenticated freshness token: do
+			// not serve the cached plaintext just because the HEAD succeeded.
+			client.metadata["cache-bucket/cache-key"]["ETag"] = ""
+			getsBeforeMissingETag := client.getObjectCallCount
+			fourth := serve("")
+			require.Equal(t, http.StatusOK, fourth.Code)
+			assert.Equal(t, tc.body, fourth.Body.String())
+			assert.Greater(t, client.getObjectCallCount, getsBeforeMissingETag, "cache hit must require a non-empty matching backend ETag")
+		})
+	}
+}
+
+func TestObjectHandlers_PropagateVersionIDToBackend(t *testing.T) {
+	client := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-version-propagation"))
+	require.NoError(t, err)
+	plain := []byte("versioned handler payload")
+	reader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "version-bucket", Key: "version-key"}, bytes.NewReader(plain), nil)
+	require.NoError(t, err)
+	ciphertext, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	metadata["Content-Length"] = strconv.Itoa(len(ciphertext))
+	metadata["ETag"] = `"version-backend-etag"`
+	client.objects["version-bucket/version-key"] = ciphertext
+	client.metadata["version-bucket/version-key"] = metadata
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	handler := NewHandler(client, engine, logger, getTestMetrics())
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	const version = "chosen-version"
+
+	for _, tc := range []struct {
+		method      string
+		rangeHeader string
+	}{
+		{method: http.MethodHead},
+		{method: http.MethodGet},
+		{method: http.MethodGet, rangeHeader: "bytes=2-7"},
+	} {
+		t.Run(tc.method+"/"+tc.rangeHeader, func(t *testing.T) {
+			client.locksMu.Lock()
+			client.headVersionHistory = nil
+			client.getVersionHistory = nil
+			client.locksMu.Unlock()
+			req := httptest.NewRequest(tc.method, "/version-bucket/version-key?versionId="+version, nil)
+			if tc.rangeHeader != "" {
+				req.Header.Set("Range", tc.rangeHeader)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, req)
+			require.True(t, response.Code == http.StatusOK || response.Code == http.StatusPartialContent, "status=%d body=%s", response.Code, response.Body.String())
+			client.locksMu.Lock()
+			defer client.locksMu.Unlock()
+			if tc.method == http.MethodHead || tc.rangeHeader != "" {
+				require.NotEmpty(t, client.headVersionHistory, "handler must HEAD the requested version")
+				for _, got := range client.headVersionHistory {
+					if got.key != "version-bucket/version-key" {
+						continue
+					}
+					require.NotNil(t, got.versionID)
+					assert.Equal(t, version, *got.versionID)
+				}
+				assert.Contains(t, keysForVersionCalls(client.headVersionHistory), "version-bucket/version-key")
+			}
+			if tc.method == http.MethodGet {
+				require.NotEmpty(t, client.getVersionHistory, "handler must GET the requested version")
+				for _, got := range client.getVersionHistory {
+					if got.key != "version-bucket/version-key" {
+						continue
+					}
+					require.NotNil(t, got.versionID)
+					assert.Equal(t, version, *got.versionID)
+				}
+				assert.Contains(t, keysForVersionCalls(client.getVersionHistory), "version-bucket/version-key")
+			}
+		})
+	}
+}
+
+func keysForVersionCalls(calls []backendVersionCall) []string {
+	keys := make([]string, 0, len(calls))
+	for _, call := range calls {
+		keys = append(keys, call.key)
+	}
+	return keys
+}
+
+func TestGetObject_CacheFillConcurrentReaders(t *testing.T) {
+	client := newMockS3Client()
+	client.objects["cache-bucket/concurrent"] = []byte("body")
+	client.metadata["cache-bucket/concurrent"] = map[string]string{"Content-Length": "4", "ETag": "backend-etag"}
+	responseCache := cache.NewMemoryCache(4096, 10, time.Minute)
+	cfg := &config.Config{Cache: config.CacheConfig{MaxSize: 4096}}
+	source, err := json.Marshal(objectResponseSource{Meta: map[string]string{"Content-Length": "4", "ETag": "backend-etag"}, PlainSize: 4, BackendETag: "backend-etag"})
+	require.NoError(t, err)
+	entryWriter, ok := responseCache.(cache.EntryWriter)
+	require.True(t, ok)
+	require.NoError(t, entryWriter.SetEntry(context.Background(), "cache-bucket", "concurrent", &cache.CacheEntry{Data: []byte("body"), BackendETag: "backend-etag", Source: source}, time.Minute))
+	h := NewHandlerWithFeatures(client, crypto.PassthroughEngine{}, logrus.New(), getTestMetrics(), nil, responseCache, nil, cfg, nil)
+	router := mux.NewRouter()
+	h.RegisterRoutes(router)
+
+	const readers = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errCh := make(chan error, readers)
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/cache-bucket/concurrent", nil))
+			if w.Code != http.StatusOK || w.Body.String() != "body" {
+				errCh <- fmt.Errorf("status=%d body=%q", w.Code, w.Body.String())
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	entry, ok := responseCache.Get(context.Background(), "cache-bucket", "concurrent")
+	require.True(t, ok)
+	assert.Equal(t, "body", string(entry.Data))
+}
+
+func TestGetObject_IncompleteIntegrityStreamIsNotCached(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+	client := newMockS3Client()
+	engine, err := crypto.NewEngine([]byte("test-password-123456"))
+	require.NoError(t, err)
+	responseCache := cache.NewMemoryCache(4096, 10, time.Minute)
+	cfg := &config.Config{Cache: config.CacheConfig{MaxSize: 1024}}
+	handler := NewHandlerWithFeatures(client, engine, logger, getTestMetrics(), nil, responseCache, nil, cfg, nil)
+
+	encReader, metadata, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "cache-bucket", Key: "truncated"}, strings.NewReader("body that must authenticate"), nil)
+	require.NoError(t, err)
+	ciphertext, err := io.ReadAll(encReader)
+	require.NoError(t, err)
+	require.Greater(t, len(ciphertext), 1)
+	ciphertext = ciphertext[:len(ciphertext)-1]
+	metadata["ETag"] = `"truncated"`
+	_, err = client.PutObject(context.Background(), "cache-bucket", "truncated", bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+	client.metadata["cache-bucket/truncated"]["ETag"] = `"truncated"`
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/cache-bucket/truncated", nil))
+	_, cached := responseCache.Get(context.Background(), "cache-bucket", "truncated")
+	assert.False(t, cached, "failed authenticated stream must not enter cache")
 }
 
 // TestGetEncryptionEngine_DisableBranch_ReturnsPassthrough verifies that
@@ -3346,13 +3849,9 @@ func TestListObjects_SizeCache_WarmPath(t *testing.T) {
 	bucket := "test-bucket"
 	plainSize := int64(12345)
 
-	_, err := mockClient.PutObject(ctx, bucket, "key1", bytes.NewReader([]byte("data1")), nil, nil, "", nil, "", "", "", "", "")
-	require.NoError(t, err)
-	_, err = mockClient.PutObject(ctx, bucket, "key2", bytes.NewReader([]byte("data2")), nil, nil, "", nil, "", "", "", "", "")
-	require.NoError(t, err)
-
-	require.NoError(t, sc.Set(ctx, bucket, "key1", plainSize))
-	require.NoError(t, sc.Set(ctx, bucket, "key2", plainSize+1))
+	for key, size := range map[string]int64{"key1": plainSize, "key2": plainSize + 1} {
+		seedEncryptedListObject(t, handler, mockClient, sc, ctx, bucket, key, size)
+	}
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -3498,11 +3997,17 @@ func TestListObjects_SizeCache_PartialHit(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Populate cache for keys 1, 2, 3 with distinct plaintext sizes.
-	require.NoError(t, sc.Set(ctx, bucket, "key1", 111))
-	require.NoError(t, sc.Set(ctx, bucket, "key2", 222))
-	require.NoError(t, sc.Set(ctx, bucket, "key3", 333))
-	// keys 4 and 5 are not in cache → ciphertext sizes (40 and 50) returned.
+	// Seed three genuine encrypted objects and populate cache only with exact
+	// sizes returned by the production resolver. Keys 4 and 5 remain backend
+	// plaintext objects and therefore report their real backend lengths.
+	for i, size := range []int64{111, 222, 333} {
+		seedEncryptedListObject(t, handler, mockClient, sc, ctx, bucket, fmt.Sprintf("key%d", i+1), size)
+	}
+	for i := 4; i <= 5; i++ {
+		data := bytes.Repeat([]byte("x"), i*10)
+		_, err := mockClient.PutObject(ctx, bucket, fmt.Sprintf("key%d", i), bytes.NewReader(data), nil, nil, "", nil, "", "", "", "", "")
+		require.NoError(t, err)
+	}
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -3514,7 +4019,7 @@ func TestListObjects_SizeCache_PartialHit(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	body := w.Body.String()
-	// Cache-hit keys: plaintext sizes must appear.
+	// Cache entries created by recordPlaintextSize are exact resolved plaintext sizes.
 	assert.Contains(t, body, "<Size>111</Size>")
 	assert.Contains(t, body, "<Size>222</Size>")
 	assert.Contains(t, body, "<Size>333</Size>")
@@ -3523,6 +4028,29 @@ func TestListObjects_SizeCache_PartialHit(t *testing.T) {
 	assert.Contains(t, body, "<Size>50</Size>")
 	// No HEAD calls issued (fallback disabled).
 	assert.Equal(t, 0, mockClient.headObjectCallCount)
+}
+
+// seedEncryptedListObject stores a real encrypted object and writes its cache
+// entry through the same format classifier and exact plaintext-size resolver
+// used by production cache population.
+func seedEncryptedListObject(t *testing.T, handler *Handler, client *mockS3Client, cache *sizecache.ValkeySizeCache, ctx context.Context, bucket, key string, plainSize int64) {
+	t.Helper()
+	plaintext := bytes.Repeat([]byte("p"), int(plainSize))
+	reader, metadata, err := handler.encryptionEngine.Encrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, bytes.NewReader(plaintext), map[string]string{
+		"Content-Length": strconv.FormatInt(plainSize, 10),
+	})
+	require.NoError(t, err)
+	ciphertext, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	_, err = client.PutObject(ctx, bucket, key, bytes.NewReader(ciphertext), metadata, nil, "", nil, "", "", "", "", "")
+	require.NoError(t, err)
+	view, err := handler.loadObjectView(bucket, key, nil, metadata)
+	require.NoError(t, err)
+	resolved, err := handler.resolvePlaintextSize(ctx, client, view)
+	require.NoError(t, err)
+	require.True(t, resolved.Exact)
+	require.Equal(t, plainSize, resolved.Size)
+	require.NoError(t, cache.Set(ctx, bucket, key, resolved.Size))
 }
 
 // TestListObjects_SizeCache_ColdMiss_FallbackEnabled verifies that when
@@ -3546,8 +4074,8 @@ func TestListObjects_SizeCache_ColdMiss_FallbackEnabled(t *testing.T) {
 	data1 := bytes.Repeat([]byte("a"), int(plainSize1)+16) // simulate ciphertext (larger than plain)
 	data2 := bytes.Repeat([]byte("b"), int(plainSize2)+16)
 
-	meta1 := map[string]string{crypto.MetaOriginalSize: strconv.FormatInt(plainSize1, 10)}
-	meta2 := map[string]string{crypto.MetaOriginalSize: strconv.FormatInt(plainSize2, 10)}
+	meta1 := map[string]string{crypto.MetaEncrypted: "true", crypto.MetaAlgorithm: crypto.AlgorithmAES256GCM, crypto.MetaOriginalSize: strconv.FormatInt(plainSize1, 10)}
+	meta2 := map[string]string{crypto.MetaEncrypted: "true", crypto.MetaAlgorithm: crypto.AlgorithmAES256GCM, crypto.MetaOriginalSize: strconv.FormatInt(plainSize2, 10)}
 
 	mockClient.objects[bucket+"/key1"] = data1
 	mockClient.metadata[bucket+"/key1"] = meta1
@@ -3667,12 +4195,12 @@ func TestCopyObject_SizeCache_Populated(t *testing.T) {
 	dstKey := "dst-copy"
 	const plainSize = int64(7777)
 
-	// Put source object with MetaOriginalSize metadata so handleCopyObject
-	// can read the plaintext size and populate the cache.
-	srcData := bytes.Repeat([]byte("e"), int(plainSize)+16)
+	// A plaintext source's backend length is the authoritative resolved size;
+	// gateway metadata must not be used as a substitute size source.
+	srcData := bytes.Repeat([]byte("e"), int(plainSize))
 	mockClient.objects[bucket+"/"+srcKey] = srcData
 	mockClient.metadata[bucket+"/"+srcKey] = map[string]string{
-		crypto.MetaOriginalSize: strconv.FormatInt(plainSize, 10),
+		"Content-Length": strconv.FormatInt(plainSize, 10),
 	}
 
 	router := mux.NewRouter()

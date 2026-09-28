@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -26,6 +27,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func encodeTestChunkedManifest(t *testing.T, version uint8) string {
+	t.Helper()
+	manifest := fmt.Sprintf(`{"v":%d,"cs":%d,"cc":1,"iv":"AAAAAAAAAAAAAAAA"}`, version, crypto.DefaultChunkSize)
+	encoded := []byte(manifest)
+	return base64.StdEncoding.EncodeToString(encoded)
+}
 
 func TestUploadPartCopy_ClientMetricsExcludeInternalCopyBytes(t *testing.T) {
 	reg := prometheus.NewRegistry()
@@ -400,10 +408,27 @@ func TestClassifyCopySource_MPUWinsOverGenericEncryptedMarker(t *testing.T) {
 
 	handler := NewHandler(mockClient, engine, logger, getTestMetrics())
 	mockClient.metadata["src-bucket/src-key"] = map[string]string{
-		crypto.MetaEncrypted:    "true",
-		crypto.MetaMPUEncrypted: "true",
-		crypto.MetaFallbackMode: "mpu",
+		crypto.MetaEncrypted:       "true",
+		crypto.MetaMPUEncrypted:    "true",
+		crypto.MetaFallbackMode:    "mpu",
+		crypto.MetaFallbackPointer: "src-key" + crypto.MPUManifestSuffix,
 	}
+	mockClient.objects["src-bucket/src-key"] = []byte("ciphertext")
+	manifestKey := "src-key" + crypto.MPUManifestSuffix
+	manifest := &crypto.MultipartManifest{
+		Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize,
+		IVPrefix: "AAAAAAAAAAAAAAAA", UploadIDHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		WrappedDEK: "test-wrapped-dek", TotalPlainSize: 1,
+		Parts: []crypto.MPUPartRecord{{PartNumber: 1, PlainLen: 1, EncLen: 17, ChunkCount: 1}},
+	}
+	manifestBytes, err := manifest.Marshal()
+	require.NoError(t, err)
+	manifestReader, manifestMeta, err := engine.Encrypt(context.Background(), crypto.ObjectContext{Bucket: "src-bucket", Key: manifestKey}, bytes.NewReader(manifestBytes), nil)
+	require.NoError(t, err)
+	manifestCiphertext, err := io.ReadAll(manifestReader)
+	require.NoError(t, err)
+	mockClient.objects["src-bucket/"+manifestKey] = manifestCiphertext
+	mockClient.metadata["src-bucket/"+manifestKey] = manifestMeta
 
 	classification, err := handler.classifyCopySource(context.Background(), mockClient, "src-bucket", "src-key", nil)
 	require.NoError(t, err)
@@ -548,6 +573,7 @@ func TestUploadPartCopy_LegacySourceExceedsCap(t *testing.T) {
 	mockClient.objects["src-bucket/legacy-big"] = make([]byte, 2048)
 	mockClient.metadata["src-bucket/legacy-big"] = map[string]string{
 		crypto.MetaEncrypted: "true",
+		crypto.MetaAlgorithm: crypto.AlgorithmAES256GCM,
 		"Content-Length":     "2048",
 	}
 
@@ -771,6 +797,7 @@ func TestSEC29_ChunkedSourceBufferCap_uploadPartCopyChunked(t *testing.T) {
 		crypto.MetaChunkedFormat: "true",
 		crypto.MetaEncrypted:     "true",
 		crypto.MetaOriginalSize:  "1024",
+		crypto.MetaManifest:      encodeTestChunkedManifest(t, crypto.ChunkedFormatV1),
 	}
 	mockClient.objects["src-bucket/chunked-key"] = make([]byte, 64)
 	mockClient.metadata["src-bucket/chunked-key"] = srcMeta
@@ -819,6 +846,7 @@ func TestSEC29_ChunkedSourceBufferCap_ReencryptMPU(t *testing.T) {
 		crypto.MetaChunkedFormat: "true",
 		crypto.MetaEncrypted:     "true",
 		crypto.MetaOriginalSize:  "1024",
+		crypto.MetaManifest:      encodeTestChunkedManifest(t, crypto.ChunkedFormatV1),
 	}
 	mockClient.objects["src-bucket/chunked-key"] = make([]byte, 64)
 	mockClient.metadata["src-bucket/chunked-key"] = srcMeta

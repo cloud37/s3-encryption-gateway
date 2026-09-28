@@ -6,6 +6,7 @@ import (
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/gorilla/mux"
 )
 
 type authorizationOperation int
@@ -19,6 +20,40 @@ const (
 	authorizationManageBucket
 	authorizationListBuckets
 )
+
+// operationPermission is the reviewed permission contract for mux route names.
+// CopyObject and UploadPartCopy intentionally use the PutObject and UploadPart
+// route-family entries; semantic operation names are classified separately for
+// instrumentation. Route parity tests compare these permissions with an
+// independent oracle against the real mux and request classifier.
+var operationPermission = map[string]authorizationOperation{
+	"ListBuckets": authorizationListBuckets, "CreateBucket": authorizationCreateBucket,
+	"DeleteBucket": authorizationDeleteBucket, "HeadBucket": authorizationRead, "ListObjects": authorizationRead,
+	"GetObject": authorizationRead, "HeadObject": authorizationRead, "PutObject": authorizationWrite,
+	"CopyObject": authorizationWrite, "DeleteObject": authorizationWrite, "DeleteObjects": authorizationWrite,
+	"CreateMultipartUpload": authorizationWrite, "UploadPart": authorizationWrite, "UploadPartCopy": authorizationWrite,
+	"CompleteMultipartUpload": authorizationWrite, "AbortMultipartUpload": authorizationWrite,
+	"ListParts": authorizationRead, "ListMultipartUploads": authorizationRead,
+	"GetObjectRetention": authorizationRead, "PutObjectRetention": authorizationWrite,
+	"GetObjectLegalHold": authorizationRead, "PutObjectLegalHold": authorizationWrite,
+	"GetObjectTagging": authorizationRead, "PutObjectTagging": authorizationWrite, "DeleteObjectTagging": authorizationWrite,
+	"GetObjectACL": authorizationRead, "PutObjectACL": authorizationWrite, "RestoreObject": authorizationWrite,
+	"SelectObjectContent": authorizationRead, "CORSPreflight": authorizationRead,
+	"GetObjectLockConfiguration": authorizationRead, "PutObjectLockConfiguration": authorizationManageBucket,
+	"GetBucketLifecycle": authorizationRead, "PutBucketLifecycle": authorizationManageBucket, "DeleteBucketLifecycle": authorizationManageBucket,
+	"GetBucketPolicy": authorizationRead, "PutBucketPolicy": authorizationManageBucket, "DeleteBucketPolicy": authorizationManageBucket,
+	"GetBucketCors": authorizationRead, "PutBucketCors": authorizationManageBucket, "DeleteBucketCors": authorizationManageBucket,
+	"GetBucketVersioning": authorizationRead, "PutBucketVersioning": authorizationManageBucket,
+	"GetBucketEncryption": authorizationRead, "PutBucketEncryption": authorizationManageBucket, "DeleteBucketEncryption": authorizationManageBucket,
+	"GetBucketACL": authorizationRead, "PutBucketACL": authorizationManageBucket,
+	"GetBucketLocation": authorizationRead, "GetBucketNotification": authorizationRead, "PutBucketNotification": authorizationManageBucket,
+	"GetBucketReplication": authorizationRead, "PutBucketReplication": authorizationManageBucket, "DeleteBucketReplication": authorizationManageBucket,
+	"GetBucketLogging": authorizationRead, "PutBucketLogging": authorizationManageBucket,
+	"GetBucketRequestPayment": authorizationRead, "PutBucketRequestPayment": authorizationManageBucket,
+	"GetBucketWebsite": authorizationRead, "PutBucketWebsite": authorizationManageBucket, "DeleteBucketWebsite": authorizationManageBucket,
+	"GetBucketInventory": authorizationRead, "PutBucketInventory": authorizationManageBucket, "DeleteBucketInventory": authorizationManageBucket,
+	"GetBucketAnalytics": authorizationRead, "PutBucketIntelligentTiering": authorizationManageBucket,
+}
 
 // AuthorizationMiddleware enforces the authenticated credential's policy before
 // routing can acquire a backend client. proxiedBucket is an additional global
@@ -204,6 +239,12 @@ func queryValueNonEmpty(query map[string][]string, key string) bool {
 }
 
 func classifyAuthorizationOperation(r *http.Request) (authorizationOperation, string) {
+	if route := mux.CurrentRoute(r); route != nil {
+		name := route.GetName()
+		if expected, ok := operationPermission[name]; ok {
+			return expected, name
+		}
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
 	if path == "" {
