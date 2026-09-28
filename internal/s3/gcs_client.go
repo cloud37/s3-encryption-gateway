@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 )
 
 // gcsClient wraps a Client and applies GCS S3-compatible API normalisation.
@@ -61,7 +63,7 @@ func (c *gcsClient) GetObject(ctx context.Context, bucket, key string, versionID
 	if err != nil {
 		return body, meta, err
 	}
-	return body, lowercaseKeys(meta), nil
+	return body, objectmeta.NormalizeBackendKeys(meta), nil
 }
 
 func (c *gcsClient) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
@@ -69,7 +71,7 @@ func (c *gcsClient) HeadObject(ctx context.Context, bucket, key string, versionI
 	if err != nil {
 		return meta, err
 	}
-	return lowercaseKeys(meta), nil
+	return objectmeta.NormalizeBackendKeys(meta), nil
 }
 
 func (c *gcsClient) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error) {
@@ -77,11 +79,11 @@ func (c *gcsClient) CopyObject(ctx context.Context, dstBucket, dstKey string, sr
 	if err != nil {
 		return etag, resultMeta, err
 	}
-	resultMeta = lowercaseKeys(resultMeta)
+	resultMeta = objectmeta.NormalizeBackendKeys(resultMeta)
 	// GCS's XML API does not return LastModified in the CopyObjectResult body;
 	// substitute time.Now() as the sentinel value.
-	if _, ok := resultMeta["last-modified"]; !ok {
-		resultMeta["last-modified"] = time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
+	if _, ok := resultMeta["Last-Modified"]; !ok {
+		resultMeta["Last-Modified"] = time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
 	}
 	return etag, resultMeta, nil
 }
@@ -153,14 +155,20 @@ func (c *gcsClient) GetObjectLockConfiguration(ctx context.Context, bucket strin
 
 // ---- helpers ----
 
-// lowercaseKeys returns a copy of m with all keys lowercased.
+// lowercaseKeys returns a copy with only user x-amz metadata lowercased.
+// Native standard headers must retain their canonical names for the inner
+// adapter's objectmeta.Split boundary.
 func lowercaseKeys(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		out[strings.ToLower(k)] = v
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
+			out[strings.ToLower(k)] = v
+		} else {
+			out[http.CanonicalHeaderKey(k)] = v
+		}
 	}
 	return out
 }

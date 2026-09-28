@@ -26,6 +26,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/debug"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -476,9 +477,10 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 	)
 	defer span.End()
 
+	native, userMetadata := objectmeta.Split(metadata)
 	// Convert metadata - strip x-amz-meta- prefix as AWS SDK v2 adds it automatically
 	// For custom endpoints (Ceph/Hetzner), the SDK should still handle this correctly
-	convertedMeta := convertMetadata(metadata)
+	convertedMeta := convertMetadata(userMetadata)
 
 	// Debug: log critical encryption metadata values being sent to SDK
 	// Check both full keys (if compaction didn't happen) and compacted keys
@@ -507,6 +509,26 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 		Body:     reader,
 		Metadata: convertedMeta,
 	}
+	if native.ContentType != "" {
+		input.ContentType = aws.String(native.ContentType)
+	}
+	if native.CacheControl != "" {
+		input.CacheControl = aws.String(native.CacheControl)
+	}
+	if native.ContentDisposition != "" {
+		input.ContentDisposition = aws.String(native.ContentDisposition)
+	}
+	if native.ContentEncoding != "" {
+		input.ContentEncoding = aws.String(native.ContentEncoding)
+	}
+	if native.ContentLanguage != "" {
+		input.ContentLanguage = aws.String(native.ContentLanguage)
+	}
+	if native.Expires != "" {
+		if t, err := http.ParseTime(native.Expires); err == nil {
+			input.Expires = &t
+		}
+	}
 	if contentLength != nil {
 		input.ContentLength = contentLength
 	}
@@ -533,11 +555,16 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 	// the legacy Content-MD5 header on PutObject. AWS SDK v2 dropped automatic
 	// MD5 computation when it moved to x-amz-checksum-*. Compute it here when
 	// the body is seekable (small objects, cached MPU parts); skip for
-	// non-seekable streaming encrypted data.
-	md5Str, body, md5Err := computeContentMD5(reader)
+	// non-seekable streaming encrypted data. The SDK's seekable stream adapter
+	// derives the HTTP Content-Length from the stream passed to SetStream; derive
+	// the same exact remaining length here for the PutObject input as well.
+	md5Str, body, seekableLength, md5Err := computeContentMD5AndLength(reader)
 	if md5Err != nil {
 		span.SetStatus(codes.Error, md5Err.Error())
 		return "", fmt.Errorf("failed to compute Content-MD5 for %s/%s: %w", bucket, key, md5Err)
+	}
+	if seekableLength != nil {
+		input.ContentLength = seekableLength
 	}
 	if md5Str != "" {
 		input.ContentMD5 = aws.String(md5Str)
@@ -648,6 +675,18 @@ func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID 
 	if result.ContentEncoding != nil {
 		metadata["Content-Encoding"] = *result.ContentEncoding
 	}
+	if result.ContentLanguage != nil {
+		metadata["Content-Language"] = *result.ContentLanguage
+	}
+	if result.Expires != nil {
+		metadata["Expires"] = result.Expires.Format(http.TimeFormat)
+	}
+	if result.StorageClass != "" {
+		metadata["x-amz-storage-class"] = string(result.StorageClass)
+	}
+	if result.PartsCount != nil {
+		metadata["x-amz-mp-parts-count"] = fmt.Sprintf("%d", *result.PartsCount)
+	}
 
 	if result.ObjectLockMode != "" {
 		metadata["x-amz-object-lock-mode"] = string(result.ObjectLockMode)
@@ -660,7 +699,7 @@ func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID 
 	}
 
 	span.SetStatus(codes.Ok, "")
-	return result.Body, metadata, nil
+	return result.Body, objectmeta.NormalizeBackendKeys(metadata), nil
 }
 
 // DeleteObject deletes an object from S3.
@@ -724,8 +763,26 @@ func (c *s3Client) HeadObject(ctx context.Context, bucket, key string, versionID
 	if result.ContentDisposition != nil {
 		metadata["Content-Disposition"] = *result.ContentDisposition
 	}
+	if result.ContentEncoding != nil {
+		metadata["Content-Encoding"] = *result.ContentEncoding
+	}
+	if result.ContentLanguage != nil {
+		metadata["Content-Language"] = *result.ContentLanguage
+	}
+	if result.Expires != nil {
+		metadata["Expires"] = result.Expires.Format(http.TimeFormat)
+	}
 	if result.ETag != nil {
 		metadata["ETag"] = *result.ETag
+	}
+	if result.AcceptRanges != nil {
+		metadata["Accept-Ranges"] = *result.AcceptRanges
+	}
+	if result.StorageClass != "" {
+		metadata["x-amz-storage-class"] = string(result.StorageClass)
+	}
+	if result.PartsCount != nil {
+		metadata["x-amz-mp-parts-count"] = fmt.Sprintf("%d", *result.PartsCount)
 	}
 	if result.LastModified != nil {
 		metadata["Last-Modified"] = result.LastModified.Format("Mon, 02 Jan 2006 15:04:05 GMT")
@@ -741,7 +798,7 @@ func (c *s3Client) HeadObject(ctx context.Context, bucket, key string, versionID
 		metadata["x-amz-object-lock-legal-hold"] = string(result.ObjectLockLegalHoldStatus)
 	}
 
-	return metadata, nil
+	return objectmeta.NormalizeBackendKeys(metadata), nil
 }
 
 // ListObjects lists objects in a bucket.
@@ -819,22 +876,6 @@ func convertMetadata(metadata map[string]string) map[string]string {
 	return result
 }
 
-func cloneMetadataWithoutStandardHeaders(metadata map[string]string) map[string]string {
-	if metadata == nil {
-		return nil
-	}
-	result := make(map[string]string, len(metadata))
-	for key, value := range metadata {
-		switch strings.ToLower(key) {
-		case "content-type", "cache-control", "content-disposition":
-			continue
-		default:
-			result[key] = value
-		}
-	}
-	return result
-}
-
 // extractMetadata extracts metadata from S3 response.
 // AWS SDK v2 returns metadata keys WITHOUT the x-amz-meta- prefix (it strips it automatically).
 // We add the prefix back for consistency with our internal representation.
@@ -864,23 +905,31 @@ func extractMetadata(metadata map[string]string) map[string]string {
 
 // CreateMultipartUpload initiates a multipart upload.
 func (c *s3Client) CreateMultipartUpload(ctx context.Context, bucket, key string, metadata map[string]string, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
-	contentType := metadata["Content-Type"]
-	cacheControl := metadata["Cache-Control"]
-	contentDisposition := metadata["Content-Disposition"]
-	metadata = cloneMetadataWithoutStandardHeaders(metadata)
+	native, userMetadata := objectmeta.Split(metadata)
 	input := &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(bucket),
 		Key:      aws.String(key),
-		Metadata: convertMetadata(metadata),
+		Metadata: convertMetadata(userMetadata),
 	}
-	if contentType != "" {
-		input.ContentType = aws.String(contentType)
+	if native.ContentType != "" {
+		input.ContentType = aws.String(native.ContentType)
 	}
-	if cacheControl != "" {
-		input.CacheControl = aws.String(cacheControl)
+	if native.CacheControl != "" {
+		input.CacheControl = aws.String(native.CacheControl)
 	}
-	if contentDisposition != "" {
-		input.ContentDisposition = aws.String(contentDisposition)
+	if native.ContentDisposition != "" {
+		input.ContentDisposition = aws.String(native.ContentDisposition)
+	}
+	if native.ContentEncoding != "" {
+		input.ContentEncoding = aws.String(native.ContentEncoding)
+	}
+	if native.ContentLanguage != "" {
+		input.ContentLanguage = aws.String(native.ContentLanguage)
+	}
+	if native.Expires != "" {
+		if t, err := http.ParseTime(native.Expires); err == nil {
+			input.Expires = &t
+		}
 	}
 	if cannedACL != "" {
 		input.ACL = types.ObjectCannedACL(cannedACL)
@@ -914,21 +963,41 @@ func (c *s3Client) CreateMultipartUpload(ctx context.Context, bucket, key string
 // seeks back to the start, and returns the base64-encoded MD5 string.
 // If the reader is not seekable it returns empty string and the original reader.
 func computeContentMD5(r io.Reader) (string, io.Reader, error) {
+	md5Str, body, _, err := computeContentMD5AndLength(r)
+	return md5Str, body, err
+}
+
+// computeContentMD5AndLength hashes a seekable stream, returns its remaining
+// byte length, and restores its original position. Non-seekable streams are
+// returned untouched and without a derived length.
+func computeContentMD5AndLength(r io.Reader) (string, io.Reader, *int64, error) {
 	if r == nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	seeker, ok := r.(io.Seeker)
 	if !ok {
-		return "", r, nil
+		return "", r, nil, nil
+	}
+	start, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to determine body position for Content-MD5: %w", err)
 	}
 	h := md5.New()
 	if _, err := io.Copy(h, r); err != nil {
-		return "", nil, fmt.Errorf("failed to hash body for Content-MD5: %w", err)
+		return "", nil, nil, fmt.Errorf("failed to hash body for Content-MD5: %w", err)
 	}
-	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-		return "", nil, fmt.Errorf("failed to seek body after hashing: %w", err)
+	end, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to determine body length for Content-MD5: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(h.Sum(nil)), r, nil
+	if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+		return "", nil, nil, fmt.Errorf("failed to seek body after hashing: %w", err)
+	}
+	if end < start {
+		return "", nil, nil, fmt.Errorf("invalid seekable body length: end %d precedes start %d", end, start)
+	}
+	length := end - start
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)), r, &length, nil
 }
 
 // UploadPart uploads a part of a multipart upload.
@@ -1067,6 +1136,7 @@ func (c *s3Client) ListParts(ctx context.Context, bucket, key, uploadID string) 
 
 // CopyObject copies an object from source to destination.
 func (c *s3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error) {
+	native, userMetadata := objectmeta.Split(metadata)
 	copySource := fmt.Sprintf("%s/%s", srcBucket, srcKey)
 	if srcVersionID != nil && *srcVersionID != "" {
 		copySource = fmt.Sprintf("%s/%s?versionId=%s", srcBucket, srcKey, *srcVersionID)
@@ -1076,7 +1146,30 @@ func (c *s3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, src
 		Bucket:     aws.String(dstBucket),
 		Key:        aws.String(dstKey),
 		CopySource: aws.String(copySource),
-		Metadata:   convertMetadata(metadata),
+		Metadata:   convertMetadata(userMetadata),
+	}
+	if metadata != nil {
+		input.MetadataDirective = types.MetadataDirectiveReplace
+	}
+	if native.ContentType != "" {
+		input.ContentType = aws.String(native.ContentType)
+	}
+	if native.CacheControl != "" {
+		input.CacheControl = aws.String(native.CacheControl)
+	}
+	if native.ContentDisposition != "" {
+		input.ContentDisposition = aws.String(native.ContentDisposition)
+	}
+	if native.ContentEncoding != "" {
+		input.ContentEncoding = aws.String(native.ContentEncoding)
+	}
+	if native.ContentLanguage != "" {
+		input.ContentLanguage = aws.String(native.ContentLanguage)
+	}
+	if native.Expires != "" {
+		if t, err := http.ParseTime(native.Expires); err == nil {
+			input.Expires = &t
+		}
 	}
 	if lock != nil {
 		if lock.Mode != "" {
@@ -1110,7 +1203,7 @@ func (c *s3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, src
 		etag = strings.Trim(*result.CopyObjectResult.ETag, "\"")
 	}
 
-	return etag, resultMetadata, nil
+	return etag, objectmeta.NormalizeBackendKeys(resultMetadata), nil
 }
 
 // UploadPartCopy copies a byte range from a source object to a part in a multipart upload.

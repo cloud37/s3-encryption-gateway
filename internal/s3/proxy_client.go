@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 )
 
 // ProxyClient forwards HTTP requests to the backend with original headers intact.
@@ -209,7 +210,9 @@ func (p *ProxyClient) CopyObject(ctx context.Context, dstBucket, dstKey string, 
 		respMetadata["Last-Modified"] = result.LastModified
 	}
 
-	return etag, respMetadata, nil
+	// CopyObject is ProxyClient's only successful operation that returns a
+	// metadata map; GetObject and HeadObject are forwarded directly by handlers.
+	return etag, objectmeta.NormalizeBackendKeys(respMetadata), nil
 }
 
 // UploadPartCopy forwards a PUT request with x-amz-copy-source for a multipart copy operation.

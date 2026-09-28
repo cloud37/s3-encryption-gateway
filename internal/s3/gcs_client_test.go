@@ -106,8 +106,8 @@ func (c *simpleInnerClient) GetObjectLockConfiguration(ctx context.Context, buck
 // delegated to the embedded nil Client which panics on unexpected calls.
 type gcsMockClient struct {
 	Client
-	putObjectFn func(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error)
-	getObjectFn func(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error)
+	putObjectFn  func(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error)
+	getObjectFn  func(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error)
 	copyObjectFn func(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error)
 	uploadPartFn func(ctx context.Context, bucket, key, uploadID string, partNumber int32, reader io.Reader, contentLength *int64) (string, error)
 }
@@ -151,9 +151,9 @@ func TestGCSClient_PutObject_LowercasesMetadata(t *testing.T) {
 	c := &gcsClient{inner: mock}
 
 	input := map[string]string{
-		"X-Amz-Meta-Foo":       "bar",
+		"X-Amz-Meta-Foo":        "bar",
 		"X-Amz-Meta-Encryption": "aes256",
-		"x-amz-meta-normal":    "ok",
+		"x-amz-meta-normal":     "ok",
 	}
 	_, err := c.PutObject(context.Background(), "b", "k", nil, input, nil, "", nil, "", "", "", "", "")
 	if err != nil {
@@ -192,13 +192,11 @@ func TestGCSClient_GetObject_LowercasesReturnedMetadata(t *testing.T) {
 		t.Fatalf("GetObject: %v", err)
 	}
 
-	for k := range meta {
-		if k != strings.ToLower(k) {
-			t.Errorf("metadata key %q is not lowercase", k)
-		}
-	}
 	if meta["x-amz-meta-foo"] != "bar" {
 		t.Errorf("expected meta['x-amz-meta-foo'] = 'bar', got %q", meta["x-amz-meta-foo"])
+	}
+	if meta["Last-Modified"] == "" {
+		t.Errorf("expected canonical Last-Modified, got %v", meta)
 	}
 }
 
@@ -301,7 +299,6 @@ func TestGCSClient_PutObject_NilMetadata(t *testing.T) {
 	}
 }
 
-
 func TestGCSClient_CopyObject_LowercasesMetadataAndSubstitutesLastModified(t *testing.T) {
 	mock := &gcsMockClient{
 		copyObjectFn: func(_ context.Context, _, _ string, _, _ string, _ *string, metadata map[string]string, _ *ObjectLockInput) (string, map[string]string, error) {
@@ -327,8 +324,9 @@ func TestGCSClient_CopyObject_LowercasesMetadataAndSubstitutesLastModified(t *te
 	if meta["x-amz-meta-foo"] != "bar" {
 		t.Errorf("expected lowercased metadata key 'x-amz-meta-foo'='bar', got %v", meta)
 	}
-	// LastModified should be substituted (since mock didn't return one)
-	if _, ok := meta["last-modified"]; !ok {
+	// LastModified should be substituted (since mock didn't return one), and
+	// returned standard metadata uses the repository's canonical casing.
+	if _, ok := meta["Last-Modified"]; !ok {
 		t.Errorf("expected last-modified to be substituted in metadata, got %v", meta)
 	}
 }
@@ -349,8 +347,8 @@ func TestGCSClient_CopyObject_PreservesExistingLastModified(t *testing.T) {
 		t.Fatalf("CopyObject: %v", err)
 	}
 	// The existing last-modified should be preserved (not substituted)
-	if meta["last-modified"] != existingTime {
-		t.Errorf("expected last-modified %q, got %q", existingTime, meta["last-modified"])
+	if meta["Last-Modified"] != existingTime {
+		t.Errorf("expected last-modified %q, got %q", existingTime, meta["Last-Modified"])
 	}
 }
 
@@ -366,15 +364,10 @@ func TestGCSClient_HeadObject_LowercasesMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HeadObject: %v", err)
 	}
-	for k := range meta {
-		if k != strings.ToLower(k) {
-			t.Errorf("metadata key %q is not lowercase", k)
-		}
-	}
 	if meta["x-amz-meta-test"] != "value" {
 		t.Errorf("expected meta['x-amz-meta-test'] = 'value', got %q", meta["x-amz-meta-test"])
 	}
-	if meta["content-type"] != "text/plain" {
-		t.Errorf("expected meta['content-type'] = 'text/plain', got %q", meta["content-type"])
+	if meta["Content-Type"] != "text/plain" {
+		t.Errorf("expected meta['Content-Type'] = 'text/plain', got %q", meta["Content-Type"])
 	}
 }

@@ -275,6 +275,12 @@ func TestProxyClient_CopyObject_Success(t *testing.T) {
 	if metadata["ETag"] != "etag-abc123" {
 		t.Errorf("CopyObject() metadata[ETag] = %q, want %q", metadata["ETag"], "etag-abc123")
 	}
+	if _, exists := metadata["Last-Modified"]; !exists {
+		t.Fatalf("CopyObject() metadata lacks normalized Last-Modified key: %#v", metadata)
+	}
+	if _, exists := metadata["Last-modified"]; exists {
+		t.Fatalf("CopyObject() retained non-normalized Last-modified key: %#v", metadata)
+	}
 }
 
 // TestProxyClient_CopyObject_BackendError verifies CopyObject returns an error

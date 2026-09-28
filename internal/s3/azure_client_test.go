@@ -14,6 +14,7 @@ type azureMockClient struct {
 	putObjectFn  func(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error)
 	getObjectFn  func(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error)
 	headObjectFn func(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error)
+	copyObjectFn func(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error)
 }
 
 func (m *azureMockClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
@@ -35,6 +36,51 @@ func (m *azureMockClient) HeadObject(ctx context.Context, bucket, key string, ve
 		return m.headObjectFn(ctx, bucket, key, versionID)
 	}
 	return nil, errors.New("unexpected HeadObject call")
+}
+
+func (m *azureMockClient) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error) {
+	if m.copyObjectFn != nil {
+		return m.copyObjectFn(ctx, dstBucket, dstKey, srcBucket, srcKey, srcVersionID, metadata, lock)
+	}
+	return "", nil, errors.New("unexpected CopyObject call")
+}
+
+func TestAzureClient_NormalizesSuccessfulObjectMetadata(t *testing.T) {
+	newMetadata := func() map[string]string {
+		return map[string]string{"content-length": "12", "X-Amz-Meta-Custom": "value", "ETag": "etag-value"}
+	}
+	c := &azureClient{inner: &azureMockClient{
+		getObjectFn: func(_ context.Context, _, _ string, _ *string, _ *string) (io.ReadCloser, map[string]string, error) {
+			return io.NopCloser(strings.NewReader("body")), newMetadata(), nil
+		},
+		headObjectFn: func(_ context.Context, _, _ string, _ *string) (map[string]string, error) {
+			return newMetadata(), nil
+		},
+		copyObjectFn: func(_ context.Context, _, _, _, _ string, _ *string, _ map[string]string, _ *ObjectLockInput) (string, map[string]string, error) {
+			return "etag-value", newMetadata(), nil
+		},
+	}}
+
+	_, getMetadata, err := c.GetObject(context.Background(), "b", "k", nil, nil)
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+	headMetadata, err := c.HeadObject(context.Background(), "b", "k", nil)
+	if err != nil {
+		t.Fatalf("HeadObject: %v", err)
+	}
+	_, copyMetadata, err := c.CopyObject(context.Background(), "db", "dk", "sb", "sk", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("CopyObject: %v", err)
+	}
+	for name, metadata := range map[string]map[string]string{"GetObject": getMetadata, "HeadObject": headMetadata, "CopyObject": copyMetadata} {
+		if metadata["Content-Length"] != "12" || metadata["x-amz-meta-custom"] != "value" || metadata["ETag"] != "etag-value" {
+			t.Errorf("%s metadata not normalized: %#v", name, metadata)
+		}
+		if _, exists := metadata["X-Amz-Meta-Custom"]; exists {
+			t.Errorf("%s retained non-normalized metadata key: %#v", name, metadata)
+		}
+	}
 }
 
 func TestAzureClient_PutObject_MetadataTooLarge_ReturnsInvalidArgument(t *testing.T) {

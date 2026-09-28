@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 )
 
 // azureClient wraps a Client and applies Azure Blob Storage S3-compatible
@@ -19,6 +20,7 @@ import (
 //     dollar sign ($), and period (.).
 //   - Error code "BlobNotFound" should be mapped to S3 "NoSuchKey".
 //   - Object Lock operations are not supported.
+//
 // Compile-time assertion: *azureClient implements Client.
 var _ Client = (*azureClient)(nil)
 
@@ -67,7 +69,7 @@ func (c *azureClient) GetObject(ctx context.Context, bucket, key string, version
 		err = mapAzureError(err)
 		return body, meta, err
 	}
-	return body, meta, nil
+	return body, objectmeta.NormalizeBackendKeys(meta), nil
 }
 
 func (c *azureClient) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
@@ -75,7 +77,7 @@ func (c *azureClient) HeadObject(ctx context.Context, bucket, key string, versio
 	if err != nil {
 		return meta, mapAzureError(err)
 	}
-	return meta, nil
+	return objectmeta.NormalizeBackendKeys(meta), nil
 }
 
 // ---- Object Lock - all return NotImplemented ----
@@ -135,7 +137,11 @@ func (c *azureClient) ListParts(ctx context.Context, bucket, key, uploadID strin
 }
 
 func (c *azureClient) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error) {
-	return c.inner.CopyObject(ctx, dstBucket, dstKey, srcBucket, srcKey, srcVersionID, metadata, lock)
+	etag, resultMetadata, err := c.inner.CopyObject(ctx, dstBucket, dstKey, srcBucket, srcKey, srcVersionID, metadata, lock)
+	if err != nil {
+		return etag, resultMetadata, err
+	}
+	return etag, objectmeta.NormalizeBackendKeys(resultMetadata), nil
 }
 
 func (c *azureClient) UploadPartCopy(ctx context.Context, dstBucket, dstKey, uploadID string, partNumber int32, srcBucket, srcKey string, srcVersionID *string, srcRange *CopyPartRange) (*CopyPartResult, error) {

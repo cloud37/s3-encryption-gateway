@@ -838,7 +838,7 @@ func TestS3Client_ListParts_Success(t *testing.T) {
 	}
 }
 
-// TestS3Client_CopyObject_Success verifies CopyObject parses the response.
+// TestS3Client_CopyObject_Success verifies CopyObject parses and normalizes the response.
 func TestS3Client_CopyObject_Success(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -864,8 +864,15 @@ func TestS3Client_CopyObject_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CopyObject() error: %v", err)
 	}
-	_ = etag
-	_ = meta
+	if etag != "copy-etag-abc" {
+		t.Fatalf("CopyObject() ETag = %q, want unquoted %q", etag, "copy-etag-abc")
+	}
+	if meta["ETag"] != "copy-etag-abc" {
+		t.Fatalf("CopyObject() metadata ETag = %q, want canonical unquoted ETag", meta["ETag"])
+	}
+	if meta["Last-Modified"] != "Mon, 15 Jan 2024 10:30:00 GMT" {
+		t.Fatalf("CopyObject() Last-Modified = %q, want canonical header casing", meta["Last-Modified"])
+	}
 }
 
 // TestS3Client_UploadPartCopy_Success verifies UploadPartCopy returns a result.
@@ -1104,6 +1111,132 @@ func TestS3Client_PutObject_WithContentLength(t *testing.T) {
 	}
 }
 
+func TestS3ClientPutObject_SeekableEncryptedBodyLengthMatchesWireBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		plainSize  int
+		cipherSize int
+	}{
+		{name: "empty", plainSize: 0, cipherSize: 16},
+		{name: "small", plainSize: 26, cipherSize: 42},
+		{name: "medium", plainSize: 4096, cipherSize: 4112},
+		{name: "copy-source", plainSize: 19, cipherSize: 35},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := bytes.Repeat([]byte("c"), tt.cipherSize)
+			declaredPlaintextLength := int64(tt.plainSize)
+			var gotRequestLength int64 = -1
+			var gotContentMD5 string
+			var gotBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotRequestLength = r.ContentLength
+				gotContentMD5 = r.Header.Get("Content-Md5")
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("ETag", `"wire-etag"`)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			factory := NewClientFactory(&config.BackendConfig{
+				Endpoint: server.URL, Region: "us-east-1", AccessKey: "AKIATEST", SecretKey: "secrettest",
+			})
+			client, err := factory.GetClient()
+			if err != nil {
+				t.Fatalf("GetClient: %v", err)
+			}
+
+			if _, err := client.PutObject(context.Background(), "test-bucket", tt.name,
+				bytes.NewReader(body), nil, &declaredPlaintextLength, "", nil, "", "", "", "", ""); err != nil {
+				t.Fatalf("PutObject: %v", err)
+			}
+			if gotRequestLength != int64(tt.cipherSize) {
+				t.Fatalf("backend Content-Length = %d, want %d", gotRequestLength, tt.cipherSize)
+			}
+			if len(gotBody) != tt.cipherSize {
+				t.Fatalf("backend received %d body bytes, want %d", len(gotBody), tt.cipherSize)
+			}
+			if !bytes.Equal(gotBody, body) {
+				t.Fatal("backend body differs from encrypted input")
+			}
+			if want := base64.StdEncoding.EncodeToString(md5sum(body)); gotContentMD5 != want {
+				t.Fatalf("backend Content-MD5=%q, want ciphertext digest %q", gotContentMD5, want)
+			}
+		})
+	}
+}
+
+func TestS3ClientPutObject_NonSeekableBodyPreservesDeclaredLength(t *testing.T) {
+	body := []byte("streamed ciphertext body")
+	declaredLength := int64(len(body))
+	var gotLength int64 = -1
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLength = r.ContentLength
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("ETag", `"stream-etag"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	factory := NewClientFactory(&config.BackendConfig{
+		Endpoint: server.URL, Region: "us-east-1", AccessKey: "AKIATEST", SecretKey: "secrettest",
+	})
+	client, err := factory.GetClient()
+	if err != nil {
+		t.Fatalf("GetClient: %v", err)
+	}
+	if _, err := client.PutObject(context.Background(), "test-bucket", "streamed",
+		io.NopCloser(bytes.NewReader(body)), nil, &declaredLength, "", nil, "", "", "", "", ""); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	if gotLength != declaredLength || !bytes.Equal(gotBody, body) {
+		t.Fatalf("backend length/body = %d/%q, want %d/%q", gotLength, gotBody, declaredLength, body)
+	}
+}
+
+func TestS3ClientPutObject_SeekableEncryptedBodySetsExactSerializedLength(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plain int64
+		body  []byte
+	}{
+		{name: "empty", plain: 0, body: bytes.Repeat([]byte("c"), 16)},
+		{name: "small", plain: 26, body: bytes.Repeat([]byte("c"), 42)},
+		{name: "medium", plain: 4096, body: bytes.Repeat([]byte("c"), 4112)},
+		{name: "copy-source", plain: 19, body: bytes.Repeat([]byte("c"), 35)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotLength int64 = -1
+			var gotHeader string
+			var gotMD5 string
+			var gotBody []byte
+			transport := &fakeS3Transport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotLength = r.ContentLength
+				gotHeader = r.Header.Get("Content-Length")
+				gotMD5 = r.Header.Get("Content-Md5")
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("ETag", `"wire-etag"`)
+				w.WriteHeader(http.StatusOK)
+			})}
+			client := buildTestS3Client(t, transport)
+			_, err := client.PutObject(context.Background(), "test-bucket", tc.name,
+				bytes.NewReader(tc.body), nil, &tc.plain, "", nil, "", "", "", "", "")
+			if err != nil {
+				t.Fatalf("PutObject: %v", err)
+			}
+			wantLength := int64(len(tc.body))
+			if gotLength != wantLength || (gotHeader != "" && gotHeader != fmt.Sprint(wantLength)) {
+				t.Fatalf("serialized Content-Length = field %d/header %q, want %d", gotLength, gotHeader, wantLength)
+			}
+			if !bytes.Equal(gotBody, tc.body) {
+				t.Fatalf("serialized body length=%d, want %d", len(gotBody), len(tc.body))
+			}
+			if wantMD5 := base64.StdEncoding.EncodeToString(md5sum(tc.body)); gotMD5 != wantMD5 {
+				t.Fatalf("serialized Content-MD5=%q, want %q", gotMD5, wantMD5)
+			}
+		})
+	}
+}
+
 // TestS3Client_PutObject_WithACL verifies that the ACL header is sent to the
 // backend as a PUT request header. The SDK encodes the canned ACL in the
 // request; we verify the backend receives it.
@@ -1278,6 +1411,38 @@ func TestS3Client_CreateMultipartUpload_WithMetadata(t *testing.T) {
 	}
 	if uploadID == "" {
 		t.Error("expected non-empty uploadID")
+	}
+}
+
+func TestS3Client_CreateMultipartUpload_AllSixNativeStandardHeaders(t *testing.T) {
+	var got http.Header
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<InitiateMultipartUploadResult><UploadId>upload-id</UploadId></InitiateMultipartUploadResult>`))
+	})
+	client := buildTestS3Client(t, &fakeS3Transport{handler: mux})
+	meta := map[string]string{
+		"Content-Type": "application/example", "Cache-Control": "private",
+		"Content-Disposition": `attachment; filename="x.txt"`, "Content-Encoding": "gzip",
+		"Content-Language": "en-GB", "Expires": "Wed, 21 Oct 2030 07:28:00 GMT",
+	}
+	if _, err := client.CreateMultipartUpload(context.Background(), "bucket", "key", meta, "", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range meta {
+		gotValue := got.Get(name)
+		if name == "Expires" {
+			parsed, err := http.ParseTime(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want = parsed.Format(http.TimeFormat)
+		}
+		if gotValue != want {
+			t.Errorf("backend %s=%q want %q", name, gotValue, want)
+		}
 	}
 }
 
@@ -1546,17 +1711,42 @@ func TestComputeContentMD5_Seekable(t *testing.T) {
 	wantMD5 := base64.StdEncoding.EncodeToString(md5sum(data))
 
 	r := bytes.NewReader(data)
-	got, r2, err := computeContentMD5(r)
+	got, r2, length, err := computeContentMD5AndLength(r)
 	if err != nil {
-		t.Fatalf("computeContentMD5 error: %v", err)
+		t.Fatalf("computeContentMD5AndLength error: %v", err)
 	}
 	if got != wantMD5 {
 		t.Errorf("md5 = %q, want %q", got, wantMD5)
+	}
+	if length == nil || *length != int64(len(data)) {
+		t.Fatalf("length = %v, want %d", length, len(data))
 	}
 	// Verify stream was rewound.
 	pos, _ := r2.(io.Seeker).Seek(0, io.SeekCurrent)
 	if pos != 0 {
 		t.Errorf("stream not rewound, pos = %d", pos)
+	}
+}
+
+func TestComputeContentMD5AndLength_PreservesStartingOffset(t *testing.T) {
+	r := bytes.NewReader([]byte("skip-ciphertext"))
+	start := int64(len("skip-"))
+	if _, err := r.Seek(start, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	got, _, length, err := computeContentMD5AndLength(r)
+	if err != nil {
+		t.Fatalf("computeContentMD5AndLength: %v", err)
+	}
+	wantBody := []byte("ciphertext")
+	if got != base64.StdEncoding.EncodeToString(md5sum(wantBody)) {
+		t.Fatalf("MD5=%q, want hash of remaining body", got)
+	}
+	if length == nil || *length != int64(len(wantBody)) {
+		t.Fatalf("length=%v, want %d", length, len(wantBody))
+	}
+	if pos, _ := r.Seek(0, io.SeekCurrent); pos != start {
+		t.Fatalf("reader position=%d, want restored offset %d", pos, start)
 	}
 }
 
@@ -1666,6 +1856,8 @@ func TestS3Client_GetObject_MapsResponseMetadata(t *testing.T) {
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.Header().Set("Content-Disposition", "inline")
 		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Language", "en-GB")
+		w.Header().Set("Expires", "Mon, 21 Oct 2030 07:28:00 GMT")
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("ETag", `"etag"`)
 		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
@@ -1686,7 +1878,7 @@ func TestS3Client_GetObject_MapsResponseMetadata(t *testing.T) {
 	for key, want := range map[string]string{
 		"x-amz-meta-custom": "value", "x-amz-version-id": "v1", "Content-Length": "4",
 		"Content-Type": "text/plain", "Cache-Control": "max-age=60", "Content-Disposition": "inline",
-		"Content-Encoding": "gzip", "Accept-Ranges": "bytes", "ETag": `"etag"`,
+		"Content-Encoding": "gzip", "Content-Language": "en-GB", "Expires": "Mon, 21 Oct 2030 07:28:00 GMT", "Accept-Ranges": "bytes", "ETag": `"etag"`,
 		"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-legal-hold": "ON",
 	} {
 		if metadata[key] != want {
@@ -1705,6 +1897,9 @@ func TestS3Client_HeadObject_MapsResponseMetadata(t *testing.T) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Content-Disposition", "attachment")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Language", "en-GB")
+		w.Header().Set("Expires", "Mon, 21 Oct 2030 07:28:00 GMT")
 		w.Header().Set("ETag", `"head-etag"`)
 		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
 		w.Header().Set("x-amz-version-id", "head-v1")
@@ -1720,6 +1915,12 @@ func TestS3Client_HeadObject_MapsResponseMetadata(t *testing.T) {
 	require.Equal(t, "head-value", metadata["x-amz-meta-custom"])
 	require.Equal(t, "head-v1", metadata["x-amz-version-id"])
 	require.Equal(t, "9", metadata["Content-Length"])
+	require.Equal(t, "application/octet-stream", metadata["Content-Type"])
+	require.Equal(t, "no-cache", metadata["Cache-Control"])
+	require.Equal(t, "attachment", metadata["Content-Disposition"])
+	require.Equal(t, "gzip", metadata["Content-Encoding"])
+	require.Equal(t, "en-GB", metadata["Content-Language"])
+	require.Equal(t, "Mon, 21 Oct 2030 07:28:00 GMT", metadata["Expires"])
 	require.Equal(t, "COMPLIANCE", metadata["x-amz-object-lock-mode"])
 	require.Equal(t, "OFF", metadata["x-amz-object-lock-legal-hold"])
 	require.NotEmpty(t, metadata["Last-Modified"])
