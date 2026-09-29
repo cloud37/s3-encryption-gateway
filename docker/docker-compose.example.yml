@@ -7,7 +7,7 @@ services:
   # S3-compatible backend storage
   # For production, replace with your actual S3 provider (AWS S3, MinIO, etc.)
   backend:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
+    image: chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f
     container_name: s3-backend
     ports:
       - "9000:9000"

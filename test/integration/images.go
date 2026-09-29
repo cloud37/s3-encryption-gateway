@@ -6,5 +6,5 @@ package integration
 // maintained Renovate inventory until this suite is migrated to conformance.
 const azuriteImage = "mcr.microsoft.com/azure-storage/azurite:3.33.0"
 
-// renovate: datasource=docker depName=quay.io/minio/minio versioning=docker
-const minioImage = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
+// renovate: datasource=docker depName=chainguard/minio versioning=docker
+const minioImage = "chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f"

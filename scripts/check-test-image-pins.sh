@@ -10,7 +10,7 @@ import re
 import sys
 
 files = sorted(Path("test").rglob("*.go"))
-baseline = "RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
+minio_digest = "sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f"
 channel = re.compile(r"^(latest|edge|nightly|stable|main|master|dev|canary)$", re.I)
 annotation = re.compile(
     r"^// renovate: datasource=(?P<datasource>\S+) depName=(?P<dep>\S+) "
@@ -40,13 +40,19 @@ for path in files:
         if name.endswith("Image"):
             if ann["datasource"] != "docker" or ann["versioning"] != "docker":
                 raise SystemExit(f"{path}:{i+1}: image {name} has inconsistent datasource/versioning")
-            if ":" not in value:
-                raise SystemExit(f"{path}:{i+1}: image {name} has no explicit tag")
-            dep, tag = value.rsplit(":", 1)
-            if dep != ann["dep"] or ann["dep"] == "" or channel.fullmatch(tag):
+            if "@" in value:
+                dep, digest = value.split("@", 1)
+                if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+                    raise SystemExit(f"{path}:{i+1}: image {name} has an invalid digest")
+                version = digest
+            elif ":" in value:
+                dep, version = value.rsplit(":", 1)
+            else:
+                raise SystemExit(f"{path}:{i+1}: image {name} has no explicit tag or digest")
+            if dep != ann["dep"] or ann["dep"] == "" or channel.fullmatch(version):
                 raise SystemExit(f"{path}:{i+1}: annotation/value mismatch for {name}")
-            if ann["dep"] == "quay.io/minio/minio" and tag != baseline:
-                raise SystemExit(f"{path}:{i+1}: MinIO must remain at {baseline}")
+            if ann["dep"] == "chainguard/minio" and version != minio_digest:
+                raise SystemExit(f"{path}:{i+1}: MinIO must remain at {minio_digest}")
         else:
             if ann["datasource"] != "pypi" or ann["versioning"] != "pep440":
                 raise SystemExit(f"{path}:{i+1}: package {name} has inconsistent datasource/versioning")
@@ -66,12 +72,12 @@ expected = {
     ("docker", "restic/restic"), ("docker", "dxflrs/garage"),
     ("docker", "rustfs/rustfs"), ("docker", "chrislusf/seaweedfs"),
     ("docker", "quay.io/openbao/openbao"), ("docker", "ghcr.io/cosmian/kms"),
-    ("docker", "valkey/valkey"), ("docker", "quay.io/minio/minio"),
+    ("docker", "valkey/valkey"), ("docker", "chainguard/minio"),
     ("pypi", "boto3"), ("pypi", "minio"),
 }
 actual = [(source, dep) for _, source, dep, _ in found]
 expected_counts = {
-    item: 2 if item == ("docker", "quay.io/minio/minio") else 1
+    item: 2 if item == ("docker", "chainguard/minio") else 1
     for item in expected
 }
 for item in expected:

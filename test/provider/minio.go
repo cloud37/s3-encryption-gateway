@@ -35,8 +35,8 @@ func init() {
 
 type minioProvider struct{ tlsReady bool }
 
-// renovate: datasource=docker depName=quay.io/minio/minio versioning=docker
-const minioImage = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772"
+// renovate: datasource=docker depName=chainguard/minio versioning=docker
+const minioImage = "chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f"
 
 func (p *minioProvider) Name() string { return "minio" }
 
@@ -174,9 +174,11 @@ func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 	c, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
 		ContainerRequest: tc.ContainerRequest{
 			Image: minioImage, ExposedPorts: []string{"9000/tcp"},
-			Cmd:        []string{"server", "/data"},
+			// Chainguard's distroless image runs as nonroot, so the legacy
+			// /root/.minio/certs location cannot hold this test-only fixture.
+			Cmd:        []string{"--certs-dir", "/tmp/minio-certs", "server", "/data"},
 			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}), // #nosec G402 -- test-only health probe for the generated self-signed fixture
-			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/root/.minio/certs/public.crt", FileMode: 0600}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/root/.minio/certs/private.key", FileMode: 0600}},
+			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/tmp/minio-certs/public.crt", FileMode: 0644}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/tmp/minio-certs/private.key", FileMode: 0644}}, // #nosec G306 -- ephemeral certificates must be readable by Chainguard's nonroot runtime user
 			Env: map[string]string{
 				"MINIO_ROOT_USER":     "minioadmin",
 				"MINIO_ROOT_PASSWORD": "minioadmin",
