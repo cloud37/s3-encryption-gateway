@@ -1,186 +1,171 @@
 # gosec Suppression Audit
 
-This file documents every `#nosec` or `//nolint:gosec` suppression in the
-codebase. Suppressions are grouped by gosec rule. Each entry includes the
-file, line, rule, and a one-line justification.
+This is the complete source-annotation inventory for this repository, including
+production code, tagged code, test providers, and `_test.go` files. Each entry
+records the rule and its concrete guard or trust precondition. An annotation
+does not establish safety for unrelated code or for every deployment setting.
 
-**Policy:** Only HIGH-severity gosec findings that are proven false positives
-are suppressed. Genuine HIGH findings must be fixed, not suppressed. This
-file is regenerated after every significant gosec version bump to verify
-that suppressions remain valid.
+## Policy and scan coverage
 
----
+- Fix real numeric, authentication, and transport defects instead of suppressing
+  them. Prefer explicit bounds and ordinary byte encoding to suppression.
+- Retained annotations must use `#nosec Gxxx -- reason` with specific rule IDs.
+  Broad `nolint:gosec`, unexplained directives, and global rule exclusions are
+  not permitted. Direct gosec does not interpret standalone `nolint:gosec`.
+- Explicit insecure-TLS opt-ins are **accepted diagnostic risk exceptions**, not
+  proven false positives. Secure defaults verify certificates. See below for
+  the exact remaining limitations.
+- The CI/Makefile gate pins gosec **v2.29.0**, enforces rule IDs and explanations,
+  and blocks unsuppressed HIGH findings. G104 is no longer globally excluded;
+  its lower-severity findings remain visible in all-severity audits.
+- The default scan excludes `_test.go` and inactive build tags. The inventory
+  guard examines all Go source comments, regardless of tags, independently of
+  scanner severity. FIPS/conformance and explicit test scans supplement CI.
+- Do not run HSM builds/scans until functional HSM support exists, per
+  `docs/TESTING.md`.
 
-## G101 — Hardcoded Credentials (CWE-798)
+## Reproduce and verify completeness
 
-All G101 findings are in test provider registration code. The "credentials"
-are environment variable names, placeholder secrets for test containers, or
-empty SDK-default endpoints. None are production secrets.
+```bash
+# CI-equivalent security gate (no global rule exclusions).
+make gosec
 
-| File | Line | Justification |
-|------|------|---------------|
-| `test/provider/hetzner.go` | 19–29 | Test provider registration; values are env var names and default endpoints; annotated `// #nosec G101` |
-| `test/provider/garage.go` | 73 | Test-only RPC secret for Garage container; annotated `// #nosec G101` |
-| `test/provider/aws.go` | 20–33 | Test provider registration; annotated `// #nosec G101` |
+# Independent inventory check; does not rewrite the document.
+python3 scripts/gosec-suppressions.py
+go test ./internal/ci -run '^TestGosecSuppressionInventory$' -count=1
 
----
+# Refresh only after reviewing the changed source guards and trust assumptions.
+python3 scripts/gosec-suppressions.py --write
 
-## G115 — Integer Overflow Conversions (CWE-190)
+# Explicit all-severity audit, ignoring annotations; findings require triage.
+go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 \
+  -nosec -fmt=json -out=/tmp/opencode/gosec-unsuppressed.json ./...
 
-All G115 findings are deliberate, safe integer conversions used in
-cryptographic operations. None can overflow in practice because the source
-values are bounded by small constants, chunk sizes, or object metadata limits.
+# Additional source/build configurations (not a claim of zero raw findings).
+go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 \
+  -nosec -tags=fips,conformance ./...
+go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 \
+  -nosec -tests -tags=conformance,load,soak,chaos ./...
+```
 
-### AES Key Wrap (RFC 3394) — `internal/crypto/keymanager_memory.go`
+The Python refresh and the independent Tier 1 Go AST test require exact rows,
+source line numbers, rules, scopes, and reasons. Missing, extra, duplicated,
+stale, or broad annotations fail the check. This prevents the former inventory
+drift; it does not replace human review of whether a reason remains true.
 
-| Lines | Justification |
-|-------|---------------|
-| 270–276 | AES-KW wrap: `t = n*j + i + 1`, j ≤ 5, n ≤ 2^32, product fits uint64; the `byte(t >> N)` extracts one octet of the 8-byte counter |
-| 312 | `uint64(n*j + i + 1)` — multiplication of small ints, no overflow; annotated `// #nosec G115` |
-| 315–321 | AES-KW unwrap: same t computation; same justification |
+## Reviewed controls and remaining preconditions
 
-### Metadata Length Encoding — `internal/crypto/engine.go`
+### Numeric and cryptographic encoding
 
-| Lines | Justification |
-|-------|---------------|
-| 1202 | `uint32(len(metadataJSON))` — metadata is JSON of encryption params, max ~1 KiB |
-| 1205–1207 | 4-byte big-endian header encoding the metadata length |
-| 1656 | Same encoding in fallback path |
-| 1660–1662 | Same 4-byte header bytes in fallback path |
-| 1871 | `uint32(len(plaintext)-4)` — length is guarded by `len(plaintext) < 4` check above; annotated `// #nosec G115` |
-| 2028 | `uint32(len(data))` in writeLengthPrefixed — AAD metadata field, tiny |
+Metadata/AAD writers validate the uint32 wire length before encoding. Fallback
+readers compare widened body lengths, including values crossing 4 GiB, before
+forming slice indices. PBKDF2 ceilings must be positive before unsigned error
+encoding. MPU manifests validate ordered part numbers, nonnegative lengths,
+consistent chunk counts/ciphertext lengths/totals, and overflow bounds; public
+range and cipher helpers reject invalid coordinates. Declared part lengths and
+chunk counters are enforced before further encryption. Valid legacy formats
+remain readable; small legacy MPU chunk sizes are permitted up to 1 MiB.
 
-### Chunk Index Derivation — `internal/crypto/chunked.go`
+AES key wrap uses ordinary big-endian integer XOR rather than byte-truncation
+annotations. Its remaining counter conversion is bounded by the source slice
+length and loop limits, not an assumed small key. Retry jitter's modulo result
+is less than its positive int64 nanosecond bound; it is not key material.
 
-| Lines | Justification |
-|-------|---------------|
-| 126 | `uint32(chunkIndex)` — HKDF info field; chunkIndex ≤ total chunks, well within uint32 |
-| 414 | `uint32(chunkIndex)` — XOR-based IV derivation; same bound |
+### TLS exceptions
 
-### Range Decrypt — `internal/crypto/range_decrypt.go`
+- **Cosmian:** `insecure_skip_verify` requires a configured CA and now skips
+  hostname matching only. `VerifyConnection` still validates chain, expiry,
+  server-auth purpose, and intermediates; it runs on resumed handshakes too.
+- **OpenBao with CA:** same hostname-only exception with pinned-chain
+  verification. Any valid server certificate under that CA can be accepted
+  regardless of hostname, so the CA and network remain trusted.
+- **OpenBao without CA, backend S3, Valkey, and audit sink:** explicit
+  skip-verification disables certificate authentication and permits MITM.
+  Warnings identify this diagnostic setting; never enable it as a secure
+  production configuration. All skip-verification defaults are false.
+- The audit HTTP sink rejects invalid custom TLS initialization before network
+  I/O; it no longer falls back to a different system-root policy.
+- Test-only self-signed probes/clients are scoped to ephemeral fixtures, not
+  production secret-bearing endpoints.
 
-| Lines | Justification |
-|-------|---------------|
-| 109 | `uint32(chunkIndex)` — XOR IV derivation; chunkIndex bounded by range size |
+### HTTP and filesystem boundaries
 
-### PBKDF2 Iterations — `internal/crypto/password_keymanager.go`
+Passthrough host/scheme are operator-selected. Client path/query cannot replace
+the destination, and redirects are returned rather than followed: the gateway
+does not forward credentials or replay bodies to a redirect target. S3/CORS
+request filtering happens before gateway signing.
 
-| Lines | Justification |
-|-------|---------------|
-| 99 | `uint32(m.pbkdf2Iterations)` — PBKDF2 iterations are configurable but practical max is ~10^7, well within uint32 |
+Configuration, token and JWT paths are operator-selected, never S3-request
+paths. Audit file writes reject unsafe configured/existing modes, symlinks and
+nonregular destinations; no-follow/exclusive creation and opened-inode
+revalidation occur before writes. Default `0600` and explicit `0640` remain
+supported. Parent directories must be operator-controlled; file hardening does
+not authorize writes into directories controlled by other users.
 
-### MPU Encrypter — `internal/crypto/mpu_encrypter.go`
+### Compatibility primitives and fixtures
 
-| Lines | Justification |
-|-------|---------------|
-| 121 | `uint32(partNumber)` — S3 part numbers are 1–10000 |
-| 356 | `uint32(part.PartNumber)` and `uint32(r.chunkIdx)` — part ≤ 10000, chunkIdx ≤ total chunks per part |
-| 416 | `uint32(startChunkIdx)` — chunk index bounds |
-| 425, 471 | `uint32(partNumber)` — part ≤ 10000 |
+MD5 here supplies S3 Content-MD5/ETag compatibility, not encryption or access
+control. Legacy SigV2 uses **HMAC-SHA1**; SigV4 uses **HMAC-SHA256**. Unsuppressed
+lower-severity import/checksum findings remain visible in full scans; entries
+are not invented for imports with no source annotation.
 
-### Chunk Count Computation — `internal/api/handlers.go`, `internal/api/upload_part_copy.go`
+Fixture secrets are public/disposable, not production credentials. Garage test
+ports require an isolated test runner/network. The ephemeral MinIO private-key
+fixture is mode `0644` inside its disposable nonroot container only; this is
+not a recommendation for production key permissions. Deterministic test RNGs
+drive fault timing/probability, never cryptographic keys or authorization.
 
-| File | Lines | Justification |
-|------|-------|---------------|
-| `handlers.go` | 2948 | `int32(encMPUPlainLen / chunkSize)` — max ~82k chunks for 5 GiB parts |
-| `upload_part_copy.go` | 851 | Same computation; same bound |
+## Complete annotation inventory
 
-### Crypto Jitter — `internal/s3/retry.go`
-
-| Lines | Justification |
-|-------|---------------|
-| 46 | `int64(binary.BigEndian.Uint64(...) % uint64(n))` — n is maxAttempts ≤ 10, product fits int64 |
-
----
-
-## G402 — TLS InsecureSkipVerify (CWE-295)
-
-`InsecureSkipVerify` is always an operator opt-in, guarded by explicit
-configuration with a startup warning (V1.0-SEC-9). Each site uses
-`//nolint:gosec` and `// #nosec G402` annotations.
-
-| File | Line | Justification |
-|------|------|---------------|
-| `internal/mpu/state.go` | 218 | Valkey TLS: operator opt-in; startup warning at ERROR level; annotated `// #nosec G402` |
-| `internal/audit/sink.go` | 276 | Audit HTTP sink TLS: operator opt-in; annotated `// #nosec G402` |
-| `internal/api/crypto_factory.go` | 129 | KMS TLS: operator opt-in; startup warning with custom CA; annotated `// #nosec G402` |
-
----
-
-## G404 — Weak Random Number Generator (CWE-338)
-
-| File | Line | Justification |
-|------|------|---------------|
-| `test/harness/faulty_s3.go` | 75 | Test-only: `math/rand` with deterministic seed for reproducible fault injection; `//nolint:gosec` already present |
-
----
-
-## G501 / G505 — Blocklisted Import (CWE-327)
-
-These imports are required by the S3 protocol or FIPS build infrastructure.
-They are not used for security purposes.
-
-| File | Rule | Justification |
-|------|------|---------------|
-| `internal/crypto/etag_default.go` | G501 | `crypto/md5` — ETag is an S3 protocol identifier (not a security hash); FIPS builds use `etag_fips.go` with SHA-256 |
-| `internal/s3/client.go` | G501 | `crypto/md5` — Content-MD5 is an S3 protocol header; required for request integrity |
-| `internal/api/auth.go` | G505 | `crypto/sha1` — AWS Signature V4 requires HMAC-SHA1 for the signing key derivation step |
-
----
-
-## G304 — Potential File Inclusion via Variable (CWE-22)
-
-All G304 findings are intentional file reads from operator-configured paths.
-Paths come from config files, environment variables, or command-line flags set
-by the operator during deployment. None are user-supplied.
-
-| File | Line | Justification |
-|------|------|---------------|
-| `internal/config/config.go` | 842 | `os.ReadFile(path)` — path from `CONFIG_FILE` env var or `--config` flag |
-| `internal/config/config.go` | 1318 | `os.ReadFile(path)` — path from `AUTH_CREDENTIALS_FILE` env var (also annotated `#nosec G703`) |
-| `internal/config/config.go` | 2097 | `os.ReadFile(path)` — metadata key file path from config |
-| `internal/config/policy.go` | 62 | `os.ReadFile(match)` — glob match from `POLICIES` env var |
-| `internal/crypto/keymanager_registry.go` | 131 | `os.ReadFile(path)` — key material from `file://` URI |
-| `internal/crypto/keymanager_selfcontained_factory.go` | 146, 183 | `os.ReadFile(path)` — key material from `file://` URI |
-| `internal/admin/server.go` | 236, 271 | `os.ReadFile(path)` — admin bearer token file from config |
-| `internal/migrate/state.go` | 61 | `os.ReadFile(path)` — migration state file path from CLI flag |
-
----
-
-## G703 — Path Traversal via Taint Analysis (CWE-22)
-
-These findings involve paths from environment variables or flags that gosec's
-taint tracker flags. Both are operator-configured and not user-controllable.
-
-| File | Line | Justification |
-|------|------|---------------|
-| `internal/config/config.go` | 1318 | `os.ReadFile(path)` — path from `AUTH_CREDENTIALS_FILE` env var; annotated `// #nosec G703` |
-| `cmd/server/main.go` | 351 | `os.Stat(configPath)` — config file path from flag/env; annotated `// #nosec G703` |
-
----
-
-## G704 — SSRF via Taint (CWE-918)
-
-All G704 findings are in the S3 passthrough proxy code. The gateway
-intentionally proxies HTTP requests to the configured backend S3 endpoint.
-This is the core function of the gateway, not a vulnerability.
-
-| File | Line | Justification |
-|------|------|---------------|
-| `internal/api/handlers.go` | 474 | `http.NewRequestWithContext` — proxying request to configured backend S3 endpoint |
-| `internal/api/handlers.go` | 563 | `httpClient.Do(backendReq)` — executing the forwarded request |
-| `internal/api/utils.go` | 211 | `client.Do(proxyReq)` — proxying request to backend in `forwardToBackend` |
-
----
-
-## G705 — XSS via Taint (CWE-79)
-
-All G705 findings are writing XML responses to HTTP clients in S3 API
-handlers. This is the expected behaviour of an S3-compatible gateway, not
-a cross-site scripting vector (S3 clients parse XML, not render it as HTML).
-
-| File | Line | Justification |
-|------|------|---------------|
-| `internal/api/handlers.go` | 1375 | `w.Write(outputData)` — writing S3 GET response body |
-| `internal/api/handlers.go` | 2018 | `w.Write([]byte(xmlResponse))` — writing S3 ListObjects/ListParts XML response |
-| `internal/api/object_lock.go` | 269 | `w.Write(b)` — writing S3 Object Lock configuration XML |
+<!-- BEGIN GENERATED GOSEC SUPPRESSIONS -->
+| Source location | Rules | Scope | Verified justification / precondition |
+|---|---|---|---|
+| `cmd/server/main.go:421` | G703 | Production | CONFIG_PATH is operator-selected; existence check only, not request input |
+| `internal/api/aws_chunked_reader.go:142` | G115 | Production | remaining is checked non-negative |
+| `internal/api/crypto_factory.go:252` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the configured CA chain and emits a warning |
+| `internal/api/crypto_factory.go:414` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the pinned CA chain on every handshake including resumption |
+| `internal/api/crypto_factory.go:435` | G402 | Production | operator-only diagnostic opt-in with ERROR warning; no certificate authentication, never a secure production mode |
+| `internal/api/crypto_factory.go:466` | G304 | Production | token or SecretID file reference is chosen by the operator, never by an S3 request |
+| `internal/api/handlers.go:4250` | G115 | Production | negative sizes are rejected above |
+| `internal/api/upload_part_copy.go:1060` | G115 | Production | chunkCount is bounded by MaxInt32 above |
+| `internal/api/utils.go:5` | G501 | Production | S3 Content-MD5 interoperability header |
+| `internal/api/utils.go:301` | G704 | Production | host/scheme come only from operator backend config; requests supply path/query and redirects are disabled |
+| `internal/api/utils.go:360` | G401 | Production | required by S3 lifecycle APIs |
+| `internal/api/utils_bucket_management_test.go:64` | G401 | Test fixture | test expected S3 header |
+| `internal/audit/sink.go:283` | G402 | Production | operator-only diagnostic opt-in emits WARN; secure default verifies chain and hostname |
+| `internal/audit/sink.go:479` | G304 | Production | operator-controlled directory/path; no-follow exclusive creation and inode/type/mode revalidation precede writes |
+| `internal/config/config.go:2048` | G703 | Production | AUTH_CREDENTIALS_FILE is operator-selected; HTTP requests cannot choose its path |
+| `internal/crypto/engine.go:145` | G115 | Production | field count was checked above |
+| `internal/crypto/engine.go:1843` | G115 | Production | ChunkedPlaintextSize rejects negative sizes |
+| `internal/crypto/engine.go:1909` | G115 | Production | ChunkedPlaintextSize rejects negative sizes |
+| `internal/crypto/engine.go:2717` | G115 | Production | length is bounded by MaxUint32 above |
+| `internal/crypto/kdf.go:84` | G115 | Production | both values were validated positive above |
+| `internal/crypto/keymanager_memory.go:304` | G115 | Production | n=len(ciphertext)/8-1; j=0..5 and i=0..n-1 imply 1<=counter<=6*n<MaxInt |
+| `internal/crypto/keymanager_openbao.go:852` | G304 | Production | JWT path is operator-configured or the projected ServiceAccount path; requests cannot choose it |
+| `internal/crypto/mpu_encrypter.go:454` | G115 | Production | negative values are rejected above |
+| `internal/crypto/mpu_encrypter.go:553` | G115 | Production | partNumber is non-negative and chunkIndex is uint32 |
+| `internal/crypto/password_keymanager.go:88` | G115 | Production | constructor and derivation validate 100000..2000000 iterations before encoding |
+| `internal/crypto/range_decrypt.go:105` | G115 | Production | product was bounded by MaxInt64 above |
+| `internal/crypto/range_decrypt.go:216` | G115 | Production | index was bounded by MaxInt64/chunkSize above |
+| `internal/crypto/range_optimization.go:98` | G115 | Production | dataSize is non-negative |
+| `internal/crypto/range_optimization.go:129` | G115 | Production | validateChunkSize requires a positive chunk size |
+| `internal/crypto/range_optimization.go:138` | G115 | Production | values are bounded by MaxInt64 above |
+| `internal/crypto/range_optimization.go:188` | G115 | Production | negative offsets were rejected above |
+| `internal/crypto/range_optimization.go:189` | G115 | Production | negative offsets were rejected above |
+| `internal/crypto/range_optimization.go:252` | G115 | Production | ChunkCount was bounded by MaxInt64 above |
+| `internal/crypto/range_optimization.go:377` | G115 | Production | size was bounded by MaxInt64 above |
+| `internal/mpu/state.go:659` | G402 | Production | operator-only diagnostic opt-in with ERROR warning above; default requires authenticated TLS |
+| `internal/s3/backend_transport.go:27` | G402 | Production | explicit operator-controlled diagnostic configuration; startup emits a warning |
+| `internal/s3/client_bench_test.go:54` | G404 | Test fixture | deterministic benchmark fault timing only; never keys, tokens, or authorization |
+| `internal/s3/retry.go:46` | G115 | Production | n>0; modulo result is less than n<=MaxInt64; jitter only, not key material |
+| `test/conformance/passthrough_headers_test.go:245` | G401 | Test fixture | S3 Content-MD5 compatibility header |
+| `test/conformance/s3_compat_test.go:73` | G401 | Test fixture | required S3 compatibility header |
+| `test/harness/faulty_s3.go:75` | G404 | Test fixture | deterministic test fault timing/probability only; never cryptographic material |
+| `test/harness/gateway.go:364` | G402 | Test fixture | the test-only TLS certificate is self-signed |
+| `test/harness/gateway.go:482` | G402 | Test fixture | test-only self-signed certificate |
+| `test/provider/aws.go:20` | G101 | Test fixture | provider registration contains environment variable names, not embedded credentials |
+| `test/provider/garage.go:85` | G101 | Test fixture | public disposable RPC secret for an isolated test container, never production credentials |
+| `test/provider/hetzner.go:19` | G101 | Test fixture | provider registration contains environment variable names and public endpoints, not embedded credentials |
+| `test/provider/minio.go:180` | G402 | Test fixture | test-only health probe for the generated self-signed fixture |
+| `test/provider/minio.go:181` | G306 | Test fixture | disposable container-only certificate/private key must be readable by its nonroot user; isolated fixture, never production key permissions |
+<!-- END GENERATED GOSEC SUPPRESSIONS -->

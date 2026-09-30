@@ -3,9 +3,9 @@
 # Runs on every PR targeting main and every push to main.
 #
 # govulncheck: blocks any known CVE in direct or transitive Go dependencies.
-# gosec:       blocks HIGH-severity findings (G104 errors-unhandled is globally
-#              excluded because the project uses explicit error-handling patterns
-#              and G104 generates high-volume false positives in test helpers).
+# gosec:       blocks HIGH-severity findings and requires rule-specific,
+#              explained suppressions. Lower-severity findings remain visible
+#              in explicit all-severity audits; no rule is globally excluded.
 
 name: Security Scanning
 
@@ -33,4 +33,4 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: gosec
-        run: go run github.com/securego/gosec/v2/cmd/gosec@latest -exclude=G104 -severity high ./...
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 -nosec-require-rules -nosec-require-justification -severity high ./...

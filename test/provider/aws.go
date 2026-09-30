@@ -17,7 +17,7 @@ func init() {
 	if ak == "" || sk == "" || bk == "" {
 		return // credentials not set; skip silently
 	}
-	// #nosec G101 — test provider registration; values are env var names and default endpoints, not secrets
+	// #nosec G101 -- provider registration contains environment variable names, not embedded credentials
 	Register(&externalProvider{
 		name:      "aws",
 		endpoint:  "", // use SDK default (virtual-hosted style)

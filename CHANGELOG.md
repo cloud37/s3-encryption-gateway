@@ -23,6 +23,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   plaintext size when selecting a full chunked-source range. Remove a redundant
   unchecked `uint64`-to-`int64` conversion that could overwrite the bounded range
   end, fixing the CI gosec G115 finding without adding a suppression.
+- **Suppression-audit hardening:** Validate metadata/AAD wire lengths and wide
+  fallback slice bounds, PBKDF2 ceilings, MPU numeric layouts and coordinates,
+  declared part lengths, and chunk counters before conversion or cipher use.
+  Valid legacy wire formats remain readable.
+- **KMS and audit transport verification:** Cosmian's hostname-skip opt-in now
+  actually verifies the configured CA chain. Audit sinks warn on insecure TLS
+  and reject invalid custom TLS settings rather than falling back to system
+  roots. Audit file writes reject unsafe modes, symlinks and nonregular files.
+- **Passthrough redirect isolation:** Return backend redirects unchanged; do
+  not follow them or replay credentials/bodies to a different destination.
 
 ### Tests and documentation
 
@@ -34,6 +44,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ListBuckets responses.
 - Documented the passthrough header contract, reverse-proxy deployment
   behavior, legacy Caddy workaround, and focused regression commands.
+- Rebuilt the complete gosec suppression inventory with an independent Tier 1
+  AST guard and refresh/check script. Suppressions require rule IDs and
+  scanner-readable reasons; broad linter suppressions and the global G104
+  exclusion were removed. CI pins gosec v2.29.0. Added numeric, TLS, filesystem,
+  and provider-neutral redirect/private-CA regressions.
 
 ## [0.12.1] — 2026-09-28
 

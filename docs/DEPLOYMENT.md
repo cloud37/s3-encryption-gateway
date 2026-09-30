@@ -60,6 +60,28 @@ This workaround loses forwarded client-IP information at the gateway; it is
 not required after the fix. Backend credentials, bucket-creation authorization,
 and encryption configuration do not need to change.
 
+### Backend redirects, KMS TLS, and audit sinks
+
+Passthrough backend redirects are returned unchanged instead of followed.
+Configure the backend's final endpoint/region: the gateway does not forward
+credentials or replay request bodies to another redirect destination.
+
+Cosmian `insecure_skip_verify` now requires `ca_cert` and disables hostname
+matching **only**; the configured CA chain, expiry, and server-auth purpose
+remain verified. OpenBao with a configured CA has the same hostname-only
+exception. Use ordinary hostname verification in production; hostname-only
+mode still trusts other server identities signed by that CA. Backend S3,
+Valkey, audit-sink, and CA-less OpenBao verification bypasses remain explicitly
+insecure diagnostic settings, with warnings and secure defaults.
+
+Invalid custom audit-sink TLS settings now reject audit delivery instead of
+falling back to system roots. Audit files default to `0600`; explicit `0640`
+group-read remains supported. Unsafe configured/existing modes, symlinks and
+nonregular destinations are rejected without modifying operator files. Fix
+existing file permissions explicitly and keep the parent directory protected.
+See the [suppression audit](security/gosec-suppressions.md) for the precise
+guards and accepted diagnostic risks.
+
 ## Docker Container Design
 
 ### Multi-Stage Build Strategy

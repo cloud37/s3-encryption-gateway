@@ -2045,7 +2045,7 @@ func loadCredentialFile(config *Config) error {
 	if path == "" {
 		return nil
 	}
-	data, err := os.ReadFile(path) // #nosec G703 — operator-configured path from env var
+	data, err := os.ReadFile(path) // #nosec G703 -- AUTH_CREDENTIALS_FILE is operator-selected; HTTP requests cannot choose its path
 	if err != nil {
 		return fmt.Errorf("failed to read AUTH_CREDENTIALS_FILE: %w", err)
 	}

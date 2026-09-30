@@ -51,7 +51,7 @@ const (
 	defaultOpenBaoProvider    = "openbao-transit"
 	defaultOpenBaoTransitPath = "transit"
 	defaultOpenBaoTimeout     = 5 * time.Second
-	defaultOpenBaoSAJWTPath   = "/var/run/secrets/kubernetes.io/serviceaccount/token" //nolint:gosec // well-known path, not a credential
+	defaultOpenBaoSAJWTPath   = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	// openBaoCiphertextPrefix is the fixed prefix of every Transit ciphertext.
 	// The "vault:" literal is retained by OpenBao for wire compatibility.
@@ -849,7 +849,7 @@ func (m *openBaoTransitManager) login(ctx context.Context) (*bao.Secret, error) 
 			if path == "" {
 				path = defaultOpenBaoSAJWTPath
 			}
-			data, err := os.ReadFile(path) //nolint:gosec // operator-configured well-known path
+			data, err := os.ReadFile(path) // #nosec G304 -- JWT path is operator-configured or the projected ServiceAccount path; requests cannot choose it
 			if err != nil {
 				return nil, fmt.Errorf("read service account token %q: %w", path, err)
 			}

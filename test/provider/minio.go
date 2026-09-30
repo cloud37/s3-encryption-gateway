@@ -177,8 +177,8 @@ func (p *minioProvider) Start(ctx context.Context, t *testing.T) Instance {
 			// Chainguard's distroless image runs as nonroot, so the legacy
 			// /root/.minio/certs location cannot hold this test-only fixture.
 			Cmd:        []string{"--certs-dir", "/tmp/minio-certs", "server", "/data"},
-			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}), // #nosec G402 -- test-only health probe for the generated self-signed fixture
-			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/tmp/minio-certs/public.crt", FileMode: 0644}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/tmp/minio-certs/private.key", FileMode: 0644}}, // #nosec G306 -- ephemeral certificates must be readable by Chainguard's nonroot runtime user
+			WaitingFor: wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithTLS(true, &tls.Config{InsecureSkipVerify: true}),                                                                                                                      // #nosec G402 -- test-only health probe for the generated self-signed fixture
+			Files:      []tc.ContainerFile{{Reader: strings.NewReader(certPEM), ContainerFilePath: "/tmp/minio-certs/public.crt", FileMode: 0644}, {Reader: strings.NewReader(keyPEM), ContainerFilePath: "/tmp/minio-certs/private.key", FileMode: 0644}}, // #nosec G306 -- disposable container-only certificate/private key must be readable by its nonroot user; isolated fixture, never production key permissions
 			Env: map[string]string{
 				"MINIO_ROOT_USER":     "minioadmin",
 				"MINIO_ROOT_PASSWORD": "minioadmin",

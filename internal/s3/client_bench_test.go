@@ -44,14 +44,14 @@ type benchFaultyTransport struct {
 	inner http.RoundTripper
 	rules []benchFaultRule
 	mu    sync.Mutex
-	rng   *rand.Rand //nolint:gosec // intentionally non-crypto
+	rng   *rand.Rand
 }
 
 func newBenchFaultyTransport(inner http.RoundTripper, seed int64, rules []benchFaultRule) *benchFaultyTransport {
 	return &benchFaultyTransport{
 		inner: inner,
 		rules: rules,
-		rng:   rand.New(rand.NewSource(seed)), //nolint:gosec
+		rng:   rand.New(rand.NewSource(seed)), // #nosec G404 -- deterministic benchmark fault timing only; never keys, tokens, or authorization
 	}
 }
 

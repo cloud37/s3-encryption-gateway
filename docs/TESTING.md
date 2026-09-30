@@ -532,6 +532,34 @@ conformance gates. See the
 [passthrough header contract](S3_API_IMPLEMENTATION.md#passthrough-request-header-contract)
 for the exact preserved and excluded header sets.
 
+### Suppression and transport hardening regressions
+
+Tier 1 includes allocation-free uint32 metadata-length and wide fallback-slice
+bounds, negative KDF ceilings, malformed MPU layout/coordinates, declared MPU
+length enforcement, pinned KMS CA handshakes, and audit TLS/file safety tests.
+The independent Go AST `TestGosecSuppressionInventory` checks **all** Go source
+comments (including tagged/test files) against the generated suppression table;
+it rejects broad, unexplained, missing, or stale annotations. The standard
+HIGH-severity gate pins gosec v2.29.0 and requires specific rules and reasons.
+
+Tier 2 registers `Passthrough_RedirectNotFollowed` and
+`Passthrough_TLSVerification` with capability `0`. The existing provider harness
+uses injected HTTP/TLS frontends to prove unchanged redirect status/headers/body,
+no target requests or body replay, actual private-CA rejection, and successful
+configured-CA/explicit-diagnostic controls. No new proxy container or provider
+name branch is needed. Run focused coverage with:
+
+```bash
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/Passthrough_(RedirectNotFollowed|TLSVerification)'
+python3 scripts/gosec-suppressions.py
+go test ./internal/ci -run '^TestGosecSuppressionInventory$' -count=1
+```
+
+Review and regeneration procedures and all accepted-risk preconditions are in
+[`security/gosec-suppressions.md`](security/gosec-suppressions.md).
+
 ---
 
 ## How to add a new public S3 provider (plug-in recipe)

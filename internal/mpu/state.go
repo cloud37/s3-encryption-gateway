@@ -656,8 +656,7 @@ func buildTLSConfig(cfg config.ValkeyTLSConfig) (*tls.Config, error) {
 	}
 
 	tc := &tls.Config{
-		// #nosec G402 — operator opt-in with startup warning
-		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec
+		InsecureSkipVerify: cfg.InsecureSkipVerify, // #nosec G402 -- operator-only diagnostic opt-in with ERROR warning above; default requires authenticated TLS
 	}
 
 	switch cfg.MinVersion {
