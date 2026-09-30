@@ -11,12 +11,47 @@ import (
 	"testing"
 )
 
+func parseSuppressionComment(line string) (string, string, error) {
+	directive := regexp.MustCompile(`^//\s*(?:#nosec|gosec:disable)\s+((?:G\d{3}\s*)+)--\s*(.+)$`)
+	match := directive.FindStringSubmatch(line)
+	if match == nil || strings.TrimSpace(match[2]) == "" || strings.Count(line, "#nosec")+strings.Count(line, "gosec:disable") != 1 {
+		return "", "", fmt.Errorf("requires one directive, rule IDs and a nonempty -- reason")
+	}
+	rule := regexp.MustCompile(`G\d{3}`)
+	ids := rule.FindAllString(match[1], -1)
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			return "", "", fmt.Errorf("duplicate rule %s", id)
+		}
+		seen[id] = true
+	}
+	return strings.Join(ids, ", "), strings.TrimSpace(match[2]), nil
+}
+
+func TestSuppressionCommentRejectsMalformedDirectives(t *testing.T) {
+	for _, line := range []string{
+		"// #nosec G115 --   ",
+		"// #nosec -- missing rule; #nosec G115 -- valid reason",
+		"// #nosec G115 G115 -- duplicated rule",
+		"// #nosec G115 -- reason; #nosec G402 -- second directive",
+		"// #nosec G115",
+	} {
+		if _, _, err := parseSuppressionComment(line); err == nil {
+			t.Errorf("accepted malformed directive %q", line)
+		}
+	}
+	for _, line := range []string{"// #nosec G115 -- bounded value", "//gosec:disable G115 G402 -- explicit reviewed scope"} {
+		if _, _, err := parseSuppressionComment(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // Check every source file, independent of build tags and scanner severity.
 // This prevents a stale inventory or broad annotations from silently returning.
 func TestGosecSuppressionInventory(t *testing.T) {
 	root := filepath.Join("..", "..")
-	directive := regexp.MustCompile(`(?:#nosec|gosec:disable)\s+((?:G\d{3}\s*)+)--\s*(.+)`)
-	rule := regexp.MustCompile(`G\d{3}`)
 	var rows []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -58,17 +93,17 @@ func TestGosecSuppressionInventory(t *testing.T) {
 					t.Errorf("%s:%d requires a single-line suppression comment", rel, index+1)
 					continue
 				}
-				match := directive.FindStringSubmatch(line)
-				if match == nil {
-					t.Errorf("%s:%d requires rule IDs and -- reason", rel, index+1)
+				rules, explanation, err := parseSuppressionComment(line)
+				if err != nil {
+					t.Errorf("%s:%d: %v", rel, index+1, err)
 					continue
 				}
 				scope := "Production"
 				if strings.HasSuffix(rel, "_test.go") || strings.HasPrefix(filepath.ToSlash(rel), "test/") {
 					scope = "Test fixture"
 				}
-				reason := strings.ReplaceAll(strings.ReplaceAll(match[2], "|", `\|`), "`", "'")
-				rows = append(rows, fmt.Sprintf("| `%s:%d` | %s | %s | %s |", filepath.ToSlash(rel), index+1, strings.Join(rule.FindAllString(match[1], -1), ", "), scope, reason))
+				reason := strings.ReplaceAll(strings.ReplaceAll(explanation, "|", `\|`), "`", "'")
+				rows = append(rows, fmt.Sprintf("| `%s:%d` | %s | %s | %s |", filepath.ToSlash(rel), index+1, rules, scope, reason))
 			}
 		}
 		return nil

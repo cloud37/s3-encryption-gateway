@@ -555,10 +555,16 @@ GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
   -run '^TestConformance/[^/]+/Passthrough_(RedirectNotFollowed|TLSVerification)'
 python3 scripts/gosec-suppressions.py
 go test ./internal/ci -run '^TestGosecSuppressionInventory$' -count=1
+python3 scripts/test-gosec-suppressions.py
 ```
 
 Review and regeneration procedures and all accepted-risk preconditions are in
 [`security/gosec-suppressions.md`](security/gosec-suppressions.md).
+Completion regressions additionally inject invalid committed-state snapshots
+and assert no companion write or backend completion, plus lifecycle reopening.
+Manifest overflow coverage uses individually consistent parts whose cumulative
+ciphertext length exceeds int64. Python and Go parser regressions reject empty
+reasons, duplicate rules, and multiple directives in a single comment.
 
 ---
 

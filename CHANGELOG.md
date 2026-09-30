@@ -26,7 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Suppression-audit hardening:** Validate metadata/AAD wire lengths and wide
   fallback slice bounds, PBKDF2 ceilings, MPU numeric layouts and coordinates,
   declared part lengths, and chunk counters before conversion or cipher use.
-  Valid legacy wire formats remain readable.
+  Validate manifest serialization and checked completion totals before backend
+  mutation. Valid legacy wire formats remain readable.
 - **KMS and audit transport verification:** Cosmian's hostname-skip opt-in now
   actually verifies the configured CA chain. Audit sinks warn on insecure TLS
   and reject invalid custom TLS settings rather than falling back to system

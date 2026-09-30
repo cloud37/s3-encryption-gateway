@@ -8,7 +8,7 @@ import sys
 
 START = "<!-- BEGIN GENERATED GOSEC SUPPRESSIONS -->"
 END = "<!-- END GENERATED GOSEC SUPPRESSIONS -->"
-DIRECTIVE = re.compile(r"(?:#nosec|gosec:disable)\s+((?:G\d{3}\s*)+)--\s*(.+)")
+DIRECTIVE = re.compile(r"//\s*(?:#nosec|gosec:disable)\s+((?:G\d{3}\s*)+)--\s*(.+)")
 GO_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|`[^`]*`|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 
 
@@ -29,11 +29,14 @@ def inventory(root):
                 continue
             if line.startswith("/*") or "\n" in line:
                 raise ValueError(f"{path}:{number}: use a single-line suppression comment")
-            match = DIRECTIVE.search(line)
-            if not match:
+            match = DIRECTIVE.fullmatch(line)
+            if not match or not match[2].strip() or line.count("#nosec")+line.count("gosec:disable") != 1:
                 raise ValueError(f"{path}:{number}: suppression requires rule IDs and -- reason")
-            rules = ", ".join(re.findall(r"G\d{3}", match[1]))
-            reason = match[2].replace("|", "\\|").replace("`", "'")
+            ids = re.findall(r"G\d{3}", match[1])
+            if len(ids) != len(set(ids)):
+                raise ValueError(f"{path}:{number}: duplicate suppression rule")
+            rules = ", ".join(ids)
+            reason = match[2].strip().replace("|", "\\|").replace("`", "'")
             tier = "Test fixture" if path.name.endswith("_test.go") or path.relative_to(root).parts[0] == "test" else "Production"
             rows.append(f"| `{path.relative_to(root)}:{number}` | {rules} | {tier} | {reason} |")
     return "\n".join([

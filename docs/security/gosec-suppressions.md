@@ -33,6 +33,7 @@ make gosec
 # Independent inventory check; does not rewrite the document.
 python3 scripts/gosec-suppressions.py
 go test ./internal/ci -run '^TestGosecSuppressionInventory$' -count=1
+python3 scripts/test-gosec-suppressions.py
 
 # Refresh only after reviewing the changed source guards and trust assumptions.
 python3 scripts/gosec-suppressions.py --write
@@ -52,6 +53,9 @@ The Python refresh and the independent Tier 1 Go AST test require exact rows,
 source line numbers, rules, scopes, and reasons. Missing, extra, duplicated,
 stale, or broad annotations fail the check. This prevents the former inventory
 drift; it does not replace human review of whether a reason remains true.
+Both directive parsers reject whitespace-only explanations, multiple directives
+in one comment, and duplicate rule IDs. Their negative regression tests cover
+these cases independently of the scanner's own formatting checks.
 
 ## Reviewed controls and remaining preconditions
 
@@ -65,6 +69,11 @@ consistent chunk counts/ciphertext lengths/totals, and overflow bounds; public
 range and cipher helpers reject invalid coordinates. Declared part lengths and
 chunk counters are enforced before further encryption. Valid legacy formats
 remain readable; small legacy MPU chunk sizes are permitted up to 1 MiB.
+Manifest serialization validates the same layout as readers. Completion checks
+plaintext accumulation before addition and rejects invalid state before companion
+encryption/storage or backend completion; failed validation reopens the lifecycle.
+An allocation-free regression uses individually valid large parts to exercise
+cumulative ciphertext overflow rather than an earlier consistency error.
 
 AES key wrap uses ordinary big-endian integer XOR rather than byte-truncation
 annotations. Its remaining counter conversion is bounded by the source slice
@@ -126,7 +135,7 @@ drive fault timing/probability, never cryptographic keys or authorization.
 | `internal/api/crypto_factory.go:414` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the pinned CA chain on every handshake including resumption |
 | `internal/api/crypto_factory.go:435` | G402 | Production | operator-only diagnostic opt-in with ERROR warning; no certificate authentication, never a secure production mode |
 | `internal/api/crypto_factory.go:466` | G304 | Production | token or SecretID file reference is chosen by the operator, never by an S3 request |
-| `internal/api/handlers.go:4250` | G115 | Production | negative sizes are rejected above |
+| `internal/api/handlers.go:4254` | G115 | Production | negative sizes are rejected above |
 | `internal/api/upload_part_copy.go:1060` | G115 | Production | chunkCount is bounded by MaxInt32 above |
 | `internal/api/utils.go:5` | G501 | Production | S3 Content-MD5 interoperability header |
 | `internal/api/utils.go:301` | G704 | Production | host/scheme come only from operator backend config; requests supply path/query and redirects are disabled |
@@ -138,12 +147,8 @@ drive fault timing/probability, never cryptographic keys or authorization.
 | `internal/crypto/engine.go:145` | G115 | Production | field count was checked above |
 | `internal/crypto/engine.go:1843` | G115 | Production | ChunkedPlaintextSize rejects negative sizes |
 | `internal/crypto/engine.go:1909` | G115 | Production | ChunkedPlaintextSize rejects negative sizes |
-| `internal/crypto/engine.go:2717` | G115 | Production | length is bounded by MaxUint32 above |
-| `internal/crypto/kdf.go:84` | G115 | Production | both values were validated positive above |
 | `internal/crypto/keymanager_memory.go:304` | G115 | Production | n=len(ciphertext)/8-1; j=0..5 and i=0..n-1 imply 1<=counter<=6*n<MaxInt |
 | `internal/crypto/keymanager_openbao.go:852` | G304 | Production | JWT path is operator-configured or the projected ServiceAccount path; requests cannot choose it |
-| `internal/crypto/mpu_encrypter.go:454` | G115 | Production | negative values are rejected above |
-| `internal/crypto/mpu_encrypter.go:553` | G115 | Production | partNumber is non-negative and chunkIndex is uint32 |
 | `internal/crypto/password_keymanager.go:88` | G115 | Production | constructor and derivation validate 100000..2000000 iterations before encoding |
 | `internal/crypto/range_decrypt.go:105` | G115 | Production | product was bounded by MaxInt64 above |
 | `internal/crypto/range_decrypt.go:216` | G115 | Production | index was bounded by MaxInt64/chunkSize above |
