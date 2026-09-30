@@ -129,7 +129,7 @@ drive fault timing/probability, never cryptographic keys or authorization.
 <!-- BEGIN GENERATED GOSEC SUPPRESSIONS -->
 | Source location | Rules | Scope | Verified justification / precondition |
 |---|---|---|---|
-| `cmd/server/main.go:421` | G703 | Production | CONFIG_PATH is operator-selected; existence check only, not request input |
+| `cmd/server/main.go:409` | G703 | Production | CONFIG_PATH is operator-selected; existence check only, not request input |
 | `internal/api/aws_chunked_reader.go:142` | G115 | Production | remaining is checked non-negative |
 | `internal/api/crypto_factory.go:252` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the configured CA chain and emits a warning |
 | `internal/api/crypto_factory.go:414` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the pinned CA chain on every handshake including resumption |
