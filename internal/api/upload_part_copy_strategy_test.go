@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -113,6 +114,54 @@ func (e *strategyRangeEngine) DecryptRange(_ context.Context, _ crypto.ObjectCon
 type strategySourceEngine struct {
 	crypto.EncryptionEngine
 	plain []byte
+}
+
+type strategyRangeCaptureEngine struct {
+	mockEngine
+	start, end int64
+	calls      int
+	err        error
+}
+
+func (e *strategyRangeCaptureEngine) DecryptRange(_ context.Context, _ crypto.ObjectContext, _ io.Reader, _ map[string]string, start, end int64) (io.Reader, map[string]string, error) {
+	e.calls++
+	e.start, e.end = start, end
+	return nil, nil, e.err
+}
+
+// Exercise the real copy strategy at uint64/int64 boundaries without creating
+// enormous objects. Stop at DecryptRange and inspect the resolved offsets.
+func TestUploadPartCopyReencryptMPU_UsesBoundedPlaintextSize(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		size    uint64
+		wantEnd int64
+	}{
+		{"authenticated", 4, 3},
+		{"max-int64", math.MaxInt64, math.MaxInt64 - 1},
+		{"above-int64-resolves-from-ciphertext", uint64(math.MaxInt64) + 1, 47},
+		{"max-uint64-resolves-from-ciphertext", math.MaxUint64, 47},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newMockS3Client()
+			client.objects["src/chunked"] = make([]byte, 64)
+			client.metadata["src/chunked"] = map[string]string{
+				crypto.MetaEncrypted: "true", crypto.MetaChunkedFormat: "true",
+				crypto.MetaManifest: encodeTestChunkedManifest(t, crypto.ChunkedFormatV1),
+				"Content-Length":    "64",
+			}
+			stop := errors.New("stop after range selection")
+			engine := &strategyRangeCaptureEngine{err: stop}
+			h := strategyHandler(client, engine)
+			_, _, err := h.uploadPartCopyReencryptMPU(t.Context(), client, "dst", "key", "upload", 1, "src", "chunked", nil, nil,
+				&CopySourceMetadata{Class: SourceClassChunked, ChunkedInfo: crypto.ChunkedObjectInfo{Authenticated: true, PlaintextSize: tc.size}}, 100, 100)
+			require.ErrorIs(t, err, stop)
+			require.Equal(t, 1, engine.calls)
+			require.Zero(t, engine.start)
+			require.Equal(t, tc.wantEnd, engine.end)
+			require.Zero(t, client.putObjectCallCount, "range selection must not mutate destination")
+		})
+	}
 }
 
 func (e *strategySourceEngine) DecryptRange(context.Context, crypto.ObjectContext, io.Reader, map[string]string, int64, int64) (io.Reader, map[string]string, error) {
