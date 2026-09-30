@@ -8,9 +8,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"io"
+	"log"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,4 +139,161 @@ func TestBuildOpenBaoTLSConfig_Semantics(t *testing.T) {
 			t.Error("VerifyConnection accepted a cert NOT signed by the pinned CA — pinning is ineffective")
 		}
 	})
+}
+
+func genTestTLSCertificate(t *testing.T, template, signer *x509.Certificate, signerKey *ecdsa.PrivateKey) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, signer, &key.PublicKey, signerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func TestBuildCosmianTLSConfig_VerifyConnection(t *testing.T) {
+	caPath, ca, caKey := genTestCA(t)
+	cfg, err := buildCosmianTLSConfig(config.CosmianConfig{CACert: caPath, InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VerifyConnection == nil {
+		t.Fatal("hostname-only bypass must retain pinned chain verification")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{}); err == nil {
+		t.Fatal("accepted a connection without peer certificates")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{genTestLeaf(t, ca, caKey)}}); err != nil {
+		t.Fatalf("rejected trusted leaf: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		after time.Time
+		usage x509.ExtKeyUsage
+	}{
+		{"expired", time.Now().Add(-time.Minute), x509.ExtKeyUsageServerAuth},
+		{"wrong_key_usage", time.Now().Add(time.Hour), x509.ExtKeyUsageClientAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert := genTestTLSCertificate(t, &x509.Certificate{
+				SerialNumber: big.NewInt(3), NotBefore: time.Now().Add(-time.Hour), NotAfter: tc.after,
+				KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{tc.usage},
+			}, ca, caKey)
+			leaf, err := x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}); err == nil {
+				t.Fatal("accepted invalid server certificate")
+			}
+		})
+	}
+
+	// The server supplies the intermediate; it need not be in the pinned file.
+	intermediate := genTestTLSCertificate(t, &x509.Certificate{
+		SerialNumber: big.NewInt(4), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}, ca, caKey)
+	intermediateCA, err := x509.ParseCertificate(intermediate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := genTestLeaf(t, intermediateCA, intermediate.PrivateKey.(*ecdsa.PrivateKey))
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf, intermediateCA}}); err != nil {
+		t.Fatalf("rejected trusted intermediate chain: %v", err)
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}); err == nil {
+		t.Fatal("accepted incomplete chain without required intermediate")
+	}
+}
+
+// Exercise real handshakes, not just callbacks: trusted SAN mismatches work
+// only under the explicit opt-in, while an unrelated CA is always rejected.
+func TestBuildKMSTLSConfig_PinnedCAHandshake(t *testing.T) {
+	caPath, ca, caKey := genTestCA(t)
+	_, otherCA, otherKey := genTestCA(t)
+	for _, provider := range []struct {
+		name  string
+		build func(bool) (*tls.Config, error)
+	}{
+		{"cosmian", func(skip bool) (*tls.Config, error) {
+			return buildCosmianTLSConfig(config.CosmianConfig{CACert: caPath, InsecureSkipVerify: skip})
+		}},
+		{"openbao", func(skip bool) (*tls.Config, error) {
+			return buildOpenBaoTLSConfig(config.OpenBaoTLSConfig{CACert: caPath, InsecureSkipVerify: skip})
+		}},
+	} {
+		t.Run(provider.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				skip    bool
+				trusted bool
+			}{
+				{"trusted_hostname_opt_in", true, true},
+				{"trusted_hostname_mismatch_secure", false, true},
+				{"untrusted_ca_with_opt_in", true, false},
+				{"untrusted_ca_secure", false, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					signer, key := ca, caKey
+					if !tc.trusted {
+						signer, key = otherCA, otherKey
+					}
+					cert := genTestTLSCertificate(t, &x509.Certificate{
+						SerialNumber: big.NewInt(5), DNSNames: []string{"kms.internal"},
+						NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+						KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+					}, signer, key)
+					var calls atomic.Int32
+					server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						w.WriteHeader(http.StatusNoContent)
+					}))
+					server.Config.ErrorLog = log.New(io.Discard, "", 0)
+					server.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+					server.StartTLS()
+					defer server.Close()
+					cfg, err := provider.build(tc.skip)
+					if err != nil {
+						t.Fatal(err)
+					}
+					transport := &http.Transport{TLSClientConfig: cfg}
+					defer transport.CloseIdleConnections()
+					client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+					resp, err := client.Get(server.URL)
+					if tc.trusted && tc.skip {
+						if err != nil {
+							t.Fatalf("trusted chain with hostname opt-in failed: %v", err)
+						}
+						defer resp.Body.Close()
+						if resp.StatusCode != http.StatusNoContent || calls.Load() != 1 {
+							t.Fatalf("trusted request: status=%d calls=%d", resp.StatusCode, calls.Load())
+						}
+						return
+					}
+					if resp != nil {
+						resp.Body.Close()
+					}
+					if err == nil || calls.Load() != 0 {
+						t.Fatalf("unverified request reached server: err=%v calls=%d", err, calls.Load())
+					}
+					if tc.skip {
+						var unknownCA x509.UnknownAuthorityError
+						if !errors.As(err, &unknownCA) {
+							t.Fatalf("expected pinned CA rejection, got %v", err)
+						}
+					} else {
+						var verification *tls.CertificateVerificationError
+						if !errors.As(err, &verification) {
+							t.Fatalf("expected standard TLS verification failure, got %v", err)
+						}
+					}
+				})
+			}
+		})
+	}
 }

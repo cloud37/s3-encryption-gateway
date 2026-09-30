@@ -235,6 +235,9 @@ func buildCosmianOptions(kmCfg *config.KeyManagerConfig) (crypto.CosmianKMIPOpti
 	}, nil
 }
 
+// buildCosmianTLSConfig normally verifies both the server chain and hostname.
+// The insecure_skip_verify opt-in requires ca_cert and skips only hostname
+// verification: VerifyConnection still verifies the chain against that CA.
 func buildCosmianTLSConfig(cfg config.CosmianConfig) (*tls.Config, error) {
 	if cfg.InsecureSkipVerify {
 		if cfg.CACert == "" {
@@ -242,16 +245,11 @@ func buildCosmianTLSConfig(cfg config.CosmianConfig) (*tls.Config, error) {
 				"this disables TLS certificate verification for KMS connections without pinning a trusted CA, " +
 				"allowing MITM attacks. Either provide a ca_cert or remove insecure_skip_verify")
 		}
-		logrus.WithFields(logrus.Fields{
-			"component": "crypto_factory",
-			"setting":   "COSMIAN_KMS_INSECURE_SKIP_VERIFY",
-		}).Error("InsecureSkipVerify is ENABLED with a custom CA certificate: TLS certificate verification is disabled for KMS connections. This should only be used in development.")
 	}
 
 	tlsCfg := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		// #nosec G402 — operator opt-in with startup warning
-		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: cfg.InsecureSkipVerify, // #nosec G402 -- explicit hostname-only opt-in; VerifyConnection checks the configured CA chain and emits a warning
 		CipherSuites: []uint16{
 			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
@@ -271,6 +269,27 @@ func buildCosmianTLSConfig(cfg config.CosmianConfig) (*tls.Config, error) {
 			return nil, fmt.Errorf("failed to parse Cosmian CA certificate")
 		}
 		tlsCfg.RootCAs = pool
+		if cfg.InsecureSkipVerify {
+			// RootCAs alone has no effect when Go's default verification is
+			// disabled. Verify the chain manually, deliberately omitting DNSName.
+			tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+				if len(cs.PeerCertificates) == 0 {
+					return fmt.Errorf("cosmian: server presented no certificates")
+				}
+				opts := x509.VerifyOptions{Roots: pool, Intermediates: x509.NewCertPool()}
+				for _, intermediate := range cs.PeerCertificates[1:] {
+					opts.Intermediates.AddCert(intermediate)
+				}
+				if _, err := cs.PeerCertificates[0].Verify(opts); err != nil {
+					return fmt.Errorf("cosmian: server certificate not trusted by pinned ca_cert: %w", err)
+				}
+				return nil
+			}
+			logrus.WithFields(logrus.Fields{
+				"component": "crypto_factory",
+				"setting":   "COSMIAN_KMS_INSECURE_SKIP_VERIFY",
+			}).Warn("Cosmian TLS: hostname verification disabled; peer is verified against the pinned ca_cert only.")
+		}
 	}
 
 	if cfg.ClientCert != "" && cfg.ClientKey != "" {
@@ -392,8 +411,7 @@ func buildOpenBaoTLSConfig(cfg config.OpenBaoTLSConfig) (*tls.Config, error) {
 		// Skip Go's default verification (which includes the hostname check) but
 		// still verify the chain to the pinned CA via VerifyConnection — RootCAs
 		// alone would pin nothing once InsecureSkipVerify is true.
-		// #nosec G402 — verification is performed manually below.
-		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+		tlsCfg.InsecureSkipVerify = true // #nosec G402 -- explicit hostname-only opt-in; VerifyConnection checks the pinned CA chain on every handshake including resumption
 		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
 				return fmt.Errorf("openbao: server presented no certificates")
@@ -414,8 +432,7 @@ func buildOpenBaoTLSConfig(cfg config.OpenBaoTLSConfig) (*tls.Config, error) {
 
 	case cfg.InsecureSkipVerify:
 		// No CA pinned and verification disabled: genuinely insecure, dev only.
-		// #nosec G402 — operator opt-in with a loud startup warning.
-		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+		tlsCfg.InsecureSkipVerify = true // #nosec G402 -- operator-only diagnostic opt-in with ERROR warning; no certificate authentication, never a secure production mode
 		logrus.WithFields(logrus.Fields{
 			"component": "crypto_factory",
 			"setting":   "OPENBAO_SKIP_VERIFY",
@@ -446,7 +463,7 @@ func resolveOpenBaoSecret(ref string) (string, error) {
 		return v, nil
 	case strings.HasPrefix(ref, "file:"):
 		path := strings.TrimPrefix(ref, "file:")
-		data, err := os.ReadFile(path) //nolint:gosec // operator-configured path
+		data, err := os.ReadFile(path) // #nosec G304 -- token or SecretID file reference is chosen by the operator, never by an S3 request
 		if err != nil {
 			return "", fmt.Errorf("openbao: read secret file %q: %w", path, err)
 		}

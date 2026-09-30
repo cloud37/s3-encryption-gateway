@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
@@ -83,6 +85,90 @@ func TestForwardToBackend_CustomCATrust(t *testing.T) {
 	resp.Body.Close()
 	if !called {
 		t.Fatal("raw forwarding did not reach TLS backend")
+	}
+}
+
+func TestHandlePassthrough_RedirectNotFollowed(t *testing.T) {
+	const requestBody = "sensitive configuration body must not be replayed"
+	const responseBody = "<Error><Code>TemporaryRedirect</Code></Error>"
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPost} {
+			for _, sameOrigin := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%d/%s/same_origin=%t", status, method, sameOrigin), func(t *testing.T) {
+					var destinationCalls atomic.Int32
+					var backendCalls atomic.Int32
+					var receivedBody, authorization string
+					var readErr error
+					redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						destinationCalls.Add(1)
+						w.WriteHeader(http.StatusOK)
+					}))
+					defer redirectTarget.Close()
+					location := redirectTarget.URL + "/stolen"
+					if sameOrigin {
+						location = "/stolen"
+					}
+					backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path == "/stolen" {
+							destinationCalls.Add(1)
+							w.WriteHeader(http.StatusOK)
+							return
+						}
+						backendCalls.Add(1)
+						body, err := io.ReadAll(r.Body)
+						receivedBody, readErr = string(body), err
+						authorization = r.Header.Get("Authorization")
+						w.Header().Set("Location", location)
+						w.Header().Set("Content-Type", "application/xml")
+						w.WriteHeader(status)
+						_, _ = io.WriteString(w, responseBody)
+					}))
+					defer backend.Close()
+					h := forwardingHandler(backend.URL, false, config.BackendTLSConfig{})
+					h.config.Backend.AccessKey = "configured-backend-key"
+					h.config.Backend.SecretKey = "configured-backend-secret"
+					h.metrics = metrics.NewMetricsWithRegistry(prometheus.NewRegistry())
+					request := httptest.NewRequest(method, "/bucket?cors", strings.NewReader(requestBody))
+					w := httptest.NewRecorder()
+					h.handlePassthrough(w, request, "BucketConfiguration", "bucket", "")
+					// Closing the backend joins its handlers before reading observations.
+					backend.Close()
+					if readErr != nil || receivedBody != requestBody || backendCalls.Load() != 1 {
+						t.Fatalf("initial request: err=%v body=%q calls=%d", readErr, receivedBody, backendCalls.Load())
+					}
+					if !strings.Contains(authorization, "Credential=configured-backend-key/") {
+						t.Fatalf("expected initial request to be signed with backend credentials, got %q", authorization)
+					}
+					if destinationCalls.Load() != 0 {
+						t.Fatalf("redirect target received %d unauthorized requests", destinationCalls.Load())
+					}
+					if w.Code != status || w.Header().Get("Location") != location || w.Body.String() != responseBody {
+						t.Fatalf("redirect not returned intact: status=%d location=%q body=%q", w.Code, w.Header().Get("Location"), w.Body.String())
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestForwardToBackend_UntrustedCARejected(t *testing.T) {
+	var calls atomic.Int32
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	caPath, _, _ := genTestCA(t)
+	resp, err := forwardingHandler(backend.URL, true, config.BackendTLSConfig{CAFile: caPath}).forwardToBackend(httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("must not persist")))
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil || calls.Load() != 0 {
+		t.Fatalf("untrusted TLS reached backend: err=%v calls=%d", err, calls.Load())
+	}
+	var unknownCA x509.UnknownAuthorityError
+	if !errors.As(err, &unknownCA) {
+		t.Fatalf("expected actual CA verification failure, got %v", err)
 	}
 }
 

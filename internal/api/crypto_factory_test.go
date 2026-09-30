@@ -265,6 +265,9 @@ func TestBuildCosmianTLSConfig_InsecureWithCACert(t *testing.T) {
 	if !tlsCfg.InsecureSkipVerify {
 		t.Error("expected InsecureSkipVerify=true")
 	}
+	if tlsCfg.RootCAs == nil || tlsCfg.VerifyConnection == nil {
+		t.Fatal("hostname opt-in must still verify the peer chain against the pinned CA")
+	}
 }
 
 // TestBuildCosmianTLSConfig_MissingCACert verifies that a non-existent
@@ -303,8 +306,8 @@ func TestBuildCosmianTLSConfig_InvalidCACert(t *testing.T) {
 }
 
 // TestBuildCosmianTLSConfig_InsecureSkipVerify_Warning verifies that an
-// ERROR-level warning is logged when InsecureSkipVerify is enabled with a
-// custom CA certificate (V1.0-SEC-F3).
+// WARN-level message accurately describes hostname-only verification bypass
+// when InsecureSkipVerify is enabled with a custom CA certificate.
 func TestBuildCosmianTLSConfig_InsecureSkipVerify_Warning(t *testing.T) {
 	// Create a dummy CA cert file (needed because the warning is only logged
 	// when InsecureSkipVerify=true and CACert is non-empty).
@@ -325,7 +328,7 @@ func TestBuildCosmianTLSConfig_InsecureSkipVerify_Warning(t *testing.T) {
 		logrus.StandardLogger().Level = originalLevel
 	}()
 	logrus.StandardLogger().Out = &buf
-	logrus.StandardLogger().Level = logrus.ErrorLevel
+	logrus.StandardLogger().Level = logrus.WarnLevel
 
 	cfg := config.CosmianConfig{
 		InsecureSkipVerify: true,
@@ -338,14 +341,14 @@ func TestBuildCosmianTLSConfig_InsecureSkipVerify_Warning(t *testing.T) {
 	}
 
 	logOutput := buf.String()
-	if !strings.Contains(logOutput, "InsecureSkipVerify is ENABLED") {
-		t.Errorf("expected ERROR log with 'InsecureSkipVerify is ENABLED', got: %s", logOutput)
+	if !strings.Contains(logOutput, "level=warning") || !strings.Contains(logOutput, "hostname verification disabled") {
+		t.Errorf("expected WARN log describing disabled hostname verification, got: %s", logOutput)
 	}
 	if !strings.Contains(logOutput, "COSMIAN_KMS_INSECURE_SKIP_VERIFY") {
-		t.Errorf("expected ERROR log to mention 'COSMIAN_KMS_INSECURE_SKIP_VERIFY', got: %s", logOutput)
+		t.Errorf("expected WARN log to mention 'COSMIAN_KMS_INSECURE_SKIP_VERIFY', got: %s", logOutput)
 	}
-	if !strings.Contains(logOutput, "only be used in development") {
-		t.Errorf("expected ERROR log to mention 'only be used in development', got: %s", logOutput)
+	if !strings.Contains(logOutput, "peer is verified against the pinned ca_cert only") {
+		t.Errorf("expected WARN log to describe pinned chain verification, got: %s", logOutput)
 	}
 }
 
@@ -361,7 +364,7 @@ func TestBuildCosmianTLSConfig_NoInsecureSkipVerify_NoWarning(t *testing.T) {
 		logrus.StandardLogger().Level = originalLevel
 	}()
 	logrus.StandardLogger().Out = &buf
-	logrus.StandardLogger().Level = logrus.ErrorLevel
+	logrus.StandardLogger().Level = logrus.WarnLevel
 
 	cfg := config.CosmianConfig{
 		InsecureSkipVerify: false,
@@ -373,7 +376,7 @@ func TestBuildCosmianTLSConfig_NoInsecureSkipVerify_NoWarning(t *testing.T) {
 	}
 
 	logOutput := buf.String()
-	if strings.Contains(logOutput, "InsecureSkipVerify is ENABLED") {
+	if logOutput != "" {
 		t.Errorf("expected no warning when InsecureSkipVerify is false, but got: %s", logOutput)
 	}
 }

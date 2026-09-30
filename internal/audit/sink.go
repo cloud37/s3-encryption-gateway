@@ -16,6 +16,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"golang.org/x/sys/unix"
 )
 
 // droppedAuditEventsTotal counts audit events dropped due to sink failures
@@ -125,7 +126,7 @@ func (s *BatchSink) run() {
 			s.mu.Lock()
 			events := s.drainBufferLocked()
 			s.mu.Unlock()
-			
+
 			if len(events) > 0 {
 				s.writeWithRetry(events)
 			}
@@ -133,7 +134,7 @@ func (s *BatchSink) run() {
 			s.mu.Lock()
 			events := s.drainBufferLocked()
 			s.mu.Unlock()
-			
+
 			if len(events) > 0 {
 				s.writeWithRetry(events)
 			}
@@ -148,7 +149,7 @@ func (s *BatchSink) drainBufferLocked() []*AuditEvent {
 	if len(s.buffer) == 0 {
 		return nil
 	}
-	
+
 	events := make([]*AuditEvent, len(s.buffer))
 	copy(events, s.buffer)
 	s.buffer = s.buffer[:0]
@@ -182,7 +183,7 @@ func (s *BatchSink) writeWithRetry(events []*AuditEvent) error {
 			time.Sleep(s.retryBackoff * time.Duration(1<<uint(i)))
 		}
 	}
-	
+
 	slog.Error("audit: failed to flush events", "retries", s.retryCount, "error", err)
 	return err
 }
@@ -198,6 +199,7 @@ type HTTPSink struct {
 	client   *http.Client
 	headers  map[string]string
 	logger   *slog.Logger
+	initErr  error // immutable; invalid TLS configuration must never send events
 }
 
 // NewHTTPSink creates a new HTTP sink with default (hardened) transport settings.
@@ -210,6 +212,8 @@ func NewHTTPSink(endpoint string, headers map[string]string) *HTTPSink {
 // V1.0-SEC-8 — hardened HTTP transport with per-phase timeouts, connection limits,
 // and concurrency caps to prevent resource exhaustion.
 // V1.0-SEC-H07 — supports custom TLS configuration for private PKI audit endpoints.
+// The constructor signature is retained for compatibility. Invalid TLS settings
+// are logged and stored; subsequent non-empty writes fail without network I/O.
 func NewHTTPSinkWithConfig(endpoint string, headers map[string]string, cfg config.HTTPTransportConfig, tlsCfg config.SinkTLSConfig) *HTTPSink {
 	// Apply defaults for zero values
 	timeout := cfg.Timeout
@@ -250,14 +254,12 @@ func NewHTTPSinkWithConfig(endpoint string, headers map[string]string, cfg confi
 		MaxConnsPerHost:       maxConnsPerHost,
 	}
 
-	if tlsCfg.CAFile != "" || tlsCfg.CertFile != "" || tlsCfg.InsecureSkipVerify || tlsCfg.MinVersion != "" {
-		tlsConfig, err := buildSinkTLSConfig(tlsCfg)
-		if err != nil {
-			// Log the error but don't fail — fall back to system defaults
-			slog.Default().Error("audit: failed to build TLS config, using system defaults", "error", err)
-		} else {
-			transport.TLSClientConfig = tlsConfig
-		}
+	tlsConfig, initErr := buildSinkTLSConfig(tlsCfg)
+	if initErr != nil {
+		initErr = fmt.Errorf("audit HTTP sink TLS initialization failed: %w", initErr)
+		slog.Default().Error("audit: invalid TLS configuration; HTTP sink writes disabled", "error", initErr)
+	} else {
+		transport.TLSClientConfig = tlsConfig
 	}
 
 	return &HTTPSink{
@@ -268,13 +270,17 @@ func NewHTTPSinkWithConfig(endpoint string, headers map[string]string, cfg confi
 		},
 		headers: headers,
 		logger:  slog.Default(),
+		initErr: initErr,
 	}
 }
 
 func buildSinkTLSConfig(cfg config.SinkTLSConfig) (*tls.Config, error) {
+	if cfg.InsecureSkipVerify {
+		slog.Default().Warn("audit: TLS certificate and hostname verification are DISABLED; this allows MITM attacks. Use only in development.",
+			"setting", "AUDIT_SINK_TLS_INSECURE_SKIP_VERIFY")
+	}
 	tlsConfig := &tls.Config{
-		// #nosec G402 — operator opt-in with startup warning
-		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec
+		InsecureSkipVerify: cfg.InsecureSkipVerify, // #nosec G402 -- operator-only diagnostic opt-in emits WARN; secure default verifies chain and hostname
 		MinVersion:         tls.VersionTLS12,
 	}
 
@@ -301,6 +307,9 @@ func buildSinkTLSConfig(cfg config.SinkTLSConfig) (*tls.Config, error) {
 		tlsConfig.RootCAs = caCertPool
 	}
 
+	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
+		return nil, fmt.Errorf("client certificate requires both cert_file and key_file")
+	}
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
@@ -323,6 +332,16 @@ func (s *HTTPSink) WriteEvent(event *AuditEvent) error {
 func (s *HTTPSink) WriteBatch(events []*AuditEvent) error {
 	if len(events) == 0 {
 		return nil
+	}
+	if s.initErr != nil {
+		droppedAuditEventsTotal.Add(float64(len(events)))
+		if s.logger != nil {
+			s.logger.Error("cannot send audit events: HTTP sink TLS initialization failed",
+				slog.String("error", s.initErr.Error()),
+				slog.Int("event_count", len(events)),
+			)
+		}
+		return s.initErr
 	}
 
 	data, err := json.Marshal(events)
@@ -393,31 +412,85 @@ func (s *HTTPSink) SetLogger(logger *slog.Logger) {
 type FileSink struct {
 	path     string
 	fileMode fs.FileMode // V1.0-SEC-26: default 0600; configurable via NewFileSinkWithMode
+	initErr  error
 	mu       sync.Mutex
 }
 
 // NewFileSink creates a new file sink.
 func NewFileSink(path string) *FileSink {
-	return &FileSink{path: path, fileMode: 0600} //nolint:gosec // intentionally restricted
+	return NewFileSinkWithMode(path, 0600)
 }
 
 // NewFileSinkWithMode creates a new file sink with a configurable file permission mode.
 // Use this to override the default 0600 (e.g. 0640 for group-readable deployments).
 // V1.0-SEC-26 — configurable file mode override.
+// Modes may grant owner read/write and optional group read only. Invalid modes
+// retain the constructor signature but cause all writes to fail closed.
 func NewFileSinkWithMode(path string, mode fs.FileMode) *FileSink {
-	return &FileSink{path: path, fileMode: mode}
+	return &FileSink{path: path, fileMode: mode, initErr: validateAuditFileMode(mode)}
+}
+
+func validateAuditFileMode(mode fs.FileMode) error {
+	if mode&^fs.FileMode(0640) != 0 || mode&0200 == 0 {
+		return fmt.Errorf("unsafe audit file mode %04o: require owner write, allow only owner read/write and optional group read", mode)
+	}
+	return nil
+}
+
+func (s *FileSink) validateDestination(info fs.FileInfo) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("audit file destination must be a regular file, got %s", info.Mode().Type())
+	}
+	if err := validateAuditFileMode(info.Mode()); err != nil {
+		return err
+	}
+	if info.Mode().Perm()&^s.fileMode.Perm() != 0 {
+		return fmt.Errorf("audit file destination mode %04o exceeds configured mode %04o", info.Mode().Perm(), s.fileMode.Perm())
+	}
+	return nil
 }
 
 // WriteEvent writes a single event.
 func (s *FileSink) WriteEvent(event *AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.initErr != nil {
+		return s.initErr
+	}
 
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, s.fileMode) //nolint:gosec // intentionally restricted
+	// The parent directory is operator-controlled. Reject unsafe existing
+	// destinations before opening, then recheck the opened inode before writing.
+	previous, err := os.Lstat(s.path)
+	flags := os.O_APPEND | os.O_CREATE | os.O_WRONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK
+	switch {
+	case err == nil:
+		if err := s.validateDestination(previous); err != nil {
+			return err
+		}
+	case os.IsNotExist(err):
+		// Do not follow or reuse a destination created between Lstat and open.
+		flags |= os.O_EXCL
+	default:
+		return fmt.Errorf("inspect audit file destination: %w", err)
+	}
+
+	// NOFOLLOW rejects a swapped final symlink; NONBLOCK prevents a swapped
+	// FIFO from hanging before the regular-file check. Neither truncates data.
+	f, err := os.OpenFile(s.path, flags, s.fileMode) // #nosec G304 -- operator-controlled directory/path; no-follow exclusive creation and inode/type/mode revalidation precede writes
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened audit file: %w", err)
+	}
+	if err := s.validateDestination(opened); err != nil {
+		return err
+	}
+	if previous != nil && !os.SameFile(previous, opened) {
+		return fmt.Errorf("audit file destination changed while opening")
+	}
 
 	data, err := json.Marshal(event)
 	if err != nil {

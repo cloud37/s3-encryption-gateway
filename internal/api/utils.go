@@ -292,8 +292,13 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 	}
 	client := &http.Client{
 		Transport: transport,
+		// The configured backend is the only authorized destination. Return
+		// redirects unchanged instead of changing targets or replaying bodies.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
-	resp, err := client.Do(proxyReq) // #nosec G704 — S3 proxy: forward to configured backend
+	resp, err := client.Do(proxyReq) // #nosec G704 -- host/scheme come only from operator backend config; requests supply path/query and redirects are disabled
 	if err != nil {
 		return nil, fmt.Errorf("send backend request: %w", err)
 	}
