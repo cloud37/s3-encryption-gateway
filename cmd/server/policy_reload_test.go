@@ -65,6 +65,32 @@ func TestConfigApplier_CredentialFailureKeepsPolicySnapshot(t *testing.T) {
 	assert.Same(t, old, a.config)
 }
 
+func TestConfigApplier_PolicySnapshotPublishedOnSharedManager(t *testing.T) {
+	t.Setenv("GW_POLICY_0_ID", "env-bypass")
+	t.Setenv("GW_POLICY_0_BUCKETS", "backups")
+	t.Setenv("GW_POLICY_0_DISABLE_ENCRYPTION", "true")
+	t.Setenv("GW_POLICY_0_REQUIRE_ENCRYPTION", "false")
+	t.Setenv("GW_POLICY_1_ID", "")
+	old := &config.Config{}
+	pm := config.NewPolicyManager()
+	require.NoError(t, pm.ReloadPolicies(nil))
+	selected := pm.GetPolicyForBucket("backups")
+	require.NotNil(t, selected)
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	a := NewConfigChangeApplier(logger, nil, nil, nil, nil, old, pm, nil)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, a.ApplyConfigChanges(old, old))
+		assert.Same(t, pm, a.policyManager)
+		require.Len(t, pm.Policies(), 1)
+		assert.True(t, pm.BucketDisablesEncryption("backups"))
+	}
+	t.Setenv("GW_POLICY_0_DISABLE_ENCRYPTION", "false")
+	require.NoError(t, a.ApplyConfigChanges(old, old))
+	assert.False(t, pm.BucketDisablesEncryption("backups"))
+	assert.True(t, selected.DisableEncryption, "a selected policy must not be mutated by publication")
+}
+
 // Exercise the actual credentials-file watcher and reload callback. Completion
 // is signalled by the callback, not inferred from a scheduling sleep.
 func TestConfigReloader_CredentialsFilePolicyFailurePreservesConfig(t *testing.T) {
@@ -79,7 +105,7 @@ func TestConfigReloader_CredentialsFilePolicyFailurePreservesConfig(t *testing.T
 	writeReloadConfig(t, configPath, reloadCredential{accessKey: "base", secretKey: "base-secret"})
 	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0600)
 	require.NoError(t, err)
-	_, err = f.WriteString("policy_files: [" + policyPath + "]\n")
+	_, err = f.WriteString("policies: [" + policyPath + "]\n")
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 	cfg, err := config.LoadConfig(configPath)

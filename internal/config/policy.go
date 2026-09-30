@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,7 +52,42 @@ func NewPolicyManager() *PolicyManager {
 	}
 }
 
-// ReloadPolicies reloads both policy sources for a running gateway.
+// PolicySnapshot is a fully loaded policy set. Its contents are private so a
+// caller can publish a prepared set without changing it between validation and
+// publication. A zero snapshot represents an intentionally empty set.
+type PolicySnapshot struct {
+	policies []*PolicyConfig
+}
+
+// LoadPolicySnapshot prepares file policies followed by environment policies
+// without touching any live manager. The existing source/matching order and
+// validation rules are preserved.
+func LoadPolicySnapshot(patterns []string) (PolicySnapshot, error) {
+	return loadPolicySnapshot(patterns, (*PolicyManager).LoadPoliciesFromEnv)
+}
+
+func loadPolicySnapshot(patterns []string, loadEnv func(*PolicyManager) error) (PolicySnapshot, error) {
+	candidate := NewPolicyManager()
+	if err := candidate.LoadPolicies(patterns); err != nil {
+		return PolicySnapshot{}, fmt.Errorf("load policy files: %w", err)
+	}
+	if err := loadEnv(candidate); err != nil {
+		return PolicySnapshot{}, fmt.Errorf("load environment policies: %w", err)
+	}
+	return PolicySnapshot{policies: candidate.policies}, nil
+}
+
+// ReplaceSnapshot atomically publishes a prepared set on the existing manager.
+// Readers that already selected a policy retain that immutable policy; future
+// lookups see the complete replacement. No file I/O occurs under the live lock.
+func (pm *PolicyManager) ReplaceSnapshot(snapshot PolicySnapshot) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.policies = snapshot.policies
+}
+
+// ReloadPolicies atomically replaces both policy sources for a running gateway.
+// Any loading/validation error leaves the complete previous set unchanged.
 func (pm *PolicyManager) ReloadPolicies(patterns []string) error {
 	return pm.reloadPolicies(patterns, (*PolicyManager).LoadPoliciesFromEnv)
 }
@@ -61,20 +95,18 @@ func (pm *PolicyManager) ReloadPolicies(patterns []string) error {
 // Keep the source boundary explicit so tests can coordinate readers while the
 // environment source is being loaded without sleeps or reload stress loops.
 func (pm *PolicyManager) reloadPolicies(patterns []string, loadEnv func(*PolicyManager) error) error {
-	pm.Reset()
-	var fileErr error
-	if len(patterns) > 0 {
-		fileErr = pm.LoadPolicies(patterns)
+	snapshot, err := loadPolicySnapshot(patterns, loadEnv)
+	if err != nil {
+		return err
 	}
-	return errors.Join(fileErr, loadEnv(pm))
+	pm.ReplaceSnapshot(snapshot)
+	return nil
 }
 
-// LoadPolicies loads policies from the specified file patterns
+// LoadPolicies replaces file policies only after all files load successfully.
+// Use ReloadPolicies to atomically replace files and environment together.
 func (pm *PolicyManager) LoadPolicies(patterns []string) error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	pm.policies = make([]*PolicyConfig, 0)
+	policies := make([]*PolicyConfig, 0)
 
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
@@ -105,10 +137,11 @@ func (pm *PolicyManager) LoadPolicies(patterns []string) error {
 				return fmt.Errorf("policy %q: disable_encryption and require_encryption are mutually exclusive", policy.ID)
 			}
 
-			pm.policies = append(pm.policies, &policy)
+			policies = append(policies, &policy)
 		}
 	}
 
+	pm.ReplaceSnapshot(PolicySnapshot{policies: policies})
 	return nil
 }
 
@@ -258,8 +291,8 @@ func (pm *PolicyManager) Policies() []*PolicyConfig {
 	return result
 }
 
-// Reset clears all loaded policies. Must be called before a full config
-// reload to prevent policy accumulation across SIGHUP cycles.
+// Reset explicitly clears all loaded policies. Do not use it for live reload:
+// ReloadPolicies replaces a complete set without an empty-policy window.
 func (pm *PolicyManager) Reset() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -280,12 +313,11 @@ func splitTrimmed(s, sep string) []string {
 // GW_POLICY_N_ID is absent. Validation is identical to LoadPolicies.
 //
 // Invariants:
-//   - Thread-safe (acquires pm.mu.Lock).
-//   - Appends to existing policies; call Reset() before a full reload.
-//   - Returns the first validation error encountered.
+//   - Thread-safe; the complete append happens under pm.mu.Lock.
+//   - Appends to existing policies; use ReloadPolicies for a full live reload.
+//   - Any validation error leaves existing policies unchanged.
 func (pm *PolicyManager) LoadPoliciesFromEnv() error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	policies := make([]*PolicyConfig, 0)
 
 	for i := 0; ; i++ {
 		id := os.Getenv(fmt.Sprintf("GW_POLICY_%d_ID", i))
@@ -342,7 +374,10 @@ func (pm *PolicyManager) LoadPoliciesFromEnv() error {
 			return fmt.Errorf("GW_POLICY_%d (%q): disable_encryption and require_encryption are mutually exclusive", i, id)
 		}
 
-		pm.policies = append(pm.policies, policy)
+		policies = append(policies, policy)
 	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.policies = append(pm.policies, policies...)
 	return nil
 }

@@ -109,6 +109,12 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 	if oldConfig.Server.SpoolDirectory != newConfig.Server.SpoolDirectory {
 		return fmt.Errorf("server.spool_directory cannot be changed during hot reload")
 	}
+	// Validate both policy sources before changing credentials, gates or other
+	// live components. Keep the prepared snapshot private until apply succeeds.
+	policySnapshot, err := config.LoadPolicySnapshot(newConfig.PolicyFiles)
+	if err != nil {
+		return fmt.Errorf("prepare policy reload: %w", err)
+	}
 	if oldConfig.Server.MaxAggregateSpoolBytes != newConfig.Server.MaxAggregateSpoolBytes && a.spoolManager != nil {
 		if err := a.spoolManager.ReconfigureCapacity(newConfig.Server.MaxAggregateSpoolBytes); err != nil {
 			return fmt.Errorf("reconfigure spool capacity: %w", err)
@@ -288,16 +294,13 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 		}
 	}
 
-	// Reload both policy sources through the shared runtime entry point.
+	// Publish on the manager already shared with the handlers. Never reset it or
+	// replace the manager pointer: either would expose missing/stale policies.
 	if a.policyManager == nil {
 		a.policyManager = config.NewPolicyManager()
 	}
-	if err := a.policyManager.ReloadPolicies(newConfig.PolicyFiles); err != nil {
-		a.logger.WithError(err).Warn("Failed to reload policies during config change")
-		changes = append(changes, "policies: reload failed")
-	} else {
-		changes = append(changes, "policies: reloaded")
-	}
+	a.policyManager.ReplaceSnapshot(policySnapshot)
+	changes = append(changes, "policies: reloaded")
 
 	// Update the config reference
 	a.config = newConfig
@@ -772,16 +775,8 @@ func main() {
 
 	// Initialize policy manager
 	var policyManager = config.NewPolicyManager()
-	if len(cfg.PolicyFiles) > 0 {
-		if err := policyManager.LoadPolicies(cfg.PolicyFiles); err != nil {
-			logger.WithError(err).Fatal("Failed to load policy files")
-		}
-		logger.WithField("count", len(cfg.PolicyFiles)).Info("Policy files loaded")
-	}
-	// Load policies from environment variables (GW_POLICY_N_*).
-	// Env-sourced policies are additive with file-sourced policies.
-	if err := policyManager.LoadPoliciesFromEnv(); err != nil {
-		logger.WithError(err).Fatal("Failed to load policies from environment")
+	if err := policyManager.ReloadPolicies(cfg.PolicyFiles); err != nil {
+		logger.WithError(err).Fatal("Failed to load policies")
 	}
 	// Emit a startup warning for every bypass (disable_encryption: true) policy.
 	for _, p := range policyManager.Policies() {

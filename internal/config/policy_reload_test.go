@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,15 +33,26 @@ func setReloadPolicyEnv(t *testing.T) {
 // Pause at the source boundary, not at a guessed scheduling delay. Every
 // lookup must still see the complete old snapshot until publication.
 func TestPolicyReload_ReadersKeepCompleteSnapshot(t *testing.T) {
+	for _, withFiles := range []bool{false, true} {
+		t.Run(fmt.Sprint(withFiles), func(t *testing.T) { testPolicyReloadSourceBoundary(t, withFiles) })
+	}
+}
+
+func testPolicyReloadSourceBoundary(t *testing.T, withFiles bool) {
+	t.Helper()
 	setReloadPolicyEnv(t)
 	file := writeReloadPolicy(t, t.TempDir(), "policy.yaml", "id: file-required\nbuckets: [protected]\nrequire_encryption: true\ndisallow_lock_bypass: true\n")
+	var paths []string
+	if withFiles {
+		paths = []string{file}
+	}
 	pm := NewPolicyManager()
-	require.NoError(t, pm.ReloadPolicies([]string{file}))
+	require.NoError(t, pm.ReloadPolicies(paths))
 	before := pm.Policies()
 	loadingEnv, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- pm.reloadPolicies([]string{file}, func(candidate *PolicyManager) error {
+		done <- pm.reloadPolicies(paths, func(candidate *PolicyManager) error {
 			close(loadingEnv)
 			<-release
 			return candidate.LoadPoliciesFromEnv()
@@ -57,8 +70,40 @@ func TestPolicyReload_ReadersKeepCompleteSnapshot(t *testing.T) {
 	assert.Equal(t, before, pm.Policies(), "readers must never see a file-only snapshot")
 	assert.True(t, pm.BucketDisablesEncryption("backups"))
 	assert.False(t, pm.BucketEncryptsMultipart("backups"))
-	assert.True(t, pm.BucketRequiresEncryption("protected"))
-	assert.True(t, pm.BucketDisallowsLockBypass("protected"))
+	assert.Equal(t, withFiles, pm.BucketRequiresEncryption("protected"))
+	assert.Equal(t, withFiles, pm.BucketDisallowsLockBypass("protected"))
+}
+
+func TestPolicyReload_ConcurrentLookups(t *testing.T) {
+	setReloadPolicyEnv(t)
+	file := writeReloadPolicy(t, t.TempDir(), "policy.yaml", "id: required\nbuckets: [protected]\nrequire_encryption: true\ndisallow_lock_bypass: true\n")
+	pm := NewPolicyManager()
+	require.NoError(t, pm.ReloadPolicies([]string{file}))
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	violations := make(chan string, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 200; i++ {
+				if !pm.BucketDisablesEncryption("backups") || pm.BucketEncryptsMultipart("backups") || !pm.BucketRequiresEncryption("protected") || !pm.BucketDisallowsLockBypass("protected") || len(pm.Policies()) != 2 {
+					violations <- "lookup observed incomplete policy set"
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	for i := 0; i < 100; i++ {
+		require.NoError(t, pm.ReloadPolicies([]string{file}))
+	}
+	wg.Wait()
+	close(violations)
+	for violation := range violations {
+		t.Error(violation)
+	}
 }
 
 func TestPolicyReload_FailurePreservesAllPolicies(t *testing.T) {
