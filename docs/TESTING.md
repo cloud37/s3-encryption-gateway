@@ -484,6 +484,54 @@ The legacy `integration`-tagged Azurite fixture is outside the PR conformance
 gate. It is retained for separate integration validation until migrated to the
 conformance tier.
 
+### Reverse-proxy header regressions (GH-338)
+
+No reverse proxy **in front of the gateway** is required to reproduce this
+bug: tests inject the headers a frontend proxy adds after client signing.
+The failure depends on a backend frontend changing a signed header after
+gateway signing, not on running Caddy itself.
+
+- **Tier 1:** `internal/api/passthrough_headers_test.go` uses the production
+  router and a local `httptest` backend. The backend verifies SigV4, appends
+  to `X-Forwarded-For`, then verifies again. Cases cover location, creation,
+  ListBuckets, multipart listing, tagging, and preflight; direct requests are
+  positive controls. Separate checks assert exact signed-header exclusion,
+  S3/CORS header preservation, body length, authentication/query stripping,
+  case-insensitive Connection tokens, response filtering, and independent
+  inbound/outbound header storage. No Docker or expensive KDF fixture is used.
+- **Tier 2:** `test/conformance/passthrough_headers_test.go` registers
+  `Passthrough_ProxyHeaders_*` cases in the ordinary provider matrix. An
+  in-process backend frontend verifies signatures before and after appending
+  `X-Forwarded-For`, then re-signs the final hop for the real provider's host.
+  A deliberately signed proxy-header control must fail with
+  `SignatureDoesNotMatch`; gateway requests must survive the mutation and
+  preserve real provider behavior. Location, scoped ListBuckets, and CORS
+  forwarding run without a capability requirement. Creation, multipart
+  listing, tagging, and configured CORS use their existing capability bits.
+  Backend-denied account-wide ListBuckets is explicitly skipped. CORS
+  forwarding compares native backend status/headers even when configured CORS
+  is unsupported. Local backends remain Testcontainers-managed with the usual
+  Docker-unavailable skips; no extra proxy container, fixed port, or CI target
+  is needed.
+
+Focused commands from the repository root:
+
+```bash
+# Tier 1: repeat inexpensive regressions under the race detector.
+go test -race ./internal/api -count=10 \
+  -run 'Test(PassthroughHeaders|ForwardToBackend_HeaderBoundary|BackendRequestHeaders|CopyProxyResponse_ConnectionTokens)'
+
+# Tier 2: all local providers, using the existing fixture/capability registry.
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/Passthrough_ProxyHeaders'
+```
+
+These focused commands supplement, not replace, the full Tier 1 and local
+conformance gates. See the
+[passthrough header contract](S3_API_IMPLEMENTATION.md#passthrough-request-header-contract)
+for the exact preserved and excluded header sets.
+
 ---
 
 ## How to add a new public S3 provider (plug-in recipe)

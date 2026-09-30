@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+### Fixed
+
+- **Passthrough signing behind reverse proxies (GH-338):** Bucket location,
+  creation/configuration, ListBuckets, multipart-upload listing, object
+  tagging/ACL/restore, and CORS forwarding no longer sign incoming proxy
+  headers such as `X-Forwarded-For`. Backend load balancers can append to these
+  transport headers without invalidating the gateway's signature. Passthrough
+  requests now allow only end-to-end S3/content/conditional/range/CORS headers;
+  client authentication, proxy identity, cookies, tracing, arbitrary headers,
+  and hop-by-hop fields are removed before backend signing. Inbound headers
+  remain available for gateway auditing and trusted-proxy IP extraction.
+- **Proxy response header hygiene:** Strip the standard `Trailer` header and
+  all fields nominated by `Connection`, in addition to fixed hop-by-hop fields.
+
+### Tests and documentation
+
+- Added Tier 1 production-router regressions and capability-gated,
+  provider-neutral Tier 2 proxy-header conformance tests. An in-process backend
+  frontend verifies signatures before and after appending `X-Forwarded-For`,
+  then forwards to the real provider; no extra reverse-proxy container is
+  required. Coverage includes S3/CORS header preservation and scoped
+  ListBuckets responses.
+- Documented the passthrough header contract, reverse-proxy deployment
+  behavior, legacy Caddy workaround, and focused regression commands.
+
 ## [0.12.1] — 2026-09-28
 
 This hotfix release restores authenticated HTTPS upload compatibility for

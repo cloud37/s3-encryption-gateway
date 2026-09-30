@@ -20,6 +20,46 @@ The following ListBuckets behavior applies to every credential combination:
 
 Lifecycle grants affect bucket mutation only; they do not affect ListBuckets authorization or routing. Credential permissions and bucket scopes never select the backend endpoint or transport. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
 
+## Reverse Proxies and Backend Load Balancers
+
+The gateway supports TLS termination at a reverse proxy such as Caddy or an
+ingress controller. Preserve the client's signed `Host`, path, query, and S3
+headers so gateway authentication can validate the original request.
+
+Passthrough operations (including GetBucketLocation, CreateBucket,
+ListBuckets, ListMultipartUploads, tagging/ACLs, and CORS) build a separate
+backend request and sign it with configured backend credentials. The gateway
+does **not** forward incoming `X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP`,
+cookies, tracing, arbitrary client headers, or hop-by-hop fields to the backend.
+This prevents `403 SignatureDoesNotMatch` when a backend load balancer appends
+to `X-Forwarded-For` after signing (GH-338). S3/content/conditional/range headers
+and the three CORS preflight input headers are preserved. See the complete
+[passthrough header contract](S3_API_IMPLEMENTATION.md#passthrough-request-header-contract).
+
+This outbound filtering does not remove incoming proxy headers from gateway
+auditing or client-IP extraction. Configure `server.trusted_proxies` (or
+`SERVER_TRUSTED_PROXIES`) with only your trusted proxy CIDRs when forwarded
+client IPs should be used; by default the gateway trusts none and uses the
+connection's remote address. This trust setting is independent of backend
+header filtering.
+
+**Workaround for affected releases through 0.12.1:** If passthrough requests
+fail only when an incoming `X-Forwarded-For` reaches a header-mutating backend,
+remove it at the frontend proxy until upgrading to a release containing the
+GH-338 fix. For Caddy:
+
+```caddyfile
+s3-gateway.example.com {
+    reverse_proxy http://gateway:8180 {
+        header_up -X-Forwarded-For
+    }
+}
+```
+
+This workaround loses forwarded client-IP information at the gateway; it is
+not required after the fix. Backend credentials, bucket-creation authorization,
+and encryption configuration do not need to change.
+
 ## Docker Container Design
 
 ### Multi-Stage Build Strategy

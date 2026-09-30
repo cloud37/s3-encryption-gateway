@@ -328,6 +328,41 @@ backend ETags as documented separately below.
 - `x-amz-tagging` (validated: max 10 tags, key ≤128 chars, value ≤256 chars)
 - `x-amz-version-id`
 
+### Passthrough Request Header Contract
+
+`forwardToBackend` is an S3 forwarding boundary, not a generic HTTP proxy.
+Before backend SigV4 signing it builds an independent header set containing:
+
+- `x-amz-*` operation headers (including metadata, checksums, ACLs,
+  expected-owner, requester-pays, and MFA), except client authentication fields.
+- `Content-Type`, `Content-MD5`, `Cache-Control`, `Content-Disposition`,
+  `Content-Encoding`, `Content-Language`, and `Expires`.
+- `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`,
+  `If-Range`, and `Range`.
+- CORS inputs: `Origin`, `Access-Control-Request-Method`, and
+  `Access-Control-Request-Headers`.
+
+Client `Authorization`, `X-Amz-Date`, `X-Amz-Content-Sha256`, and
+`X-Amz-Security-Token` are not copied. Existing SigV2/SigV4 query authentication
+is removed without rewriting the remaining raw S3 subresource selectors.
+The gateway supplies the backend host, derives Content-Length from the buffered
+body, and generates its own authentication fields when backend credentials are
+configured. The same filtering applies to unsigned backend requests.
+
+Everything else is excluded, including `X-Forwarded-*`, `Forwarded`, `Via`,
+`X-Real-IP`, cookies, client request IDs, and tracing headers. Fixed hop-by-hop
+fields and every field nominated by any `Connection` value are removed
+case-insensitively, even if an otherwise allowed S3 header is nominated.
+Filtering does not mutate inbound headers used for gateway auditing and
+trusted-proxy IP extraction. An HTTP transport may add its own unsigned
+transport headers; these are not copied client identity.
+
+The policy covers both the generic passthrough wrapper and the direct
+ListBuckets forwarding call. Proxy responses retain end-to-end S3/CORS headers
+but strip fixed and `Connection`-nominated hop-by-hop fields, including `Trailer`.
+See [reverse-proxy deployment](DEPLOYMENT.md#reverse-proxies-and-backend-load-balancers)
+and [GH-338 testing](TESTING.md#reverse-proxy-header-regressions-gh-338).
+
 ### Added Encryption Metadata
 - `x-amz-meta-encrypted`: "true"
 - `x-amz-meta-encryption-algorithm`: "AES256-GCM" or "ChaCha20-Poly1305"
