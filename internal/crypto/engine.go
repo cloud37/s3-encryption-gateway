@@ -2714,7 +2714,7 @@ func checkedLengthPrefix(length uint64) ([4]byte, error) {
 	if length > math.MaxUint32 {
 		return prefix, fmt.Errorf("length %d exceeds uint32", length)
 	}
-	binary.BigEndian.PutUint32(prefix[:], uint32(length)) // #nosec G115 -- length is bounded by MaxUint32 above
+	binary.BigEndian.PutUint32(prefix[:], uint32(length))
 	return prefix, nil
 }
 

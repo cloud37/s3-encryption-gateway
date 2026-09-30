@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -3498,6 +3499,9 @@ func (h *Handler) writeMPUManifestObject(ctx context.Context, uploadID, bucket, 
 	mpuParts := make([]crypto.MPUPartRecord, len(sortedParts))
 	var totalPlain int64
 	for i, p := range sortedParts {
+		if p.PlainLen < 0 || p.PlainLen > math.MaxInt64-totalPlain {
+			return fmt.Errorf("writeMPUManifest: invalid or overflowing plaintext total")
+		}
 		mpuParts[i] = crypto.MPUPartRecord{
 			PartNumber: p.PartNumber,
 			ETag:       p.ETag,

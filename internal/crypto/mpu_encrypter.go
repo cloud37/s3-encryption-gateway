@@ -451,7 +451,7 @@ func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
 	var aad []byte
 	if r.bound {
 		var aadErr error
-		aad, aadErr = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(part.PartNumber), uint64(r.chunkIdx)) // #nosec G115 -- negative values are rejected above
+		aad, aadErr = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(part.PartNumber), uint64(r.chunkIdx))
 		if aadErr != nil {
 			return aadErr
 		}
@@ -550,7 +550,7 @@ func decryptMPUPartRange(object ObjectContext, bindingID [16]byte, ciphertext []
 		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex)
 		var aad []byte
 		if bound {
-			aad, err = buildObjectAAD(aadMPUV2Chunk, object, bindingID[:], uint64(partNumber), uint64(chunkIndex)) // #nosec G115 -- partNumber is non-negative and chunkIndex is uint32
+			aad, err = buildObjectAAD(aadMPUV2Chunk, object, bindingID[:], uint64(partNumber), uint64(chunkIndex))
 			if err != nil {
 				return nil, err
 			}

@@ -34,7 +34,6 @@ func TestMultipartManifestRejectsInvalidNumericLayout(t *testing.T) {
 				m.Parts[0].PlainLen = 1<<32 + 1
 				m.TotalPlainSize = 1<<32 + 1
 			}},
-			{"overflowing cumulative length", func(m *MultipartManifest) { m.Parts[0].EncLen = math.MaxInt64; m.Parts[1].EncLen = math.MaxInt64 }},
 		} {
 			t.Run(tc.name+string(rune('0'+version)), func(t *testing.T) {
 				m := makeTestManifest(2)
@@ -48,9 +47,32 @@ func TestMultipartManifestRejectsInvalidNumericLayout(t *testing.T) {
 				require.Error(t, err, "programmatic manifest must also be validated")
 				_, err = m.EncRangeForPlaintextRange(0, 0)
 				require.Error(t, err)
+				_, err = m.Marshal()
+				require.Error(t, err, "invalid manifests must not be emitted by writers")
 			})
 		}
 	}
+}
+
+func TestMultipartManifestRejectsCumulativeCiphertextOverflow(t *testing.T) {
+	// Every part is independently valid. Their plaintext sum fits int64, but
+	// the accumulated authentication overhead pushes the ciphertext sum over it.
+	const count = int32(math.MaxInt32)
+	plain := int64(count) * MaxChunkSize
+	enc := plain + int64(count)*mpuAEADTagSize
+	parts := make([]MPUPartRecord, 4096)
+	for i := range parts {
+		parts[i] = MPUPartRecord{PartNumber: int32(i + 1), PlainLen: plain, EncLen: enc, ChunkCount: count}
+	}
+	// Assert independent validity so this regression cannot pass via an earlier
+	// count/length-consistency rejection.
+	single := &MultipartManifest{Version: 1, ChunkSize: MaxChunkSize, TotalPlainSize: plain, Parts: parts[:1]}
+	require.NoError(t, single.validateLayout())
+	m := &MultipartManifest{Version: 1, ChunkSize: MaxChunkSize, TotalPlainSize: plain * int64(len(parts)), Parts: parts}
+	require.Positive(t, m.TotalPlainSize)
+	require.ErrorContains(t, m.validateLayout(), "overflowing part sizes")
+	_, err := m.Marshal()
+	require.ErrorContains(t, err, "overflowing part sizes")
 }
 
 func TestMPURejectsInvalidCoordinatesBeforeCiphertext(t *testing.T) {

@@ -75,6 +75,9 @@ type MultipartManifest struct {
 
 // Marshal serialises the manifest to JSON.
 func (m *MultipartManifest) Marshal() ([]byte, error) {
+	if err := m.validateLayout(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(m)
 }
 
