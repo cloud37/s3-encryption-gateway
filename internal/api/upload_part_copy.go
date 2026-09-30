@@ -881,12 +881,6 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			}
 			pEnd = plaintextSize - 1
 		}
-		if sourceClass.ChunkedInfo.Authenticated && sourceClass.ChunkedInfo.PlaintextSize > 0 {
-			if srcRange == nil {
-				pStart = 0
-				pEnd = int64(sourceClass.ChunkedInfo.PlaintextSize) - 1
-			}
-		}
 		// DecryptRange expects the source reader to contain the FULL encrypted
 		// object — see uploadPartCopyChunked for rationale.
 		r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
