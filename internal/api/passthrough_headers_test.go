@@ -139,8 +139,13 @@ func TestForwardToBackend_HeaderBoundary(t *testing.T) {
 					if got := r.Header.Values(key); len(got) != 0 {
 						t.Errorf("backend received prohibited %s=%q", key, got)
 					}
-					if strings.Contains(r.Header.Get("Authorization"), strings.ToLower(key)+";") || strings.Contains(r.Header.Get("Authorization"), strings.ToLower(key)+",") {
-						t.Errorf("backend signature includes prohibited %s", key)
+					authorization := r.Header.Get("Authorization")
+					_, list, _ := strings.Cut(authorization, "SignedHeaders=")
+					list, _, _ = strings.Cut(list, ",")
+					for _, header := range strings.Split(list, ";") {
+						if header == strings.ToLower(key) {
+							t.Errorf("backend signature includes prohibited %s", key)
+						}
 					}
 				}
 				if r.Header.Get("X-Amz-Security-Token") != "" || strings.Contains(r.Header.Get("Authorization"), "client-access") {
@@ -210,5 +215,38 @@ func TestCopyProxyResponse_ConnectionTokensAndTrailer(t *testing.T) {
 	}
 	if w.Header().Get("X-Amz-Request-Id") != "backend-id" || w.Body.String() != "body" {
 		t.Fatal("end-to-end response changed")
+	}
+}
+
+func TestBackendRequestHeaders_CaseInsensitiveAndIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		in, want http.Header
+	}{
+		{"nil", nil, http.Header{}},
+		{"noncanonical", http.Header{
+			"content-type": {"application/xml"}, "x-amz-meta-user": {"first", "second"},
+			"x-forwarded-for": {"203.0.113.10"}, "AUTHORIZATION": {"client"},
+			"x-amz-date": {"client-date"}, "X-AMZ-CONTENT-SHA256": {"client-hash"}, "x-amz-security-token": {"client-token"},
+		}, http.Header{"Content-Type": {"application/xml"}, "X-Amz-Meta-User": {"first", "second"}}},
+		{"connection-tokens", http.Header{
+			"connection":   {" Content-Type, X-Amz-Meta-Hop ", "ORIGIN"},
+			"CONTENT-TYPE": {"hop-only"}, "x-amz-meta-hop": {"hop-only"}, "origin": {"hop-only"},
+			"x-amz-checksum-sha256": {"end-to-end"}, "trailer": {"checksum"},
+		}, http.Header{"X-Amz-Checksum-Sha256": {"end-to-end"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.in.Clone()
+			got := backendRequestHeaders(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("headers=%v, want %v", got, tc.want)
+			}
+			for key := range got {
+				got[key][0] = "outbound-only"
+			}
+			if !reflect.DeepEqual(tc.in, original) {
+				t.Fatal("outbound headers share mutable input state")
+			}
+		})
 	}
 }

@@ -52,6 +52,7 @@ func TestConformance(t *testing.T) {
 				{"BackendConnection_SchemeLessHTTP", 0, testBackendSchemeLessHTTPRoundTrip},
 				// GH-338: injected frontend headers plus a mutating backend frontend.
 				{"Passthrough_ProxyHeaders_Location", 0, testPassthroughProxyHeadersLocation},
+				{"Passthrough_ProxyHeaders_ListBuckets", 0, testPassthroughProxyHeadersListBuckets},
 				{"Passthrough_ProxyHeaders_CreateBucket", provider.CapBucketManagement, testPassthroughProxyHeadersCreateBucket},
 				{"Passthrough_ProxyHeaders_MultipartListing", provider.CapMultipartUpload, testPassthroughProxyHeadersMultipartListing},
 				{"Passthrough_ProxyHeaders_Tagging", provider.CapObjectTagging, testPassthroughProxyHeadersTagging},

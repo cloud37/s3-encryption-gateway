@@ -46,9 +46,14 @@ func passthroughBackendFrontend(t *testing.T, inst provider.Instance) (string, <
 	observations := make(chan passthroughObservation, 32)
 	proxy := &httputil.ReverseProxy{Rewrite: func(pr *httputil.ProxyRequest) {
 		pr.SetURL(target)
-		// Preserve the gateway-signed host: path-style S3 does not require
-		// replacing it with the destination host (invalidating the signature).
-		pr.Out.Host = pr.In.Host
+		// Verification above proves the gateway's signature survived the
+		// mutation. Re-sign the final hop for the real provider's host so
+		// external frontends can route it just like an ordinary S3 request.
+		// Add the transport-only XFF after signing this final hop.
+		pr.Out.Header.Del("X-Forwarded-For")
+		if err := v4.NewSigner().SignHTTP(pr.Out.Context(), aws.Credentials{AccessKeyID: inst.AccessKey, SecretAccessKey: inst.SecretKey}, pr.Out, pr.Out.Header.Get("X-Amz-Content-Sha256"), "s3", inst.Region, time.Now()); err != nil {
+			t.Errorf("sign backend frontend final hop: %v", err)
+		}
 		pr.Out.Header.Set("X-Forwarded-For", pr.In.Header.Get("X-Forwarded-For"))
 	}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +207,25 @@ func testPassthroughProxyHeadersMultipartListing(t *testing.T, inst provider.Ins
 	var result struct{ XMLName xml.Name }
 	if resp.StatusCode != http.StatusOK || xml.Unmarshal(data, &result) != nil || result.XMLName.Local != "ListMultipartUploadsResult" {
 		t.Fatalf("ListMultipartUploads: status=%d body=%s", resp.StatusCode, data)
+	}
+}
+
+func testPassthroughProxyHeadersListBuckets(t *testing.T, inst provider.Instance) {
+	backend := newS3CompatClient(t, inst)
+	if _, err := backend.ListBuckets(t.Context(), &s3.ListBucketsInput{}); err != nil {
+		if strings.Contains(err.Error(), "AccessDenied") || strings.Contains(err.Error(), "Forbidden") {
+			t.Skipf("backend credential does not permit account-wide ListBuckets: %v", err)
+		}
+		t.Fatal(err)
+	}
+	c := config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey, Buckets: []string{inst.Bucket}}
+	gw, observations := passthroughGateway(t, inst, c)
+	resp, data := passthroughRequest(t, gw, observations, c, "GET", "/", nil, nil, true)
+	var result struct {
+		Buckets []struct{ Name string } `xml:"Buckets>Bucket"`
+	}
+	if resp.StatusCode != http.StatusOK || xml.Unmarshal(data, &result) != nil || len(result.Buckets) != 1 || result.Buckets[0].Name != inst.Bucket {
+		t.Fatalf("ListBuckets filtered inventory: status=%d body=%s", resp.StatusCode, data)
 	}
 }
 

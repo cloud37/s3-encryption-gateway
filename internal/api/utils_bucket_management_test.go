@@ -42,7 +42,7 @@ func TestHandlePassthroughWithBodyLimit_BodyAndHeaders(t *testing.T) {
 		if !bytes.Equal(got, body) {
 			t.Errorf("body=%q", got)
 		}
-		if r.Header.Get("X-Test") != "yes" {
+		if r.Header.Get("Content-Type") != "application/xml" {
 			t.Errorf("header missing")
 		}
 		w.Header().Set("X-Reply", "yes")
@@ -51,7 +51,7 @@ func TestHandlePassthroughWithBodyLimit_BodyAndHeaders(t *testing.T) {
 	defer b.Close()
 	h := managementHandler(t, b.URL, true)
 	req := httptest.NewRequest(http.MethodPut, "/abc?test=preserved", bytes.NewReader(body))
-	req.Header.Set("X-Test", "yes")
+	req.Header.Set("Content-Type", "application/xml")
 	w := httptest.NewRecorder()
 	h.handlePassthroughWithBodyLimit(w, req, "CreateBucket", "abc", "", 64)
 	if w.Code != http.StatusCreated || w.Header().Get("X-Reply") != "yes" {

@@ -119,18 +119,72 @@ var hopByHopHeaders = []string{
 	"Proxy-Authenticate",
 	"Proxy-Authorization",
 	"Te",
+	"Trailer",
 	"Trailers",
 	"Transfer-Encoding",
 	"Upgrade",
+}
+
+// removeHopByHopHeaders also removes every field nominated by Connection,
+// including otherwise end-to-end S3 headers. Match case-insensitively so this
+// boundary is safe for both net/http requests and programmatically built ones.
+func removeHopByHopHeaders(headers http.Header) {
+	blocked := make(map[string]struct{}, len(hopByHopHeaders))
+	for _, name := range hopByHopHeaders {
+		blocked[strings.ToLower(name)] = struct{}{}
+	}
+	for name, values := range headers {
+		if !strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			for _, token := range strings.Split(value, ",") {
+				if token = strings.TrimSpace(token); token != "" {
+					blocked[strings.ToLower(token)] = struct{}{}
+				}
+			}
+		}
+	}
+	for name := range headers {
+		if _, drop := blocked[strings.ToLower(name)]; drop {
+			delete(headers, name)
+		}
+	}
+}
+
+// backendRequestHeaders is an S3 request allow-list, not a generic HTTP proxy
+// policy. Proxy identity, cookies, tracing, and arbitrary client headers must
+// never reach the backend or become part of its SigV4 signature. Authentication
+// is regenerated below; body framing belongs to the new outbound request.
+func backendRequestHeaders(incoming http.Header) http.Header {
+	clean := incoming.Clone()
+	removeHopByHopHeaders(clean)
+	result := make(http.Header)
+	for name, values := range clean {
+		lower := strings.ToLower(name)
+		switch lower {
+		case "authorization", "x-amz-content-sha256", "x-amz-date", "x-amz-security-token":
+			continue
+		case "content-type", "content-md5", "cache-control", "content-disposition", "content-encoding", "content-language", "expires",
+			"if-match", "if-none-match", "if-modified-since", "if-unmodified-since", "if-range", "range",
+			"origin", "access-control-request-method", "access-control-request-headers":
+			// S3 content, conditional, range, and CORS request semantics.
+		default:
+			if !strings.HasPrefix(lower, "x-amz-") {
+				continue
+			}
+		}
+		canonical := http.CanonicalHeaderKey(name)
+		result[canonical] = append(result[canonical], values...)
+	}
+	return result
 }
 
 // copyProxyResponse copies the status code, filtered headers, and body from an
 // upstream HTTP response to the client ResponseWriter. Hop-by-hop headers are
 // stripped before copying.
 func copyProxyResponse(w http.ResponseWriter, resp *http.Response) (int64, error) {
-	for _, h := range hopByHopHeaders {
-		resp.Header.Del(h)
-	}
+	removeHopByHopHeaders(resp.Header)
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
@@ -142,10 +196,11 @@ func copyProxyResponse(w http.ResponseWriter, resp *http.Response) (int64, error
 
 // forwardToBackend creates and sends a request to the configured S3 backend.
 // It builds the backend URL from h.config.Backend.Endpoint, preserves the
-// original path and query, copies all headers (replacing Host with the backend
-// hostname), and sets Content-Length if present. A minimal http.Client with
-// TLS 1.2 minimum is used. The raw *http.Response is returned directly without
-// writing to the ResponseWriter.
+// original path and query, keeps only end-to-end S3 request headers, replaces
+// Host with the backend hostname, and derives Content-Length from the body.
+// Sanitization happens before signing without modifying inbound headers.
+// A minimal http.Client with TLS 1.2 minimum is used. The raw *http.Response is
+// returned directly without writing to the ResponseWriter.
 func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 	if h.config == nil || h.config.Backend.Endpoint == "" {
 		return nil, ErrBackendNotConfigured
@@ -173,20 +228,15 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proxy request: %w", err)
 	}
-	proxyReq.Header = r.Header.Clone()
+	proxyReq.Header = backendRequestHeaders(r.Header)
 	proxyReq.Host = u.Host
-	proxyReq.Header.Set("Host", u.Host)
-	// Strip client authentication artifacts so the gateway can re-sign with its
+	// backendRequestHeaders strips client authentication headers; also remove
+	// query authentication artifacts so the gateway can re-sign with its
 	// own backend credentials. Forwarding the client's Authorization header (or
 	// presigned query parameters) to the backend is never correct: the client's
 	// signature is bound to the original Host header and will fail against the
 	// backend. V1.0-AUTH-1 removed useClientCredentials; the gateway always
 	// authenticates to the backend with configured credentials.
-	proxyReq.Header.Del("Authorization")
-	proxyReq.Header.Del("X-Amz-Content-Sha256")
-	proxyReq.Header.Del("X-Amz-Date")
-	proxyReq.Header.Del("X-Amz-Security-Token")
-
 	if proxyReq.URL != nil {
 		presignedParams := map[string]struct{}{
 			// SigV2 query authentication must not reach the backend alongside the
@@ -206,9 +256,7 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 		proxyReq.URL.RawQuery = stripClientAuthQuery(proxyReq.URL.RawQuery, presignedParams)
 	}
 
-	if len(bodyBytes) > 0 {
-		proxyReq.ContentLength = int64(len(bodyBytes))
-	}
+	proxyReq.ContentLength = int64(len(bodyBytes))
 
 	if h.config.Backend.AccessKey != "" {
 		bodyHash := sha256.Sum256(bodyBytes)
