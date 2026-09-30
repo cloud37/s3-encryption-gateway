@@ -101,7 +101,7 @@ jobs:
 
       - name: Set up ORAS
         if: steps.version_check.outputs.already_released == 'false'
-        uses: oras-project/setup-oras@v2.0.1
+        uses: oras-project/setup-oras@v2.0.2
 
       - name: Extract changelog entry
         if: steps.version_check.outputs.already_released == 'false'
