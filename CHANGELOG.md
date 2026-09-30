@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   remain available for gateway auditing and trusted-proxy IP extraction.
 - **Proxy response header hygiene:** Strip the standard `Trailer` header and
   all fields nominated by `Connection`, in addition to fixed hop-by-hop fields.
+- **Encrypted-MPU UploadPartCopy range bounds:** Retain the validated/resolved
+  plaintext size when selecting a full chunked-source range. Remove a redundant
+  unchecked `uint64`-to-`int64` conversion that could overwrite the bounded range
+  end, fixing the CI gosec G115 finding without adding a suppression.
 
 ### Tests and documentation
 
