@@ -288,30 +288,15 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 		}
 	}
 
-	// Reload policies on every SIGHUP. Both file-sourced and env-sourced
-	// policies are reloaded together to detect changes in either source.
-	// Reset() prevents accumulation across reload cycles.
+	// Reload both policy sources through the shared runtime entry point.
 	if a.policyManager == nil {
 		a.policyManager = config.NewPolicyManager()
 	}
-	a.policyManager.Reset()
-	policyFileCount := 0
-	if len(newConfig.PolicyFiles) > 0 {
-		if err := a.policyManager.LoadPolicies(newConfig.PolicyFiles); err != nil {
-			a.logger.WithError(err).Warn("Failed to reload policy files during config change")
-			changes = append(changes, "policy_files: reload failed")
-		} else {
-			policyFileCount = len(newConfig.PolicyFiles)
-		}
-	}
-	if err := a.policyManager.LoadPoliciesFromEnv(); err != nil {
-		a.logger.WithError(err).Warn("Failed to reload policies from environment during config change")
-		changes = append(changes, "policy_env: reload failed")
-	}
-	if policyFileCount > 0 {
-		changes = append(changes, fmt.Sprintf("policy_files: reloaded (%d files)", policyFileCount))
+	if err := a.policyManager.ReloadPolicies(newConfig.PolicyFiles); err != nil {
+		a.logger.WithError(err).Warn("Failed to reload policies during config change")
+		changes = append(changes, "policies: reload failed")
 	} else {
-		changes = append(changes, "policy_files: cleared")
+		changes = append(changes, "policies: reloaded")
 	}
 
 	// Update the config reference

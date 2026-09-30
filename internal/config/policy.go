@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,10 +16,10 @@ import (
 
 // PolicyConfig holds the structure for a policy file
 type PolicyConfig struct {
-	ID          string             `yaml:"id"`
-	Buckets     []string           `yaml:"buckets"` // Glob patterns for bucket names
-	Encryption  *EncryptionConfig  `yaml:"encryption,omitempty"`
-	RateLimit   *RateLimitConfig   `yaml:"rate_limit,omitempty"`
+	ID         string            `yaml:"id"`
+	Buckets    []string          `yaml:"buckets"` // Glob patterns for bucket names
+	Encryption *EncryptionConfig `yaml:"encryption,omitempty"`
+	RateLimit  *RateLimitConfig  `yaml:"rate_limit,omitempty"`
 	// RequireEncryption, when true, mandates that every object stored in
 	// matching buckets must be encrypted. It enables hard-refusal semantics
 	// at policy-relevant points (e.g. UploadPartCopy from a plaintext source
@@ -29,7 +30,7 @@ type PolicyConfig struct {
 	// objects in matching buckets as plain bytes without AEAD encryption.
 	// Mutually exclusive with RequireEncryption: true.
 	// Also implies EncryptMultipartUploads = false.
-	DisableEncryption bool `yaml:"disable_encryption,omitempty"`
+	DisableEncryption  bool `yaml:"disable_encryption,omitempty"`
 	DisallowLockBypass bool `yaml:"disallow_lock_bypass,omitempty"`
 	// EncryptMultipartUploads opts this bucket into the encrypted multipart
 	// upload path (ADR 0009). When true a per-upload DEK is generated at
@@ -50,6 +51,22 @@ func NewPolicyManager() *PolicyManager {
 	return &PolicyManager{
 		policies: make([]*PolicyConfig, 0),
 	}
+}
+
+// ReloadPolicies reloads both policy sources for a running gateway.
+func (pm *PolicyManager) ReloadPolicies(patterns []string) error {
+	return pm.reloadPolicies(patterns, (*PolicyManager).LoadPoliciesFromEnv)
+}
+
+// Keep the source boundary explicit so tests can coordinate readers while the
+// environment source is being loaded without sleeps or reload stress loops.
+func (pm *PolicyManager) reloadPolicies(patterns []string, loadEnv func(*PolicyManager) error) error {
+	pm.Reset()
+	var fileErr error
+	if len(patterns) > 0 {
+		fileErr = pm.LoadPolicies(patterns)
+	}
+	return errors.Join(fileErr, loadEnv(pm))
 }
 
 // LoadPolicies loads policies from the specified file patterns

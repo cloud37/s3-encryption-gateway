@@ -220,6 +220,8 @@ func TestConformance(t *testing.T) {
 				{"BypassEncryption_MixedBypassAndEncrypt", 0, testBypassEncryption_MultiPolicy_MixedBypassAndEncrypt},
 				{"BypassEncryption_ConflictRejected", 0, testBypassEncryption_ConflictRejected},
 				{"BypassEncryption_ResetClearsPolicies", 0, testBypassEncryption_ResetClearsPolicies},
+				{"PolicyReload_FailedLoadPreservesBypass", 0, testPolicyReload_FailedLoadPreservesBypass},
+				{"PolicyReload_ConcurrentBypassWrites", 0, testPolicyReload_ConcurrentBypassWrites},
 
 				// V1.0-CONFIG-1 — Restic bypass-encryption conformance (issue #198).
 				// These spin up a real restic/restic container and exercise the
