@@ -141,6 +141,40 @@ than relocated with a backend-native copy or rename.
 
 ## Supported Re-encryption Patterns
 
+### Recovering GH-339 bypass-bucket miswrites
+
+On releases affected by GH-339, a configuration reload could store gateway
+ciphertext in a `disable_encryption` bucket while returning a successful PUT.
+After the bypass policy returns, GET fails with 409
+`EncryptionConfigurationMismatch`. Installing the fix prevents new miswrites
+but does not rewrite existing ones.
+
+1. Pause application writes and avoid reloads on affected gateway instances.
+   Preserve a backend backup/version of each suspect object **and its complete
+   metadata** before attempting recovery.
+2. Inventory suspect objects using backend encryption markers or the read-only
+   `s3eg-cli`. A larger listing size alone is not proof of encryption.
+3. Use an isolated, access-controlled, encryption-enabled gateway reader with
+   the original encryption settings/keys and the original bucket/key identity
+   to download each affected object. Verify the recovered application bytes
+   with the application's own integrity checks.
+4. PUT those verified bytes through a fixed gateway with the intended bypass
+   policy, retaining required user/content metadata. Use distinct reader and
+   writer endpoints and an explicit download/upload; a server-side copy or
+   no-op sync is not a substitute for this recovery.
+5. Verify byte-identical backend content, absence of gateway encryption markers,
+   and successful gateway GET/HEAD before resuming the application.
+
+For restic, recovered bytes are still **restic-encrypted** pack data; bypassing
+gateway encryption does not remove application encryption. Validate the
+repository after repair. Do not strip gateway encryption metadata, serve raw
+ciphertext as if it were recovered data, or relocate ciphertext to another
+bucket/key: authenticated location binding must remain valid during reading.
+
+The older mismatch error text mentions a "migration tool", but `s3eg-migrate`
+has been removed and `s3eg-cli` is read-only. Recovery requires the controlled
+GET-through-reader → PUT-through-bypass-writer workflow above.
+
 ### Standard re-encryption (GET → PUT)
 
 ```bash

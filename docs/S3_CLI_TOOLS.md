@@ -642,7 +642,13 @@ kubectl exec deploy/s3-encryption-gateway -- kill -HUP 1
 kubectl logs deploy/s3-encryption-gateway | grep "Configuration reloaded"
 ```
 
-Invalid reloads are rejected and the prior policy remains active.
+Invalid policy loads reject the reload before changing live credentials or
+runtime gates, retaining the complete previous bucket-policy set (GH-339).
+File and environment policies are published together; policy files are not
+independently watched, so use SIGHUP after editing them when hot reload is
+enabled. This does not make every runtime component one global transaction.
+See [atomic policy reloads](POLICY_CONFIGURATION.md#atomic-reloads) and
+[recovery of earlier bypass-bucket miswrites](MIGRATION.md#recovering-gh-339-bypass-bucket-miswrites).
 
 ---
 

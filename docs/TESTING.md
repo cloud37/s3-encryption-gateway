@@ -566,6 +566,49 @@ Manifest overflow coverage uses individually consistent parts whose cumulative
 ciphertext length exceeds int64. Python and Go parser regressions reject empty
 reasons, duplicate rules, and multiple directives in a single comment.
 
+### Atomic bucket-policy reload regressions (GH-339)
+
+- **Tier 1:** `internal/config/policy_reload_test.go` pauses a reload at the
+  file/environment source boundary using channels. With environment-only and
+  combined sources, readers must retain the complete previous policy set;
+  no timing loop or Docker fixture is needed to expose the original bug.
+  Cases cover malformed/unreadable files, invalid globs, validation failures,
+  a late invalid environment entry, all-or-nothing individual loaders,
+  precedence, replacement/removal, nonaccumulation, and concurrent policy
+  lookups. `cmd/server/policy_reload_test.go` checks publication on the shared
+  manager, retained selected policy objects, preparation before live mutation,
+  and a real credentials-file replacement driving the production reload
+  callback. The watcher test signals callback completion rather than guessing
+  a sleep duration. Policy failures retain credentials and current config.
+- **Tier 2:** `test/conformance/policy_reload_test.go` registers
+  `PolicyReload_FailedLoadPreservesBypass` and
+  `PolicyReload_ConcurrentBypassWrites` with capability `0` in the ordinary
+  provider matrix. The first deterministically reproduces a failed reload
+  followed by a successful PUT, then checks raw backend bytes/markers and
+  gateway reads after restoring the intended policy. The second checks a
+  positive control and 32 bounded concurrent PUTs during reload, then backend
+  bytes/length, GET status/body/length, and ListObjectsV2 sizes. It is
+  supplemental concurrency coverage, not the sole reproduction gate or a
+  timed load workload. Both use the same snapshot-loading/publication path as
+  the server, with Testcontainers-managed providers and standard
+  Docker-unavailable skips. No provider-name branching, global environment
+  mutation in provider cases, extra container, or new CI target is needed.
+
+```bash
+# Repeat deterministic Tier 1 regressions under the race detector.
+go test -race ./internal/config ./cmd/server -count=20 \
+  -run 'Test(PolicyReload|PolicyLoad_Failure|ConfigApplier_Policy|ConfigApplier_CredentialFailure|ConfigReloader_CredentialsFilePolicyFailure)'
+
+# Tier 2: both cases on all four local providers.
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/PolicyReload_'
+```
+
+These focused commands supplement the full Tier 1, local conformance, and
+isolation gates; they do not replace them. Reload publication and operator
+recovery are documented in [Policy Configuration](POLICY_CONFIGURATION.md).
+
 ---
 
 ## How to add a new public S3 provider (plug-in recipe)

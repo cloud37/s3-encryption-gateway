@@ -18,7 +18,7 @@ The following ListBuckets behavior applies to every credential combination:
 | omitted or `rw` | `create`, `delete`, or both | absent | Same routing as no lifecycle grants |
 | omitted or `rw` | any valid grants | explicitly empty | Forward, then return HTTP 200 with an empty inventory |
 
-Lifecycle grants affect bucket mutation only; they do not affect ListBuckets authorization or routing. Credential permissions and bucket scopes never select the backend endpoint or transport. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` hot-reload atomically; invalid changes keep the prior active policy. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
+Lifecycle grants affect bucket mutation only; they do not affect ListBuckets authorization or routing. Credential permissions and bucket scopes never select the backend endpoint or transport. `PROXIED_BUCKET` further narrows every credential scope. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` reload credentials using an atomic credential snapshot. Bucket policies are prepared separately and published as one complete file/environment set; invalid policy loads reject the reload before changing live credentials or runtime gates (GH-339). These are per-component snapshots, not one global transaction. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed. See [policy reload behavior](POLICY_CONFIGURATION.md#atomic-reloads).
 
 ## Reverse Proxies and Backend Load Balancers
 

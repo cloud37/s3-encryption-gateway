@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Atomic bucket-policy reloads (GH-339):** SIGHUP and main-config or
+  credentials-file reloads build and validate the complete file/environment
+  policy set before replacing it under one lock. Requests no longer see an
+  empty or file-only policy set, preventing silently encrypted writes to
+  `disable_encryption` buckets. Failed policy loads retain the previous set and
+  reject the reload before live credentials or runtime gates are changed.
+  Source precedence and intentional policy removal remain unchanged. This fix
+  prevents new miswrites; previously affected objects need a controlled rewrite.
 - **Passthrough signing behind reverse proxies (GH-338):** Bucket location,
   creation/configuration, ListBuckets, multipart-upload listing, object
   tagging/ACL/restore, and CORS forwarding no longer sign incoming proxy
@@ -37,6 +45,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Tests and documentation
 
+- Added deterministic Tier 1 policy-source-boundary, failed-load,
+  shared-manager, concurrent-lookup, and real credentials-file watcher
+  regressions. Added provider-neutral Tier 2 failed-reload and concurrent-write
+  checks for plaintext backend bytes, encryption markers, GET responses, and
+  listing sizes. Documented reload publication, failure handling, legacy
+  workarounds, and recovery precautions in the policy and testing guides.
 - Added Tier 1 production-router regressions and capability-gated,
   provider-neutral Tier 2 proxy-header conformance tests. An in-process backend
   frontend verifies signatures before and after appending `X-Forwarded-For`,
