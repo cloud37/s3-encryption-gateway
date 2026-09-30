@@ -50,6 +50,13 @@ func TestConformance(t *testing.T) {
 				{"CompatibleHealthAliases", 0, testCompatibleHealthAliases},
 				{"CompatibleHealthAliasNearMatchesRequireAuth", 0, testCompatibleHealthAliasNearMatchesRequireAuth},
 				{"BackendConnection_SchemeLessHTTP", 0, testBackendSchemeLessHTTPRoundTrip},
+				// GH-338: injected frontend headers plus a mutating backend frontend.
+				{"Passthrough_ProxyHeaders_Location", 0, testPassthroughProxyHeadersLocation},
+				{"Passthrough_ProxyHeaders_CreateBucket", provider.CapBucketManagement, testPassthroughProxyHeadersCreateBucket},
+				{"Passthrough_ProxyHeaders_MultipartListing", provider.CapMultipartUpload, testPassthroughProxyHeadersMultipartListing},
+				{"Passthrough_ProxyHeaders_Tagging", provider.CapObjectTagging, testPassthroughProxyHeadersTagging},
+				{"Passthrough_ProxyHeaders_CORS", provider.CapBucketCors, testPassthroughProxyHeadersCORS},
+				{"Passthrough_ProxyHeaders_CORSForwarding", 0, testPassthroughProxyHeadersCORSForwarding},
 				{"BackendTLS_CustomCARoundTrip", provider.CapBackendTLSFixture, testBackendTLSCustomCARoundTrip},
 				{"BackendTLS_InsecureSkipVerifyRoundTrip", provider.CapBackendTLSFixture, testBackendTLSInsecureSkipVerifyRoundTrip},
 				{"BackendTLS_UntrustedCertificateRejected", provider.CapBackendTLSFixture, testBackendTLSUntrustedCertificateRejected},
