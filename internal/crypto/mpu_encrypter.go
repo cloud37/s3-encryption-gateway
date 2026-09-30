@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 )
 
@@ -40,9 +41,10 @@ type mpuEncryptReader struct {
 	chunkIdx  uint32
 
 	// flow control
-	srcDone bool // source exhausted
-	eof     bool // all ciphertext consumed
-	err     error
+	srcDone   bool  // source exhausted
+	remaining int64 // source bytes still required by the declared plaintext length
+	eof       bool  // all ciphertext consumed
+	err       error
 }
 
 // plainChunkPool reuses per-chunk plaintext buffers to reduce GC pressure.
@@ -90,6 +92,9 @@ func newMPUPartEncryptReader(ctx context.Context, object ObjectContext, bindingI
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
+	if partNumber < 1 || partNumber > 10000 || plainLen < 0 || chunkSize > MaxChunkSize {
+		return nil, 0, fmt.Errorf("mpu_encrypter: invalid part number, plaintext length, or chunk size")
+	}
 
 	aead, err := createMPUAEADCipher(algorithm, dek)
 	if err != nil {
@@ -104,16 +109,14 @@ func newMPUPartEncryptReader(ctx context.Context, object ObjectContext, bindingI
 	//
 	// When plainLen == N * chunkSize exactly, there are N full chunks and no
 	// trailing partial chunk — fullChunks × (chunkSize + tagSize) is the total.
-	var encLen int64
-	if plainLen > 0 {
-		fullChunks := plainLen / int64(chunkSize)
-		rem := plainLen % int64(chunkSize)
-		encLen = fullChunks * int64(chunkSize+tagSize)
-		if rem > 0 {
-			// Trailing partial chunk.
-			encLen += rem + int64(tagSize)
-		}
+	count := plainLen / int64(chunkSize)
+	if plainLen%int64(chunkSize) != 0 {
+		count++
 	}
+	if count > math.MaxInt32 || count > (math.MaxInt64-plainLen)/int64(tagSize) {
+		return nil, 0, fmt.Errorf("mpu_encrypter: chunk count or ciphertext length overflow")
+	}
+	encLen := plainLen + count*int64(tagSize)
 
 	// Get a pooled plaintext buffer when chunkSize matches the pool size.
 	var plainBuf []byte
@@ -136,13 +139,12 @@ func newMPUPartEncryptReader(ctx context.Context, object ObjectContext, bindingI
 		dek:    dekCopy,
 		hash:   uploadIDHash,
 		prefix: ivPrefix,
-		part:   uint32(partNumber), // #nosec G115 — S3 part number ≤ 10000, fits uint32
+		part:   uint32(partNumber),
 		csz:    chunkSize,
 		object: object, binding: bindingID, bound: bound,
 
-		plainBuf: plainBuf,
-		srcDone:  plainLen == 0,
-		eof:      plainLen == 0,
+		plainBuf:  plainBuf,
+		remaining: plainLen,
 	}, encLen, nil
 }
 
@@ -178,26 +180,30 @@ func (r *mpuEncryptReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 
-		// Read one chunk from the source (may be short if near EOF).
-		n, readErr := io.ReadFull(r.src, r.plainBuf)
-		if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+		if r.remaining == 0 {
+			var extra [1]byte
+			n, err := io.ReadFull(r.src, extra[:])
+			if n != 0 || err != io.EOF {
+				r.err = fmt.Errorf("mpu_encrypter: source exceeds declared plaintext length")
+				r.returnPlainBuf()
+				return total, r.err
+			}
+			r.srcDone = true
+			continue
+		}
+		if r.chunkIdx >= math.MaxInt32 {
+			r.err = fmt.Errorf("mpu_encrypter: chunk index overflow")
+			r.returnPlainBuf()
+			return total, r.err
+		}
+		want := min(int64(len(r.plainBuf)), r.remaining)
+		n, readErr := io.ReadFull(r.src, r.plainBuf[:want])
+		if readErr != nil {
 			r.err = fmt.Errorf("mpu_encrypter: read source: %w", readErr)
 			r.returnPlainBuf()
 			return total, r.err
 		}
-		if readErr == io.ErrUnexpectedEOF || readErr == io.EOF {
-			// Short or empty read — this is the final (possibly partial) chunk.
-			r.srcDone = true
-			if n == 0 {
-				// Source was already at EOF; no more chunks.
-				r.eof = true
-				r.returnPlainBuf()
-				if total > 0 {
-					return total, nil
-				}
-				return 0, io.EOF
-			}
-		}
+		r.remaining -= int64(n)
 
 		iv := DeriveMultipartIV(r.dek, r.hash, r.prefix, r.part, r.chunkIdx)
 		var aad []byte
@@ -338,6 +344,9 @@ func newMPUDecryptReader(object ObjectContext, bindingID [16]byte, src io.Reader
 	if manifest == nil {
 		return nil, fmt.Errorf("mpu: nil manifest")
 	}
+	if err := manifest.validateLayout(); err != nil {
+		return nil, err
+	}
 	if len(manifest.Parts) == 0 {
 		return bytes.NewReader(nil), nil
 	}
@@ -350,6 +359,11 @@ func newMPUDecryptReader(object ObjectContext, bindingID [16]byte, src io.Reader
 	dekCopy := make([]byte, len(dek))
 	copy(dekCopy, dek)
 
+	encBuf := encBufPool.Get().([]byte)
+	if manifest.ChunkSize+mpuAEADTagSize > cap(encBuf) {
+		encBufPool.Put(encBuf)
+		encBuf = make([]byte, manifest.ChunkSize+mpuAEADTagSize)
+	}
 	return &mpuDecryptReader{
 		src:          src,
 		manifest:     manifest,
@@ -357,7 +371,7 @@ func newMPUDecryptReader(object ObjectContext, bindingID [16]byte, src io.Reader
 		uploadIDHash: uploadIDHash,
 		ivPrefix:     ivPrefix,
 		gcm:          aead,
-		encBuf:       encBufPool.Get().([]byte),
+		encBuf:       encBuf,
 		object:       object, binding: bindingID, bound: bound,
 	}, nil
 }
@@ -398,6 +412,10 @@ func (r *mpuDecryptReader) Read(p []byte) (int, error) {
 		}
 
 		part := r.manifest.Parts[r.partIdx]
+		if part.ChunkCount == 0 {
+			r.partIdx++
+			continue
+		}
 		if err := r.decryptNextChunk(part); err != nil {
 			r.err = err
 			r.returnEncBuf()
@@ -410,6 +428,9 @@ func (r *mpuDecryptReader) Read(p []byte) (int, error) {
 // decryptNextChunk reads the next encrypted chunk from src, authenticates it,
 // and stores the plaintext in r.buf.
 func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
+	if part.PartNumber < 1 || part.PartNumber > 10000 || r.chunkIdx < 0 || r.chunkIdx >= part.ChunkCount {
+		return fmt.Errorf("mpu_decrypt: invalid part or chunk index")
+	}
 	isLastChunk := r.chunkIdx == part.ChunkCount-1
 
 	var encSize int
@@ -426,12 +447,9 @@ func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
 		return fmt.Errorf("mpu_decrypt: part %d chunk %d: read: %w", part.PartNumber, r.chunkIdx, err)
 	}
 
-	iv := DeriveMultipartIV(r.dek, r.uploadIDHash, r.ivPrefix, uint32(part.PartNumber), uint32(r.chunkIdx)) // #nosec G115 — partNumber ≤ 10000, chunkIdx bounded by part size
+	iv := DeriveMultipartIV(r.dek, r.uploadIDHash, r.ivPrefix, uint32(part.PartNumber), uint32(r.chunkIdx))
 	var aad []byte
 	if r.bound {
-		if part.PartNumber < 0 || r.chunkIdx < 0 {
-			return fmt.Errorf("mpu_decrypt: negative part or chunk index")
-		}
 		var aadErr error
 		aad, aadErr = buildObjectAAD(aadMPUV2Chunk, r.object, r.binding[:], uint64(part.PartNumber), uint64(r.chunkIdx)) // #nosec G115 -- negative values are rejected above
 		if aadErr != nil {
@@ -460,7 +478,9 @@ func (r *mpuDecryptReader) decryptNextChunk(part MPUPartRecord) error {
 
 func (r *mpuDecryptReader) returnEncBuf() {
 	if r.encBuf != nil {
-		encBufPool.Put(r.encBuf)
+		if cap(r.encBuf) == DefaultChunkSize+mpuAEADTagSize {
+			encBufPool.Put(r.encBuf)
+		}
 		r.encBuf = nil
 	}
 	// Zero DEK to prevent key material lingering in heap after the reader is done.
@@ -502,6 +522,9 @@ func decryptMPUPartRange(object ObjectContext, bindingID [16]byte, ciphertext []
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
+	if partNumber < 1 || partNumber > 10000 || startChunkIdx < 0 || chunkSize > MaxChunkSize {
+		return nil, fmt.Errorf("mpu_encrypter: invalid part number, chunk index, or chunk size")
+	}
 
 	aead, err := createMPUAEADCipher(algorithm, dek)
 	if err != nil {
@@ -512,21 +535,21 @@ func decryptMPUPartRange(object ObjectContext, bindingID [16]byte, ciphertext []
 	var (
 		out        []byte
 		offset     int
-		chunkIndex = uint32(startChunkIdx) // #nosec G115 — startChunkIdx ≤ total chunks (\u003c 2^32)
+		chunkIndex = uint32(startChunkIdx)
 	)
 
 	for offset < len(ciphertext) {
+		if chunkIndex >= math.MaxInt32 {
+			return nil, fmt.Errorf("mpu_encrypter: chunk index overflow")
+		}
 		end := offset + encChunkSize
 		if end > len(ciphertext) {
 			end = len(ciphertext)
 		}
 		encChunk := ciphertext[offset:end]
-		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex) // #nosec G115 — partNumber ≤ 10000, chunkIndex already uint32
+		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex)
 		var aad []byte
 		if bound {
-			if partNumber < 0 {
-				return nil, fmt.Errorf("mpu_encrypter: negative part number")
-			}
 			aad, err = buildObjectAAD(aadMPUV2Chunk, object, bindingID[:], uint64(partNumber), uint64(chunkIndex)) // #nosec G115 -- partNumber is non-negative and chunkIndex is uint32
 			if err != nil {
 				return nil, err
@@ -568,6 +591,9 @@ func DecryptMPUPart(
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
+	if partNumber < 1 || partNumber > 10000 || chunkSize > MaxChunkSize {
+		return nil, fmt.Errorf("mpu_encrypter: invalid part number or chunk size")
+	}
 
 	aead, err := createMPUAEADCipher(algorithm, dek)
 	if err != nil {
@@ -582,12 +608,15 @@ func DecryptMPUPart(
 	)
 
 	for offset < len(ciphertext) {
+		if chunkIndex >= math.MaxInt32 {
+			return nil, fmt.Errorf("mpu_encrypter: chunk index overflow")
+		}
 		end := offset + encChunkSize
 		if end > len(ciphertext) {
 			end = len(ciphertext)
 		}
 		encChunk := ciphertext[offset:end]
-		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex) // #nosec G115 — partNumber ≤ 10000, chunkIndex already uint32
+		iv := DeriveMultipartIV(dek, uploadIDHash, ivPrefix, uint32(partNumber), chunkIndex)
 		plain, err := aead.Open(nil, iv[:], encChunk, nil)
 		if err != nil {
 			return nil, fmt.Errorf("mpu_encrypter: chunk %d auth failure in part %d: %w", chunkIndex, partNumber, err)

@@ -168,7 +168,10 @@ func TestBufferedLegacy_DualRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	aadMeta := map[string]string{MetaOriginalSize: "6", "Content-Type": ""}
-	legacyAAD := buildAAD(AlgorithmAES256GCM, salt, iv, aadMeta)
+	legacyAAD, err := buildAAD(AlgorithmAES256GCM, salt, iv, aadMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := aead.(cipher.AEAD).Seal(nil, iv, []byte("legacy"), legacyAAD)
 	metadata := map[string]string{MetaEncrypted: "true", MetaAlgorithm: AlgorithmAES256GCM, MetaKeySalt: encodeBase64(salt), MetaIV: encodeBase64(iv), MetaOriginalSize: "6", MetaKDFParams: FormatKDFParams(e.defaultKDFParams())}
 	plain, _, err := eng.Decrypt(context.Background(), object, bytes.NewReader(body), metadata)

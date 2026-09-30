@@ -1025,7 +1025,8 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 	// PERF-1 plan). encReader is now a streaming mpuEncryptReader (Phase G);
 	// buffering it here to obtain a *bytes.Reader is unavoidable without
 	// backend streaming-checksum support (D-1, deferred). The allocation is
-	// bounded by encLen (≤ MaxPartBuffer; enforced upstream in the handler).
+	// bounded by the validated plaintext source/copy-range cap plus per-chunk
+	// authentication overhead; the UploadPart MaxPartBuffer setting is separate.
 	encBytes, err := io.ReadAll(encReader)
 	if err != nil {
 		return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: read re-encrypted part: %w", err)

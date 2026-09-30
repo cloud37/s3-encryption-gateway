@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 )
 
 const (
@@ -37,7 +38,7 @@ type MPUPartRecord struct {
 // completed multipart upload. It is serialised as JSON and stored either
 // inline in x-amz-meta-encryption-mpu or as a fallback companion object.
 type MultipartManifest struct {
-	// Version is the manifest format version; currently always 1.
+	// Version is 2 for current writes; version 1 remains readable.
 	Version         int    `json:"v"`
 	ParentBucket    string `json:"parent_bucket,omitempty"`
 	ParentKey       string `json:"parent_key,omitempty"`
@@ -110,10 +111,58 @@ func UnmarshalMultipartManifest(data []byte) (*MultipartManifest, error) {
 	if m.Version != 1 && m.Version != mpuManifestVersion {
 		return nil, fmt.Errorf("mpu_manifest: unsupported version %d (want %d)", m.Version, mpuManifestVersion)
 	}
+	if err := m.validateLayout(); err != nil {
+		return nil, err
+	}
 	return &m, nil
 }
 
+// validateLayout checks both deserialized and programmatically constructed
+// manifests before any division, narrowing, allocation, or backend range use.
+// Small legacy chunk sizes remain readable; current writers use 64 KiB.
+func (m *MultipartManifest) validateLayout() error {
+	if m == nil {
+		return fmt.Errorf("mpu_manifest: nil manifest")
+	}
+	if m.TotalPlainSize < 0 || len(m.Parts) > 10000 {
+		return fmt.Errorf("mpu_manifest: invalid total size or part count")
+	}
+	if len(m.Parts) == 0 && m.TotalPlainSize == 0 {
+		return nil
+	}
+	if m.ChunkSize <= 0 || m.ChunkSize > MaxChunkSize {
+		return fmt.Errorf("mpu_manifest: invalid chunk size %d", m.ChunkSize)
+	}
+	var totalPlain, totalEnc int64
+	var previous int32
+	for _, part := range m.Parts {
+		if part.PartNumber <= previous || part.PartNumber > 10000 || part.PlainLen < 0 || part.EncLen < 0 || part.ChunkCount < 0 {
+			return fmt.Errorf("mpu_manifest: invalid part layout")
+		}
+		previous = part.PartNumber
+		count := part.PlainLen / int64(m.ChunkSize)
+		if part.PlainLen%int64(m.ChunkSize) != 0 {
+			count++
+		}
+		if count > math.MaxInt32 || count != int64(part.ChunkCount) || count > (math.MaxInt64-part.PlainLen)/mpuAEADTagSize {
+			return fmt.Errorf("mpu_manifest: invalid chunk count or ciphertext size")
+		}
+		if part.EncLen != part.PlainLen+count*mpuAEADTagSize || part.PlainLen > math.MaxInt64-totalPlain || part.EncLen > math.MaxInt64-totalEnc {
+			return fmt.Errorf("mpu_manifest: inconsistent or overflowing part sizes")
+		}
+		totalPlain += part.PlainLen
+		totalEnc += part.EncLen
+	}
+	if totalPlain != m.TotalPlainSize {
+		return fmt.Errorf("mpu_manifest: total plaintext size does not match parts")
+	}
+	return nil
+}
+
 func (m *MultipartManifest) ValidateFor(parent, companion ObjectContext, bindingID [16]byte) error {
+	if err := m.validateLayout(); err != nil {
+		return err
+	}
 	if err := parent.Validate(); err != nil {
 		return err
 	}
@@ -149,6 +198,9 @@ func UnmarshalMultipartManifestBase64(s string) (*MultipartManifest, error) {
 // number, chunk index within that part, and intra-chunk byte offset.
 // Returns an error if offset is out of range.
 func (m *MultipartManifest) PlainOffsetToPartChunk(offset int64) (partIdx int, chunkIdx int32, intraChunk int64, err error) {
+	if err := m.validateLayout(); err != nil {
+		return 0, 0, 0, err
+	}
 	if offset < 0 || offset >= m.TotalPlainSize {
 		return 0, 0, 0, fmt.Errorf("mpu_manifest: offset %d out of range [0, %d)", offset, m.TotalPlainSize)
 	}
@@ -156,7 +208,11 @@ func (m *MultipartManifest) PlainOffsetToPartChunk(offset int64) (partIdx int, c
 	for i, part := range m.Parts {
 		if offset < cumPlain+part.PlainLen {
 			relOffset := offset - cumPlain
-			ci := int32(relOffset / int64(m.ChunkSize)) // #nosec G115 — relOffset ≤ part.PlainLen ≤ maxPartSize (5 GiB), ChunkSize ≥ 64 KiB, quotient fits int32
+			index := relOffset / int64(m.ChunkSize)
+			if index < 0 || index > math.MaxInt32 {
+				return 0, 0, 0, fmt.Errorf("mpu_manifest: chunk index overflow")
+			}
+			ci := int32(index)
 			ic := relOffset % int64(m.ChunkSize)
 			return i, ci, ic, nil
 		}
@@ -169,8 +225,14 @@ func (m *MultipartManifest) PlainOffsetToPartChunk(offset int64) (partIdx int, c
 // the given chunk within the given part (part index is 0-based).
 // The backend offset is absolute (from the start of the concatenated parts).
 func (m *MultipartManifest) EncOffsetForPartChunk(partIdx int, chunkIdx int32) (int64, error) {
+	if err := m.validateLayout(); err != nil {
+		return 0, err
+	}
 	if partIdx < 0 || partIdx >= len(m.Parts) {
 		return 0, fmt.Errorf("mpu_manifest: part index %d out of range", partIdx)
+	}
+	if chunkIdx < 0 || chunkIdx >= m.Parts[partIdx].ChunkCount {
+		return 0, fmt.Errorf("mpu_manifest: chunk index out of range")
 	}
 	var base int64
 	for i := 0; i < partIdx; i++ {
@@ -209,6 +271,9 @@ type MPURangeResult struct {
 // calculated precisely (the last byte of the last affected chunk) so no bytes
 // from the next part are fetched.
 func (m *MultipartManifest) EncRangeForPlaintextRange(pStart, pEnd int64) (MPURangeResult, error) {
+	if err := m.validateLayout(); err != nil {
+		return MPURangeResult{}, err
+	}
 	if pStart < 0 || pStart > pEnd || pEnd >= m.TotalPlainSize {
 		return MPURangeResult{}, fmt.Errorf("mpu_manifest: range [%d,%d] out of [0,%d)", pStart, pEnd, m.TotalPlainSize)
 	}

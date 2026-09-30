@@ -43,7 +43,7 @@ func TestMultipartManifestV2_MalformedBindingNeverFallsBack(t *testing.T) {
 }
 
 func TestMultipartManifestV1_DualRead(t *testing.T) {
-	m := &MultipartManifest{Version: 1, ChunkSize: 4, Parts: []MPUPartRecord{{PartNumber: 1, PlainLen: 3, EncLen: 19, ChunkCount: 1}}}
+	m := &MultipartManifest{Version: 1, ChunkSize: 4, Parts: []MPUPartRecord{{PartNumber: 1, PlainLen: 3, EncLen: 19, ChunkCount: 1}}, TotalPlainSize: 3}
 	if _, err := UnmarshalMultipartManifest(mustMarshal(t, m)); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestBoundMPUConstructorsRejectInvalidContextAndAuthentication(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest := &MultipartManifest{Version: 2, ChunkSize: 4, Parts: []MPUPartRecord{{PartNumber: 1, PlainLen: 4, EncLen: encLen, ChunkCount: 1}}}
+	manifest := &MultipartManifest{Version: 2, ChunkSize: 4, Parts: []MPUPartRecord{{PartNumber: 1, PlainLen: 4, EncLen: encLen, ChunkCount: 1}}, TotalPlainSize: 4}
 	if _, err := NewMPUDecryptReader(ObjectContext{}, binding, bytes.NewReader(ct), manifest, dek, [32]byte{}, [12]byte{}, AlgorithmAES256GCM); err == nil {
 		t.Fatal("invalid decrypt object accepted")
 	}

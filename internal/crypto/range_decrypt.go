@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"crypto/cipher"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -150,21 +149,7 @@ func (r *rangeDecryptReader) deriveChunkIV(chunkIndex uint64) ([]byte, error) {
 	if r.manifest.IVDerivation != "hkdf-sha256" {
 		return deriveLegacyChunkIVIndex(r.baseIV, chunkIndex)
 	}
-	if r.manifest.IVDerivation == "hkdf-sha256" {
-		return deriveChunkIVHKDFIndex(r.baseIV, chunkIndex)
-	}
-	// Deprecated: used for objects without MetaIVDerivation flag. Remove no earlier than v3.0.
-	iv := make([]byte, len(r.baseIV))
-	copy(iv, r.baseIV)
-
-	indexBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(indexBytes, uint32(chunkIndex)) // #nosec G115 — v1 wire format is uint32
-
-	for i := 0; i < 4 && i < len(iv); i++ {
-		iv[len(iv)-1-i] ^= indexBytes[3-i]
-	}
-
-	return iv, nil
+	return deriveChunkIVHKDFIndex(r.baseIV, chunkIndex)
 }
 
 // Read implements io.Reader for range-aware chunked decryption.

@@ -225,7 +225,10 @@ func TestBufferedFallback_LegacyV1Compatibility(t *testing.T) {
 	binary.BigEndian.PutUint32(lengthPrefix, uint32(len(encoded)))
 	pt := append(lengthPrefix, encoded...)
 	pt = append(pt, []byte("legacy-v1")...)
-	aad := buildAAD(AlgorithmAES256GCM, salt, iv, map[string]string{"Content-Type": "text/plain", MetaOriginalSize: "9"})
+	aad, err := buildAAD(AlgorithmAES256GCM, salt, iv, map[string]string{"Content-Type": "text/plain", MetaOriginalSize: "9"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := gcm.Seal(nil, iv, pt, aad)
 	meta := map[string]string{
 		MetaEncrypted: "true", MetaFallbackMode: "true", MetaAlgorithm: AlgorithmAES256GCM,

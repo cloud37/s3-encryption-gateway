@@ -128,12 +128,7 @@ func buildObjectAAD(domain aadDomain, object ObjectContext, bindingID []byte, fi
 	out.WriteString("S3EGAAD\x00")
 	_ = binary.Write(&out, binary.BigEndian, uint16(1))
 	writeBytes := func(value []byte) error {
-		if uint64(len(value)) > uint64(^uint32(0)) {
-			return fmt.Errorf("AAD component exceeds uint32")
-		}
-		_ = binary.Write(&out, binary.BigEndian, uint32(len(value))) // #nosec G115 -- value length was checked above
-		_, _ = out.Write(value)
-		return nil
+		return writeLengthPrefixed(&out, value)
 	}
 	if err := writeBytes([]byte(domain)); err != nil {
 		return nil, err
@@ -1098,7 +1093,10 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 		}
 		aad, err = buildObjectAAD(aadBufferedV2, object, bindingID)
 	} else {
-		aad = buildAAD(algorithm, salt, iv, aadMeta)
+		aad, err = buildAAD(algorithm, salt, iv, aadMeta)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build AAD: %w", err)
 	}
 	// Debug: log AAD for troubleshooting (no raw crypto values logged).
 	if debug.Enabled() {
@@ -1549,18 +1547,15 @@ func (e *engine) encryptChunkedWithMetadataFallback(ctx context.Context, object 
 	// Build the 4-byte big-endian metadata-length header.
 	// This is the only allocation in the encrypt hot path; it is O(1) regardless
 	// of object size, as opposed to the legacy path which allocated O(objectSize).
-	metadataLen := uint32(len(metadataJSON)) // #nosec G115 — metadata length bounded by max metadata size (<< 2^32)
-	headerBuf := []byte{
-		byte(metadataLen >> 24), // #nosec G115
-		byte(metadataLen >> 16), // #nosec G115
-		byte(metadataLen >> 8),  // #nosec G115
-		byte(metadataLen),       // #nosec G115 — 4-byte big-endian encoding of metadata header
+	headerBuf, err := checkedLengthPrefix(uint64(len(metadataJSON)))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode metadata length: %w", err)
 	}
 
 	// Stream: [4-byte header][metadata JSON][chunked ciphertext stream]
 	// Peak memory ≈ len(headerBuf) + len(metadataJSON) — bounded by metadata, not by object size.
 	streamingReader := io.MultiReader(
-		bytes.NewReader(headerBuf),
+		bytes.NewReader(headerBuf[:]),
 		bytes.NewReader(metadataJSON),
 		chunkedReader,
 	)
@@ -2242,13 +2237,16 @@ func (e *engine) encryptWithMetadataFallback(ctx context.Context, object ObjectC
 	// Build a single plaintext buffer for the AEAD Seal call to avoid holding
 	// intermediate copies (finalData + dataToEncryptFinal) on top of the
 	// caller's plaintext slice.
-	metadataLen := uint32(len(metadataJSON)) // #nosec G115 — metadata length bounded
+	metadataHeader, err := checkedLengthPrefix(uint64(len(metadataJSON)))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode metadata length: %w", err)
+	}
+	if len(metadataJSON) > math.MaxInt-4 || len(data) > math.MaxInt-4-len(metadataJSON) {
+		return nil, nil, fmt.Errorf("fallback-v2: plaintext size exceeds int")
+	}
 	ptSize := 4 + len(metadataJSON) + len(data)
 	pt := make([]byte, ptSize)
-	pt[0] = byte(metadataLen >> 24) // #nosec G115
-	pt[1] = byte(metadataLen >> 16) // #nosec G115
-	pt[2] = byte(metadataLen >> 8)  // #nosec G115
-	pt[3] = byte(metadataLen)       // #nosec G115 — 4-byte big-endian encoding of metadata header
+	copy(pt[:4], metadataHeader[:])
 	copy(pt[4:], metadataJSON)
 	copy(pt[4+len(metadataJSON):], data)
 
@@ -2417,11 +2415,11 @@ func (e *engine) decryptFallbackBound(ctx context.Context, object ObjectContext,
 	if len(plaintext) < 4 {
 		return nil, nil, fmt.Errorf("fallback-v2: encrypted data too short")
 	}
-	metadataLen := int(uint32(plaintext[0])<<24 | uint32(plaintext[1])<<16 | uint32(plaintext[2])<<8 | uint32(plaintext[3]))
-	if metadataLen > len(plaintext)-4 {
+	metadataEnd, err := checkedMetadataEnd(binary.BigEndian.Uint32(plaintext[:4]), uint64(len(plaintext)))
+	if err != nil {
 		return nil, nil, fmt.Errorf("fallback-v2: invalid metadata length")
 	}
-	fullMetadata, err := decodeMetadataFromJSON(plaintext[4 : 4+metadataLen])
+	fullMetadata, err := decodeMetadataFromJSON(plaintext[4:metadataEnd])
 	if err != nil {
 		return nil, nil, fmt.Errorf("fallback-v2: failed to decode metadata: %w", err)
 	}
@@ -2432,7 +2430,7 @@ func (e *engine) decryptFallbackBound(ctx context.Context, object ObjectContext,
 	if v := fullMetadata[MetaOriginalETag]; v != "" {
 		decMetadata["ETag"] = v
 	}
-	return bytes.NewReader(plaintext[4+metadataLen:]), decMetadata, nil
+	return bytes.NewReader(plaintext[metadataEnd:]), decMetadata, nil
 }
 
 // decryptFallbackV2 decrypts objects written by the fixed (V1.0-SEC-27) fallback
@@ -2574,7 +2572,10 @@ func (e *engine) decryptFallbackV1(reader io.Reader, metadata map[string]string)
 		"Content-Type":   contentType,
 		MetaOriginalSize: originalSize,
 	}
-	aad := buildAAD(algorithm, salt, iv, aadMeta)
+	aad, err := buildAAD(algorithm, salt, iv, aadMeta)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build AAD: %w", err)
+	}
 
 	// Decrypt the data (try new format first, then legacy)
 	plaintext, err := aeadCipher.Open(nil, iv, ciphertext, aad)
@@ -2591,13 +2592,12 @@ func (e *engine) decryptFallbackV1(reader io.Reader, metadata map[string]string)
 		return nil, nil, fmt.Errorf("encrypted data too short for fallback format")
 	}
 
-	metadataLen := uint32(plaintext[0])<<24 | uint32(plaintext[1])<<16 | uint32(plaintext[2])<<8 | uint32(plaintext[3])
-	if metadataLen > uint32(len(plaintext)-4) { // #nosec G115 — len(plaintext) >= 4 guarded by check above
+	metadataEnd, err := checkedMetadataEnd(binary.BigEndian.Uint32(plaintext[:4]), uint64(len(plaintext)))
+	if err != nil {
 		return nil, nil, fmt.Errorf("invalid metadata length in fallback format")
 	}
 
 	metadataStart := 4
-	metadataEnd := metadataStart + int(metadataLen)
 	metadataJSON := plaintext[metadataStart:metadataEnd]
 	actualData := plaintext[metadataEnd:]
 
@@ -2691,24 +2691,52 @@ func buildAADLegacy(algorithm string, salt, nonce []byte, meta map[string]string
 // buildAAD constructs additional authenticated data from stable metadata fields.
 // Uses length-prefixed encoding to prevent injection attacks (V1.0-SEC-H01).
 // Fields are written in a fixed canonical order.
-func buildAAD(algorithm string, salt, nonce []byte, meta map[string]string) []byte {
+func buildAAD(algorithm string, salt, nonce []byte, meta map[string]string) ([]byte, error) {
 	var b bytes.Buffer
-	writeLengthPrefixed(&b, []byte(algorithm))
-	writeLengthPrefixed(&b, salt)
-	writeLengthPrefixed(&b, nonce)
 	// Fixed order for canonicalization
-	writeLengthPrefixed(&b, []byte(meta[MetaKeyVersion]))
-	writeLengthPrefixed(&b, []byte(meta["Content-Type"]))
-	writeLengthPrefixed(&b, []byte(meta[MetaOriginalSize]))
-	return b.Bytes()
+	for _, field := range [][]byte{
+		[]byte(algorithm), salt, nonce,
+		[]byte(meta[MetaKeyVersion]),
+		[]byte(meta["Content-Type"]),
+		[]byte(meta[MetaOriginalSize]),
+	} {
+		if err := writeLengthPrefixed(&b, field); err != nil {
+			return nil, err
+		}
+	}
+	return b.Bytes(), nil
+}
+
+// checkedLengthPrefix validates the wire length before narrowing it to uint32.
+// Taking a length rather than a slice also permits allocation-free boundary tests.
+func checkedLengthPrefix(length uint64) ([4]byte, error) {
+	var prefix [4]byte
+	if length > math.MaxUint32 {
+		return prefix, fmt.Errorf("length %d exceeds uint32", length)
+	}
+	binary.BigEndian.PutUint32(prefix[:], uint32(length)) // #nosec G115 -- length is bounded by MaxUint32 above
+	return prefix, nil
+}
+
+// checkedMetadataEnd validates a metadata prefix without narrowing the available
+// plaintext length or converting the declared length to a platform-sized int.
+// The returned slice index is bounded by plaintextLength on both 32- and 64-bit hosts.
+func checkedMetadataEnd(metadataLength uint32, plaintextLength uint64) (uint64, error) {
+	if plaintextLength < 4 || uint64(metadataLength) > plaintextLength-4 {
+		return 0, fmt.Errorf("invalid metadata length in fallback format")
+	}
+	return 4 + uint64(metadataLength), nil
 }
 
 // writeLengthPrefixed writes data to buf prefixed with its length as a big-endian uint32.
-func writeLengthPrefixed(buf *bytes.Buffer, data []byte) {
-	var tmp [4]byte
-	binary.BigEndian.PutUint32(tmp[:], uint32(len(data))) // #nosec G115 — data is AAD metadata, bounded by object metadata size
-	buf.Write(tmp[:])
+func writeLengthPrefixed(buf *bytes.Buffer, data []byte) error {
+	prefix, err := checkedLengthPrefix(uint64(len(data)))
+	if err != nil {
+		return err
+	}
+	buf.Write(prefix[:])
 	buf.Write(data)
+	return nil
 }
 
 // zeroBytes overwrites a byte slice with zeros for secure memory cleanup.

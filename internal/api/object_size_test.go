@@ -183,7 +183,8 @@ func TestResolvePlaintextSize_CompactOriginalSizeAlias(t *testing.T) {
 func TestLookupListObjectPlaintextSize_UsesResolverForMPUV1AndEmptyObjects(t *testing.T) {
 	h, client, _ := newMPUTestHandler(t, "list-resolver-*")
 	ctx := context.Background()
-	manifest := &crypto.MultipartManifest{Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize, TotalPlainSize: 23}
+	manifest := &crypto.MultipartManifest{Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize, TotalPlainSize: 23,
+		Parts: []crypto.MPUPartRecord{{PartNumber: 1, PlainLen: 23, EncLen: 39, ChunkCount: 1}}}
 	manifestBody, err := manifest.Marshal()
 	if err != nil {
 		t.Fatal(err)

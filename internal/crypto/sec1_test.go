@@ -70,7 +70,8 @@ func TestMPUDecryptReader_DEKZeroizedAfterEOF(t *testing.T) {
 	// Build a manifest so NewMPUDecryptReader can work.
 	chunkCount := int32(1)
 	manifest := &MultipartManifest{
-		ChunkSize: chunkSize,
+		ChunkSize:      chunkSize,
+		TotalPlainSize: int64(len(plaintext)),
 		Parts: []MPUPartRecord{
 			{PartNumber: 1, ChunkCount: chunkCount, PlainLen: int64(len(plaintext)), EncLen: int64(len(ciphertext))},
 		},
@@ -113,7 +114,8 @@ func TestMPUDecryptReader_CallerDEKUnaffected(t *testing.T) {
 	require.NoError(t, err)
 
 	manifest := &MultipartManifest{
-		ChunkSize: DefaultChunkSize,
+		ChunkSize:      DefaultChunkSize,
+		TotalPlainSize: int64(len(plaintext)),
 		Parts: []MPUPartRecord{
 			{PartNumber: 1, ChunkCount: 1, PlainLen: int64(len(plaintext)), EncLen: int64(len(ciphertext))},
 		},

@@ -85,7 +85,7 @@ func (m *passwordKeyManager) kdfParamsBytes() []byte {
 		return buf
 	default:
 		buf := make([]byte, 4)
-		binary.BigEndian.PutUint32(buf, uint32(m.pbkdf2Iterations)) // #nosec G115
+		binary.BigEndian.PutUint32(buf, uint32(m.pbkdf2Iterations)) // #nosec G115 -- constructor and derivation validate 100000..2000000 iterations before encoding
 		return buf
 	}
 }

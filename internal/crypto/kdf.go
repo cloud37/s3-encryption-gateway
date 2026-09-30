@@ -77,6 +77,9 @@ func ValidateKDFParams(params KDFParams, limits KDFLimits) error {
 		if params.Iterations < MinPBKDF2Iterations || params.Iterations > MaxPBKDF2Iterations {
 			return invalidKDF(params.Algorithm, "iterations", uint64(max(params.Iterations, 0)), fmt.Sprintf("must be between %d and %d", MinPBKDF2Iterations, MaxPBKDF2Iterations))
 		}
+		if limits.PBKDF2MaxIterations <= 0 {
+			return invalidKDF(params.Algorithm, "max_iterations", 0, fmt.Sprintf("must be positive (got %d)", limits.PBKDF2MaxIterations))
+		}
 		if params.Iterations > limits.PBKDF2MaxIterations {
 			return &ErrKDFCostTooHigh{Algorithm: params.Algorithm, Parameter: "iterations", Requested: uint64(params.Iterations), Maximum: uint64(limits.PBKDF2MaxIterations)} // #nosec G115 -- both values were validated positive above
 		}

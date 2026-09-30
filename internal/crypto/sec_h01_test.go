@@ -45,8 +45,14 @@ func TestBuildAAD_InjectionResistance(t *testing.T) {
 		MetaOriginalSize: "999",
 	}
 
-	aadNewA := buildAAD(AlgorithmAES256GCM, salt, nonce, metaA)
-	aadNewB := buildAAD(AlgorithmAES256GCM, salt, nonce, metaB)
+	aadNewA, err := buildAAD(AlgorithmAES256GCM, salt, nonce, metaA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aadNewB, err := buildAAD(AlgorithmAES256GCM, salt, nonce, metaB)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if bytes.Equal(aadNewA, aadNewB) {
 		t.Errorf("buildAAD produced identical AAD for different metadata combinations")
@@ -73,10 +79,16 @@ func TestBuildAAD_CanonicalOrder(t *testing.T) {
 		MetaKeyVersion:   "v1",
 	}
 
-	aad1 := buildAAD(AlgorithmAES256GCM, salt, nonce, meta)
+	aad1, err := buildAAD(AlgorithmAES256GCM, salt, nonce, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Rebuild with the same values; should be identical
-	aad2 := buildAAD(AlgorithmAES256GCM, salt, nonce, meta)
+	aad2, err := buildAAD(AlgorithmAES256GCM, salt, nonce, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if !bytes.Equal(aad1, aad2) {
 		t.Errorf("buildAAD is not deterministic for identical inputs")
@@ -182,7 +194,10 @@ func TestBuildAAD_DifferentMetaProducesDifferentAAD(t *testing.T) {
 		MetaOriginalSize: "1024",
 	}
 
-	baseAAD := buildAAD(AlgorithmAES256GCM, salt, nonce, baseMeta)
+	baseAAD, err := buildAAD(AlgorithmAES256GCM, salt, nonce, baseMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name string
@@ -208,7 +223,10 @@ func TestBuildAAD_DifferentMetaProducesDifferentAAD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			aad := buildAAD(AlgorithmAES256GCM, salt, nonce, tt.meta)
+			aad, err := buildAAD(AlgorithmAES256GCM, salt, nonce, tt.meta)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if bytes.Equal(aad, baseAAD) {
 				t.Errorf("buildAAD produced identical AAD for different metadata")
 			}
@@ -233,8 +251,14 @@ func TestBuildAAD_EmptyFieldsIncluded(t *testing.T) {
 		MetaOriginalSize: "1024",
 	}
 
-	aadEmpty := buildAAD(AlgorithmAES256GCM, salt, nonce, metaWithEmpty)
-	aadValue := buildAAD(AlgorithmAES256GCM, salt, nonce, metaWithValue)
+	aadEmpty, err := buildAAD(AlgorithmAES256GCM, salt, nonce, metaWithEmpty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aadValue, err := buildAAD(AlgorithmAES256GCM, salt, nonce, metaWithValue)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if bytes.Equal(aadEmpty, aadValue) {
 		t.Errorf("buildAAD should differentiate empty vs non-empty key version")

@@ -40,10 +40,10 @@ func cryptoRandInt63n(n int64) int64 {
 	}
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		// Fallback: XOR with nanoseconds; acceptable for jitter, not for keys.
+		// Timestamp fallback is acceptable for jitter, never for keys.
 		binary.BigEndian.PutUint64(buf[:], uint64(time.Now().UnixNano()))
 	}
-	return int64(binary.BigEndian.Uint64(buf[:]) % uint64(n)) // #nosec G115 — n is small (maxAttempts ≤ 10), product fits in int64
+	return int64(binary.BigEndian.Uint64(buf[:]) % uint64(n)) // #nosec G115 -- n>0; modulo result is less than n<=MaxInt64; jitter only, not key material
 }
 
 // retryReasonLabel is a closed set of classifier reason labels used as the
@@ -256,18 +256,18 @@ func classify(op string, err error) (retryReasonLabel, bool) {
 	if errors.As(err, &respErr) {
 		code := respErr.HTTPStatusCode()
 		switch code {
-		case http.StatusBadRequest,          // 400
-			http.StatusUnauthorized,         // 401
-			http.StatusForbidden,            // 403
-			http.StatusNotFound,             // 404
-			http.StatusMethodNotAllowed,     // 405
-			http.StatusConflict,             // 409
-			http.StatusLengthRequired,       // 411
-			http.StatusPreconditionFailed,   // 412
-			http.StatusRequestEntityTooLarge, // 413
-			http.StatusUnsupportedMediaType, // 415
+		case http.StatusBadRequest, // 400
+			http.StatusUnauthorized,                 // 401
+			http.StatusForbidden,                    // 403
+			http.StatusNotFound,                     // 404
+			http.StatusMethodNotAllowed,             // 405
+			http.StatusConflict,                     // 409
+			http.StatusLengthRequired,               // 411
+			http.StatusPreconditionFailed,           // 412
+			http.StatusRequestEntityTooLarge,        // 413
+			http.StatusUnsupportedMediaType,         // 415
 			http.StatusRequestedRangeNotSatisfiable, // 416
-			http.StatusUnprocessableEntity: // 422
+			http.StatusUnprocessableEntity:          // 422
 			return reasonNonRetry, false
 		case http.StatusTooManyRequests: // 429
 			return reasonThrottle429, true
@@ -343,16 +343,16 @@ type OnGiveUpFn func(op string, attempts int, reason string, err error)
 // closure of the initial token (via GetAttemptToken), which is called after
 // every attempt including the final one.
 type retryer struct {
-	inner      aws.Retryer
-	cfg        config.BackendRetryConfig
-	op         string // set per-operation via clone
-	backoff    backoffCalculator
-	clk        clock
-	onAttempt  OnAttemptFn
-	onGiveUp   OnGiveUpFn
-	prevDelay  time.Duration // used by decorrelated jitter
-	mu         sync.Mutex
-	retries    int32 // atomic: counts GetRetryToken calls (= retries, not initial attempt)
+	inner     aws.Retryer
+	cfg       config.BackendRetryConfig
+	op        string // set per-operation via clone
+	backoff   backoffCalculator
+	clk       clock
+	onAttempt OnAttemptFn
+	onGiveUp  OnGiveUpFn
+	prevDelay time.Duration // used by decorrelated jitter
+	mu        sync.Mutex
+	retries   int32 // atomic: counts GetRetryToken calls (= retries, not initial attempt)
 }
 
 // newRetryer builds a retryer from the supplied config.

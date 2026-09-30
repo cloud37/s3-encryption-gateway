@@ -1,10 +1,60 @@
 package crypto
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"testing"
 )
+
+func TestValidateKDFParams_InvalidPBKDF2Maximum(t *testing.T) {
+	params := KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: MinPBKDF2Iterations}
+	for _, maximum := range []int{math.MinInt, -1, 0} {
+		t.Run(fmt.Sprint(maximum), func(t *testing.T) {
+			limits := KDFLimits{PBKDF2MaxIterations: maximum}
+			for _, validate := range []func() error{
+				func() error { return ValidateKDFParams(params, limits) },
+				func() error {
+					e := &engine{kdfLimits: limits}
+					key, err := e.deriveKeyWithParams(bytes.Repeat([]byte{1}, saltSize), params)
+					if key != nil {
+						zeroBytes(key)
+						t.Fatal("invalid maximum returned a derived key")
+					}
+					return err
+				},
+			} {
+				var invalid *ErrInvalidKDFParams
+				err := validate()
+				if !errors.As(err, &invalid) || invalid.Algorithm != KDFAlgPBKDF2SHA256 || invalid.Parameter != "max_iterations" || invalid.Value != 0 || !strings.Contains(invalid.Reason, fmt.Sprint(maximum)) {
+					t.Fatalf("expected typed invalid maximum without unsigned wrap: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateKDFParams_PBKDF2OnlyOperationalLimits(t *testing.T) {
+	params := KDFParams{Algorithm: KDFAlgPBKDF2SHA256, Iterations: MinPBKDF2Iterations}
+	for _, maximum := range []int{1, MinPBKDF2Iterations - 1, MinPBKDF2Iterations, MaxPBKDF2Iterations, MaxPBKDF2Iterations + 1} {
+		t.Run(fmt.Sprint(maximum), func(t *testing.T) {
+			// Unused Argon2 ceilings remain zero for a PBKDF2-only caller.
+			err := ValidateKDFParams(params, KDFLimits{PBKDF2MaxIterations: maximum})
+			if maximum >= params.Iterations {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var cost *ErrKDFCostTooHigh
+			if !errors.As(err, &cost) || cost.Algorithm != KDFAlgPBKDF2SHA256 || cost.Parameter != "iterations" || cost.Requested != uint64(params.Iterations) || cost.Maximum != uint64(maximum) {
+				t.Fatalf("positive operational maximum must remain a cost error: %v", err)
+			}
+		})
+	}
+}
 
 func TestParseKDFParams_HardBounds(t *testing.T) {
 	cases := []struct {

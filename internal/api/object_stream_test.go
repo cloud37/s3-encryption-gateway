@@ -733,7 +733,8 @@ func TestLoadMPUManifestSize_ValidAndInvalidMetadata(t *testing.T) {
 	ctx := context.Background()
 	bucket, key := "manifest-size-bucket", "object"
 	manifestKey := key + crypto.MPUManifestSuffix
-	manifest := &crypto.MultipartManifest{Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize, TotalPlainSize: 29}
+	manifest := &crypto.MultipartManifest{Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize, TotalPlainSize: 29,
+		Parts: []crypto.MPUPartRecord{{PartNumber: 1, PlainLen: 29, EncLen: 45, ChunkCount: 1}}}
 	plain, err := manifest.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -777,7 +778,8 @@ func TestPlanFullObjectRead_UsesAuthoritativeMPUHeadSource(t *testing.T) {
 	ctx := context.Background()
 	bucket, key := "full-mpu-plan-bucket", "object"
 	manifestKey := key + crypto.MPUManifestSuffix
-	manifest := &crypto.MultipartManifest{Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize, TotalPlainSize: 29}
+	manifest := &crypto.MultipartManifest{Version: 1, Algorithm: crypto.AlgorithmAES256GCM, ChunkSize: crypto.DefaultChunkSize, TotalPlainSize: 29,
+		Parts: []crypto.MPUPartRecord{{PartNumber: 1, PlainLen: 29, EncLen: 45, ChunkCount: 1}}}
 	plain, err := manifest.Marshal()
 	if err != nil {
 		t.Fatal(err)
