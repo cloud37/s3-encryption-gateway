@@ -172,6 +172,8 @@ config:
 
   auth:
     clockSkewTolerance:
+      # Header-auth replay window and maximum future skew for SigV4 presigned
+      # URLs. Presigned lifetime is controlled separately by X-Amz-Expires.
       value: "5m"
     # SigV2 is deprecated and disabled by default. Set to "true" only for
     # clients that cannot yet migrate to SigV4.

@@ -266,6 +266,33 @@ data:
 
 The gateway requires every incoming request to present valid AWS Signature V4 credentials. Legacy Signature V2 is disabled by default and must be explicitly enabled only for a temporary client migration. Gateway credentials are configured in the `auth.credentials` list and are **separate** from the backend S3 credentials.
 
+### Presigned URL Lifetime and Clock Skew (GH-345)
+
+Keep client and gateway clocks synchronized. `AUTH_CLOCK_SKEW_TOLERANCE`
+(YAML `auth.clock_skew_tolerance`, Helm `config.auth.clockSkewTolerance.value`)
+defaults to `5m`. It bounds the header-signed request replay window and how far
+in the future a SigV4 presigned timestamp may be; it is **not** the presigned
+URL's lifetime. Set the lifetime in the signing client's `X-Amz-Expires`
+parameter, between 1 and 604800 seconds.
+
+Versions affected by GH-345, including `0.12.2`, reject presigned URLs once
+their signature age exceeds the skew setting even when their signed expiry is
+later. After deploying the fix, operators who increased the skew solely to
+work around this issue can restore `5m`. Leaving a larger value unnecessarily
+widens the replay window for header-signed requests. Apply the configuration
+change through your normal deployment/restart process; no object rewrite or
+key migration is needed.
+
+Standard SDK-generated URLs with a valid positive expiry need no change.
+Custom signing clients must provide exactly one decimal `X-Amz-Expires` value;
+missing, empty, duplicate, zero, negative, malformed, and oversized values now
+fail closed with 400 `InvalidArgument`. Expired authenticated URLs return 403
+`AccessDenied` with "Request has expired."; future timestamps outside tolerance
+return 403 `RequestTimeTooSkewed`, rather than `SignatureDoesNotMatch`.
+Credential removal or permission restrictions still revoke access regardless
+of URL lifetime. See the [request-time contract](S3_API_IMPLEMENTATION.md#sigv4-request-time-and-presigned-expiration)
+and [regression commands](TESTING.md#presigned-url-lifetime-regressions-gh-345).
+
 ### Legacy SigV2 Migration
 
 Before upgrading, identify SigV2 clients and any outstanding SigV2 presigned URLs. Migrate them to SigV4 where possible; existing SigV2 presigned URLs require the temporary opt-in until they expire. SigV2 canonicalizes supported S3 subresources, so clients must include those selectors when signing.

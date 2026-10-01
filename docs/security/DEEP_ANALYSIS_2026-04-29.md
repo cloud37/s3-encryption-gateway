@@ -50,6 +50,14 @@ Since the `v0.6.2` release, the project has undergone an **extraordinary securit
 |-------|--------|--------------|
 | **SEC-11** — SigV4 header auth missing clock-skew / replay window | ✅ Complete | `ValidateSignatureV4` parses `X-Amz-Date` for ALL requests (header and presigned); rejects if `|time.Since(t)| > defaultClockSkew` (15 min); presigned expiry unchanged |
 
+**Correction (GH-345, 2026-10-01):** The verification above describes the
+April implementation, not the current request-time contract. Applying the
+symmetric window to presigned URLs shortened their signed lifetime; the default
+was subsequently reduced to five minutes. GH-345 keeps symmetric skew checks
+for header authentication, limits only future skew for SigV4 presigned URLs,
+and requires a signed 1–604800-second expiry. See the
+[current contract](../S3_API_IMPLEMENTATION.md#sigv4-request-time-and-presigned-expiration).
+
 ### Resource Exhaustion & DoS Mitigation (SEC-10, SEC-13, SEC-14, SEC-20)
 
 | Issue | Status | Verification |

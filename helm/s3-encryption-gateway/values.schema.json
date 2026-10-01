@@ -866,7 +866,7 @@
           "properties": {
             "clockSkewTolerance": {
               "allOf": [{ "$ref": "#/$defs/configValue" }],
-              "description": "Maximum acceptable clock skew for signature validation (e.g. 5m)."
+              "description": "Header-auth replay window and maximum future skew for SigV4 presigned URLs (default 5m); presigned lifetime is controlled by X-Amz-Expires."
             },
             "allowLegacySignatureV2": {
               "allOf": [{ "$ref": "#/$defs/configValue" }],

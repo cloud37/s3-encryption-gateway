@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Presigned URL lifetime and errors (GH-345):** SigV4 presigned requests
+  remain valid for their signed `X-Amz-Expires` duration instead of being cut
+  off by the five-minute authentication clock-skew window. Header-signed
+  requests retain their existing replay window, and excessively future-dated
+  presigned requests are still rejected. Expired URLs return 403 `AccessDenied`
+  ("Request has expired."); excessive skew returns 403 `RequestTimeTooSkewed`.
+  Presigned expiry must be exactly one decimal integer in 1–604800 seconds;
+  missing, duplicate, malformed, zero, negative, and overflowing values are
+  rejected with 400 `InvalidArgument`, without backend access. Includes
+  SDK-signed Tier 1 regressions and provider-neutral Tier 2 delayed-download,
+  error, invalid-expiry, and header-skew cases. Operators who enlarged
+  `AUTH_CLOCK_SKEW_TOLERANCE` solely as a workaround can restore `5m`.
 - **Object-read backend error classification (GH-344):** Backend failures
   during chunked-v2 terminal preflight and object-read planning retain S3 error
   semantics instead of becoming decrypt failures. `NoSuchKey` returns 404,

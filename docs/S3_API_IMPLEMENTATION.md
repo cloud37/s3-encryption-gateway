@@ -297,6 +297,46 @@ Credentials are stored in an atomic snapshot compiled from `config.yaml`, enviro
     *   **Requirement**: The client must use credentials that are configured in `auth.credentials`. The gateway validates the signature against the principal's secret before any backend interaction.
 2.  **Path Style vs Virtual Host Style**: Clients should prefer Path Style addressing when generating presigned URLs for the gateway to avoid DNS resolution issues, though the gateway handles virtual host style if DNS is configured correctly.
 
+### SigV4 Request Time and Presigned Expiration
+
+Header-signed requests and presigned URLs have different validity windows:
+
+- **Header authentication:** the absolute difference between the signing
+  timestamp and server time must not exceed `auth.clock_skew_tolerance`
+  (`AUTH_CLOCK_SKEW_TOLERANCE`, default `5m`). The header-auth replay window is
+  unchanged by the GH-345 fix.
+- **Presigned authentication:** `X-Amz-Date` may not be more than the configured
+  skew tolerance in the future. Past signature age is bounded by
+  `X-Amz-Date + X-Amz-Expires`, not by the clock-skew window. The tolerance does
+  not extend this deadline; requests strictly after it are expired. Expiration
+  is checked when authentication begins;
+  an accepted download is not interrupted merely because its deadline passes.
+- **Required expiry:** `X-Amz-Expires` must occur exactly once and contain a
+  decimal integer from `1` through `604800` seconds (seven days), inclusive.
+  Empty, signed, fractional, negative, duplicate, and overflowing values are
+  invalid. Bounds are checked before duration conversion.
+- **Authentication still applies:** the credential must remain configured and
+  permitted for the operation. The scope date must match the signing
+  timestamp's UTC date, not the current server date. Crossing midnight does
+  not invalidate a URL. Changing the URL's expiry without re-signing fails
+  signature verification; the expiry check follows HMAC verification.
+
+The gateway returns fixed S3 XML messages without signatures or internal
+diagnostic details:
+
+| Failure | HTTP status | S3 code | Message |
+| --- | --- | --- | --- |
+| Authenticated presigned URL past its deadline | 403 | `AccessDenied` | `Request has expired.` |
+| Header timestamp outside the skew window, or presigned timestamp too far in the future | 403 | `RequestTimeTooSkewed` | `The difference between the request time and the server's time is too large.` |
+| Authenticated presigned request with invalid/missing expiry | 400 | `InvalidArgument` | `X-Amz-Expires must be a single integer between 1 and 604800 seconds.` |
+| Incorrect HMAC signature | 403 | `SignatureDoesNotMatch` | Existing fixed signature-mismatch message |
+
+All rejected requests stop before backend interaction. Other malformed
+authentication errors retain the existing opaque response. Legacy SigV2 timing
+and its opt-in policy are unchanged. See the AWS references for
+[presigned parameters](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-query-string-auth.html)
+and [S3 error codes](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/ErrorResponses.html).
+
 ## Header and Metadata Handling
 
 The canonical encrypted-object metadata inventory, field ownership, and

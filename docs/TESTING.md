@@ -609,6 +609,48 @@ These focused commands supplement the full Tier 1, local conformance, and
 isolation gates; they do not replace them. Reload publication and operator
 recovery are documented in [Policy Configuration](POLICY_CONFIGURATION.md).
 
+### Presigned URL Lifetime Regressions (GH-345)
+
+- **Tier 1:** `internal/api/presigned_time_test.go` signs requests using the
+  independent AWS SDK SigV4 signer and backdates the signing timestamp, so a
+  15-minute URL used after six minutes reproduces the bug immediately, without
+  sleeps or Docker. Validator/middleware cases cover 15-/30-/60-minute and
+  seven-day lifetimes, custom/default skew, expiry without a grace extension,
+  future timestamps, strict expiry inputs and overflow, tampering, fixed XML,
+  one auth-failure audit event, and no downstream invocation on rejection.
+  An explicit request-time snapshot tests nanosecond expiry/skew boundaries
+  and UTC-midnight crossings without a mutable global clock. Existing success
+  and expiry tests require genuine valid signatures rather than allowing a
+  signature mismatch to pass as expiry coverage.
+- **Tier 2:** `test/conformance/presigned_time_test.go` registers
+  `PresignedTime_Lifetime`, `PresignedTime_Failures`,
+  `PresignedTime_InvalidExpiry`, and `PresignedTime_HeaderSkew` with capability
+  `0`. These test **inbound gateway authentication**, not backend-generated
+  presigning, so `CapPresignedURL` is not required. Every provider stores a
+  real self-contained AES-KEK chunked object. Delayed SDK-signed GETs must
+  return exact decrypted bytes and plaintext Content-Length. Invalid requests
+  must return the expected S3 code/message/resource without issuing any
+  gateway-to-backend HTTP request; a subsequent normal read remains healthy.
+  The standard Testcontainers matrix and Docker-unavailable skips are retained,
+  with no provider-name branches, extra containers, or new CI targets.
+
+```bash
+# Tier 1: repeat inexpensive production-validator/middleware regressions.
+go test -race ./internal/api -count=20 -run '^TestPresignedTime_'
+
+# Tier 2: all four local providers and existing presigned auth cases.
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/(PresignedTime_|Auth_PresignedURL_)'
+```
+
+These tests assert the corrected contract: the delayed-download and error
+cases were confirmed red before the fix in Tier 1 and on all four local
+providers. Focused checks supplement, not replace, full Tier 1/FIPS, local
+conformance, and isolation gates. The [request-time contract](S3_API_IMPLEMENTATION.md#sigv4-request-time-and-presigned-expiration)
+and [operator guidance](DEPLOYMENT.md#presigned-url-lifetime-and-clock-skew-gh-345)
+describe expiry requirements and removing the widened-skew workaround.
+
 ### Object-read backend error regressions (GH-344)
 
 - **Tier 1:** `internal/api/object_read_backend_test.go` uses real routes and
