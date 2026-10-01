@@ -22,6 +22,30 @@ Lifecycle grants affect bucket mutation only; they do not affect ListBuckets aut
 
 ## Reverse Proxies and Backend Load Balancers
 
+### URL-encoded copy sources (GH-346)
+
+Releases through 0.12.2 do not decode the `x-amz-copy-source` header. CopyObject
+and UploadPartCopy therefore fail for escaped source keys, including spaces and
+non-ASCII names. The AWS SDK for PHP also escapes key slashes, affecting folder
+keys and Laravel `Storage::copy()` / `Storage::move()`. If an encoded-looking
+sibling key exists, affected releases can copy that object's bytes instead of
+failing.
+
+Upgrade to a release containing GH-346; no encryption-policy, key, credential,
+or object-format migration is required. Keep client copy-source encoding and
+preserve the signed header unchanged through frontend proxies. Do not add
+proxy-side decoding: it can invalidate signatures and create double-decoding
+ambiguities. The gateway decodes identities internally and encodes the
+separate backend copy request.
+
+Audit the source/destination bytes of earlier successful copies involving
+escaped keys before trusting them. For move workflows, check that the intended
+source was not deleted after a wrong-object copy; recover from retained object
+versions or backups if necessary. The fix prevents new miscopies but does not
+repair existing destinations. See the [copy-source contract](S3_API_IMPLEMENTATION.md#copy-source-encoding-and-identity-gh-346).
+
+### Frontend header preservation
+
 The gateway supports TLS termination at a reverse proxy such as Caddy or an
 ingress controller. Preserve the client's signed `Host`, path, query, and S3
 headers so gateway authentication can validate the original request.

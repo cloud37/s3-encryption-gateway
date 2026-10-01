@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **URL-encoded copy sources (GH-346):** CopyObject and UploadPartCopy decode
+  `x-amz-copy-source` exactly once before source authorization and reads. Keys
+  containing spaces, non-ASCII characters, `+`, literal percent sequences, and
+  encoded slashes (including AWS SDK for PHP folder keys) select the intended
+  object rather than returning `NoSuchKey` or silently copying an encoded-looking
+  sibling. Preserve key slashes and encoded query characters, decode version
+  selectors separately, and re-encode backend-native copy headers. Malformed
+  escapes return 400 `InvalidArgument` before backend access; scope denials
+  remain 403 `AccessDenied`. Includes Tier 1 signed-handler/wire/fuzz coverage
+  and provider-neutral Tier 2 copy matrices, with failures reproduced before
+  the fix on all four local providers. Garage's stale versioning capability is
+  removed after 2.4.1 returned 501 `NotImplemented` for PutBucketVersioning.
 - **Presigned URL lifetime and errors (GH-345):** SigV4 presigned requests
   remain valid for their signed `X-Amz-Expires` duration instead of being cut
   off by the five-minute authentication clock-skew window. Header-signed

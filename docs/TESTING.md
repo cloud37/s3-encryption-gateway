@@ -697,6 +697,56 @@ focused checks supplement the full Tier 1/FIPS, local conformance and isolation
 gates. See [S3 error translation](S3_API_IMPLEMENTATION.md#backend-error-translation)
 and [failure observability](OBSERVABILITY.md#object-read-failure-classification-gh-344).
 
+### Copy-source encoding regressions (GH-346)
+
+- **Tier 1:** `internal/api/copy_source_test.go` exercises the shared parser,
+  SDK-signed authentication/authorization and real CopyObject/UploadPartCopy
+  routes with authentic AES-KEK buffered/chunked objects and plaintext sources.
+  Cases verify exact copied bytes even when an encoded-looking sibling exists,
+  selected-version propagation, unchanged signed headers, plus/percent/query
+  characters and key-slash preservation. Rejections assert fixed S3 XML and no
+  backend access, including unauthenticated handler client acquisition.
+  `FuzzCopySource_EncodedRoundTrip` checks single decoding without Docker.
+  `internal/s3/copy_source_test.go` checks actual SDK/ProxyClient outbound
+  headers for both native copy operations, including versions and ranges.
+  Bucket-validation regressions distinguish malformed input (400) from scope
+  denial (403). Unit tests have no build tag and use bounded crypto fixtures.
+- **Tier 2:** `test/conformance/copy_source_test.go` registers
+  `CopySource_EncodedObject` (capability `0`), `CopySource_EncodedPart`
+  (`CapMultipartCopy`), `CopySource_Malformed` (capability `0`), and versioned
+  object/part variants (`CapVersioning`, plus `CapMultipartCopy` for parts).
+  Independent SDK requests model AWS CLI percent escapes and PHP's escaped
+  key slashes. Chunked, buffered, and real plaintext-bypass variants assert
+  complete copied bytes, plaintext length and ETag against real providers;
+  native part-copy fixtures use 5 MiB to satisfy backend part-size validation.
+  Signed malformed/scope-denied requests assert exact S3 XML and zero outbound
+  backend calls. Versioned cases copy an older version after overwriting the
+  source. Provider tests do not branch on names or add containers/CI targets.
+
+All four local providers reproduced encoded-source failures before the fix,
+with unencoded controls passing. Garage 2.4.1's `PutBucketVersioning` returns
+501 `NotImplemented`; its stale `CapVersioning` flag was removed, so versioned
+cases use capability skips. SeaweedFS runs the current local versioned cases;
+the other local providers do not advertise that capability.
+
+```bash
+# Tier 1: repeat signed routes, parser/wire behavior, and rejection boundaries.
+go test -race ./internal/api ./internal/s3 ./internal/middleware -count=10 \
+  -run '^(TestCopySource_|FuzzCopySource_|TestBucketValidationMiddleware_)'
+
+# Optional bounded fuzz run (Tier 1; no Docker).
+go test ./internal/api -run '^$' -fuzz '^FuzzCopySource_EncodedRoundTrip$' \
+  -fuzztime=10s -parallel=4
+
+# Tier 2: the ordinary four-provider matrix with capability/Docker skips.
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/CopySource_'
+```
+
+Focused checks supplement, not replace, full Tier 1/FIPS, local conformance,
+and isolation gates. See the [copy-source encoding contract](S3_API_IMPLEMENTATION.md#copy-source-encoding-and-identity-gh-346).
+
 ---
 
 ## How to add a new public S3 provider (plug-in recipe)

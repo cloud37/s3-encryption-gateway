@@ -59,7 +59,8 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
    - Provider interoperability testing framework
 
 #### PUT Object (Multipart Copy / UploadPartCopy)
-- **Endpoint**: `PUT /{bucket}/{key}?partNumber=X&uploadId=Y&x-amz-copy-source=...`
+- **Endpoint**: `PUT /{bucket}/{key}?partNumber=X&uploadId=Y`, with the
+  `x-amz-copy-source` request header
 - **Description**: Copies a byte range from a source object as a part in a multipart upload
 - **Encryption**: Conditional based on source encryption status
 - **Implementation**:
@@ -107,11 +108,51 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   - Config mismatch (plaintext source to encrypted-destination bucket) triggers hard refusal with audit event
 
 #### PUT Object Copy
-- **Endpoint**: `PUT /{bucket}/{key}?x-amz-copy-source=...`
+- **Endpoint**: `PUT /{bucket}/{key}`, with the `x-amz-copy-source` request header
 - **Encryption**: Conditional based on source encryption status
 - **Implementation**:
   - Check if source object is encrypted
   - Copy operation may require decryption then re-encryption
+
+#### Copy-source encoding and identity (GH-346)
+
+Both copy operations accept a URL-encoded `x-amz-copy-source` header in the
+form `bucket/key` or `/bucket/key`, optionally followed by
+`?versionId=<version>`. This is a **header**, not a destination URL parameter.
+
+The gateway separates the raw version suffix before percent-decoding the path
+exactly once with path semantics. A literal `+` stays `+`; `%20` becomes a
+space; `%2F` inside a key becomes a slash. A key containing the literal text
+`%2F` must be sent as `%252F`. Encoded `?`, `#`, and `?versionId=` remain key
+data rather than selecting a query or fragment. Only the optional slash before
+the bucket is removed; leading/repeated key slashes and dot segments are not
+normalized. An opaque version ID is decoded separately, preserving literal
+`+` and `/`; an empty version suffix retains the existing latest-version
+behavior.
+
+| Source key | Valid header value for bucket `b` |
+|---|---|
+| `dir/with space.txt` | `b/dir/with%20space.txt` |
+| `dir/umlaut-ä.txt` | `b/dir/umlaut-%C3%A4.txt` |
+| `dir/a+b&c.txt` | `b/dir/a%2Bb%26c.txt` |
+| `dir/plain.txt` (PHP-style escaped slashes) | `/b/dir%2Fplain.txt` |
+| `dir/literal%2F.txt` | `b/dir/literal%252F.txt` |
+| `name?versionId=literal`, version `v+/=` | `b/name%3FversionId%3Dliteral?versionId=v%2B%2F%3D` |
+
+Authorization and backend reads use the same decoded bucket/key identity.
+The incoming signed header is never rewritten. Backend-native CopyObject and
+UploadPartCopy construct a separate correctly encoded header from the decoded
+identities; the AWS SDK for Go v2 does not escape `CopySource` automatically.
+
+Malformed percent escapes in the path/version and empty bucket/key components
+return `400 InvalidArgument` with `Invalid x-amz-copy-source header`, without
+backend requests. After authentication and destination permission checks,
+malformed syntax is distinct from a valid source outside the credential or
+`PROXIED_BUCKET` scope, which returns `403 AccessDenied`. Existing authentication
+and read-only/destination-denial precedence is retained.
+
+See [operator compatibility guidance](DEPLOYMENT.md#url-encoded-copy-sources-gh-346)
+and [regression commands](TESTING.md#copy-source-encoding-regressions-gh-346).
 
 ### Operations NOT Requiring Encryption
 
