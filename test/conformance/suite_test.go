@@ -334,6 +334,11 @@ func TestConformance(t *testing.T) {
 				{"Auth_WrongSecret_Rejected", 0, testAuth_WrongSecret_Rejected},
 				{"Auth_PresignedURL_Valid", 0, testAuth_PresignedURL_Valid},
 				{"Auth_PresignedURL_Expired", 0, testAuth_PresignedURL_Expired},
+				// GH-345: inbound gateway auth, not backend presigning capability.
+				{"PresignedTime_Lifetime", 0, testPresignedTimeLifetime},
+				{"PresignedTime_Failures", 0, testPresignedTimeFailures},
+				{"PresignedTime_InvalidExpiry", 0, testPresignedTimeInvalidExpiry},
+				{"PresignedTime_HeaderSkew", 0, testPresignedTimeHeaderSkew},
 				{"SEC40_Auth_SigV2PresignedGET_RedactsAccessLog", 0, testSEC40_Auth_SigV2PresignedGET_RedactsAccessLog},
 				{"SEC44_Auth_SigV2PresignedSubresourceAccepted", provider.CapObjectTagging, testSEC44_Auth_SigV2PresignedSubresourceAccepted},
 				{"SEC44_Auth_SigV2PresignedSubresourceSubstitutionRejected", provider.CapObjectTagging, testSEC44_Auth_SigV2PresignedSubresourceSubstitutionRejected},

@@ -534,9 +534,7 @@ func TestValidateSignatureV4_PresignedURL(t *testing.T) {
 	// This should succeed (valid presigned URL within clock-skew window)
 	_, err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err != nil {
-		if !errors.Is(err, ErrSignatureMismatch) && !strings.Contains(err.Error(), "signature") {
-			t.Errorf("ValidateSignatureV4() presigned: unexpected error type: %v", err)
-		}
+		t.Fatalf("ValidateSignatureV4() rejected valid presigned URL: %v", err)
 	}
 }
 
@@ -696,36 +694,13 @@ func TestValidateSignatureV4_CredentialDateMismatch_Presigned(t *testing.T) {
 // TestValidateSignatureV4_PresignedURL_Expired verifies that an expired
 // presigned URL is rejected.
 func TestValidateSignatureV4_PresignedURL_Expired(t *testing.T) {
-	secretKey := "test-secret"
-	// Use a timestamp 3 minutes ago with a 1-minute expiry so the URL is
-	// expired but still within the 5-minute clock-skew window.
-	now := time.Now().UTC().Add(-3 * time.Minute)
-	timestamp := now.Format("20060102T150405Z")
-	date := now.Format("20060102")
-	region := "us-east-1"
-	service := "s3"
-	accessKey := "AKIATEST"
-	credScope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
-
-	q := url.Values{}
-	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
-	q.Set("X-Amz-Credential", accessKey+"/"+credScope)
-	q.Set("X-Amz-Date", timestamp)
-	q.Set("X-Amz-Expires", "60") // 1 minute — expired 2 minutes ago
-	q.Set("X-Amz-SignedHeaders", "host")
-	q.Set("X-Amz-Signature", strings.Repeat("a", 64))
-
-	reqURL := "/bucket/key?" + q.Encode()
-	req := httptest.NewRequest("GET", reqURL, nil)
-	req.Host = "localhost"
-
-	_, err := ValidateSignatureV4(req, secretKey, defaultClockSkew)
+	req := presignedTimeRequest(t, time.Now().UTC().Add(-3*time.Minute), []string{"60"})
+	_, err := ValidateSignatureV4(req, presignedTestSecret, defaultClockSkew)
 	if err == nil {
 		t.Fatal("ValidateSignatureV4() expected error for expired presigned URL, got nil")
 	}
-	if !strings.Contains(err.Error(), "expired") && !errors.Is(err, ErrSignatureMismatch) {
-		t.Logf("ValidateSignatureV4() expired presigned URL returned: %v", err)
-		// Either "expired" message or a signature mismatch (computed before expiry check) is acceptable
+	if !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expected genuine expiry rejection, got: %v", err)
 	}
 }
 
