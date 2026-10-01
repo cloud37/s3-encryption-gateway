@@ -22,21 +22,31 @@ annotations:
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.1
+      image: docker.io/cloud37io/s3-encryption-gateway:0.12.2
       whitelisted: true
     - name: s3-encryption-gateway-fips
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.1-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.12.2-fips
       whitelisted: true
   artifacthub.io/changes: |
     - kind: fixed
-      description: Accept authenticated unsigned AWS-chunked trailer uploads from current AWS CLI and boto3 clients over HTTPS
+      description: Publish complete bucket-policy snapshots atomically on reload to prevent encrypted writes to bypass buckets
     - kind: fixed
-      description: Provide writable verified-body spool storage for the default read-only-root-filesystem deployment
+      description: Sanitize passthrough request and response headers for reliable backend signing behind reverse proxies
+    - kind: fixed
+      description: Preserve standard and user metadata, plaintext sizes, and fresh cached bodies across object and multipart operations
+    - kind: fixed
+      description: Retain validated plaintext range bounds for encrypted multipart UploadPartCopy
+    - kind: security
+      description: Validate crypto and multipart numeric bounds and manifests before cipher use or backend mutation
+    - kind: security
+      description: Verify configured KMS CA chains, reject unsafe audit destinations, and isolate backend redirects
     - kind: changed
-      description: Verify authenticated TLS AWS CLI and boto3 single-part and multipart uploads in the conformance suite
+      description: Centralize object metadata handling and enforce COPY and REPLACE directives and gateway-reserved metadata validation
+    - kind: changed
+      description: Expand provider-neutral regression coverage, enforce explained gosec suppressions, and update compatibility fixtures
   artifacthub.io/containsSecurityUpdates: "true"
-version: 0.12.1
-appVersion: "0.12.1"
+version: 0.12.2
+appVersion: "0.12.2"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;

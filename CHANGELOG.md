@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+## [0.12.2] — 2026-09-30
+
+This patch release fixes bucket-policy reload races and backend signing behind
+reverse proxies, centralizes object metadata handling, and hardens numeric,
+KMS, audit, and passthrough transport boundaries. It includes all significant
+changes since `0.12.1`.
+
+### ⚠️ Upgrade considerations ⚠️
+
+`0.12.2` retains the coordinated-upgrade requirements introduced by `0.12.0`.
+If the currently deployed version is earlier than `0.12.0-rc1`, follow the full
+[0.12 upgrade instructions](docs/MIGRATION.md), including staged writers,
+encrypted-MPU state-v2, KDF limits, rollback, and object-location binding.
+The chart retains the writable `/tmp` spool default introduced in `0.12.1`.
+
+- The GH-339 reload fix prevents new encrypted writes to bypass buckets; it
+  does not repair existing miswrites. Preserve original keys, object locations,
+  and metadata and follow the [controlled recovery procedure](docs/MIGRATION.md#recovering-gh-339-bypass-bucket-miswrites).
+- CopyObject COPY (including an omitted directive) inherits source metadata and
+  ignores request metadata. Use REPLACE to change destination metadata. Writes
+  using canonical, compact, or legacy gateway-reserved metadata names are
+  rejected before backend I/O. See the [metadata contract](docs/METADATA_MODEL.md).
+- Passthrough backend redirects are returned unchanged rather than followed.
+  Configure the final backend endpoint/region. Cosmian hostname-skip mode
+  requires a configured CA and still verifies its chain. Invalid custom audit
+  TLS settings and unsafe audit-file destinations are rejected; explicitly fix
+  permissions or TLS configuration. See [deployment guidance](docs/DEPLOYMENT.md#backend-redirects-kms-tls-and-audit-sinks).
+
 ### Fixed
 
 - **Atomic bucket-policy reloads (GH-339):** SIGHUP and main-config or
@@ -31,6 +59,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   plaintext size when selecting a full chunked-source range. Remove a redundant
   unchecked `uint64`-to-`int64` conversion that could overwrite the bounded range
   end, fixing the CI gosec G115 finding without adding a suppression.
+- **Object metadata preservation:** Preserve all six standard content headers
+  and user metadata across encrypted PUT, CopyObject, multipart creation,
+  UploadPartCopy, HEAD, and full/ranged GET. Passthrough and bypass writes use
+  native backend headers; adapters consistently normalize returned metadata.
+- **Encrypted-MPU reads, listings, and deletion:** Project stored content/user
+  metadata, ETag, and version headers on full/ranged GET; translate listing
+  sizes from authenticated manifest totals; delete v1/v2 companion manifests
+  with primary objects, including version-aware cleanup. Ranged-GET failures
+  use stable S3 error XML and consistent error metrics.
+- **Cache freshness and response projection:** Cache only complete bounded
+  plaintext bodies, validate every hit against the current backend ETag, and
+  re-project current metadata, version headers, and authenticated `response-*`
+  GET overrides. Hide gateway encryption metadata on HEAD and GET.
+- **Unknown-length streaming writes:** Persist the exact plaintext size with a
+  metadata-replacing backend copy that preserves standard and user metadata.
+
+### Security
+
 - **Suppression-audit hardening:** Validate metadata/AAD wire lengths and wide
   fallback slice bounds, PBKDF2 ceilings, MPU numeric layouts and coordinates,
   declared part lengths, and chunk counters before conversion or cipher use.
@@ -42,6 +88,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   roots. Audit file writes reject unsafe modes, symlinks and nonregular files.
 - **Passthrough redirect isolation:** Return backend redirects unchanged; do
   not follow them or replay credentials/bodies to a different destination.
+
+### Changed
+
+- **Centralized object metadata (V1.0-S3-6):** Share the metadata registry,
+  canonical/compact/legacy aliases, format classification, plaintext-size
+  resolution, MPU manifest loading, persistence, response projection, and
+  error/stream handling across object paths. Valid legacy formats remain
+  readable; unknown markers and invalid manifest pointers fail closed.
+- **Copy and write metadata contract:** COPY inherits source metadata; REPLACE
+  uses request metadata and excludes request Content-Length/ETag. Reject
+  gateway-reserved metadata aliases and invalid copy directives before backend
+  side effects.
+- **Test runtime and reproducibility:** Use bounded PBKDF2 fixtures for format
+  and API behavior tests without changing production defaults or explicit KDF
+  coverage. Move the full 400 MiB MPU fixture behind the load tag while keeping
+  a smaller cross-part Tier 1 regression. Pin local MinIO fixtures to a public
+  Chainguard digest and enforce digest-aware image checks.
+
+### Dependencies
+
+- Updated the AWS SDK for Go v2 S3 service module
+  (`github.com/aws/aws-sdk-go-v2/service/s3`) to v1.114.0.
+- Updated `golang.org/x/perf` (benchstat tooling) to
+  `v0.0.0-20260929162123-406019bb8b68`.
+- Updated the AWS CLI compatibility image to v2.37.6.
+- Updated boto3 compatibility testing to v1.43.106.
+- Updated the SeaweedFS conformance image to v4.48.
+- Updated the ORAS setup action (`oras-project/setup-oras`) to v2.0.2.
 
 ### Tests and documentation
 
@@ -64,6 +138,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scanner-readable reasons; broad linter suppressions and the global G104
   exclusion were removed. CI pins gosec v2.29.0. Added numeric, TLS, filesystem,
   and provider-neutral redirect/private-CA regressions.
+- Added deterministic object-format/header goldens, source drift and real-router
+  parity guards, and provider-neutral metadata matrices covering PUT,
+  COPY/REPLACE, MPU, UploadPartCopy, HEAD, full/fixed/open/suffix GET, cache
+  freshness, reserved-key rejection, response overrides, listing sizes, and
+  companion deletion.
+- Published the metadata ownership/precedence inventory and ADR 0018, expanded
+  S3/encryption/testing guidance, added a reproducible metadata benchmark target,
+  and documented same-command Tier 1 runtime comparisons.
 
 ## [0.12.1] — 2026-09-28
 
@@ -121,21 +203,6 @@ by the published `0.12.0` chart.
   forwarding work, in the versioned issue history.
 - Updated the supported-release policy to identify the current 0.12 release
   line as the security-fix target.
-
-- **B1:** Hide encrypted markers, wrapped keys, KMS identifiers, KDF parameters, and format/binding metadata from HEAD and GET responses.
-- **B2:** Delete v1/v2 MPU companion manifests with their primary objects, including version-aware cleanup.
-- **B3:** Translate completed encrypted-MPU ListObjects sizes from authenticated manifest totals.
-- **B4:** Project stored content metadata, user metadata, ETag, and version headers on full and ranged MPU GET responses.
-- **B5:** Cache only complete bounded plaintext bodies, compare every hit with the current backend ETag, and re-project current response overrides.
-- **Client-visible (B6):** CopyObject COPY inherits source metadata; REPLACE uses request metadata and excludes request Content-Length/ETag.
-- **B7:** Preserve native standard headers for passthrough/bypass writes.
-- **B8:** Preserve Content-Encoding, Content-Language, and Expires across encrypted writes, copies, multipart creation, HEAD, and GET.
-- **Client-visible (B9):** Apply authenticated `response-*` overrides to GET responses.
-- **Client-visible (B10):** Reject gateway-reserved canonical, compact, and legacy metadata names on writes.
-- **B11:** Persist exact plaintext size after unknown-length streaming writes using a metadata-replacing backend copy.
-- **B12:** Return stable 500 XML and error metrics for every MPU ranged-GET failure branch.
-- Centralize encrypted-object classification, metadata aliases, size resolution, error mapping, and response projection.
-- Reject every canonical, compact, and legacy gateway-owned metadata key in request user metadata, including `x-amz-meta-e`, `x-amz-meta-a`, `x-amz-meta-s`, `x-amz-meta-i`, `x-amz-meta-os`, `x-amz-meta-oe`, `x-amz-meta-ct`, `x-amz-meta-ccache`, `x-amz-meta-cdisp`, `x-amz-meta-cenc`, `x-amz-meta-clang`, `x-amz-meta-cexp`, `x-amz-meta-c`, `x-amz-meta-cs`, `x-amz-meta-cc`, `x-amz-meta-m`, `x-amz-meta-kv`, `x-amz-meta-wk`, `x-amz-meta-kid`, `x-amz-meta-kp`, `x-amz-meta-kdf`, `x-amz-meta-fb`, `x-amz-meta-fbv`, `x-amz-meta-fmt`, `x-amz-meta-bid`, and `x-amz-meta-em`, plus registered long-form and legacy aliases.
 
 ## [0.12.0] — 2026-09-21
 

@@ -7,17 +7,30 @@
 
 ## Overview
 
-## 0.12 upgrade notice (including 0.12.1)
+## 0.12 upgrade notice (including 0.12.2)
 
 The 0.12 release line changes encryption write formats and deployment
 prerequisites. Plan a coordinated upgrade rather than a rolling mix of old and
 new writers.
 
 **If the currently deployed version is earlier than `0.12.0-rc1`, these full
-instructions remain mandatory when upgrading directly to `0.12.1`.** The
-`0.12.1` hotfix restores authenticated HTTPS upload compatibility and fixes the
-Helm chart's default writable spool storage; it does not change the format,
-state-v2 writer, KDF-limit, rollback, or location-binding requirements below.
+instructions remain mandatory when upgrading directly to `0.12.2`.** The
+0.12 patch releases retain the format, state-v2 writer, KDF-limit, rollback,
+and location-binding requirements below. Version `0.12.1` restored
+authenticated HTTPS upload compatibility and fixed the Helm chart's default
+writable spool storage; `0.12.2` retains those fixes.
+
+Version `0.12.2` adds atomic bucket-policy reloads, reverse-proxy signing fixes,
+metadata consistency, and numeric/transport hardening. COPY inherits source
+metadata; use REPLACE for destination metadata changes. Client writes using
+gateway-reserved metadata names are rejected. Configure final backend endpoints
+because passthrough redirects are no longer followed, and fix invalid audit
+TLS settings or unsafe audit-file permissions before rollout. See the
+[0.12.2 changelog](../CHANGELOG.md) and
+[transport and audit deployment guidance](DEPLOYMENT.md#backend-redirects-kms-tls-and-audit-sinks).
+The reload fix prevents new GH-339 bypass-bucket miswrites but does not repair
+existing objects; follow the
+[controlled recovery procedure](#recovering-gh-339-bypass-bucket-miswrites).
 
 The procedure also applies when upgrading from the stable `0.11.10` release or
 any `0.12.0` release candidate. The stable release no longer carries the
@@ -81,9 +94,9 @@ expected verified-body workload; the default aggregate spool budget is 10 GiB
 per gateway process. After rollout, verify a signed ListObjects request through
 the gateway as well as `/ready`.
 
-The `0.12.1` chart provides the `/tmp` `emptyDir` and spool setting by default,
+Charts `0.12.1` and later provide the `/tmp` `emptyDir` and spool setting by default,
 so this specific workaround is unnecessary when installing or upgrading with
-the `0.12.1` chart. Existing `extraVolumeMounts` entries at `/tmp` take
+the `0.12.2` chart. Existing `extraVolumeMounts` entries at `/tmp` take
 precedence; keep them writable. The explicit values above remain necessary for
 the published `0.12.0` chart. They do not replace any of the coordinated
 upgrade steps above for installations earlier than `0.12.0-rc1`.
