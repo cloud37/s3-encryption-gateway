@@ -39,12 +39,13 @@ func (p *garageProvider) Capabilities() Capabilities {
 	// via the ?tagging subresource (returns 501 NotImplemented). Inline
 	// tagging via x-amz-tagging on PutObject (CapInlinePutTagging) works.
 	// Re-enable CapObjectTagging when a supported Garage version ships.
+	// Garage v2.4.1 returns 501 NotImplemented for PutBucketVersioning;
+	// omit CapVersioning until versioned object selection is supported.
 	return CapMultipartUpload |
 		CapMultipartCopy |
 		CapInlinePutTagging |
 		CapPresignedURL |
 		CapBatchDelete |
-		CapVersioning |
 		CapSizeTranslation |
 		CapEncryptedMPU |
 		CapKMSIntegration |

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -264,17 +265,18 @@ func TestBucketValidationMiddleware_DeniesWrongCopySourceWithVersionID(t *testin
 
 // TestBucketValidationMiddleware_DeniesMalformedCopySource verifies that a
 // malformed copy source is handled consistently with the shared parser and
-// results in AccessDenied.
+// results in InvalidArgument rather than being confused with a scope denial.
 func TestBucketValidationMiddleware_DeniesMalformedCopySource(t *testing.T) {
 	handler := &okHandler{}
 	mw := BucketValidationMiddleware("my-bucket", silentLogger())(handler)
 
 	malformedSources := []string{
-		"test-key",          // missing bucket
-		"/test-key",         // missing bucket with leading slash
-		"bucket/",           // missing key
-		"bucket",            // no key at all
-		"",                  // empty header
+		"test-key",         // missing bucket
+		"/test-key",        // missing bucket with leading slash
+		"bucket/",          // missing key
+		"bucket",           // no key at all
+		"",                 // empty header
+		"my-bucket/key%ZZ", // malformed percent escape
 	}
 
 	for _, source := range malformedSources {
@@ -298,8 +300,15 @@ func TestBucketValidationMiddleware_DeniesMalformedCopySource(t *testing.T) {
 				return
 			}
 
-			if w.Code != http.StatusForbidden {
-				t.Errorf("expected 403 for malformed copy-source %q, got %d", source, w.Code)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for malformed copy-source %q, got %d", source, w.Code)
+			}
+			var response struct{ Code, Message, Resource string }
+			if err := xml.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != "InvalidArgument" || response.Message != "Invalid x-amz-copy-source header" || response.Resource != req.URL.Path {
+				t.Errorf("unexpected invalid-source XML: %+v", response)
 			}
 			if handler.called {
 				t.Errorf("handler should NOT be called for malformed copy-source %q", source)

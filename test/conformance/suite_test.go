@@ -82,6 +82,12 @@ func TestConformance(t *testing.T) {
 				{"DeleteObjects", provider.CapBatchDelete, testDeleteObjects},
 				{"DeleteVersionedEncryptedMPU", provider.CapVersioning | provider.CapEncryptedMPU, testDeleteVersionedEncryptedMPU},
 				{"CopyObject", 0, testCopyObject},
+				// GH-346: signed encoded sources and exact source identity.
+				{"CopySource_EncodedObject", 0, testCopySourceEncodedObject},
+				{"CopySource_EncodedPart", provider.CapMultipartCopy, testCopySourceEncodedPart},
+				{"CopySource_Malformed", 0, testCopySourceMalformed},
+				{"CopySource_VersionedObject", provider.CapVersioning, testCopySourceVersionedObject},
+				{"CopySource_VersionedPart", provider.CapVersioning | provider.CapMultipartCopy, testCopySourceVersionedPart},
 				{"RangedRead", 0, testRangedRead},
 				{"RangedRead_CrossChunk", 0, testRangedRead_CrossChunk},
 				{"Passthrough_RangedRead", 0, testPassthroughRangedRead},
