@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,48 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/gorilla/mux"
 )
+
+// objectBackendError preserves provenance across read planning, which can fail
+// either acquiring backend data or authenticating it. Do not infer provenance
+// from an SDK error interface: key managers can return SDK errors too.
+type objectBackendError struct {
+	bucket, key string
+	err         error
+}
+
+func (e *objectBackendError) Error() string {
+	return fmt.Sprintf("read backend object %s/%s: %v", e.bucket, e.key, e.err)
+}
+func (e *objectBackendError) Unwrap() error { return e.err }
+
+func backendObjectError(bucket, key string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &objectBackendError{bucket: bucket, key: key, err: err}
+}
+
+// writeObjectBackendError handles only explicitly marked storage failures. It
+// returns false for crypto/metadata errors so their existing policy is retained.
+func (h *Handler) writeObjectBackendError(w http.ResponseWriter, r *http.Request, op string, err error, start time.Time) bool {
+	var backendErr *objectBackendError
+	if !errors.As(err, &backendErr) {
+		return false
+	}
+	// Existing GET callers use both method and S3 operation names. Keep error
+	// metrics identical to the initial object acquisition, including cache hits.
+	if op == http.MethodGet {
+		op = "GetObject"
+	}
+	if op == http.MethodHead {
+		op = "HeadObject"
+	}
+	h.writeObjectErrorForBucket(w, r, op, backendErr.bucket, TranslateError(backendErr.err, backendErr.bucket, backendErr.key), start)
+	if h.logger != nil {
+		h.logger.WithError(err).WithFields(map[string]any{"bucket": backendErr.bucket, "key": backendErr.key, "operation": op}).Error("Failed to read backend object")
+	}
+	return true
+}
 
 func isIntegrityFailure(err error) bool {
 	if err == nil {
@@ -63,6 +106,9 @@ func (h *Handler) writeObjectIntegrityError(w http.ResponseWriter, r *http.Reque
 // writeObjectDecryptError is the single pre-header decrypt-failure path. Integrity
 // failures use the same tamper metric/audit owner as post-header stream failures.
 func (h *Handler) writeObjectDecryptError(w http.ResponseWriter, r *http.Request, op, bucket, key string, err error, start time.Time) {
+	if h.writeObjectBackendError(w, r, op, err, start) {
+		return
+	}
 	if isIntegrityFailure(err) || errors.Is(err, crypto.ErrChunkedObjectIncomplete) || errors.Is(err, crypto.ErrUnsupportedChunkedVersion) {
 		h.writeObjectIntegrityError(w, r, op, bucket, key, err, start)
 		return

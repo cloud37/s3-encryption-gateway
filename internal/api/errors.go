@@ -137,6 +137,10 @@ func TranslateError(err error, bucket, key string) *S3Error {
 				RequestID:  requestID,
 				HTTPStatus: http.StatusForbidden,
 			}
+		case "SlowDown":
+			return &S3Error{Code: "SlowDown", Message: "Please reduce your request rate.", Resource: resource, RequestID: requestID, HTTPStatus: http.StatusServiceUnavailable}
+		case "ServiceUnavailable":
+			return &S3Error{Code: "ServiceUnavailable", Message: "Service is unable to handle request.", Resource: resource, RequestID: requestID, HTTPStatus: http.StatusServiceUnavailable}
 		case "InvalidBucketName":
 			return &S3Error{
 				Code:       "InvalidBucketName",

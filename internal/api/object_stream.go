@@ -94,7 +94,7 @@ func (h *Handler) planObjectRead(ctx context.Context, client s3.Client, bucket, 
 			plan.Mode = objectReadMPUFull
 			headMetadata, headErr := client.HeadObject(ctx, bucket, key, versionID)
 			if headErr != nil {
-				return objectReadPlan{}, headErr
+				return objectReadPlan{}, backendObjectError(bucket, key, headErr)
 			}
 			headView, viewErr := h.loadObjectView(bucket, key, versionID, headMetadata)
 			if viewErr != nil {
@@ -264,7 +264,7 @@ func cryptoRangeHeader(r crypto.MPURangeResult) *string {
 func (h *Handler) planGetObjectRange(ctx context.Context, client s3.Client, bucket, key string, versionID, rangeHeader *string, optimizedDecryptAvailable bool) (objectReadPlan, error) {
 	metadata, err := client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {
-		return objectReadPlan{}, err
+		return objectReadPlan{}, backendObjectError(bucket, key, err)
 	}
 	plan, err := h.planObjectRead(ctx, client, bucket, key, versionID, metadata, rangeHeader)
 	plan.Source.VersionID = requestVersionID(versionID)
@@ -298,7 +298,7 @@ func requestVersionID(versionID *string) string {
 func (h *Handler) planCachedObjectRead(ctx context.Context, client s3.Client, bucket, key string) (objectReadPlan, error) {
 	metadata, err := client.HeadObject(ctx, bucket, key, nil)
 	if err != nil {
-		return objectReadPlan{}, err
+		return objectReadPlan{}, backendObjectError(bucket, key, err)
 	}
 	plan, err := h.planObjectRead(ctx, client, bucket, key, nil, metadata, nil)
 	plan.CacheEligible = true

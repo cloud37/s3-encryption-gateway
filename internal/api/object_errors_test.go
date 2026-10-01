@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,12 +11,60 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/smithy-go"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/metrics"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+func TestObjectBackendError_ProvenanceAndWrapping(t *testing.T) {
+	if backendObjectError("bucket", "key", nil) != nil {
+		t.Fatal("nil error must remain nil")
+	}
+	original := &smithy.GenericAPIError{Code: "SlowDown", Message: "authentication failed at backend"}
+	err := fmt.Errorf("planner: %w", backendObjectError("source", "key", original))
+	var apiErr smithy.APIError
+	if !errors.Is(err, original) || !errors.As(err, &apiErr) || apiErr.ErrorCode() != "SlowDown" {
+		t.Fatal("backend wrapping lost error chain")
+	}
+	reg := prometheus.NewRegistry()
+	auditLog := audit.NewLogger(10, nil)
+	h := &Handler{metrics: metrics.NewMetricsWithRegistry(reg), auditLogger: auditLog}
+	r := mux.SetURLVars(httptest.NewRequest("GET", "/destination/key", nil), map[string]string{"bucket": "destination"})
+	w := httptest.NewRecorder()
+	h.writeObjectDecryptError(w, r, "GET", "destination", "key", err, time.Now())
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "<Resource>/source/key</Resource>") {
+		t.Fatalf("backend response=%d %q", w.Code, w.Body.String())
+	}
+	if len(auditLog.GetEvents()) != 0 || metricTotal(t, reg, "encryption_errors_total") != 0 {
+		t.Fatal("backend diagnostic was mistaken for integrity failure")
+	}
+	if metricSample(t, reg, "s3_operation_errors_total", `operation="GetObject"`, `bucket="source"`, `error_type="SlowDown"`) != 1 {
+		t.Fatal("source-scoped S3 error not recorded once")
+	}
+	if h.writeObjectBackendError(w, r, "GetObject", nil, time.Now()) {
+		t.Fatal("nil error handled as backend")
+	}
+}
+
+func TestObjectBackendError_DoesNotClassifyKeyManagerSDKError(t *testing.T) {
+	// An SDK error from a key manager is still a crypto failure. Classification
+	// must depend on acquisition provenance, not errors.As(smithy.APIError).
+	err := &smithy.GenericAPIError{Code: "AccessDenied", Message: "key unwrap denied"}
+	auditLog := audit.NewLogger(10, nil)
+	h := &Handler{auditLogger: auditLog}
+	r := httptest.NewRequest("GET", "/bucket/key", nil)
+	w := httptest.NewRecorder()
+	h.writeObjectDecryptError(w, r, "GetObject", "bucket", "key", err, time.Now())
+	if w.Code != 500 || len(auditLog.GetEvents()) != 1 || auditLog.GetEvents()[0].Operation != "decrypt" {
+		t.Fatalf("key error response=%d audit=%+v", w.Code, auditLog.GetEvents())
+	}
+	if h.writeObjectBackendError(w, r, "GetObject", context.DeadlineExceeded, time.Now()) {
+		t.Fatal("unmarked deadline classified as storage")
+	}
+}
 
 func TestDecryptFailure_MappingTable(t *testing.T) {
 	for _, tc := range []struct {

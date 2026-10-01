@@ -135,8 +135,8 @@ drive fault timing/probability, never cryptographic keys or authorization.
 | `internal/api/crypto_factory.go:414` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the pinned CA chain on every handshake including resumption |
 | `internal/api/crypto_factory.go:435` | G402 | Production | operator-only diagnostic opt-in with ERROR warning; no certificate authentication, never a secure production mode |
 | `internal/api/crypto_factory.go:466` | G304 | Production | token or SecretID file reference is chosen by the operator, never by an S3 request |
-| `internal/api/handlers.go:4254` | G115 | Production | negative sizes are rejected above |
-| `internal/api/upload_part_copy.go:1060` | G115 | Production | chunkCount is bounded by MaxInt32 above |
+| `internal/api/handlers.go:4263` | G115 | Production | negative sizes are rejected above |
+| `internal/api/upload_part_copy.go:1066` | G115 | Production | chunkCount is bounded by MaxInt32 above |
 | `internal/api/utils.go:5` | G501 | Production | S3 Content-MD5 interoperability header |
 | `internal/api/utils.go:301` | G704 | Production | host/scheme come only from operator backend config; requests supply path/query and redirects are disabled |
 | `internal/api/utils.go:360` | G401 | Production | required by S3 lifecycle APIs |

@@ -247,6 +247,9 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	// the correct strategy.
 	sourceClass, err := h.classifyCopySource(ctx, s3Client, srcBucket, srcKey, srcVersionID)
 	if err != nil {
+		if h.writeObjectBackendError(w, r, "UploadPartCopy", err, start) {
+			return
+		}
 		if errors.Is(err, crypto.ErrChunkedObjectIncomplete) || errors.Is(err, crypto.ErrUnsupportedChunkedVersion) || strings.Contains(err.Error(), "chunked manifest") {
 			h.writeObjectIntegrityError(w, r, "UploadPartCopy", srcBucket, srcKey, err, start)
 			return
@@ -366,6 +369,9 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strategyErr != nil {
+		if h.writeObjectBackendError(w, r, "UploadPartCopy", strategyErr, start) {
+			return
+		}
 		s3Err := TranslateError(strategyErr, bucket, key)
 		// Promote sentinel errors to specific S3 codes.
 		if isLegacySourceTooLarge(strategyErr) {
@@ -490,7 +496,7 @@ func copyPartClaimError(err error) (code string, status int, message string, res
 func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string) (*CopySourceMetadata, error) {
 	metadata, err := s3Client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {
-		return nil, err
+		return nil, backendObjectError(bucket, key, err)
 	}
 
 	sourceClass := &CopySourceMetadata{

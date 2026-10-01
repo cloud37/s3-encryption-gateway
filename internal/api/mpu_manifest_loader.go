@@ -28,12 +28,12 @@ func (h *Handler) loadMPUManifest(ctx context.Context, c s3.Client, bucket, pare
 		if isS3NotFoundError(err) {
 			return nil, fmt.Errorf("%w: %s", ErrMissingMPUManifest, manifestKey)
 		}
-		return nil, fmt.Errorf("fetch manifest: %w", err)
+		return nil, fmt.Errorf("fetch manifest: %w", backendObjectError(bucket, manifestKey, err))
 	}
 	defer r.Close()
 	raw, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
+		return nil, fmt.Errorf("read manifest: %w", backendObjectError(bucket, manifestKey, err))
 	}
 	engine, err := h.getEncryptionEngine(bucket)
 	if err != nil {

@@ -248,3 +248,35 @@ func TestObjectRead_KEKBackendFailureAndIntegrityControl(t *testing.T) {
 		})
 	}
 }
+
+func TestObjectRead_MissingMPUManifestRetainsDiagnostic(t *testing.T) {
+	client := newMockS3Client()
+	// The generic mock's missing-object error does not implement smithy.APIError.
+	// Model the SDK error returned by production S3 providers explicitly.
+	client.errors["bucket/parent"+crypto.MPUManifestSuffix+"/get"] = &smithy.GenericAPIError{Code: "NoSuchKey", Message: "missing companion"}
+	h := &Handler{}
+	_, err := h.loadMPUManifest(context.Background(), client, "bucket", "parent", crypto.ObjectClass{Format: crypto.FormatMPUV1, ManifestKey: "parent" + crypto.MPUManifestSuffix})
+	if !errors.Is(err, ErrMissingMPUManifest) {
+		t.Fatalf("missing companion error=%v", err)
+	}
+	var backendErr *objectBackendError
+	if errors.As(err, &backendErr) {
+		t.Fatal("missing companion must not become parent NoSuchKey")
+	}
+	response := decryptFailure(err, "/bucket/parent")
+	if response.HTTPStatus != 500 || response.Message != "Encrypted multipart object metadata is missing; the gateway MPU manifest could not be found" {
+		t.Fatalf("missing companion response=%+v", response)
+	}
+}
+
+func TestObjectRead_MPUBackendFailureProvenance(t *testing.T) {
+	client := newMockS3Client()
+	original := &smithy.GenericAPIError{Code: "SlowDown", Message: "backend unavailable"}
+	client.errors["source/parent"+crypto.MPUManifestSuffix+"/get"] = original
+	h := &Handler{}
+	_, err := h.loadMPUManifest(context.Background(), client, "source", "parent", crypto.ObjectClass{Format: crypto.FormatMPUV1, ManifestKey: "parent" + crypto.MPUManifestSuffix})
+	var backendErr *objectBackendError
+	if !errors.As(err, &backendErr) || !errors.Is(err, original) || backendErr.bucket != "source" || backendErr.key != "parent"+crypto.MPUManifestSuffix {
+		t.Fatalf("companion backend error lost provenance: %v", err)
+	}
+}

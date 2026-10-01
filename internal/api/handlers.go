@@ -1422,6 +1422,9 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	metadata = view.Expanded
 	resolved, resolveErr := h.resolvePlaintextSize(ctx, s3Client, view)
 	if resolveErr != nil {
+		if h.writeObjectBackendError(w, r, "HeadObject", resolveErr, start) {
+			return
+		}
 		if view.Class.Format != crypto.FormatMPUV1 && view.Class.Format != crypto.FormatMPUV2 {
 			h.writeObjectError(w, r, "HEAD", decryptFailure(resolveErr, r.URL.Path), start)
 			return
@@ -3959,6 +3962,9 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		return
 	}
 	sourceSize, sourceSizeErr := h.resolvePlaintextSize(ctx, s3Client, sourceView)
+	if h.writeObjectBackendError(w, r, "CopyObject", sourceSizeErr, start) {
+		return
+	}
 	if sourceSizeErr != nil && (sourceView.Class.Format == crypto.FormatMPUV1 || sourceView.Class.Format == crypto.FormatMPUV2) {
 		h.writeObjectError(w, r, "CopyObject", decryptFailure(sourceSizeErr, r.URL.Path), start)
 		return
@@ -3969,6 +3975,9 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 	}
 	if sourceView.Class.Format == crypto.FormatChunkedV1 || sourceView.Class.Format == crypto.FormatChunkedV2 {
 		if _, preflightErr := h.preflightChunkedCompleteness(ctx, s3Client, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
+			if h.writeObjectBackendError(w, r, "CopyObject", preflightErr, start) {
+				return
+			}
 			h.writeObjectError(w, r, "CopyObject", decryptFailure(preflightErr, r.URL.Path), start)
 			return
 		}
@@ -4267,7 +4276,7 @@ func (h *Handler) preflightChunkedTerminal(ctx context.Context, s3Client s3.Clie
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", first, ciphertextSize-1)
 	trailer, _, err := s3Client.GetObject(ctx, bucket, key, versionID, &rangeHeader)
 	if err != nil {
-		return crypto.ChunkedObjectInfo{}, err
+		return crypto.ChunkedObjectInfo{}, backendObjectError(bucket, key, err)
 	}
 	defer trailer.Close()
 	return engine.AuthenticateChunkedTrailer(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, trailer, metadata, ciphertextSize)
@@ -4312,7 +4321,7 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 		if expandedMetadata[crypto.MetaObjectFormatVersion] == "chunked-v2" {
 			reader, raw, getErr := s3Client.GetObject(ctx, bucket, key, versionID, nil)
 			if getErr != nil {
-				return crypto.ChunkedObjectInfo{}, getErr
+				return crypto.ChunkedObjectInfo{}, backendObjectError(bucket, key, getErr)
 			}
 			defer reader.Close()
 			engine, engineErr := h.getEncryptionEngine(bucket)
