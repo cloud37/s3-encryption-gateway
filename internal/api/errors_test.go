@@ -7,7 +7,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/aws/smithy-go"
 )
+
+func TestTranslateError_BackendAvailability(t *testing.T) {
+	for _, code := range []string{"SlowDown", "ServiceUnavailable"} {
+		t.Run(code, func(t *testing.T) {
+			err := fmt.Errorf("backend: %w", &smithy.OperationError{ServiceID: "S3", OperationName: "GetObject", Err: &smithy.GenericAPIError{Code: code, Message: "private diagnostic"}})
+			got := TranslateError(err, "bucket", "key")
+			if got.Code != code || got.HTTPStatus != http.StatusServiceUnavailable || got.Resource != "/bucket/key" || strings.Contains(got.Message, "private diagnostic") {
+				t.Fatalf("translation=%+v", got)
+			}
+		})
+	}
+}
 
 // TestS3Error_Error verifies the error message format.
 func TestS3Error_Error(t *testing.T) {
