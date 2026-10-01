@@ -173,18 +173,6 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srcBucket, srcKey, srcVersionID, err := ParseCopySource(copySource)
-	if err != nil {
-		s3Err := &S3Error{
-			Code:       "InvalidArgument",
-			Message:    "Invalid x-amz-copy-source header",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
-		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
-		return
-	}
-
 	// V1.0-AUTH-2: enforce the caller's scope for the destination and source
 	// buckets here as well, before the handler can acquire a backend client.
 	// AuthorizationMiddleware performs the same check before routing, but the
@@ -201,6 +189,17 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			}
 			h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		}
+		return
+	}
+	srcBucket, srcKey, srcVersionID, err := ParseCopySource(copySource)
+	if err != nil {
+		s3Err := &S3Error{
+			Code:       "InvalidArgument",
+			Message:    "Invalid x-amz-copy-source header",
+			Resource:   r.URL.Path,
+			HTTPStatus: http.StatusBadRequest,
+		}
+		h.writeObjectError(w, r, "UploadPartCopy", s3Err, start)
 		return
 	}
 

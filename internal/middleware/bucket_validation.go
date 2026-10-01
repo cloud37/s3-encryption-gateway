@@ -60,8 +60,8 @@ func BucketValidationMiddleware(proxiedBucket string, logger *logrus.Logger) fun
 					logger.WithFields(logrus.Fields{
 						"copy_source": copySource,
 						"error":       err,
-					}).Warn("Access denied: malformed copy source")
-					writeBucketAccessDeniedError(w, "", path)
+					}).Warn("Invalid copy source")
+					api.WriteInvalidCopySource(w, path)
 					return
 				}
 				if srcBucket != "" && srcBucket != proxiedBucket {

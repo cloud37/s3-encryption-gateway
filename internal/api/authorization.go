@@ -128,7 +128,11 @@ func AuthorizationMiddleware(proxiedBucket string, auditLog audit.Logger) func(h
 			if op == authorizationWrite && isCopyAuthorizationRoute(r) {
 				if copySource := r.Header.Get("x-amz-copy-source"); copySource != "" {
 					sourceBucket, _, _, err := ParseCopySource(copySource)
-					if err != nil || !copyBucketsAuthorized(credential, bucket, sourceBucket, proxiedBucket) {
+					if err != nil {
+						WriteInvalidCopySource(w, r.URL.Path)
+						return
+					}
+					if !copyBucketsAuthorized(credential, bucket, sourceBucket, proxiedBucket) {
 						writeAuthorizationDenied(w, r, auditLog, "bucket_scope")
 						return
 					}
@@ -484,14 +488,16 @@ func copyBucketsAuthorized(credential Credential, dstBucket, srcBucket, proxiedB
 // source buckets of a CopyObject/UploadPartCopy request before any backend
 // client is acquired. It mirrors the AuthorizationMiddleware check as
 // handler-level defense-in-depth so copy authorization never depends on
-// middleware ordering. When gateway authentication is disabled no principal is
-// attached, so it preserves the deployment's unauthenticated behavior. It
-// returns ErrAccessDenied when an authenticated caller lacks scope, and the
-// ParseCopySource error for malformed headers.
+// middleware ordering. Without a principal it still validates syntax but does
+// not apply credential scope. It returns ErrAccessDenied when an authenticated
+// caller lacks scope, and the ParseCopySource error for malformed headers.
 func (h *Handler) authorizeCopyOperation(r *http.Request, dstBucket, copySource string) error {
 	credential, ok := CredentialFromContext(r)
 	if !ok {
-		return nil
+		// Unauthenticated deployments still validate the header before client
+		// acquisition; scope checks alone depend on an attached principal.
+		_, _, _, err := ParseCopySource(copySource)
+		return err
 	}
 	if !credential.CanWrite() {
 		return ErrAccessDenied

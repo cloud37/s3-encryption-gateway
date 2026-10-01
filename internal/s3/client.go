@@ -1137,10 +1137,7 @@ func (c *s3Client) ListParts(ctx context.Context, bucket, key, uploadID string) 
 // CopyObject copies an object from source to destination.
 func (c *s3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error) {
 	native, userMetadata := objectmeta.Split(metadata)
-	copySource := fmt.Sprintf("%s/%s", srcBucket, srcKey)
-	if srcVersionID != nil && *srcVersionID != "" {
-		copySource = fmt.Sprintf("%s/%s?versionId=%s", srcBucket, srcKey, *srcVersionID)
-	}
+	copySource := copySourceHeader(srcBucket, srcKey, srcVersionID)
 
 	input := &s3.CopyObjectInput{
 		Bucket:     aws.String(dstBucket),
@@ -1208,10 +1205,7 @@ func (c *s3Client) CopyObject(ctx context.Context, dstBucket, dstKey string, src
 
 // UploadPartCopy copies a byte range from a source object to a part in a multipart upload.
 func (c *s3Client) UploadPartCopy(ctx context.Context, dstBucket, dstKey, uploadID string, partNumber int32, srcBucket, srcKey string, srcVersionID *string, srcRange *CopyPartRange) (*CopyPartResult, error) {
-	copySource := fmt.Sprintf("%s/%s", srcBucket, srcKey)
-	if srcVersionID != nil && *srcVersionID != "" {
-		copySource = fmt.Sprintf("%s/%s?versionId=%s", srcBucket, srcKey, *srcVersionID)
-	}
+	copySource := copySourceHeader(srcBucket, srcKey, srcVersionID)
 
 	input := &s3.UploadPartCopyInput{
 		Bucket:     aws.String(dstBucket),

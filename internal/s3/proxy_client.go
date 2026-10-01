@@ -143,10 +143,7 @@ func (p *ProxyClient) ListParts(ctx context.Context, bucket, key, uploadID strin
 // CopyObject forwards a PUT request with x-amz-copy-source to the backend for a copy operation.
 func (p *ProxyClient) CopyObject(ctx context.Context, dstBucket, dstKey string, srcBucket, srcKey string, srcVersionID *string, metadata map[string]string, lock *ObjectLockInput) (string, map[string]string, error) {
 	// Build copy source header
-	copySource := fmt.Sprintf("%s/%s", srcBucket, srcKey)
-	if srcVersionID != nil && *srcVersionID != "" {
-		copySource = fmt.Sprintf("%s/%s?versionId=%s", srcBucket, srcKey, *srcVersionID)
-	}
+	copySource := copySourceHeader(srcBucket, srcKey, srcVersionID)
 
 	// Build backend URL for destination
 	backendPath := fmt.Sprintf("/%s/%s", dstBucket, dstKey)
@@ -218,10 +215,7 @@ func (p *ProxyClient) CopyObject(ctx context.Context, dstBucket, dstKey string, 
 // UploadPartCopy forwards a PUT request with x-amz-copy-source for a multipart copy operation.
 func (p *ProxyClient) UploadPartCopy(ctx context.Context, dstBucket, dstKey, uploadID string, partNumber int32, srcBucket, srcKey string, srcVersionID *string, srcRange *CopyPartRange) (*CopyPartResult, error) {
 	// Build copy source header
-	copySource := fmt.Sprintf("%s/%s", srcBucket, srcKey)
-	if srcVersionID != nil && *srcVersionID != "" {
-		copySource = fmt.Sprintf("%s/%s?versionId=%s", srcBucket, srcKey, *srcVersionID)
-	}
+	copySource := copySourceHeader(srcBucket, srcKey, srcVersionID)
 
 	// Build backend URL for destination with multipart query params
 	backendPath := fmt.Sprintf("/%s/%s", dstBucket, dstKey)

@@ -255,6 +255,32 @@ func TestCopySource_RejectionBeforeBackend(t *testing.T) {
 	}
 }
 
+func TestCopySource_UnauthenticatedMalformedBeforeClientAcquisition(t *testing.T) {
+	for _, path := range []string{"/test-bucket/destination", "/test-bucket/destination?partNumber=1&uploadId=plain-upload"} {
+		t.Run(path, func(t *testing.T) {
+			engine, err := newAPIUnitEngine([]byte("gh346-password"))
+			require.NoError(t, err)
+			h := NewHandler(&failOnAnyCallS3Client{t: t}, engine, logrus.New(), getTestMetrics())
+			h.clientAcquirer = func(*http.Request) (s3.Client, error) {
+				t.Fatal("malformed header acquired backend client")
+				return nil, nil
+			}
+			router := mux.NewRouter()
+			h.RegisterRoutes(router)
+			req := httptest.NewRequest(http.MethodPut, path, nil)
+			req.Header.Set("x-amz-copy-source", "test-bucket/key%ZZ")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			require.Equal(t, http.StatusBadRequest, w.Code)
+			var response struct{ Code, Message, Resource string }
+			require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &response))
+			require.Equal(t, "InvalidArgument", response.Code)
+			require.Equal(t, "Invalid x-amz-copy-source header", response.Message)
+			require.Equal(t, "/test-bucket/destination", response.Resource)
+		})
+	}
+}
+
 // A percent sequence is data only when its percent sign is itself encoded.
 func FuzzCopySource_EncodedRoundTrip(f *testing.F) {
 	for _, key := range []string{"dir/with space", "a+b", "literal%2F", "?versionId=x", "/leading", "ä"} {

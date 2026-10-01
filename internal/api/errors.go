@@ -263,3 +263,12 @@ func WriteAccessDenied(w http.ResponseWriter, resource string) {
 	s3Err.Resource = resource
 	s3Err.WriteXML(w)
 }
+
+// WriteInvalidCopySource is shared by authorization and bucket validation;
+// malformed syntax is a client error, not a bucket-scope denial.
+func WriteInvalidCopySource(w http.ResponseWriter, resource string) {
+	(&S3Error{
+		Code: "InvalidArgument", Message: "Invalid x-amz-copy-source header",
+		Resource: resource, HTTPStatus: http.StatusBadRequest,
+	}).WriteXML(w)
+}

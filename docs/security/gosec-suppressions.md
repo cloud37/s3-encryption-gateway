@@ -136,7 +136,7 @@ drive fault timing/probability, never cryptographic keys or authorization.
 | `internal/api/crypto_factory.go:435` | G402 | Production | operator-only diagnostic opt-in with ERROR warning; no certificate authentication, never a secure production mode |
 | `internal/api/crypto_factory.go:466` | G304 | Production | token or SecretID file reference is chosen by the operator, never by an S3 request |
 | `internal/api/handlers.go:4269` | G115 | Production | negative sizes are rejected above |
-| `internal/api/upload_part_copy.go:1066` | G115 | Production | chunkCount is bounded by MaxInt32 above |
+| `internal/api/upload_part_copy.go:1065` | G115 | Production | chunkCount is bounded by MaxInt32 above |
 | `internal/api/utils.go:5` | G501 | Production | S3 Content-MD5 interoperability header |
 | `internal/api/utils.go:301` | G704 | Production | host/scheme come only from operator backend config; requests supply path/query and redirects are disabled |
 | `internal/api/utils.go:360` | G401 | Production | required by S3 lifecycle APIs |
@@ -169,7 +169,7 @@ drive fault timing/probability, never cryptographic keys or authorization.
 | `test/harness/gateway.go:364` | G402 | Test fixture | the test-only TLS certificate is self-signed |
 | `test/harness/gateway.go:482` | G402 | Test fixture | test-only self-signed certificate |
 | `test/provider/aws.go:20` | G101 | Test fixture | provider registration contains environment variable names, not embedded credentials |
-| `test/provider/garage.go:85` | G101 | Test fixture | public disposable RPC secret for an isolated test container, never production credentials |
+| `test/provider/garage.go:86` | G101 | Test fixture | public disposable RPC secret for an isolated test container, never production credentials |
 | `test/provider/hetzner.go:19` | G101 | Test fixture | provider registration contains environment variable names and public endpoints, not embedded credentials |
 | `test/provider/minio.go:180` | G402 | Test fixture | test-only health probe for the generated self-signed fixture |
 | `test/provider/minio.go:181` | G306 | Test fixture | disposable container-only certificate/private key must be readable by its nonroot user; isolated fixture, never production key permissions |

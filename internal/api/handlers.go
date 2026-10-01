@@ -4558,34 +4558,28 @@ func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
 
 // ParseCopySource extracts bucket, key, and version ID from an x-amz-copy-source header.
 // Format: "bucket/key" or "bucket/key?versionId=xxx" or "/bucket/key" or "/bucket/key?versionId=xxx"
-// Returns error if the format is invalid.
+// Decode the path and optional opaque version exactly once, preserving literal
+// plus signs and key slashes. Split the raw version suffix before decoding so
+// an encoded ?versionId= inside the key cannot become a version selector.
 func ParseCopySource(copySource string) (bucket, key string, versionID *string, err error) {
-	// Remove leading slash if present
-	if strings.HasPrefix(copySource, "/") {
-		copySource = copySource[1:]
+	path, rawVersion, hasVersion := strings.Cut(copySource, "?versionId=")
+	decodedPath, decodeErr := url.PathUnescape(path)
+	if decodeErr != nil {
+		return "", "", nil, fmt.Errorf("invalid copy source path: %w", decodeErr)
 	}
-
-	// Split on first "/" to separate bucket from key
-	parts := strings.SplitN(copySource, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	// Only the optional header-prefix slash is structural. Every slash after
+	// the bucket separator is part of the S3 key, including leading // or ../.
+	bucket, key, found := strings.Cut(strings.TrimPrefix(decodedPath, "/"), "/")
+	if !found || bucket == "" || key == "" {
 		return "", "", nil, fmt.Errorf("invalid copy source format")
 	}
-
-	bucket = parts[0]
-	keyWithVersion := parts[1]
-
-	// Parse version ID if present
-	if strings.Contains(keyWithVersion, "?versionId=") {
-		keyParts := strings.SplitN(keyWithVersion, "?versionId=", 2)
-		keyWithVersion = keyParts[0]
-		if len(keyParts) > 1 && keyParts[1] != "" {
-			versionID = &keyParts[1]
+	if hasVersion && rawVersion != "" {
+		version, decodeErr := url.PathUnescape(rawVersion)
+		if decodeErr != nil {
+			return "", "", nil, fmt.Errorf("invalid copy source version: %w", decodeErr)
 		}
+		versionID = &version
 	}
-
-	// Remove leading slash from key if present
-	key = strings.TrimPrefix(keyWithVersion, "/")
-
 	return bucket, key, versionID, nil
 }
 
