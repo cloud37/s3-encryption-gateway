@@ -427,19 +427,41 @@ all gateway-generated encryption metadata is stored as a single encrypted blob:
 ## Error Handling and Translation
 
 ### Backend Error Translation
-```go
-// Map backend errors to appropriate S3 errors
-switch backendErr.Code {
-case "NoSuchBucket":
-    return s3error.NoSuchBucket
-case "AccessDenied":
-    return s3error.AccessDenied
-case "InvalidObjectName":
-    return s3error.KeyTooLongError
-default:
-    return s3error.InternalError
-}
-```
+
+`internal/api/errors.go:TranslateError` maps wrapped S3 SDK error codes to
+fixed client-facing messages. Backend diagnostics remain in structured logs,
+not in response messages.
+
+| Backend S3 code | Client S3 code | HTTP status |
+|---|---|---|
+| `NoSuchBucket` | `NoSuchBucket` | 404 |
+| `NoSuchKey`, `NotFound` | `NoSuchKey` | 404 |
+| `AccessDenied` | `AccessDenied` | 403 |
+| `InvalidBucketName`, `InvalidArgument` | Same code | 400 |
+| `SlowDown` | `SlowDown` | 503 |
+| `ServiceUnavailable` | `ServiceUnavailable` | 503 |
+| Unrecognized errors, including unclassified transport timeouts | `InternalError` | 500 |
+
+**Object-read preflight (GH-344):** Chunked-v2 terminal acquisition and
+planning HEAD calls retain explicit storage-error provenance through the
+shared planner and plaintext-size resolver. Full/ranged GET, cache validation,
+HEAD, CopyObject, and UploadPartCopy translate these failures as backend
+errors, without failed-decrypt or tamper accounting. HEAD error responses have
+no body. Copy preflight errors identify the source resource and are returned
+before destination writes. A successful initial GET followed by terminal
+`NoSuchKey` therefore returns 404, even on a backend with inconsistent
+read-after-delete behavior; a cached body must not bypass failed validation.
+
+Storage provenance is not inferred from an SDK error interface: a key-manager
+SDK failure remains a crypto failure. A missing gateway-owned MPU companion
+manifest remains `ErrMissingMPUManifest`, not a claim that the parent object is
+missing; its established GET/copy diagnostic and HEAD/list fail-soft policy
+are retained. Other marked companion storage failures use backend translation.
+
+This classification does not eliminate separate backend reads or provide
+snapshot consistency. The full ciphertext stream still authenticates its
+records and terminal independently. Errors while consuming an already-open
+crypto stream retain the existing stream-integrity policy.
 
 ### Encryption Error Handling
 - **Decryption failures**: Return 500 Internal Server Error

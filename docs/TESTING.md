@@ -609,6 +609,52 @@ These focused commands supplement the full Tier 1, local conformance, and
 isolation gates; they do not replace them. Reload publication and operator
 recovery are documented in [Policy Configuration](POLICY_CONFIGURATION.md).
 
+### Object-read backend error regressions (GH-344)
+
+- **Tier 1:** `internal/api/object_read_backend_test.go` uses real routes and
+  authentic chunked-v2 ciphertext with targeted terminal/HEAD acquisition
+  failures. Cases cover full and ranged GET, HEAD, CopyObject, UploadPartCopy,
+  cached terminal validation and cached/ranged planning HEAD failures. Wrapped
+  SDK `NoSuchKey`, `AccessDenied`, `SlowDown`, `ServiceUnavailable`, deadline and
+  unknown failures assert exact status/code, source resource, no plaintext or
+  diagnostic leakage, exactly-once accounting, no decrypt/tamper audit or
+  metric, selected versions, and full-reader closure without body consumption.
+  AES KEK positive and tampered-terminal controls preserve genuine crypto
+  behavior. Error-owner tests prove that SDK errors from key managers are not
+  classified as storage errors and that missing MPU manifests keep their
+  distinct diagnostic. `TestTranslateError_BackendAvailability` checks 503
+  mappings directly. Unit tests have no build tag or Docker requirement.
+- **Tier 2:** `test/conformance/object_read_backend_test.go` registers
+  `ObjectRead_BackendErrors` and `ObjectRead_BackendDeleteRace` with capability
+  `0`, and `ObjectRead_BackendPartCopy` with `CapMultipartCopy`. Real providers
+  handle writes, metadata, ciphertext reads and deletion; the existing harness's
+  backend-transport option injects only terminal HTTP errors through the real
+  SDK client. Self-contained AES KEK controls verify successful reads before
+  and after faults. The delete-race case performs PUT → GET → DELETE, replays
+  the frozen successful full backend response, and fails the terminal request
+  with 404: this reproduces inconsistency deterministically without timing
+  loops or reliance on a particular provider's consistency model. The ordinary
+  Testcontainers provider matrix, capability skips and Docker-unavailable
+  behavior remain unchanged. There are no provider-name branches or new CI
+  targets.
+
+```bash
+# Tier 1, repeated under the race detector.
+go test -race ./internal/api -count=5 \
+  -run '^(TestObjectRead_|TestObjectBackendError_|TestTranslateError_BackendAvailability)'
+
+# Tier 2, all four local providers.
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/ObjectRead_Backend'
+```
+
+The regression tests assert the intended corrected contract: before the fix,
+the failure cases must be red, not skipped or changed to expect 500. These
+focused checks supplement the full Tier 1/FIPS, local conformance and isolation
+gates. See [S3 error translation](S3_API_IMPLEMENTATION.md#backend-error-translation)
+and [failure observability](OBSERVABILITY.md#object-read-failure-classification-gh-344).
+
 ---
 
 ## How to add a new public S3 provider (plug-in recipe)

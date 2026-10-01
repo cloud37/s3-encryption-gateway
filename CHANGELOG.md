@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+### Fixed
+
+- **Object-read backend error classification (GH-344):** Backend failures
+  during chunked-v2 terminal preflight and object-read planning retain S3 error
+  semantics instead of becoming decrypt failures. `NoSuchKey` returns 404,
+  `AccessDenied` returns 403, and `SlowDown` / `ServiceUnavailable` return 503
+  with their respective S3 codes. Full/ranged GET, cache validation, HEAD,
+  CopyObject, and UploadPartCopy distinguish storage failures from crypto
+  failures; backend acquisition failures no longer emit failed-decrypt or
+  tamper audit events/metrics. Genuine authentication failures still fail
+  closed. Includes deterministic unit and four-provider conformance coverage
+  for the PUT → GET → DELETE → GET inconsistency reported on Swift-backed S3.
+
 ## [0.12.2] — 2026-09-30
 
 This patch release fixes bucket-policy reload races and backend signing behind

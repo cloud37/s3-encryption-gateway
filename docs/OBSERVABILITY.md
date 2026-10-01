@@ -67,6 +67,23 @@ Audit events are structured JSON objects:
 
 You can configure `redact_metadata_keys` to prevent sensitive metadata fields from being logged. Values for these keys will be replaced with `[REDACTED]`.
 
+### Object-read failure classification (GH-344)
+
+Backend acquisition failures during terminal preflight or read planning are
+operational S3 failures, not failed decryptions. For example, a terminal
+`NoSuchKey` after a successful initial GET returns 404 and a terminal `SlowDown`
+returns 503. These paths record the translated S3 error and request status once,
+and log the backend diagnostic, but do not emit a failed `decrypt` or
+`object_stream_integrity_failure` audit event and do not increment
+`encryption_errors_total` for `decryption_failed` or `object_integrity_failure`.
+
+Alert on `s3_operation_errors_total` and request status for backend availability
+or throttling. Reserve failed-decrypt and integrity alerts for actual crypto
+failures. Genuine terminal authentication/truncation failures still fail closed
+and use integrity accounting; key derivation/unwrap failures remain crypto
+failures. This distinction applies to acquisition/preflight errors, not a new
+classification policy for failures while consuming an already-open stream.
+
 ## Metrics
 
 Prometheus metrics are exposed at `/metrics`.
@@ -410,4 +427,3 @@ helm template s3eg helm/s3-encryption-gateway \
   --set monitoring.prometheusRule.enabled=true \
   | yq 'select(.kind == "PrometheusRule") | .spec'
 ```
-
