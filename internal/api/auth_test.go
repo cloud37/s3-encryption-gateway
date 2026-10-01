@@ -531,7 +531,7 @@ func TestValidateSignatureV4_PresignedURL(t *testing.T) {
 	req = httptest.NewRequest("GET", reqURL, nil)
 	req.Host = "localhost"
 
-	// This should succeed (valid presigned URL within clock-skew window)
+	// This should succeed (valid presigned URL within its signed expiry).
 	_, err = ValidateSignatureV4(req, secretKey, defaultClockSkew)
 	if err != nil {
 		t.Fatalf("ValidateSignatureV4() rejected valid presigned URL: %v", err)

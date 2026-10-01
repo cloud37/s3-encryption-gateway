@@ -472,11 +472,11 @@ func (h *Handler) writeS3ClientError(w http.ResponseWriter, r *http.Request, err
 // response without consulting err.Error(). Pure function, no I/O — kept
 // separate so it can be unit-tested.
 //
-// This function intentionally returns three distinct S3
+// This function intentionally returns distinct S3
 // error codes rather than collapsing all auth failures into a single opaque
 // response. The distinct codes (SignatureDoesNotMatch, InvalidAccessKeyId,
-// AccessDenied) are required by the S3 specification and are relied upon by AWS
-// SDK clients for retry logic and user-facing diagnostics. The enumeration
+// AccessDenied, RequestTimeTooSkewed, InvalidArgument) follow S3 semantics and
+// are relied upon by AWS SDK clients for retry logic and diagnostics. The enumeration
 // risk is mitigated by ensuring that err.Error() — which may contain computed
 // HMAC signatures or other sensitive diagnostic detail — is NEVER included in
 // the response body; only the fixed per-class message string is written to the
@@ -488,6 +488,12 @@ func classifyAuthError(err error, resource string) *S3Error {
 		return &S3Error{Code: "EntityTooLarge", Message: "The request exceeds the permitted payload size.", Resource: resource, HTTPStatus: http.StatusRequestEntityTooLarge}
 	case errors.Is(err, ErrSpoolCapacity):
 		return &S3Error{Code: "SlowDown", Message: "Please reduce your request rate.", Resource: resource, HTTPStatus: http.StatusServiceUnavailable}
+	case errors.Is(err, ErrRequestTimeTooSkewed):
+		return &S3Error{Code: "RequestTimeTooSkewed", Message: "The difference between the request time and the server's time is too large.", Resource: resource, HTTPStatus: http.StatusForbidden}
+	case errors.Is(err, ErrRequestExpired):
+		return &S3Error{Code: "AccessDenied", Message: "Request has expired.", Resource: resource, HTTPStatus: http.StatusForbidden}
+	case errors.Is(err, ErrInvalidPresignedExpiry):
+		return &S3Error{Code: "InvalidArgument", Message: "X-Amz-Expires must be a single integer between 1 and 604800 seconds.", Resource: resource, HTTPStatus: http.StatusBadRequest}
 	case errors.Is(err, ErrSignatureMismatch):
 		return &S3Error{
 			Code:       "SignatureDoesNotMatch",

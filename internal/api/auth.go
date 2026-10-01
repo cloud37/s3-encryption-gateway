@@ -144,9 +144,8 @@ type v4SigningContextKey struct{}
 // response without ever reading err.Error() (which may contain sensitive
 // diagnostic detail intended only for logs).
 //
-// classifyAuthError maps these three sentinels to three
-// distinct S3 error codes (SignatureDoesNotMatch, InvalidAccessKeyId,
-// AccessDenied). This is intentional S3 specification compliance — AWS S3
+// classifyAuthError maps these sentinels to distinct S3 error codes,
+// including signature, credential, expiry, and clock-skew failures. AWS S3
 // itself returns these same distinct codes, and many AWS SDK clients use the
 // code to distinguish misconfigured credentials (InvalidAccessKeyId) from a
 // signing error (SignatureDoesNotMatch). Collapsing all auth failures into a
@@ -165,6 +164,13 @@ var (
 	// ErrMissingCredentials indicates credentials could not be extracted or
 	// were incomplete (missing access key or secret key).
 	ErrMissingCredentials = errors.New("missing or incomplete credentials")
+
+	// ErrRequestTimeTooSkewed identifies a timestamp outside the allowed skew.
+	ErrRequestTimeTooSkewed = errors.New("request timestamp outside clock skew window")
+	// ErrRequestExpired identifies an authenticated presigned URL past its deadline.
+	ErrRequestExpired = errors.New("presigned url expired")
+	// ErrInvalidPresignedExpiry identifies missing, ambiguous or invalid expiry.
+	ErrInvalidPresignedExpiry = errors.New("invalid presigned url expiry")
 )
 
 const defaultClockSkew = 5 * time.Minute
@@ -173,9 +179,16 @@ const defaultClockSkew = 5 * time.Minute
 // It supports both Authorization header and Presigned URL (query param).
 // secretKey is the shared secret used to sign the request.
 // clockSkew is the maximum acceptable difference between the request
-// timestamp and server time; zero or negative values fall back to
-// defaultClockSkew (5 minutes).
+// timestamp and server time for header auth, and limits future timestamps for
+// presigned URLs. Presigned lifetime is bounded separately by X-Amz-Expires.
+// Zero or negative values fall back to defaultClockSkew (5 minutes).
 func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Duration) (*V4SigningContext, error) {
+	return validateSignatureV4At(r, secretKey, clockSkew, time.Now().UTC())
+}
+
+// An explicit request-time snapshot keeps boundary tests deterministic without
+// mutable global clocks; production always supplies the current server time.
+func validateSignatureV4At(r *http.Request, secretKey string, clockSkew time.Duration, now time.Time) (*V4SigningContext, error) {
 	if clockSkew <= 0 {
 		clockSkew = defaultClockSkew
 	}
@@ -235,23 +248,25 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 		return nil, fmt.Errorf("missing timestamp")
 	}
 
-	// Clock-skew validation: reject requests whose timestamp is outside the
-	// configured skew window. This applies to both header-auth and presigned
-	// requests and prevents indefinite replay of captured signatures.
+	// Header signatures have a symmetric replay window. Presigned signatures
+	// may be older than that window: only excessive future skew is rejected here.
+	// Their replay lifetime is bounded by a required, signed X-Amz-Expires below.
 	t, err := time.Parse("20060102T150405Z", timestamp)
 	if err != nil {
 		return nil, fmt.Errorf("invalid timestamp format")
 	}
-	now := time.Now().UTC()
-	skew := now.Sub(t).Abs()
-	if skew > clockSkew {
-		return nil, fmt.Errorf("request timestamp outside clock skew window")
+	outsideSkew := now.Sub(t).Abs() > clockSkew
+	if isPresigned {
+		outsideSkew = t.Sub(now) > clockSkew
+	}
+	if outsideSkew {
+		return nil, ErrRequestTimeTooSkewed
 	}
 
 	// Cross-validate credential-scope date against X-Amz-Date.
-	// The signing key is derived from the credential-scope date; if it does not
-	// match the request timestamp an attacker can replay old credentials within
-	// the clock-skew window.
+	// The signing key is derived from the credential-scope date. It must match
+	// the signing timestamp's date, not today's server date: a valid presigned
+	// URL can span midnight and remain valid for up to seven days.
 	scopeParts := strings.Split(credentialScope, "/")
 	if len(scopeParts) != 4 {
 		return nil, fmt.Errorf("invalid credential scope")
@@ -303,18 +318,13 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 
 	// Check Expiry for Presigned URLs
 	if isPresigned {
-		expiresStr := query.Get("X-Amz-Expires")
-		if expiresStr != "" {
-			expires, err := strconv.Atoi(expiresStr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid expires format")
-			}
-			if expires > 604800 {
-				return nil, fmt.Errorf("presigned url expiry exceeds maximum allowed duration")
-			}
-			if now.After(t.Add(time.Duration(expires) * time.Second)) {
-				return nil, fmt.Errorf("presigned url expired")
-			}
+		expires, err := presignedExpiry(query["X-Amz-Expires"])
+		if err != nil {
+			return nil, err
+		}
+		// Do not extend the signed deadline by the clock-skew tolerance.
+		if now.After(t.Add(expires)) {
+			return nil, ErrRequestExpired
 		}
 	}
 
@@ -339,6 +349,27 @@ func ValidateSignatureV4(r *http.Request, secretKey string, clockSkew time.Durat
 		}
 	}
 	return ctx, nil
+}
+
+func presignedExpiry(values []string) (time.Duration, error) {
+	if len(values) != 1 || values[0] == "" {
+		return 0, ErrInvalidPresignedExpiry
+	}
+	// Require decimal digits, rejecting signs, whitespace and fractional values.
+	for _, digit := range values[0] {
+		if digit < '0' || digit > '9' {
+			return 0, ErrInvalidPresignedExpiry
+		}
+	}
+	seconds, err := strconv.ParseUint(values[0], 10, 64)
+	if err != nil || seconds < 1 {
+		return 0, ErrInvalidPresignedExpiry
+	}
+	if seconds > 604800 {
+		return 0, fmt.Errorf("%w: presigned url expiry exceeds maximum allowed duration", ErrInvalidPresignedExpiry)
+	}
+	// Bounds are checked before conversion/multiplication, avoiding overflow.
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // ValidateSignatureV2 validates an AWS Signature Version 2 request.

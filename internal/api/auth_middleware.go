@@ -243,16 +243,22 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 					writeStreamingPayloadError(w, r.URL.Path, sigErr)
 					return
 				}
-				if sigErr == ErrSignatureMismatch {
+				if errors.Is(sigErr, ErrSignatureMismatch) {
 					logger.WithField("access_key", creds.AccessKey).Warn("Signature mismatch")
 					emitAuthFailure(creds.AccessKey, ErrSignatureMismatch)
 					writeS3ClientError(w, r, ErrSignatureMismatch, r.Method)
 					return
 				}
-				// Other validation errors (expired, bad format, clock skew, etc.)
+				// Preserve typed temporal/expiry failures for S3 diagnostics without
+				// exposing internal error strings. Unknown validation errors retain
+				// the existing opaque signature-mismatch response.
 				logger.WithError(sigErr).WithField("access_key", creds.AccessKey).Warn("Signature validation failed")
 				emitAuthFailure(creds.AccessKey, sigErr)
-				writeS3ClientError(w, r, ErrSignatureMismatch, r.Method)
+				if errors.Is(sigErr, ErrRequestTimeTooSkewed) || errors.Is(sigErr, ErrRequestExpired) || errors.Is(sigErr, ErrInvalidPresignedExpiry) {
+					writeS3ClientError(w, r, sigErr, r.Method)
+				} else {
+					writeS3ClientError(w, r, ErrSignatureMismatch, r.Method)
+				}
 				return
 			}
 			if signingContext != nil {

@@ -173,6 +173,9 @@ func runPresignedTimeCases(t *testing.T, inst provider.Instance, cases []presign
 			if tc.code == "RequestTimeTooSkewed" && response.Message != "The difference between the request time and the server's time is too large." {
 				t.Errorf("skew message=%q", response.Message)
 			}
+			if tc.code == "InvalidArgument" && response.Message != "X-Amz-Expires must be a single integer between 1 and 604800 seconds." {
+				t.Errorf("invalid expiry message=%q", response.Message)
+			}
 			signature := req.URL.Query().Get("X-Amz-Signature")
 			if bytes.Contains(body, []byte(testSecretKey)) || signature != "" && strings.Contains(string(body), signature) || bytes.Contains(body, plain) {
 				t.Error("failure response leaked signing material or plaintext")

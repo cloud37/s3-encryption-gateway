@@ -641,8 +641,8 @@ func testAuth_PresignedURL_Valid(t *testing.T, inst provider.Instance) {
 	}
 }
 
-// testAuth_PresignedURL_Expired verifies that a presigned URL with zero
-// expiry (X-Amz-Expires=0) is rejected with 403.
+// testAuth_PresignedURL_Expired verifies that an actually expired URL with a
+// valid SDK signature and positive expiry is rejected with 403 AccessDenied.
 func testAuth_PresignedURL_Expired(t *testing.T, inst provider.Instance) {
 	t.Helper()
 	gw := harness.StartGateway(t, inst,
@@ -656,8 +656,8 @@ func testAuth_PresignedURL_Expired(t *testing.T, inst provider.Instance) {
 
 	putSigned(t, gw, inst.Bucket, key, data, testAccessKey, testSecretKey)
 
-	presignedURL := presignV4GET(t, gw, inst.Bucket, key, testAccessKey, testSecretKey, 0)
-	resp, err := gw.HTTPClient().Get(presignedURL)
+	req := presignedTimeSDKRequest(t, objectURL(gw, inst.Bucket, key), time.Now().UTC().Add(-3*time.Minute), []string{"60"}, false)
+	resp, err := gw.HTTPClient().Do(req)
 	if err != nil {
 		t.Fatalf("expired presigned GET: %v", err)
 	}
@@ -665,6 +665,10 @@ func testAuth_PresignedURL_Expired(t *testing.T, inst provider.Instance) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expired presigned: status %d, want 403: %s", resp.StatusCode, string(body))
+	}
+	var response struct{ Code, Message string }
+	if err := xml.Unmarshal(body, &response); err != nil || response.Code != "AccessDenied" || response.Message != "Request has expired." {
+		t.Fatalf("expired presigned: XML=%s error=%v", body, err)
 	}
 }
 

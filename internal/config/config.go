@@ -795,9 +795,9 @@ type GatewayCredential struct {
 // AuthConfig holds authentication-related configuration for the S3 API.
 type AuthConfig struct {
 	// ClockSkewTolerance is the maximum acceptable difference between the
-	// request timestamp (X-Amz-Date) and server time. Requests outside this
-	// window are rejected to prevent replay attacks.
-	// Default: 15 minutes (matching AWS SigV4 specification).
+	// request timestamp and server time for header authentication. For SigV4
+	// presigned URLs it limits future timestamps, not their signed lifetime.
+	// Presigned lifetime is controlled by X-Amz-Expires. Default: 5 minutes.
 	ClockSkewTolerance time.Duration `yaml:"clock_skew_tolerance" env:"AUTH_CLOCK_SKEW_TOLERANCE"`
 
 	// AllowLegacySignatureV2 controls whether the gateway accepts AWS
