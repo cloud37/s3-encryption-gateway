@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+## [0.12.3] — 2026-10-02
+
+This patch release fixes backend error classification during encrypted object
+reads, honors signed presigned URL lifetimes, and preserves URL-encoded copy
+source identities. It includes all significant changes since
+`s3-encryption-gateway-0.12.2`, including dependency and compatibility updates.
+
+### ⚠️ Upgrade considerations ⚠️
+
+`0.12.3` retains the coordinated-upgrade requirements introduced by `0.12.0`
+and the metadata, reload, and transport contracts introduced by `0.12.2`.
+If the currently deployed version is earlier than `0.12.0-rc1`, follow the full
+[0.12 upgrade instructions](docs/MIGRATION.md). No additional encryption-policy,
+key, credential, or object-format migration is required for these fixes.
+
+- Operators who enlarged `AUTH_CLOCK_SKEW_TOLERANCE` solely to keep presigned
+  URLs working can restore the `5m` default. Presigned URLs use their signed
+  `X-Amz-Expires` deadline; header-signed requests retain the replay window.
+- Preserve client copy-source encoding and signed headers through frontend
+  proxies; do not add proxy-side decoding. Audit earlier successful copies or
+  moves involving escaped keys: affected releases could select an encoded-looking
+  sibling object. This fix prevents new miscopies but does not repair existing
+  destinations or recover deleted sources. See the
+  [copy-source upgrade and recovery guidance](docs/DEPLOYMENT.md#url-encoded-copy-sources-gh-346).
+- Backend availability failures no longer generate false decrypt/tamper alerts.
+  Monitor backend S3 errors separately from genuine cryptographic failures; see
+  the [observability guide](docs/OBSERVABILITY.md).
+
 ### Fixed
 
 - **URL-encoded copy sources (GH-346):** CopyObject and UploadPartCopy decode
@@ -42,6 +70,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tamper audit events/metrics. Genuine authentication failures still fail
   closed. Includes deterministic unit and four-provider conformance coverage
   for the PUT → GET → DELETE → GET inconsistency reported on Swift-backed S3.
+
+### Dependencies
+
+- Updated `github.com/cenkalti/backoff/v7` to v7.0.1.
+- Updated `github.com/moby/moby/api` to v1.56.1.
+- Updated `github.com/openbao/openbao/api/v2` to v2.7.1.
+- Updated the OpenTelemetry Go modules, SDK, and trace exporters to v1.47.0,
+  including the metric and log modules. Updated transitive Google API/RPC
+  generated modules (`google.golang.org/genproto/googleapis/api` and
+  `google.golang.org/genproto/googleapis/rpc`) to
+  `v0.0.0-20260928230214-8a89bd6388cc`.
+- Updated the AWS CLI compatibility image to v2.37.8.
+- Updated boto3 compatibility testing to v1.43.107.
+- Updated the OpenBao compatibility image to v2.7.1.
+- Updated the Cosmian KMS conformance image to v5.28.0.
+- Cleaned up stale Go dependency checksums and recorded the current benchstat
+  tooling checksum without changing its pinned `golang.org/x/perf` version.
+
+### Tests and documentation
+
+- Added deterministic SDK-signed, real-router, backend-wire, and fuzz regressions
+  for the three fixes, with provider-neutral Tier 2 matrices against MinIO,
+  Garage, RustFS, and SeaweedFS. Coverage checks backend isolation, exact source
+  and version selection, expiry/skew boundaries, stable S3 errors, and absence
+  of plaintext or diagnostic leakage. Strengthened existing presigned assertions.
+- Corrected Garage's conformance capabilities: v2.4.1 does not support bucket
+  versioning, so version-selection cases are now capability-gated accordingly.
+- Documented backend-versus-crypto error provenance and observability, presigned
+  lifetime and clock-skew configuration (including Helm schema/value guidance),
+  copy-source encoding and PHP/Laravel compatibility, recovery precautions, and
+  focused Tier 1/Tier 2 regression commands. Annotated the historical presigned
+  security-audit finding and refreshed shifted gosec suppression locations
+  without adding suppressions.
 
 ## [0.12.2] — 2026-09-30
 

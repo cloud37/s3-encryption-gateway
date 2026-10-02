@@ -32,7 +32,7 @@ Install a specific chart version with:
 
 ```bash
 helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway-helm \
-  --version 0.12.2
+  --version 0.12.3
 ```
 
 For strongest artifact pinning, install by the immutable manifest digest:
@@ -520,7 +520,7 @@ Valkey instance above; no separate deployment. All fields use the
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
-| `image.tag` | Container image tag | `"0.12.2"` |
+| `image.tag` | Container image tag | `"0.12.3"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override the chart name portion of resource names | `""` |
@@ -1212,7 +1212,7 @@ helm install gw-blue . \
 
 # Green side (new version):
 helm install gw-green . \
-  --set image.tag=0.12.2 \
+  --set image.tag=0.12.3 \
   --values examples/values-green.yaml \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
 
@@ -1307,7 +1307,7 @@ changes.
 
 5. **TLS**: Enable TLS on the gateway listener (`config.tls.enabled`) and use cert-manager for automatic certificate rotation.
 
-6. **FIPS**: Use `image.tag: 0.12.2-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
+6. **FIPS**: Use `image.tag: 0.12.3-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
 
 ## Troubleshooting
 

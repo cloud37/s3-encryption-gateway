@@ -22,31 +22,25 @@ annotations:
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.2
+      image: docker.io/cloud37io/s3-encryption-gateway:0.12.3
       whitelisted: true
     - name: s3-encryption-gateway-fips
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.2-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.12.3-fips
       whitelisted: true
   artifacthub.io/changes: |
     - kind: fixed
-      description: Publish complete bucket-policy snapshots atomically on reload to prevent encrypted writes to bypass buckets
+      description: Preserve backend S3 errors during encrypted object-read preflight without false decrypt or tamper alerts (GH-344)
     - kind: fixed
-      description: Sanitize passthrough request and response headers for reliable backend signing behind reverse proxies
+      description: Honor signed presigned URL lifetimes independently of the header-auth clock-skew window and validate bounded expiry values (GH-345)
     - kind: fixed
-      description: Preserve standard and user metadata, plaintext sizes, and fresh cached bodies across object and multipart operations
-    - kind: fixed
-      description: Retain validated plaintext range bounds for encrypted multipart UploadPartCopy
-    - kind: security
-      description: Validate crypto and multipart numeric bounds and manifests before cipher use or backend mutation
-    - kind: security
-      description: Verify configured KMS CA chains, reject unsafe audit destinations, and isolate backend redirects
+      description: Decode CopyObject and UploadPartCopy source identities exactly once and encode backend-native copy headers (GH-346)
     - kind: changed
-      description: Centralize object metadata handling and enforce COPY and REPLACE directives and gateway-reserved metadata validation
+      description: Update OpenTelemetry, OpenBao, backoff, Moby API, generated Google API modules, and compatibility client and KMS images
     - kind: changed
-      description: Expand provider-neutral regression coverage, enforce explained gosec suppressions, and update compatibility fixtures
-  artifacthub.io/containsSecurityUpdates: "true"
-version: 0.12.2
-appVersion: "0.12.2"
+      description: Expand signed-handler, wire, fuzz, and four-provider regressions and document deployment guidance and corrected Garage versioning capabilities
+  artifacthub.io/containsSecurityUpdates: "false"
+version: 0.12.3
+appVersion: "0.12.3"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;

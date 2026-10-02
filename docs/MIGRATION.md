@@ -7,18 +7,18 @@
 
 ## Overview
 
-## 0.12 upgrade notice (including 0.12.2)
+## 0.12 upgrade notice (including 0.12.3)
 
 The 0.12 release line changes encryption write formats and deployment
 prerequisites. Plan a coordinated upgrade rather than a rolling mix of old and
 new writers.
 
 **If the currently deployed version is earlier than `0.12.0-rc1`, these full
-instructions remain mandatory when upgrading directly to `0.12.2`.** The
+instructions remain mandatory when upgrading directly to `0.12.3`.** The
 0.12 patch releases retain the format, state-v2 writer, KDF-limit, rollback,
 and location-binding requirements below. Version `0.12.1` restored
 authenticated HTTPS upload compatibility and fixed the Helm chart's default
-writable spool storage; `0.12.2` retains those fixes.
+writable spool storage; `0.12.2` and `0.12.3` retain those fixes.
 
 Version `0.12.2` adds atomic bucket-policy reloads, reverse-proxy signing fixes,
 metadata consistency, and numeric/transport hardening. COPY inherits source
@@ -31,6 +31,17 @@ TLS settings or unsafe audit-file permissions before rollout. See the
 The reload fix prevents new GH-339 bypass-bucket miswrites but does not repair
 existing objects; follow the
 [controlled recovery procedure](#recovering-gh-339-bypass-bucket-miswrites).
+
+Version `0.12.3` fixes backend error classification during encrypted reads,
+presigned URL lifetimes, and URL-encoded CopyObject/UploadPartCopy sources.
+These fixes require no additional encryption-policy, key, credential, or
+object-format migration. Restore the `5m` authentication clock-skew default if
+it was enlarged only as a presigned-URL workaround. Keep signed copy-source
+headers encoded through frontend proxies and audit earlier copies/moves of
+escaped keys for wrong-object selection; the fix does not repair existing
+destinations or recover deleted sources. See the
+[0.12.3 changelog](../CHANGELOG.md) and the
+[copy-source deployment and recovery guidance](DEPLOYMENT.md#url-encoded-copy-sources-gh-346).
 
 The procedure also applies when upgrading from the stable `0.11.10` release or
 any `0.12.0` release candidate. The stable release no longer carries the
@@ -96,7 +107,7 @@ the gateway as well as `/ready`.
 
 Charts `0.12.1` and later provide the `/tmp` `emptyDir` and spool setting by default,
 so this specific workaround is unnecessary when installing or upgrading with
-the `0.12.2` chart. Existing `extraVolumeMounts` entries at `/tmp` take
+the `0.12.3` chart. Existing `extraVolumeMounts` entries at `/tmp` take
 precedence; keep them writable. The explicit values above remain necessary for
 the published `0.12.0` chart. They do not replace any of the coordinated
 upgrade steps above for installations earlier than `0.12.0-rc1`.
