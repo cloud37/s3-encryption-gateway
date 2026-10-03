@@ -133,6 +133,8 @@ slow `CopyObject` operations, increase to 120–300 s.
 
 ### 2.4 Precondition Checklist (run before every cutover)
 
+- [ ] If `cors.mode: gateway` is enabled: confirm Valkey AOF and/or RDB on retained storage, take an independent recent backup, and exercise restore before cutover; verify the same policy through each replica after rollout. Do not infer policy durability from a healthy connection.
+- [ ] Before the first gateway-mode enablement (not just later cutovers), confirm persistent Valkey on retained storage, an independent backup, and a successfully exercised restore.
 - [ ] Both releases' Deployments are `Available`.
 - [ ] `scripts/verify-key-parity.sh` exits 0.
 - [ ] Both releases point at the **same** external Valkey address.
@@ -475,6 +477,24 @@ operations mutate this key.
   required.
 
 **Shared Valkey setup:**
+
+Gateway-managed CORS (`cors.mode: gateway`) makes Valkey authoritative durable
+policy, unlike disposable MPU/cache data. Before rollout, confirm AOF and/or RDB
+persistence on retained storage, take an independent recent backup, and exercise
+a restore. All gateway replicas must use the same external Valkey and switch to
+gateway mode together. A healthy Valkey connection is not evidence that CORS
+keys survived a reset; runtime `PUT/DELETE ?cors` edits are not reloaded from
+static config files. Verify rules through each replica after cutover.
+
+If backend bucket deletion succeeds but CORS-key cleanup fails, the gateway
+returns `503 ServiceUnavailable` although the backend bucket may already be
+gone. Retry/remediate the stale policy cleanup before reusing that bucket name;
+gateway-mediated creation refuses to proceed until stale-key cleanup succeeds.
+
+For standalone gateway-CORS deployment, configure the same durability and
+backup contract even without blue/green. The in-chart Valkey subchart is a
+development convenience and is not automatically a proven persistent production
+policy store.
 
 Option A — minimal standalone StatefulSet (dev/low-traffic):
 ```bash

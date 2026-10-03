@@ -224,13 +224,13 @@ and [regression commands](TESTING.md#copy-source-encoding-regressions-gh-346).
 | T2-01 | `GET` | `/{bucket}?policy` | **GetBucketPolicy** | `handleGetBucketPolicy` | Proxy verbatim |
 | T2-02 | `PUT` | `/{bucket}?policy` | **PutBucketPolicy** | `handlePutBucketPolicy` | Proxy verbatim |
 | T2-03 | `DELETE` | `/{bucket}?policy` | **DeleteBucketPolicy** | `handleDeleteBucketPolicy` | Proxy verbatim |
-| T2-04 | `GET` | `/{bucket}?cors` | **GetBucketCors** | `handleGetBucketCors` | Proxy verbatim |
-| T2-05 | `PUT` | `/{bucket}?cors` | **PutBucketCors** | `handlePutBucketCors` | Proxy verbatim |
-| T2-06 | `DELETE` | `/{bucket}?cors` | **DeleteBucketCors** | `handleDeleteBucketCors` | Proxy verbatim |
+| T2-04 | `GET` | `/{bucket}?cors` | **GetBucketCors** | `handleGetBucketCors` | Mode-dependent: passthrough proxies; gateway reads shared Valkey XML (404 `NoSuchCORSConfiguration`, 503 on store failure) |
+| T2-05 | `PUT` | `/{bucket}?cors` | **PutBucketCors** | `handlePutBucketCors` | Mode-dependent: passthrough proxies; gateway validates ≤64 KiB S3 XML/Content-MD5 and stores after a bucket existence probe |
+| T2-06 | `DELETE` | `/{bucket}?cors` | **DeleteBucketCors** | `handleDeleteBucketCors` | Mode-dependent: passthrough proxies; gateway idempotently deletes policy after a bucket existence probe |
 | T2-07 | `GET` | `/{bucket}?lifecycle` | **GetBucketLifecycle** | `handleGetBucketLifecycle` | Proxy verbatim |
 | T2-08 | `PUT` | `/{bucket}?lifecycle` | **PutBucketLifecycle** | `handlePutBucketLifecycle` | Proxy verbatim |
 | T2-09 | `DELETE` | `/{bucket}?lifecycle` | **DeleteBucketLifecycle** | `handleDeleteBucketLifecycle` | Proxy verbatim |
-| T2-10 | `OPTIONS` | `/{bucket}\|/{bucket}/{key}` | **CORS Preflight** | `handleCORSPreflight` | Gateway-handled |
+| T2-10 | `OPTIONS` | `/{bucket}\|/{bucket}/{key}` | **CORS Preflight** | `handleCORSPreflight` | Mode-dependent: passthrough forwards; gateway evaluates matching bucket policy locally without backend access |
 | T2-11 | `POST` | `/{bucket}/{key}?restore` | **RestoreObject** | `handleRestoreObject` | Proxy verbatim |
 | T2-12 | `GET` | `/{bucket}?encryption` | **GetBucketEncryption** | `handleGetBucketEncryption` | Proxy verbatim |
 | T2-13 | `PUT` | `/{bucket}?encryption` | **PutBucketEncryption** | `handlePutBucketEncryption` | Proxy verbatim |
@@ -244,6 +244,79 @@ presigned request on the preflight. The gateway still authenticates the actual
 presigned `PUT`, and `proxied_bucket` remains enforced for unauthenticated
 preflights. Incomplete or credentialed `OPTIONS` requests continue through the
 normal authentication and authorization path.
+
+### Gateway-managed CORS (GH-322)
+
+The compatible default is `cors.mode: passthrough`. In `gateway` mode, bucket
+CORS XML is stored in shared non-expiring Valkey; GET/PUT/DELETE `?cors` retain
+read/manage authorization. The management existence probe returns `NoSuchBucket`
+only for an explicit backend `NoSuchBucket`; `AccessDenied`, throttling,
+transport failures and ambiguous outcomes map to fixed `503 ServiceUnavailable`
+and leave any existing rules unchanged. Backends denying `ListObjects` prevent
+gateway-mode `?cors` management. Invalid XML or Content-MD5 returns 400 (oversize returns 413),
+missing configuration is 404, and Valkey failure is 503. A genuinely malformed
+request Origin/ACR value returns 400 `InvalidArgument`, without authorization
+headers (including when credentials mode is enabled). Preflight requires
+Origin, requested method and every requested header to match a rule; mismatch
+returns 403 without allow headers. Matched actual responses receive
+Allow-Origin and explicitly configured Expose-Headers; ETag is not exposed by
+default. Gateway mode strips upstream CORS headers. A global fallback applies
+only to genuinely missing bucket policy and is never returned by GET or used to
+mask corruption/outage. See ADR 0019 and operator durability/recovery guidance.
+If backend `DeleteBucket` succeeds but Valkey policy cleanup fails, the gateway
+returns 503 and logs that the backend may already be deleted. Retry cleanup and
+resolve the stale key before reusing that bucket name; gateway-mediated create
+will not proceed if stale-key deletion itself fails.
+
+Preflight response summary:
+
+| Condition | Status | Allow headers | `Vary` |
+|---|---:|---|---|
+| Matching rule | 200 | Origin, matched methods, requested allowed headers, configured expose/max-age, optional credentials | `Origin`, `Access-Control-Request-Method`, `Access-Control-Request-Headers` |
+| No matching rule | 403 `AccessDenied` | None | Same three tokens |
+| Malformed Origin / request headers | 400 `InvalidArgument` | None | Same three tokens |
+| Missing policy without matching fallback | 403 `AccessDenied` | None | Same three tokens |
+| Valkey unavailable/corrupt policy | 503 `ServiceUnavailable` | None | Same three tokens |
+
+On actual S3 responses, including absent-origin requests, gateway mode strips
+all backend `Access-Control-*` policy headers. On a matched request it sets only
+Allow-Origin, configured Expose-Headers, and optional credentials; no methods,
+allowed-headers, or max-age are added to actual responses. It preserves existing
+`Vary` values and adds `Origin` when relevant.
+
+The existence probe uses `ListObjects(MaxKeys=1)` and therefore requires a
+backend credential permitted to list the bucket. A backend-side ListObjects
+denial prevents gateway-managed `?cors` administration even if other bucket
+operations are permitted. With `allow_credentials: true`, the gateway echoes
+only a validated concrete Origin (never `*`); this is a nonstandard deployment
+opt-in and defaults off.
+
+Gateway-mode management response and error contract (passthrough continues to
+forward the backend response unchanged):
+
+| Operation | Condition | HTTP status | Body / S3 error |
+|---|---|---:|---|
+| `GET /{bucket}?cors` | Configured policy | 200 | CORS XML (`application/xml`) |
+| `GET /{bucket}?cors` | No stored policy | 404 | S3 XML `NoSuchCORSConfiguration` |
+| `GET /{bucket}?cors` | Missing bucket | 404 | S3 XML `NoSuchBucket` |
+| `GET /{bucket}?cors` | Valkey unavailable or stored record corrupt | 503 | S3 XML `ServiceUnavailable` |
+| `PUT /{bucket}?cors` | Valid XML stored | 200 | Empty |
+| `PUT /{bucket}?cors` | Malformed XML or invalid origin authority | 400 | S3 XML `MalformedXML` |
+| `PUT /{bucket}?cors` | XML exceeds 64 KiB | 413 | S3 XML `EntityTooLarge` |
+| `PUT /{bucket}?cors` | Malformed `Content-MD5` encoding or digest length | 400 | S3 XML `InvalidDigest` |
+| `PUT /{bucket}?cors` | `Content-MD5` does not match request body | 400 | S3 XML `BadDigest` |
+| `PUT /{bucket}?cors` | Missing bucket | 404 | S3 XML `NoSuchBucket` |
+| `PUT /{bucket}?cors` | Valkey unavailable or write failure | 503 | S3 XML `ServiceUnavailable`; prior policy remains unchanged |
+| `DELETE /{bucket}?cors` | Existing bucket, whether or not a policy existed | 204 | Empty; deletion is idempotent |
+| `DELETE /{bucket}?cors` | Missing bucket | 404 | S3 XML `NoSuchBucket` |
+| `DELETE /{bucket}?cors` | Valkey unavailable or delete failure | 503 | S3 XML `ServiceUnavailable` |
+
+Only an explicit backend `NoSuchBucket` from the bounded existence probe maps
+to 404 `NoSuchBucket`. A backend that denies the probe with `AccessDenied`, or
+returns throttling, transport failure, or another ambiguous result, produces a
+fixed 503 `ServiceUnavailable`; it is not treated as a missing bucket. The
+probe uses `ListObjects(MaxKeys=1)`, so a backend-side list denial also prevents
+gateway-mode CORS management.
 
 ### New Operations — Tier 3 (Specialised)
 
@@ -439,8 +512,11 @@ trusted-proxy IP extraction. An HTTP transport may add its own unsigned
 transport headers; these are not copied client identity.
 
 The policy covers both the generic passthrough wrapper and the direct
-ListBuckets forwarding call. Proxy responses retain end-to-end S3/CORS headers
-but strip fixed and `Connection`-nominated hop-by-hop fields, including `Trailer`.
+ListBuckets forwarding call. In gateway-managed CORS mode, response middleware
+strips backend `Access-Control-*` policy headers on every S3 response and
+applies only the gateway's matched decision before status/body commit. In
+passthrough mode proxy responses retain end-to-end S3/CORS headers. Both modes
+strip fixed and `Connection`-nominated hop-by-hop fields, including `Trailer`.
 See [reverse-proxy deployment](DEPLOYMENT.md#reverse-proxies-and-backend-load-balancers)
 and [GH-338 testing](TESTING.md#reverse-proxy-header-regressions-gh-338).
 

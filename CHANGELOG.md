@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+### Added
+
+- **Gateway-managed bucket CORS (GH-322, opt-in):** `cors.mode: gateway` stores
+  bucket XML in shared, non-expiring Valkey and applies policy to preflight and
+  actual gateway responses. This is an operational breaking change only when
+  opting in: persistent Valkey on retained storage and an independently
+  maintained, tested backup/restore are prerequisites. Default passthrough
+  remains unchanged and does not gain a durability requirement. Runtime API
+  updates are not reloaded from configuration files.
+
 ## [0.12.3] — 2026-10-02
 
 This patch release fixes backend error classification during encrypted object

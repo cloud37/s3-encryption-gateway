@@ -332,11 +332,11 @@ config:
 - **JSON/HTTP (Development only)**: Set `insecureAllowPlaintextTransport.value: "true"` explicitly. HTTP transmits plaintext DEKs and is rejected by default.
 - **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS)
 
-#### Valkey (Multipart Upload State + ListObjects Size Cache)
+#### Valkey (Multipart Upload State, ListObjects Size Cache, and Optional CORS)
 
 Valkey (or any Redis-protocol-compatible store) is the gateway's shared state
-backend. As of v1.0 a single Valkey instance and one connection pool serve two
-features:
+backend. A single Valkey instance and connection pool serve these optional or
+required features:
 
 1. **Encrypted multipart-upload state** — in-flight `UploadState` blobs
    (`mpu:<id>`, 7-day TTL). Required (fail-closed) when any policy sets
@@ -344,7 +344,13 @@ features:
 2. **ListObjects plaintext-size cache** (V1.0-S3-3) — per-bucket hash
    `plainsize:<bucket>` so `ListObjects[i].Size == HeadObject(key).Content-Length`
    without per-object HEAD calls. **Strongly recommended**; fail-soft to
-   ciphertext sizes if Valkey is unavailable.
+    ciphertext sizes if Valkey is unavailable.
+3. **Gateway-managed bucket CORS** (opt-in with `config.cors.mode: gateway`) —
+   durable, non-expiring `bucketcors:v1:<bucket>` policy records. This mode
+   requires persistence on retained storage, independent backups, and a tested
+   restore. Default `passthrough` does not add a persistence requirement, and
+   not every installation needs Valkey unless it uses encrypted MPU or enables
+   a Valkey-backed feature.
 
 Use the built-in Valkey subchart for development or point at an external cluster for production.
 
@@ -914,6 +920,30 @@ fields are supported: `encrypt_multipart_uploads`, `require_encryption`,
 
 #### Production (external Valkey, TLS)
 
+Gateway-managed CORS is opt-in with `config.cors.mode.value: gateway`; the default is
+`passthrough`. Gateway mode stores runtime API-managed bucket rules in shared,
+non-expiring Valkey. Configure persistence on retained storage, maintain an
+independent backup, and exercise restore before enabling it. The development
+subchart is not proof of production durability. Roll all replicas to the mode
+together and use the same external Valkey. Empty-but-healthy Valkey can pass
+readiness after rules are lost; `GET ?cors` then returns 404 and preflight
+denies with 403 unless explicit fallback applies. Fallback can broaden browser
+visibility and must be reviewed during recovery. `PUT/DELETE ?cors` changes are
+not reloaded from chart/config files. If backend bucket deletion succeeds but
+Valkey policy cleanup fails, retry cleanup and resolve the stale key before
+reusing that bucket name.
+
+> **Credentials warning:** `config.cors.allowCredentials` is a nonstandard,
+> deployment-level opt-in. When enabled, the gateway echoes only a syntactically
+> validated concrete request Origin for a matching rule; stored/fallback `*`
+> patterns are never reflected as `Access-Control-Allow-Origin: *` with
+> credentials. Review this browser exposure before enabling it.
+
+When `config.cors.mode.valueFrom` is present, it takes precedence over the
+direct `value`, matching the environment renderer. Helm cannot resolve that
+referenced value during rendering, so it conservatively requires Valkey even
+when a direct `value: passthrough` is also present.
+
 Disable the subchart and point at your shared Valkey cluster. The `policies`
 list works identically:
 
@@ -922,6 +952,23 @@ valkey:
   enabled: false
 
 config:
+  cors:
+    mode:
+      value: gateway
+      valueFrom: {}
+    allowCredentials:
+      value: "false"
+    fallback:
+      allowedOrigins:
+        value: ["https://console.example.com"]
+      allowedMethods:
+        value: [GET, HEAD, PUT, POST, DELETE]
+      allowedHeaders:
+        value: ["content-type", "x-amz-*"]
+      exposeHeaders:
+        value: [ETag]
+      maxAgeSeconds:
+        value: "3600"
   multipartState:
     valkey:
       addr:

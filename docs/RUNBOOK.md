@@ -462,6 +462,22 @@ being refused.
 - In-flight multipart uploads will fail until Valkey is restored — the uploads are not lost on the S3 side, but the state store is temporarily unavailable.
 - `ListObjects` **degrades, not fails**: listings return `200 OK` with ciphertext sizes, so sync clients (rclone, restic, s5cmd) will re-transfer encrypted objects until Valkey recovers and the size cache re-warms. No data loss; see [ListObjects Plaintext Size Cache](#listobjects-plaintext-size-cache-v10-s3-3).
 - After Valkey recovers, in-flight uploads with active TTLs will be readable again, and the size cache re-warms through normal write traffic.
+- Recovery of an empty Valkey does **not** restore gateway CORS rules. For gateway-managed CORS, distinguish `503 ServiceUnavailable` (same data store unavailable) from `404 NoSuchCORSConfiguration` (key absent/reset). Probe an authorized `GET /<known-configured-bucket>?cors`; review/disable any broad fallback before recovery. Restore the Valkey backup or re-apply the known XML with authenticated `PUT ?cors` using a credential with the bucket `manage` grant. Verify `OPTIONS` and an actual ETag-readable response on every replica. Do not assume static templates contain API mutations or use an unaudited broad fallback as a substitute.
+
+### Gateway CORS Valkey data loss and recovery
+
+Before enabling gateway mode, confirm retained-storage persistence, an
+independent backup, and an exercised restore; the startup persistence warning
+does not establish backup health.
+
+Gateway-mode bucket rules are durable Valkey records with no TTL. Readiness can
+be healthy after an empty reset, so use an authorized `GET ?cors` for a known
+configured bucket to check policy presence. A 503 indicates store outage; a 404
+`NoSuchCORSConfiguration` indicates an absent key. Review fallback before
+restoring because it may broaden visibility. Restore the tested Valkey backup
+or re-apply the known XML using signed `PUT ?cors` with a bucket `manage` grant.
+Then verify preflight and the actual ETag response against each replica. Static
+configuration files do not include API edits unless those rules were exported.
 
 ### Encrypted MPU nonce-safety rollout
 

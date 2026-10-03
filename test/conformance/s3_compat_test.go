@@ -7,10 +7,14 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/base64"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,6 +25,7 @@ import (
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
@@ -701,6 +706,383 @@ func testS3Compat_CORSPreflight_ConfiguredBackend(t *testing.T, inst provider.In
 			}
 		})
 	}
+}
+
+func testS3Compat_GatewayCORSWithoutBackend(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	ctx := context.Background()
+	var mpuCompleted atomic.Bool
+	vk := provider.StartValkey(ctx, t)
+	backend := newS3CompatClient(t, inst)
+	_, err := backend.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(inst.Bucket), MaxKeys: aws.Int32(1)})
+	if err != nil {
+		t.Fatalf("provider bucket existence probe: %v", err)
+	}
+
+	objectPermission := config.ObjectPermissionReadWrite
+	credential := config.GatewayCredential{AccessKey: testAccessKey, SecretKey: testSecretKey, Buckets: []string{inst.Bucket}, Permissions: &objectPermission, BucketPermissions: []config.BucketPermission{config.BucketPermissionManage}}
+	backendURL, err := url.Parse(inst.Endpoint)
+	if err != nil {
+		t.Fatalf("parse provider endpoint: %v", err)
+	}
+	transport := &corsNoBackendTransport{inner: http.DefaultTransport, backend: backendURL.Host}
+	startGateway := func() *harness.Gateway {
+		return harness.StartGateway(t, inst,
+			harness.WithValkeyAddr(vk.Addr), harness.WithCORSMode("gateway"),
+			harness.WithAuth(credential), harness.WithEncryptedMPUForBucket(inst.Bucket),
+			harness.WithBackendTransport(transport),
+			harness.WithConfigMutator(func(c *config.Config) {
+				c.CORS.Fallback = config.CORSFallbackConfig{AllowedOrigins: []string{"https://fallback.example"}, AllowedMethods: []string{"PUT", "GET"}, AllowedHeaders: []string{"content-type"}}
+			}),
+		)
+	}
+	first, second := startGateway(), startGateway()
+	key := uniqueKey(t)
+	standalonePutKey := uniqueKey(t)
+	uploadID := ""
+	corsStored := false
+	configBody := `<CORSConfiguration><CORSRule><ID>browser</ID><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>GET</AllowedMethod><AllowedMethod>HEAD</AllowedMethod><AllowedMethod>PUT</AllowedMethod><AllowedMethod>POST</AllowedMethod><AllowedMethod>DELETE</AllowedMethod><AllowedHeader>content-type</AllowedHeader><ExposeHeader>ETag</ExposeHeader><MaxAgeSeconds>3600</MaxAgeSeconds></CORSRule></CORSConfiguration>`
+	request := func(method, target string, body io.Reader, signed bool) (*http.Response, []byte) {
+		req, reqErr := http.NewRequest(method, first.URL+target, body)
+		if reqErr != nil {
+			t.Fatalf("request: %v", reqErr)
+		}
+		if signed {
+			var signedBody []byte
+			if body != nil {
+				var readErr error
+				signedBody, readErr = io.ReadAll(body)
+				if readErr != nil {
+					t.Fatalf("read request body: %v", readErr)
+				}
+				req.Body = io.NopCloser(bytes.NewReader(signedBody))
+			}
+			signV4Headers(t, req, testAccessKey, testSecretKey, signedBody)
+		}
+		resp, doErr := first.HTTPClient().Do(req)
+		if doErr != nil {
+			t.Fatalf("request %s: %v", target, doErr)
+		}
+		data, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
+		}
+		return resp, data
+	}
+	t.Cleanup(func() {
+		if corsStored {
+			cleanupReq, _ := http.NewRequest(http.MethodDelete, first.URL+"/"+inst.Bucket+"?cors", nil)
+			signV4Headers(t, cleanupReq, testAccessKey, testSecretKey, nil)
+			if cleanupResp, cleanupErr := first.HTTPClient().Do(cleanupReq); cleanupErr == nil {
+				cleanupResp.Body.Close()
+			} else {
+				t.Logf("gateway CORS cleanup: %v", cleanupErr)
+			}
+		}
+		if uploadID != "" {
+			abortReq, _ := http.NewRequest(http.MethodDelete, first.URL+"/"+inst.Bucket+"/"+key+"?uploadId="+url.QueryEscape(uploadID), nil)
+			signV4Headers(t, abortReq, testAccessKey, testSecretKey, nil)
+			if abortResp, abortErr := first.HTTPClient().Do(abortReq); abortErr == nil {
+				abortResp.Body.Close()
+			} else {
+				t.Logf("gateway MPU cleanup: %v", abortErr)
+			}
+		}
+		for _, cleanupKey := range []string{key, standalonePutKey} {
+			if _, cleanupErr := backend.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(inst.Bucket), Key: aws.String(cleanupKey)}); cleanupErr != nil {
+				t.Logf("provider object cleanup %s: %v", cleanupKey, cleanupErr)
+			}
+		}
+		manifestKey := key + crypto.MPUManifestSuffix
+		if _, cleanupErr := backend.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(inst.Bucket), Key: aws.String(manifestKey)}); cleanupErr != nil {
+			t.Logf("provider MPU manifest cleanup %s: %v", manifestKey, cleanupErr)
+		}
+	})
+	resp, body := request(http.MethodPut, "/"+inst.Bucket+"?cors", strings.NewReader(configBody), true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PutBucketCors status=%d body=%s", resp.StatusCode, body)
+	}
+	corsStored = true
+	resp, body = request(http.MethodGet, "/"+inst.Bucket+"?cors", nil, true)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "browser") {
+		t.Fatalf("GetBucketCors status=%d body=%s", resp.StatusCode, body)
+	}
+	transportCountBeforeGet := transport.blocked.Load()
+	_, _ = request(http.MethodGet, "/"+inst.Bucket+"?cors", nil, true)
+	if transport.blocked.Load() != transportCountBeforeGet {
+		t.Fatal("gateway GET ?cors reached backend transport")
+	}
+	req, _ := http.NewRequest(http.MethodOptions, first.URL+"/"+inst.Bucket+"/key", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "PUT")
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	resp, err = first.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	preflightBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" {
+		t.Fatalf("preflight status=%d headers=%v body=%s", resp.StatusCode, resp.Header, preflightBody)
+	}
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers")), "content-type") || resp.Header.Get("Access-Control-Expose-Headers") != "ETag" {
+		t.Fatalf("preflight header policy=%v", resp.Header)
+	}
+	uploadID = gatewayCORSInitiateMPU(t, first, inst.Bucket, key)
+	partPayload := []byte("cors multipart body")
+	partTag := gatewayCORSUploadPart(t, first, inst.Bucket, key, uploadID, 1, partPayload)
+	mpuCompleted.Store(true)
+	gatewayCORSCompleteMPU(t, first, inst.Bucket, key, uploadID, partTag)
+	uploadID = ""
+	getETag := ""
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		actual, _ := http.NewRequest(method, first.URL+"/"+inst.Bucket+"/"+key, nil)
+		actual.Header.Set("Origin", "https://app.example.com")
+		if method == http.MethodGet {
+			signV4Headers(t, actual, testAccessKey, testSecretKey, nil)
+		} else {
+			signV4Headers(t, actual, testAccessKey, testSecretKey, nil)
+		}
+		actualResp, actualErr := first.HTTPClient().Do(actual)
+		if actualErr != nil {
+			t.Fatalf("actual %s: %v", method, actualErr)
+		}
+		actualBody, bodyErr := io.ReadAll(actualResp.Body)
+		actualResp.Body.Close()
+		if bodyErr != nil {
+			t.Fatalf("read actual %s: %v", method, bodyErr)
+		}
+		if actualResp.StatusCode != http.StatusOK || actualResp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" || actualResp.Header.Get("Access-Control-Expose-Headers") != "ETag" {
+			t.Fatalf("actual %s headers=%v", method, actualResp.Header)
+		}
+		if actualResp.Header.Get("Vary") != "Origin" || actualResp.Header.Get("Access-Control-Allow-Methods") != "" || actualResp.Header.Get("Access-Control-Allow-Headers") != "" {
+			t.Fatalf("actual %s policy headers=%v", method, actualResp.Header)
+		}
+		if method == http.MethodGet && string(actualBody) != string(partPayload) {
+			t.Fatalf("GET body=%q", actualBody)
+		}
+		if method == http.MethodGet && actualResp.ContentLength != int64(len(partPayload)) {
+			t.Fatalf("GET content-length=%d, want plaintext length %d", actualResp.ContentLength, len(partPayload))
+		}
+		if method == http.MethodGet && actualResp.Header.Get("ETag") == "" {
+			t.Fatal("GET returned empty ETag despite exposing it")
+		}
+		if method == http.MethodGet {
+			getETag = actualResp.Header.Get("ETag")
+		}
+		if method == http.MethodHead && (actualResp.ContentLength != int64(len(partPayload)) || len(actualBody) != 0) {
+			t.Fatalf("HEAD content-length=%d body=%q", actualResp.ContentLength, actualBody)
+		}
+		if method == http.MethodHead && actualResp.Header.Get("ETag") != getETag {
+			t.Fatalf("HEAD ETag=%q differs from GET ETag=%q", actualResp.Header.Get("ETag"), getETag)
+		}
+		if method == http.MethodHead && (actualResp.Header.Get("Access-Control-Expose-Headers") != "ETag" || actualResp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com") {
+			t.Fatalf("HEAD expected ETag expose and actual CORS policy headers: %v", actualResp.Header)
+		}
+		if method == http.MethodHead {
+			if err := actualResp.Body.Close(); err != nil {
+				t.Fatalf("close HEAD body: %v", err)
+			}
+			continue
+		}
+	}
+	deleteReq, _ := http.NewRequest(http.MethodDelete, first.URL+"/"+inst.Bucket+"/"+key, nil)
+	deleteReq.Header.Set("Origin", "https://app.example.com")
+	signV4Headers(t, deleteReq, testAccessKey, testSecretKey, nil)
+	deleteResp, deleteErr := first.HTTPClient().Do(deleteReq)
+	if deleteErr != nil {
+		t.Fatalf("object DELETE: %v", deleteErr)
+	}
+	_, _ = io.Copy(io.Discard, deleteResp.Body)
+	deleteResp.Body.Close()
+	if deleteResp.StatusCode != http.StatusNoContent || deleteResp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" {
+		t.Fatalf("object DELETE status=%d headers=%v", deleteResp.StatusCode, deleteResp.Header)
+	}
+	putBody := []byte("authorized encrypted CORS put")
+	putKey := standalonePutKey
+	putReq, _ := http.NewRequest(http.MethodPut, first.URL+"/"+inst.Bucket+"/"+putKey, bytes.NewReader(putBody))
+	putReq.Header.Set("Origin", "https://app.example.com")
+	signV4Headers(t, putReq, testAccessKey, testSecretKey, putBody)
+	putResp, putErr := first.HTTPClient().Do(putReq)
+	if putErr != nil {
+		t.Fatalf("authorized PUT: %v", putErr)
+	}
+	_, _ = io.Copy(io.Discard, putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK || putResp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" || putResp.Header.Get("Access-Control-Expose-Headers") != "ETag" {
+		t.Fatalf("authorized PUT status=%d headers=%v", putResp.StatusCode, putResp.Header)
+	}
+	if putResp.Header.Get("ETag") == "" {
+		t.Fatal("authorized PUT returned empty ETag")
+	}
+	// A second gateway sees the first gateway's shared Valkey write.
+	getReq, _ := http.NewRequest(http.MethodGet, second.URL+"/"+inst.Bucket+"?cors", nil)
+	signV4Headers(t, getReq, testAccessKey, testSecretKey, nil)
+	resp, err = second.HTTPClient().Do(getReq)
+	if err != nil {
+		t.Fatalf("replica GET: %v", err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(data), "browser") {
+		t.Fatalf("replica GetBucketCors status=%d body=%s", resp.StatusCode, data)
+	}
+	wrongOrigin, _ := http.NewRequest(http.MethodOptions, first.URL+"/"+inst.Bucket, nil)
+	wrongOrigin.Header.Set("Origin", "https://wrong.example")
+	wrongOrigin.Header.Set("Access-Control-Request-Method", "PUT")
+	resp, err = first.HTTPClient().Do(wrongOrigin)
+	if err != nil {
+		t.Fatalf("wrong-origin OPTIONS: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("wrong-origin status=%d headers=%v", resp.StatusCode, resp.Header)
+	}
+	// Native bucket CORS API and OPTIONS are blocked by the injected transport.
+	if transport.blocked.Load() != 0 {
+		t.Fatalf("gateway forwarded %d CORS requests to backend", transport.blocked.Load())
+	}
+	blockedBeforeFallbackChecks := transport.blocked.Load()
+	// Delete and prove fallback now applies, but GET never returns the fallback.
+	resp, _ = request(http.MethodDelete, "/"+inst.Bucket+"?cors", nil, true)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DeleteBucketCors status=%d", resp.StatusCode)
+	}
+	fallbackReq, _ := http.NewRequest(http.MethodOptions, first.URL+"/"+inst.Bucket, nil)
+	fallbackReq.Header.Set("Origin", "https://fallback.example")
+	fallbackReq.Header.Set("Access-Control-Request-Method", "PUT")
+	resp, err = first.HTTPClient().Do(fallbackReq)
+	if err != nil {
+		t.Fatalf("fallback preflight: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fallback preflight status=%d", resp.StatusCode)
+	}
+	resp, body = request(http.MethodGet, "/"+inst.Bucket+"?cors", nil, true)
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(body), "NoSuchCORSConfiguration") {
+		t.Fatalf("fallback leaked through GetBucketCors: status=%d body=%s", resp.StatusCode, body)
+	}
+	missingGet, _ := http.NewRequest(http.MethodGet, first.URL+"/"+inst.Bucket+"/missing-cors-object", nil)
+	missingGet.Header.Set("Origin", "https://fallback.example")
+	signV4Headers(t, missingGet, testAccessKey, testSecretKey, nil)
+	missingResp, missingErr := first.HTTPClient().Do(missingGet)
+	if missingErr != nil {
+		t.Fatalf("missing GET: %v", missingErr)
+	}
+	io.Copy(io.Discard, missingResp.Body)
+	missingResp.Body.Close()
+	if missingResp.StatusCode != http.StatusNotFound || missingResp.Header.Get("Access-Control-Allow-Origin") != "https://fallback.example" {
+		t.Fatalf("fallback missing GET status=%d headers=%v", missingResp.StatusCode, missingResp.Header)
+	}
+	if got := transport.blocked.Load(); got != blockedBeforeFallbackChecks {
+		t.Fatalf("gateway forwarded %d blocked CORS calls after policy delete/fallback/missing GET (before=%d after=%d)", got-blockedBeforeFallbackChecks, blockedBeforeFallbackChecks, got)
+	}
+}
+
+type corsNoBackendTransport struct {
+	inner   http.RoundTripper
+	backend string
+	blocked atomic.Int64
+}
+
+func gatewayCORSInitiateMPU(t *testing.T, gw *harness.Gateway, bucket, key string) string {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, gw.URL+"/"+bucket+"/"+key+"?uploads", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	signV4Headers(t, req, testAccessKey, testSecretKey, nil)
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateMultipartUpload status=%d body=%s", resp.StatusCode, body)
+	}
+	var result struct {
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.UploadID == "" {
+		t.Fatal("CreateMultipartUpload returned empty upload ID")
+	}
+	return result.UploadID
+}
+
+func gatewayCORSUploadPart(t *testing.T, gw *harness.Gateway, bucket, key, uploadID string, number int, body []byte) string {
+	t.Helper()
+	query := url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {uploadID}}
+	req, err := http.NewRequest(http.MethodPut, gw.URL+"/"+bucket+"/"+key+"?"+query.Encode(), bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://app.example.com")
+	signV4Headers(t, req, testAccessKey, testSecretKey, body)
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("UploadPart status=%d body=%s", resp.StatusCode, data)
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" || resp.Header.Get("Access-Control-Expose-Headers") != "ETag" {
+		t.Fatalf("UploadPart CORS headers=%v", resp.Header)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("UploadPart returned empty ETag")
+	}
+	return etag
+}
+
+func gatewayCORSCompleteMPU(t *testing.T, gw *harness.Gateway, bucket, key, uploadID, etag string) {
+	t.Helper()
+	body := fmt.Sprintf("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>", etag)
+	req, err := http.NewRequest(http.MethodPost, gw.URL+"/"+bucket+"/"+key+"?uploadId="+url.QueryEscape(uploadID), strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Origin", "https://app.example.com")
+	signV4Headers(t, req, testAccessKey, testSecretKey, []byte(body))
+	resp, err := gw.HTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CompleteMultipartUpload status=%d body=%s", resp.StatusCode, data)
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example.com" {
+		t.Fatalf("CompleteMultipartUpload CORS headers=%v", resp.Header)
+	}
+	if resp.Header.Get("Access-Control-Expose-Headers") != "ETag" {
+		t.Fatalf("CompleteMultipartUpload CORS policy must expose ETag: %v", resp.Header)
+	}
+	var result struct {
+		ETag string `xml:"ETag"`
+	}
+	if err := xml.Unmarshal(data, &result); err != nil || result.ETag == "" {
+		t.Fatalf("CompleteMultipartUpload response XML ETag=%q err=%v body=%s", result.ETag, err, data)
+	}
+}
+
+func (t *corsNoBackendTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == t.backend && (req.Method == http.MethodOptions || req.URL.Query().Has("cors")) {
+		t.blocked.Add(1)
+		return nil, fmt.Errorf("gateway unexpectedly called backend for CORS request")
+	}
+	return t.inner.RoundTrip(req)
 }
 
 func testS3Compat_GetPutDeleteBucketEncryption(t *testing.T, inst provider.Instance) {
