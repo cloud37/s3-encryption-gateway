@@ -651,6 +651,61 @@ conformance, and isolation gates. The [request-time contract](S3_API_IMPLEMENTAT
 and [operator guidance](DEPLOYMENT.md#presigned-url-lifetime-and-clock-skew-gh-345)
 describe expiry requirements and removing the widened-skew workaround.
 
+### Signed Content-Length regressions (GH-356)
+
+- **Tier 1:** `internal/api/signed_content_length_test.go` has no build tag or
+  Docker dependency. An independent signing oracle signs the explicit header
+  before simulating its removal; canonicalization, validator, and middleware
+  cases cover known zero/positive lengths, DELETE/GET/HEAD/PUT, header/presigned
+  authentication, explicit-header precedence, case-insensitive lookup, unsigned
+  exclusion, and unknown-length rejection. Checks assert unchanged request
+  headers during canonicalization, exact body replay, fixed S3 errors, one
+  failed-auth audit event, and no downstream invocation on rejection. A real
+  `httptest` Go frontend reverse proxy removes the zero header on the wire
+  before the production auth/authorization/router chain handles DELETE;
+  direct and unsigned controls pass, and invalid signatures leave the mock
+  backend unaccessed and unchanged. No sleeps or expensive KDF fixture is used.
+- **Tier 2:** `test/conformance/signed_content_length_test.go` registers
+  `SignedContentLength_Delete` and `SignedContentLength_PresignedDelete` with
+  capability `0`: they test inbound gateway authentication, not a backend
+  presigning capability. Real self-contained AES-KEK chunked objects are read
+  back as plaintext and checked as ciphertext at the provider before deletion.
+  A local Go frontend proxy receives explicit zero length; `httptrace` checks
+  that its transport omits the header from serialization. Direct and unsigned
+  controls pass, proxied signed-zero DELETEs return 204 and remove real backend
+  objects, and wrong signed lengths return fixed 403 XML without any gateway
+  backend HTTP call or object mutation. Normal provider/Testcontainers cleanup
+  and Docker-unavailable skips remain unchanged. No provider-name branches,
+  extra proxy container, fixed port, or new CI target is needed.
+
+**Fixture requirement:** the AWS Go SDK signer skips signing zero content
+length, even when the header is supplied. An SDK-only test therefore misses
+GH-356. Keep zero-length signing independent of production canonicalization,
+and send the initial HTTP header explicitly: Go's `Request.Write` or client
+transport would otherwise omit it before it reaches the frontend test proxy.
+
+The tests assert the corrected contract and were confirmed red before the fix
+in Tier 1 and on all four local providers for both authentication forms, with
+direct/unsigned and invalid-signature rejection controls passing.
+
+```bash
+# Tier 1: repeat inexpensive canonicalization, auth, and real-proxy regressions.
+go test -race ./internal/api -count=20 -run '^TestSignedContentLength_'
+
+# FIPS variant of the same regressions (HSM validation remains disabled).
+GOFIPS140=v1.0.0 go test -race -tags=fips ./internal/api -count=20 \
+  -run '^TestSignedContentLength_'
+
+# Tier 2: both auth forms on all four local providers.
+GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
+  ./test/conformance -count=1 -timeout=10m \
+  -run '^TestConformance/[^/]+/SignedContentLength_'
+```
+
+Focused checks supplement, not replace, full Tier 1/FIPS, local conformance,
+and isolation gates. See the [signed-length contract](S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356)
+and [operator recovery guidance](DEPLOYMENT.md#signed-zero-content-length-gh-356).
+
 ### Object-read backend error regressions (GH-344)
 
 - **Tier 1:** `internal/api/object_read_backend_test.go` uses real routes and

@@ -84,6 +84,31 @@ This workaround loses forwarded client-IP information at the gateway; it is
 not required after the fix. Backend credentials, bucket-creation authorization,
 and encryption configuration do not need to change.
 
+### Signed zero Content-Length (GH-356)
+
+Clients such as Stalwart Mail Server's `rust-s3` blob store can sign
+`Content-Length: 0` on bodiless DELETE requests. Go-based frontend proxies,
+including Caddy's normal HTTP/1.1 upstream transport, may omit that header.
+Affected releases, including `0.12.3`, then reject the request with 403
+`SignatureDoesNotMatch` even though direct requests and requests without a
+signed content length work.
+
+Upgrade to a release containing GH-356. The gateway recovers a missing signed
+content length from the incoming request's known nonnegative length, including
+zero. Both header-signed and presigned requests are covered. No proxy setting,
+credential change, wider clock-skew tolerance, encryption-policy change, or
+object migration is needed. After upgrading, retry failed cleanup operations
+or allow the client's scheduled purge to retry; the fix does not run a purge
+or remove previously accumulated objects itself.
+
+Until upgrading, use a supported client option to omit `content-length` from
+signing, if available, or a trusted direct route to the gateway. Do not strip
+`content-length` from an already generated `SignedHeaders` list: that list is
+authenticated too. Do not force zero length on arbitrary requests with bodies.
+Continue preserving the original signed host/path/query and other signed
+headers. Unknown-length/chunked requests cannot recover a lost positive length.
+See the [canonicalization contract](S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356).
+
 ### Backend redirects, KMS TLS, and audit sinks
 
 Passthrough backend redirects are returned unchanged instead of followed.
