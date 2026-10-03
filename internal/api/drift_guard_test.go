@@ -170,6 +170,46 @@ func stringLiteral(expr ast.Expr) string {
 }
 
 func TestDriftGuard_APIResponseHeaderWriters(t *testing.T) {
+	expectedCORSHeaders := map[string]struct{}{
+		"Access-Control-Allow-Origin":      {},
+		"Access-Control-Allow-Methods":     {},
+		"Access-Control-Allow-Headers":     {},
+		"Access-Control-Expose-Headers":    {},
+		"Access-Control-Max-Age":           {},
+		"Access-Control-Allow-Credentials": {},
+	}
+	// Keep this independent expected set exact: positive membership checks alone
+	// would not detect an extra production registry entry.
+	if len(corsOwnedResponseHeaderNames) != len(expectedCORSHeaders) {
+		t.Fatalf("CORS response-header registry has %d entries, want exactly %d", len(corsOwnedResponseHeaderNames), len(expectedCORSHeaders))
+	}
+	registeredCORSHeaders := make(map[string]struct{}, len(corsOwnedResponseHeaderNames))
+	for _, name := range corsOwnedResponseHeaderNames {
+		registeredCORSHeaders[name] = struct{}{}
+	}
+	if len(registeredCORSHeaders) != len(expectedCORSHeaders) {
+		t.Fatalf("CORS response-header registry contains duplicate entries: %v", corsOwnedResponseHeaderNames)
+	}
+	for name := range expectedCORSHeaders {
+		if _, ok := registeredCORSHeaders[name]; !ok {
+			t.Errorf("CORS response-header registry is missing %q", name)
+		}
+	}
+	for name := range registeredCORSHeaders {
+		if _, ok := expectedCORSHeaders[name]; !ok {
+			t.Errorf("CORS response-header registry contains unexpected name %q", name)
+		}
+	}
+	for name := range expectedCORSHeaders {
+		if !isOwnedCORSResponseHeader(name) {
+			t.Errorf("expected gateway CORS response header %q to be registered", name)
+		}
+	}
+	for _, name := range []string{"Access-Control-Allow-Private-Network", "Content-Type", "ETag", "X-Arbitrary"} {
+		if isOwnedCORSResponseHeader(name) {
+			t.Errorf("arbitrary/non-CORS response header %q unexpectedly has CORS owner permission", name)
+		}
+	}
 	for _, path := range productionGoFiles(t) {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
@@ -184,7 +224,9 @@ func TestDriftGuard_APIResponseHeaderWriters(t *testing.T) {
 				for _, lhs := range assignment.Lhs {
 					if index, ok := lhs.(*ast.IndexExpr); ok && isResponseHeaderMapIndex(index, aliases) {
 						key, ok := headerWriteKey(index.Index)
-						if filepath.Base(path) != "object_response.go" && (!ok || key == "Content-Length" || key == "Content-Range" || key == "ETag" || key == "x-amz-version-id") {
+						if filepath.Base(path) == "cors_response_headers.go" && corsOwnerMapWriteIsInvalid(path, index, aliases) {
+							t.Errorf("%s writes an unregistered or dynamic gateway CORS response header", path)
+						} else if filepath.Base(path) != "cors_response_headers.go" && filepath.Base(path) != "object_response.go" && (!ok || key == "Content-Length" || key == "Content-Range" || key == "ETag" || key == "x-amz-version-id") {
 							t.Errorf("%s assigns owned or dynamic object response header outside object_response.go", path)
 						}
 					}
@@ -221,6 +263,12 @@ func TestDriftGuard_APIResponseHeaderWriters(t *testing.T) {
 				}
 				return true
 			}
+			if filepath.Base(path) == "cors_response_headers.go" {
+				if !isOwnedCORSResponseHeader(value) {
+					t.Errorf("%s writes unregistered gateway CORS response header %q", filepath.Base(path), value)
+				}
+				return true
+			}
 			switch value {
 			case "Content-Length", "Content-Range", "ETag", "x-amz-version-id":
 				if filepath.Base(path) != "object_response.go" {
@@ -230,6 +278,63 @@ func TestDriftGuard_APIResponseHeaderWriters(t *testing.T) {
 			return true
 		})
 	}
+}
+
+func TestDriftGuard_CORSOwnerRejectsUnregisteredMapWrites(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		invalid bool
+	}{
+		{name: "arbitrary literal", key: `"X-Arbitrary"`, invalid: true},
+		{name: "private network literal", key: `"Access-Control-Allow-Private-Network"`, invalid: true},
+		{name: "dynamic key", key: "name", invalid: true},
+		{name: "allow origin", key: `"Access-Control-Allow-Origin"`},
+		{name: "allow methods", key: `"Access-Control-Allow-Methods"`},
+		{name: "allow headers", key: `"Access-Control-Allow-Headers"`},
+		{name: "expose headers", key: `"Access-Control-Expose-Headers"`},
+		{name: "max age", key: `"Access-Control-Max-Age"`},
+		{name: "allow credentials", key: `"Access-Control-Allow-Credentials"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := `package api
+import "net/http"
+func owner(headers http.Header, name string) {
+	headers[` + test.key + `] = []string{"value"}
+}`
+			file, err := parser.ParseFile(token.NewFileSet(), "cors_response_headers.go", source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliases := responseHeaderAliases(file)
+			var invalidWrites int
+			ast.Inspect(file, func(node ast.Node) bool {
+				assignment, ok := node.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range assignment.Lhs {
+					index, ok := lhs.(*ast.IndexExpr)
+					if ok && isResponseHeaderMapIndex(index, aliases) && corsOwnerMapWriteIsInvalid("cors_response_headers.go", index, aliases) {
+						invalidWrites++
+					}
+				}
+				return true
+			})
+			if got := invalidWrites != 0; got != test.invalid {
+				t.Fatalf("owner map write invalid=%t, want %t", got, test.invalid)
+			}
+		})
+	}
+}
+
+func corsOwnerMapWriteIsInvalid(path string, index *ast.IndexExpr, aliases map[string]bool) bool {
+	if filepath.Base(path) != "cors_response_headers.go" || !isResponseHeaderMapIndex(index, aliases) {
+		return false
+	}
+	key, known := headerWriteKey(index.Index)
+	return !known || !isOwnedCORSResponseHeader(key)
 }
 
 func TestDriftGuard_IntentionalHeaderOwnershipViolationDetected(t *testing.T) {

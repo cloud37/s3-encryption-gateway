@@ -5,7 +5,9 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -45,6 +47,25 @@ type Config struct {
 	PolicyFiles         []string                `yaml:"policies" env:"POLICIES"`
 	MultipartState      MultipartStateConfig    `yaml:"multipart_state"`
 	ListSizeTranslate   ListSizeTranslateConfig `yaml:"list_size_translate"`
+	CORS                CORSConfig              `yaml:"cors"`
+}
+
+// CORSConfig configures gateway-owned bucket CORS behavior. It is immutable
+// after server construction; an empty Mode is treated as passthrough.
+type CORSConfig struct {
+	Mode             string             `yaml:"mode" env:"CORS_MODE"`
+	AllowCredentials bool               `yaml:"allow_credentials" env:"CORS_ALLOW_CREDENTIALS"`
+	Fallback         CORSFallbackConfig `yaml:"fallback"`
+}
+
+// CORSFallbackConfig is the optional global virtual rule used only when a
+// bucket has no stored CORS document.
+type CORSFallbackConfig struct {
+	AllowedOrigins []string `yaml:"allowed_origins"`
+	AllowedMethods []string `yaml:"allowed_methods"`
+	AllowedHeaders []string `yaml:"allowed_headers"`
+	ExposeHeaders  []string `yaml:"expose_headers"`
+	MaxAgeSeconds  int      `yaml:"max_age_seconds"`
 }
 
 // ResolvedCredentials returns a copy of the auth credentials with SecretKeyEnv
@@ -2037,6 +2058,56 @@ func loadFromEnv(config *Config) error {
 			config.ListSizeTranslate.FallbackHeadTimeout = d
 		}
 	}
+	if v, ok := os.LookupEnv("CORS_MODE"); ok {
+		config.CORS.Mode = v
+	}
+	if v, ok := os.LookupEnv("CORS_ALLOW_CREDENTIALS"); ok {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid CORS_ALLOW_CREDENTIALS %q: %w", v, err)
+		}
+		config.CORS.AllowCredentials = parsed
+	}
+	for _, item := range []struct {
+		name   string
+		target *[]string
+	}{
+		{"CORS_FALLBACK_ALLOWED_ORIGINS", &config.CORS.Fallback.AllowedOrigins},
+		{"CORS_FALLBACK_ALLOWED_METHODS", &config.CORS.Fallback.AllowedMethods},
+		{"CORS_FALLBACK_ALLOWED_HEADERS", &config.CORS.Fallback.AllowedHeaders},
+		{"CORS_FALLBACK_EXPOSE_HEADERS", &config.CORS.Fallback.ExposeHeaders},
+	} {
+		name, target := item.name, item.target
+		if value, ok := os.LookupEnv(name); ok {
+			var parsed []string
+			decoder := json.NewDecoder(strings.NewReader(value))
+			if err := decoder.Decode(&parsed); err != nil || parsed == nil {
+				if err == nil {
+					err = fmt.Errorf("must be a JSON array")
+				}
+				return fmt.Errorf("invalid %s: %w", name, err)
+			}
+			if decoder.Decode(&struct{}{}) != io.EOF {
+				return fmt.Errorf("invalid %s: trailing data", name)
+			}
+			*target = parsed
+		}
+	}
+	if value, ok := os.LookupEnv("CORS_FALLBACK_MAX_AGE_SECONDS"); ok {
+		if value == "" {
+			return fmt.Errorf("invalid CORS_FALLBACK_MAX_AGE_SECONDS %q: must contain decimal digits", value)
+		}
+		for _, digit := range value {
+			if digit < '0' || digit > '9' {
+				return fmt.Errorf("invalid CORS_FALLBACK_MAX_AGE_SECONDS %q: must contain decimal digits", value)
+			}
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid CORS_FALLBACK_MAX_AGE_SECONDS %q: %w", value, err)
+		}
+		config.CORS.Fallback.MaxAgeSeconds = n
+	}
 	return nil
 }
 
@@ -2124,6 +2195,9 @@ func parseSelfContainedAESKeys(value string) []SelfContainedAESKeyEntry {
 
 // Validate validates the configuration and returns an error if invalid.
 func (c *Config) Validate() error {
+	if err := c.CORS.Validate(c.MultipartState.Valkey.Addr != ""); err != nil {
+		return err
+	}
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listen_addr is required")
 	}
@@ -2848,6 +2922,9 @@ func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
 	if old.Server.SpoolDirectory != new.Server.SpoolDirectory {
 		return fmt.Errorf("server.spool_directory cannot be changed during hot reload")
 	}
+	if !sameCORSConfig(old.CORS, new.CORS) {
+		return fmt.Errorf("cors settings cannot be changed during hot reload")
+	}
 	// Crypto settings that MUST NOT change during hot reload
 	if old.Encryption.Password != new.Encryption.Password {
 		return fmt.Errorf("encryption.password cannot be changed during hot reload")
@@ -2908,6 +2985,27 @@ func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
 	}
 
 	return nil
+}
+
+func sameCORSConfig(a, b CORSConfig) bool {
+	return EffectiveCORSMode(a.Mode) == EffectiveCORSMode(b.Mode) && a.AllowCredentials == b.AllowCredentials &&
+		stringSlicesEqual(a.Fallback.AllowedOrigins, b.Fallback.AllowedOrigins) &&
+		stringSlicesEqual(a.Fallback.AllowedMethods, b.Fallback.AllowedMethods) &&
+		stringSlicesEqual(a.Fallback.AllowedHeaders, b.Fallback.AllowedHeaders) &&
+		stringSlicesEqual(a.Fallback.ExposeHeaders, b.Fallback.ExposeHeaders) &&
+		a.Fallback.MaxAgeSeconds == b.Fallback.MaxAgeSeconds
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // GetCurrentConfig returns a copy of the current configuration.

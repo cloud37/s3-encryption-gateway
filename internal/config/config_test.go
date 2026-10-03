@@ -71,6 +71,32 @@ func TestLoadConfig_InvalidReservationLeaseEnvReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "MPU_RESERVATION_LEASE")
 }
 
+func TestLoadConfig_CORSYAMLAndEnvironmentPrecedence(t *testing.T) {
+	t.Setenv("CORS_MODE", "gateway")
+	t.Setenv("CORS_FALLBACK_ALLOWED_ORIGINS", `["https://env.example"]`)
+	t.Setenv("VALKEY_ADDR", "valkey:6379")
+	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
+	t.Setenv("BACKEND_SECRET_KEY", "test-secret")
+	t.Setenv("ENCRYPTION_PASSWORD", "test-password")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("auth:\n  credentials:\n    - access_key: gateway\n      secret_key: gateway-secret\ncors:\n  fallback:\n    allowed_origins: [\"https://yaml.example\"]\n    allowed_methods: [GET]\n")
+	require.NoError(t, os.WriteFile(path, data, 0600))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.Equal(t, []string{"https://env.example"}, cfg.CORS.Fallback.AllowedOrigins)
+	require.Equal(t, []string{"GET"}, cfg.CORS.Fallback.AllowedMethods)
+}
+
+func TestLoadConfig_CORSArrayRejectsNullAndTrailingJSON(t *testing.T) {
+	for _, value := range []string{"null", `["https://ok.example"] trailing`} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CORS_FALLBACK_ALLOWED_ORIGINS", value)
+			_, err := loadMinimalConfigForSigV2TestErr(t, "")
+			require.ErrorContains(t, err, "CORS_FALLBACK_ALLOWED_ORIGINS")
+		})
+	}
+}
+
 func TestAllowUntrackedPlaintextUploads_EnvAndWarning(t *testing.T) {
 	t.Setenv("MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS", "true")
 	t.Setenv("BACKEND_ACCESS_KEY", "test-key")
@@ -2236,6 +2262,18 @@ func TestValidateReloadSafety_Coverage(t *testing.T) {
 			mutate:  func(c *Config) { c.Admin.Enabled = true },
 			wantErr: true,
 			wantMsg: "admin.enabled",
+		},
+		{
+			name:    "cors mode changed",
+			mutate:  func(c *Config) { c.CORS.Mode = "gateway" },
+			wantErr: true,
+			wantMsg: "cors settings",
+		},
+		{
+			name:    "cors fallback changed",
+			mutate:  func(c *Config) { c.CORS.Fallback.AllowedOrigins = []string{"https://app.example.com"} },
+			wantErr: true,
+			wantMsg: "cors settings",
 		},
 		{
 			name:    "admin.address changed",
