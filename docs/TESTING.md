@@ -687,6 +687,10 @@ transport would otherwise omit it before it reaches the frontend test proxy.
 The tests assert the corrected contract and were confirmed red before the fix
 in Tier 1 and on all four local providers for both authentication forms, with
 direct/unsigned and invalid-signature rejection controls passing.
+Post-fix validation passed the full Tier 1 race and FIPS race suites, the full
+local four-provider conformance gate, 20 repeated focused Tier 1/FIPS runs,
+and three repeated focused conformance runs. Vet, isolation, suppression
+inventory, and the pinned HIGH-severity gosec gate also passed.
 
 ```bash
 # Tier 1: repeat inexpensive canonicalization, auth, and real-proxy regressions.
