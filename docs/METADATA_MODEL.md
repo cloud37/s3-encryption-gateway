@@ -96,6 +96,12 @@ phase checklist.
 
 ## Ownership rules
 
+The version-ID inventory describes possible backend values, not a guarantee that
+every write handler returns a destination `x-amz-version-id`. Typed write/delete
+response shapes do not consistently project backend version/delete-marker fields.
+The six-field model is not a complete conditional-request, checksum-mode, or
+arbitrary backend-header contract; see [request/response compatibility](S3_COMPATIBILITY.md).
+
 - `objectmeta.Names` is the one ordered list of standard headers and is used by request parsing, persistence splitting, and response projection.
 - `crypto.MetaKeys()` owns gateway canonical keys, compact aliases, legacy aliases, reserved classification, and the frozen historical encryption-predicate bit.
 - `crypto.ClassifyObject` owns plaintext/buffered/fallback/chunked/MPU format decisions and rejects unknown marker values or manifest-pointer mismatches.
@@ -128,3 +134,11 @@ fallback. HEAD never applies response overrides.
 The fallback golden fixtures assert the exact plaintext `Content-Length` on
 full GET and HEAD, plus the selected plaintext range length on ranged GET.
 `TestGetObject_FallbackGoldenContentLengthBehavior` pins these values.
+
+## Additional Compatibility Boundaries
+
+Historical MPU reads require matching companion manifests and decryption keys.
+A key-based companion pointer is not a certified mapping from every parent
+version to its matching manifest version. Backend overwrites/deletes/replication
+need recovery validation. See the [operation inventory](S3_OPERATIONS.md) and
+[recovery caveats](S3_COMPATIBILITY.md#backend-managed-features-and-recovery).

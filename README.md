@@ -44,6 +44,9 @@ See the [what works / what doesn't / what's planned matrix](docs/S3_API_IMPLEMEN
 for supported operations, configuration requirements, backend-dependent APIs,
 known limitations, and tracking issues. The [SDK / tool test matrix](docs/SDK_COMPATIBILITY.md)
 describes automated coverage rather than promising every operation works with every client.
+The [complete operation inventory](docs/S3_OPERATIONS.md) lists every pinned S3
+SDK action; [request/response compatibility](docs/S3_COMPATIBILITY.md) records
+addressing, conditions, checksum, pagination, and field-level limitations.
 
 > **Browser uploads in v0.12.3:** SigV4 presigned PUT is supported, but browser
 > POST Object form uploads are not yet supported ([#353](https://github.com/cloud37/s3-encryption-gateway/issues/353)).
@@ -1084,18 +1087,21 @@ sequenceDiagram
 
 ## Compatible Backends
 
-The gateway works with any S3-compatible storage service. Tested and compatible backends:
+The gateway targets S3-compatible storage, but API subsets, bucket setup, and
+gateway option mappings vary. These are deployment targets, not full-parity
+certifications; see the [backend test-selection matrix](docs/SDK_COMPATIBILITY.md#backend-and-encryption-mode-coverage)
+and [request/response caveats](docs/S3_COMPATIBILITY.md).
 
 | Backend | Status | Notes |
 |---|---|---|
-| AWS S3 | Tested | Full compatibility |
+| AWS S3 | External test target | Credential-gated scenarios; not every S3 feature or request option |
 | MinIO | Tested | Primary development backend |
 | Hetzner Object Storage | Tested | Production use |
-| Wasabi | Tested | Full compatibility |
+| Wasabi | External test target | Credential-gated subset; verify required backend APIs |
 | Ceph RGW | Compatible | S3-compatible mode |
 | Cloudflare R2 | Compatible | S3-compatible API |
 | DigitalOcean Spaces | Compatible | S3-compatible API |
-| Backblaze B2 | Compatible | S3-compatible API |
+| Backblaze B2 | External test target | Credential-gated subset; SDK/capability coverage differs from AWS |
 
 Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-encryption-gateway/issues) to let us know about your experience.
 

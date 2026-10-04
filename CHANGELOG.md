@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tracking, and released-versus-unreleased reverse-proxy fixes. Reconcile the
   API guide and SDK test-coverage notes, and label earlier roadmap milestones
   as historical rather than current delivery commitments.
+- **Complete S3 documentation (GH-357 follow-up):** Inventory all 112 pinned SDK
+  operations, legacy action aliases, and browser extensions; add option-level
+  addressing, conditional-request, checksum, listing/part-pagination, write-field,
+  and recovery caveats. Document backend/SDK/encryption-mode test selection,
+  correct unsupported inline-lock/virtual-host claims, and distinguish route
+  support from provider workflow certification. No runtime behavior changes.
 
 ## [0.12.3] — 2026-10-02
 

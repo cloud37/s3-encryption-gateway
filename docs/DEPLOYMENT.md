@@ -22,6 +22,21 @@ Lifecycle grants affect bucket mutation only; they do not affect ListBuckets aut
 
 ## Reverse Proxies and Backend Load Balancers
 
+### Inbound addressing and compatibility
+
+Use path-style client URLs (`https://gateway.example/bucket/key`). The gateway
+extracts the bucket from the path, not from `bucket.gateway.example`; adding DNS
+records does not enable virtual-host bucket routing. Preserve the signed path and
+Host through frontend proxies rather than rewriting them. Backend path/virtual-host
+configuration controls outgoing SDK requests independently. See the
+[addressing and authentication contract](S3_COMPATIBILITY.md#addressing-and-authentication)
+and [complete operation inventory](S3_OPERATIONS.md).
+
+Before relying on conditional writes, listing/part pagination, per-upload SSE,
+storage class, or Object Lock headers, check the [option contract](S3_COMPATIBILITY.md).
+The typed object adapter and configuration passthrough have different field
+mapping behavior; provider support alone is insufficient.
+
 ### URL-encoded copy sources (GH-346)
 
 Releases through 0.12.2 do not decode the `x-amz-copy-source` header. CopyObject

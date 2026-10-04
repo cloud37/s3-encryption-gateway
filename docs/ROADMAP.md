@@ -8,6 +8,11 @@ For what an application can use today, consult the canonical
 and [changelog](../CHANGELOG.md). An open issue or implementation branch is not
 evidence that a feature has shipped.
 
+The [complete operation inventory](S3_OPERATIONS.md) and
+[request/response contract](S3_COMPATIBILITY.md) distinguish missing actions,
+ignored options, and unverified workflows. Documented limitations without an
+accepted tracking issue are not additional roadmap commitments.
+
 ### Accepted, Unreleased Compatibility Work
 
 - [GH-322: gateway-managed bucket CORS](https://github.com/cloud37/s3-encryption-gateway/issues/322)

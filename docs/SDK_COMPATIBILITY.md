@@ -11,6 +11,8 @@ not a certification of every operation or application using those tools. Check
 the [application compatibility matrix](S3_API_IMPLEMENTATION.md#application-compatibility-matrix)
 first for backend dependencies, browser POST/CORS gaps, listing-size and ETag
 caveats, multipart requirements, and known reverse-proxy issues.
+Use the [complete action inventory](S3_OPERATIONS.md) for individual operations
+and the [option contract](S3_COMPATIBILITY.md) for supported request/response fields.
 
 The basic runners cover upload, download, listing, and deletion; some also check
 HEAD. The AWS SDK Go v2 runner additionally exercises multipart upload and copy.
@@ -144,9 +146,126 @@ go test -count=1 -tags=conformance -v \
 
 ## Related Documents
 
+See also the backend and encryption-mode coverage tables below. They distinguish
+test eligibility from results and full feature parity.
+
 - [V1.0-COMPAT-1 Implementation Plan](../docs/plans/V1.0-COMPAT-1-plan.md)
 - [Conformance Test Suite](../test/conformance/)
 - [Application Compatibility Matrix](S3_API_IMPLEMENTATION.md#application-compatibility-matrix)
+- [Complete Operation Inventory](S3_OPERATIONS.md)
+- [Request / Response Option Contract](S3_COMPATIBILITY.md)
+
+## Backend and Encryption-Mode Coverage
+
+**These tables describe the v0.12.3 source's test selection, not fresh test
+results or provider product certification.** `S` means the fixture declares
+the corresponding capability, making gated scenarios eligible. `—` means it
+does not select that capability; this can mean missing provider functionality,
+missing fixture setup, unverified behavior, or omitted coverage. Never interpret
+`S` as proof that all options, SDKs, or workflows pass.
+
+The source of truth is [`test/provider/`](../test/provider/) and
+[`suite_test.go`](../test/conformance/suite_test.go). Ungated cases still run
+without a capability bit. Some cases add their own skips or deliberately fake an
+upstream response, so even an executed scenario is not always proof of native
+backend behavior. Selected CORS forwarding tests do not certify encrypted browser uploads.
+
+### Object and Encryption Test Selection
+
+| Fixture | MPU | Part copy | Object tagging | Inline PUT tags | Versioning | Object Lock | Encrypted MPU | Size cache |
+|---|---|---|---|---|---|---|---|---|
+| MinIO | S | S | S | S | — | — | S | S |
+| Garage | S | S | — | S | — | — | S | S |
+| RustFS | S | S | S | S | — | — | S | S |
+| SeaweedFS | S | S | S | S | S | — | S | S |
+| AWS (external) | S | S | S | S | S | S | S | S |
+| Backblaze B2 (external) | S | S | — | — | — | — | S | S |
+| Hetzner (external) | S | S | S | S | — | — | S | — |
+| Wasabi (external) | S | S | S | S | — | — | S | — |
+| GCS configured endpoint | S | — | S | — | — | — | — | — |
+| Azure configured endpoint | S | — | S | — | — | — | — | — |
+
+GCS/Azure registrations are opt-in configured endpoints, not proof of native
+non-S3 API support or a turnkey cloud deployment. Providers not registered in
+this suite (for example Ceph, Cloudflare R2, DigitalOcean Spaces, and Swift)
+have no blanket certification from these matrices.
+
+### Bucket / Other Capability Selection
+
+| Fixture | Create/delete buckets | Policy | Lifecycle | CORS | Bucket ACL | Object ACL | Bucket encryption | Conditional PUT / native SSE |
+|---|---|---|---|---|---|---|---|---|
+| MinIO | S | S | S | — | — | — | — | S / — |
+| Garage | — | — | — | — | — | — | — | — / — |
+| RustFS | — | — | — | — | — | — | — | — / — |
+| SeaweedFS | — | — | — | — | — | — | — | — / — |
+| AWS (external) | — | — | — | — | — | — | — | S / S |
+| Backblaze B2 (external) | — | — | — | — | — | — | — | — / — |
+| Hetzner / Wasabi (external) | — | — | — | — | — | — | — | — / — |
+| GCS / Azure configured endpoint | — | — | — | — | — | — | — | S / — |
+
+The last two flags describe fixture/backend selection only. The typed gateway
+PUT path does **not** implement conditional If-Match/If-None-Match or per-upload
+SSE mapping; a flag does not fix that missing contract. An absent AWS bucket
+capability here does not assert that AWS lacks the API—it means the gated tests
+are not selected by this fixture.
+
+Batch-delete and presigned-URL bits are selected for all fixtures above. Load-test
+eligibility is selected for the four locals, not external/cloud fixtures.
+Backend TLS fixture selection is conditional on MinIO TLS setup; it is not a
+cross-provider TLS certification.
+
+### SDK / Tool Selection by Backend
+
+| Fixture | Go v2 | boto3 | AWS CLI | s5cmd | rclone | minio-py | restic |
+|---|---|---|---|---|---|---|---|
+| MinIO / Garage / RustFS / SeaweedFS | S | S | S | S | S | S | S |
+| AWS (external) | S | S | S | S | S | S | S |
+| Backblaze B2 (external) | — | S | S | S | — | — | — |
+| Hetzner / Wasabi (external) | — | — | — | — | — | — | — |
+| GCS / Azure configured endpoint | — | — | — | — | — | — | — |
+
+This selects the tool scenarios, **not every operation** for each tool. minio-go
+also has a separate Multipart_MinIOGo scenario gated on multipart support, not
+a complete operation matrix. Java v2, JS v3, PHP, Rust rust-s3, .NET, and other
+clients have no exhaustive tool suite. PHP-informed copy-source fixes and the
+unreleased rust-s3 proxy fix are not complete SDK certifications.
+
+### Encryption Modes and Fixtures
+
+| Mode / feature | Existing scenario evidence | Coverage boundary |
+|---|---|---|
+| Password-derived single objects | Basic/tool runners, chunked and KDF cases | Not every tool option/size; KDF variants have dedicated tests, not a full tool matrix. |
+| Bypass encryption | Bypass metadata/body and restic init/backup/restore, including hybrid restore | No gateway confidentiality for bypass buckets; restic encrypts itself. Not encrypted MPU certification. |
+| Encrypted MPU | EncryptedMPU / SEC38 / SEC46 and metadata-matrix cases with Valkey | Explicit fixture wiring required; generic tool MPU tests do not establish this mode. |
+| Local AES/RSA envelope keys | SelfContained and metadata-matrix scenarios | Dedicated envelope/MPU tests, not every tool × key type × backend. |
+| Cosmian KMS | CapKMSIntegration selected on four locals, AWS, B2 | Dedicated tests, not all tools or every failure/recovery combination. |
+| OpenBao / Vault Transit | CapOpenBaoKMS selected on four locals | Dedicated KMS/rotation/failure cases, not a complete provider/tool matrix. |
+| FIPS | Unit/race and vet build-profile jobs | No separate complete SDK/backend matrix. |
+| AWS streaming / trailers | Signed integrity and HTTPS CLI/boto3 cases | Accepted protocol modes verified; no durable plaintext-checksum retrieval API. |
+| Legacy object formats | Golden read fixtures and compatibility cases | Not arbitrary backend moves, historical MPU recovery, or every cross-format copy. |
+
+Evidence: [`compat_test.go`](../test/conformance/compat_test.go),
+[`selfcontained_envelope_test.go`](../test/conformance/selfcontained_envelope_test.go),
+[`selfcontained_mpu_test.go`](../test/conformance/selfcontained_mpu_test.go),
+[`kms_test.go`](../test/conformance/kms_test.go),
+[`openbao_kms_test.go`](../test/conformance/openbao_kms_test.go),
+[`metadata_matrix_test.go`](../test/conformance/metadata_matrix_test.go), and
+[`object_headers_golden_harness_test.go`](../internal/api/object_headers_golden_harness_test.go).
+
+Local CI selects MinIO/Garage/RustFS/SeaweedFS on PR/main runs. External suites
+are credential-gated in nightly/release jobs; missing credentials can skip them.
+Source pins and capability bits are not historical pass results. Inspect the
+[conformance workflow](../.github/workflows/conformance.yml), actual CI logs,
+fixture policy/Valkey/KMS wiring, and per-test skips before asserting compatibility.
+
+### Workflows Not Independently Certified
+
+No complete matrix covers every unsupported action's wire error; all listing/part
+pagination inputs; conditional requests; checksum-mode retrieval; per-request SSE,
+ownership/requester-pays/MFA; analytics/inventory pagination; replication/event
+delivery; archive restore; anonymous website hosting; historical MPU version
+recovery; every SDK/proxy; or every SDK/backend/key-manager combination. Known
+missing mappings are limitations, not merely test gaps: see the [option contract](S3_COMPATIBILITY.md).
 
 ## Streaming Upload Compatibility
 

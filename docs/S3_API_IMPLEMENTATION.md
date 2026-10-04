@@ -28,6 +28,10 @@ re-signed request; it does not implement a missing backend feature. Backend IAM
 permissions remain required. See [authorization](#authentication-and-authorization),
 [SDK / tool test coverage](SDK_COMPATIBILITY.md), and [deployment guidance](DEPLOYMENT.md).
 
+For an explicit status for every action, see the [complete S3 operation inventory](S3_OPERATIONS.md).
+For addressing, conditional requests, checksums, pagination, and field-level
+limitations, see the [request/response compatibility contract](S3_COMPATIBILITY.md).
+
 | Feature | Status | Notes / tracking |
 |---|---|---|
 | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects | Supported | Encryption follows the bucket policy. GET/HEAD project plaintext size and metadata; deleting encrypted MPU objects also cleans up their companion manifest. |
@@ -44,7 +48,7 @@ permissions remain required. See [authorization](#authentication-and-authorizati
 | CreateBucket / DeleteBucket | Supported | Backend-dependent. CreateBucket requires `ALLOW_BUCKET_CREATION=true` and the explicit `create` grant; DeleteBucket requires `delete`. Object `rw` grants neither. See [bucket management](../README.md#authorized-bucket-management). |
 | Object tagging / ACL APIs | Supported | Backend-dependent passthrough; providers differ. `x-amz-tagging` on CreateMultipartUpload is not forwarded: set tags using the object `?tagging` API after completion. See [inline headers](#inline-header-passthrough). |
 | Version-specific object reads, deletes, and copy sources | Supported | Requires a versioning-capable backend. GET/HEAD/DELETE accept `versionId`; copy sources accept `?versionId=...`. This does not imply support for every S3 version-listing operation. |
-| Object Lock / retention / legal hold | Supported | Backend-dependent; retention protects ciphertext. Governance-retention bypass is refused with `403 AccessDenied`. Keep decryption keys for the retention period. See [Object Lock and provider support](#object-locking-v06-s3-2). |
+| Object Lock / retention / legal hold | Supported | Backend-dependent explicit subresource APIs; retention protects ciphertext. Inline PUT/initiation lock fields are not persisted by the typed adapter. Governance bypass is refused with `403 AccessDenied`. Keep decryption keys for the retention period. See [Object Lock and provider support](#object-locking-v06-s3-2). |
 | ListObjects / ListObjectsV2 sizes | Supported | Plaintext sizes use a configured Valkey write-through cache. Unresolved cache misses, disabled translation, or unavailable Valkey can leave ciphertext sizes. Optional `list_size_translate.fallback_head_enabled` resolves misses using extra backend reads; disabled by default. See [size-cache setup](../README.md#listobjects-plaintext-size-translation). |
 | ListObjects / ListObjectsV2 ETags | Supported | Listings expose backend ETags, not plaintext MD5. GET/HEAD can restore a recorded original ETag for single-object encryption formats; MPU objects retain backend multipart ETags. Plaintext ETag translation in listings is not implemented and has no committed release date. |
 | SigV2 authentication | Supported | Deprecated, disabled by default. Temporary migration opt-in: `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`. Prefer SigV4. |
@@ -52,6 +56,10 @@ permissions remain required. See [authorization](#authentication-and-authorizati
 | Reverse-proxy deployment | Supported | TLS termination with plain HTTP to the gateway is supported; preserve the signed Host, path, query, and S3 headers. [GH-338](https://github.com/cloud37/s3-encryption-gateway/issues/338)'s outbound proxy-header signing fix shipped in v0.12.2. A known v0.12.3 exception remains when a proxy drops signed `Content-Length: 0` on bodiless requests (for example rust-s3 DELETE); [GH-356](https://github.com/cloud37/s3-encryption-gateway/issues/356) tracks an implemented but unreleased fix. See [proxy guidance](DEPLOYMENT.md#reverse-proxies-and-backend-load-balancers). |
 | SelectObjectContent | Not supported | By design: backend SQL evaluation cannot operate on gateway-encrypted objects. Returns `501 NotImplemented`; no implementation is planned. |
 | WriteGetObjectResponse (S3 Object Lambda) | Not supported | No route or integration; incompatible with the gateway's proxy model. No implementation is planned. |
+| Virtual-host-style inbound addressing | Not supported | Use `https://gateway/bucket/key`; DNS alone does not add host-to-bucket routing. Backend addressing is independent. See [addressing](S3_COMPATIBILITY.md#addressing-and-authentication). |
+| Conditional GET/HEAD/PUT/DELETE/completion | Not supported | Typed object paths do not enforce/map If-Match/If-None-Match and related conditions. Do not rely on atomic conditional-write semantics. See [option contract](S3_COMPATIBILITY.md). |
+| Full listing / multipart pagination option parity | Not supported | ListObjectsV2 `start-after`/`fetch-owner`/`encoding-type` and ListParts pagination are ignored. ListParts emits `IsTruncated=false` for its backend page. Basic listing and token pagination remain supported; see [listing caveats](S3_COMPATIBILITY.md#listings-and-pagination). |
+| ListObjectVersions / GetObjectAttributes and other specialized actions | Not supported | Version-specific reads and upload verification do not implement version inventory or plaintext checksum retrieval. See all supported/unsupported actions in the [operation inventory](S3_OPERATIONS.md). |
 
 **Before migrating:** check the application's upload style, part sizes, listing
 size/ETag assumptions, backend configuration APIs, and reverse-proxy behavior.
@@ -114,6 +122,27 @@ not a second independent support matrix.
 This is the S3 multipart API, not the HTML `multipart/form-data` POST Object
 operation. Browser form policies are not implemented in v0.12.3; see
 [GH-353](https://github.com/cloud37/s3-encryption-gateway/issues/353).
+
+#### AbortMultipartUpload
+
+- **Endpoint:** `DELETE /{bucket}/{key}?uploadId=...`
+- **Permission:** object `rw`, scoped to the bucket.
+- **Behavior:** aborts the backend upload and coordinates encrypted-state
+  lifecycle/cleanup; returns 204 on success. Missing tracked uploads can return
+  `NoSuchUpload`; lifecycle conflicts can return 409 `OperationAborted`.
+- **Limitations:** respects the global multipart-disable gate; typed abort does
+  not forward newer conditional/expected-owner/requester-pays options.
+
+#### ListParts
+
+- **Endpoint:** `GET /{bucket}/{key}?uploadId=...`
+- **Permission:** object `ro` or `rw`, scoped to the bucket.
+- **Behavior:** returns part numbers, backend ETags, timestamps, and sizes;
+  stored positive plaintext sizes replace encrypted part sizes when available.
+- **Limitations:** only one backend page is fetched. `max-parts` and
+  `part-number-marker` are ignored, and the response emits `IsTruncated=false`
+  and `MaxParts=1000`. This is not complete pagination support for large uploads.
+  See the [option contract](S3_COMPATIBILITY.md#listings-and-pagination).
 
 #### PUT Object (Multipart Copy / UploadPartCopy)
 - **Endpoint**: `PUT /{bucket}/{key}?partNumber=X&uploadId=Y`, with the
@@ -399,7 +428,7 @@ Credentials are stored in an atomic snapshot compiled from `config.yaml`, enviro
 1.  **Host Header Mismatch**: Presigned URLs generated by clients usually sign the `Host` header. When the gateway forwards this request to the real backend, the `Host` header changes, invalidating the signature.
     *   **Solution**: The gateway intercepts the Presigned URL request, validates the signature locally using the gateway's configured credentials, and then creates a *new* request to the backend using the gateway's backend credentials.
     *   **Requirement**: The client must use credentials that are configured in `auth.credentials`. The gateway validates the signature against the principal's secret before any backend interaction.
-2.  **Path Style vs Virtual Host Style**: Clients should prefer Path Style addressing when generating presigned URLs for the gateway to avoid DNS resolution issues, though the gateway handles virtual host style if DNS is configured correctly.
+2.  **Path Style vs Virtual Host Style**: Use inbound path-style URLs (`https://gateway/bucket/key`). The gateway extracts bucket/key from the path and does not implement host-to-bucket routing; DNS alone does not enable virtual-host addressing. Backend path/virtual-host settings are independent. See [addressing compatibility](S3_COMPATIBILITY.md#addressing-and-authentication).
 
 ### SigV4 Request Time and Presigned Expiration
 
@@ -471,6 +500,11 @@ backend ETags as documented separately below.
 - `x-amz-meta-*` (user metadata)
 - `x-amz-tagging` (validated: max 10 tags, key ≤128 chars, value ≤256 chars)
 - `x-amz-version-id`
+
+This is not a promise to preserve every backend header on every operation.
+Typed write/delete handlers do not consistently expose backend destination
+version/delete-marker headers, and typed object reads use a fixed projector.
+See [field-level response compatibility](S3_COMPATIBILITY.md#object-reads-and-responses).
 
 ### Passthrough Request Header Contract
 
@@ -673,9 +707,13 @@ plaintext acquisition and before destination encryption or mutation.
 - **Performance impact**: Significantly reduced bandwidth and CPU for chunked format
 
 ### Object Versioning
-- **Versioned objects**: Encrypt/decrypt specific versions
-- **Version metadata**: Store encryption info per version
-- **Delete markers**: Handle appropriately
+
+GET/HEAD/DELETE map `versionId` to backend inputs, and copy-source headers can
+select a version. Backend versioning support is required. ListObjectVersions is
+not implemented, and write/delete-marker response fields are not fully projected.
+Historical encrypted-MPU recovery requires matching companion manifests and keys;
+the key-based manifest pointer is not a certified parent-version-to-manifest-version
+history contract. See [recovery caveats](S3_COMPATIBILITY.md#backend-managed-features-and-recovery).
 
 ### Object Locking (V0.6-S3-2)
 
@@ -689,18 +727,21 @@ for the full rationale. High-level contract:
   - `GET  /{bucket}/{key}?legal-hold` — GetObjectLegalHold
   - `PUT  /{bucket}?object-lock` — PutObjectLockConfiguration
   - `GET  /{bucket}?object-lock` — GetObjectLockConfiguration
-- **Request headers forwarded end-to-end** on `PutObject`,
-  `CopyObject`, and `CompleteMultipartUpload`:
-  `x-amz-object-lock-mode`, `x-amz-object-lock-retain-until-date`,
-  `x-amz-object-lock-legal-hold`. Invalid values produce `400
-  InvalidArgument` at the gateway; zero silent drops.
+- **Inline lock headers:** PutObject validates mode/date/hold values, but the
+  production typed PutObject adapter does not map them into backend input.
+  CreateMultipartUpload does not capture initiation lock fields. Re-encrypted
+  CopyObject has the same PutObject limitation; native backend copy maps lock
+  input. Completion applies requested retention/hold through separate calls
+  after completion, not atomically. Use backend defaults or explicit lock APIs
+  and verify actual retention; an accepted inline request is not proof of a lock.
 - **Response headers surfaced** on `GET` and `HEAD` from
   `HeadObjectOutput` / `GetObjectOutput`.
 - **`x-amz-bypass-governance-retention` is refused** with `403
   AccessDenied` on PutObjectRetention, DeleteObject, and
   DeleteObjects — pending V0.6-CFG-1's admin authorization.
   Operators needing to reduce a governance-mode retention must
-  target the backend directly in v0.6.
+  use an independently authorized backend workflow; no gateway bypass is enabled
+  in v0.12.3.
 - **Ciphertext-locking.** Retention/LegalHold apply to the
   ciphertext blob the backend stores. Key-rotation workers skip
   locked objects and emit `gateway_rotation_skipped_locked_total`.
@@ -709,20 +750,14 @@ for the full rationale. High-level contract:
 
 #### Provider support matrix
 
-| Provider | Retention | Legal Hold | Bucket Config | Notes |
-|---|---|---|---|---|
-| AWS S3 | yes | yes | yes | Reference implementation. |
-| MinIO >= RELEASE.2021-01-30 | yes | yes | yes | Bucket must be created with `--with-lock`. |
-| Ceph RGW >= Pacific | yes | yes | yes | Feature-flagged; operator must enable. |
-| Wasabi (Immutable Storage) | yes | yes | yes | Underlying primitive is Wasabi Immutable Storage. |
-| Backblaze B2 S3-compat | partial | partial | partial | 501 on the unsupported subset. |
-| Hetzner Object Storage | partial | partial | partial | 501 on the unsupported subset. |
-| DigitalOcean Spaces | no | no | no | Returns 501 NotImplemented. |
-| Cloudflare R2 | no | no | no | Returns 501 NotImplemented. |
-| Garage | no | no | no | Returns 501 NotImplemented. |
-
-Unsupported providers return `501 NotImplemented`; the response
-references this matrix.
+Backend product support, bucket setup, and gateway test coverage are different
+questions. The current [backend test-selection matrix](SDK_COMPATIBILITY.md#backend-and-encryption-mode-coverage)
+records the released fixtures: Object Lock scenarios are selected for external
+AWS but not the four local fixture bitmaps. This is not a blanket claim that
+those products lack Object Lock. Consult the provider's current documentation,
+create a lock-enabled bucket where required, and verify explicit API persistence.
+Provider rejections are translated/forwarded according to the code path; there is
+no universal provider-name check that guarantees 501 for unsupported Object Lock.
 
 ### Compression (Removed in v1.0)
 
@@ -794,9 +829,9 @@ their behavior from the generic [passthrough header contract](#passthrough-reque
 | `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantWriteACP` | |
 | `x-amz-storage-class` | **Not forwarded** | Not mapped to the typed PutObject input | Backend defaults apply; generic passthrough behavior is different |
 | `x-amz-server-side-encryption` | **Not forwarded** | Not mapped to the typed PutObject input | Backend-configured default SSE is independent of gateway encryption |
-| `x-amz-object-lock-mode` | **Forwarded** | Extracted via `extractObjectLockInput`, passed to SDK | |
-| `x-amz-object-lock-retain-until-date` | **Forwarded** | As above | |
-| `x-amz-object-lock-legal-hold` | **Forwarded** | As above | |
+| `x-amz-object-lock-mode` | **Not persisted by typed adapter** | Parsed/validated by handler, but not assigned to backend PutObject input | Use explicit lock APIs or backend defaults |
+| `x-amz-object-lock-retain-until-date` | **Not persisted by typed adapter** | As above | Accepted input is not proof of retention |
+| `x-amz-object-lock-legal-hold` | **Not persisted by typed adapter** | As above | Verify backend state explicitly |
 | `x-amz-meta-*` | **Forwarded** | Extracted as user metadata map | Gateway-reserved metadata names are rejected; backend metadata filters still apply |
 | `Content-Type` | **Forwarded** | Standard header | |
 | `Content-Encoding` | **Forwarded** | Standard header | |
@@ -814,6 +849,8 @@ their behavior from the generic [passthrough header contract](#passthrough-reque
 | `x-amz-tagging` | **Not forwarded** | Tags must be set via `?tagging` subresource after CompleteMultipartUpload. **Known limitation.** |
 | `x-amz-meta-*` | **Forwarded** | Extracted and passed to SDK |
 | `x-amz-server-side-encryption` | **Not forwarded** | Not mapped to the typed CreateMultipartUpload input; backend defaults apply |
+| `x-amz-storage-class` | **Not forwarded** | Not mapped to the typed CreateMultipartUpload input |
+| `x-amz-object-lock-*` | **Not captured at initiation** | Use backend defaults or explicit post-completion lock APIs; these are not atomic initiation guarantees |
 
 ### CopyObject ACL Note
 
@@ -837,14 +874,10 @@ headers on typed GET/HEAD or gateway-generated encrypted responses.
 
 ### Provider Quirks
 
-| Feature | AWS S3 | MinIO (default) | Garage | Wasabi |
-|---|---|---|---|---|
-| `x-amz-acl` on PutObject | ✅ Full support | ⚠️ Default container requires IAM policy | ⚠️ Limited; `private` and `public-read` accepted | ✅ Full support |
-| `x-amz-grant-*` on PutObject | ✅ Full support | ❌ Not supported in default container | ❌ | ✅ Full support |
-| `x-amz-tagging` on PutObject | ✅ | ✅ | ✅ | ✅ |
-| `?tagging` subresource | ✅ | ✅ | ✅ | ✅ |
-| `?acl` subresource (bucket) | ✅ | ⚠️ Not in default cap bitmap | ⚠️ | ✅ |
-| `?acl` subresource (object) | ✅ | ⚠️ Same | ⚠️ | ✅ |
-| `?lifecycle` subresource | ✅ | ⚠️ Not in default cap bitmap | ✅ | ✅ |
-| `x-amz-expiration` response | ✅ | Returned when lifecycle rule matches | ✅ | ✅ |
-| `x-amz-storage-class` | ✅ | ⚠️ Ignored in most configs | ❌ | ✅ |
+Use the [backend test-selection matrix](SDK_COMPATIBILITY.md#backend-and-encryption-mode-coverage)
+for current fixture coverage and the [option contract](S3_COMPATIBILITY.md) for
+gateway mappings. For example, Garage's released fixture does not select object
+tagging/versioning tests, while MinIO selects bucket lifecycle/policy tests but
+not bucket/object ACL or CORS capabilities. A skipped test is not evidence of
+product-wide non-support; a backend supporting storage-class/SSE/conditional
+fields does not make the gateway's typed adapter forward them.
