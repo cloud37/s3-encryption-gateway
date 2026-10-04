@@ -9,6 +9,7 @@ guide; current instructions take precedence over historical plans and examples.
 |---|---|---|
 | Decide whether my application will work | [S3 compatibility](S3_API_IMPLEMENTATION.md) | Released feature summary, every pinned SDK operation, request-option caveats, SDK/backend evidence |
 | Install or configure the gateway | [Deployment](DEPLOYMENT.md) | Docker/Helm, backend selection, TLS, gateway credentials, bucket policies, Valkey/spool prerequisites |
+| Restrict frontend access keys | [Frontend access-key policies](DEPLOYMENT.md#frontend-access-key-policies) | Bucket scopes, object permissions, independent bucket grants, role examples, and revocation |
 | Configure an S3 client | [CLI tools](S3_CLI_TOOLS.md) | AWS CLI, s5cmd, mc, common recipes; consult compatibility before migration |
 | Choose/manage encryption keys | [Key management](KMS_COMPATIBILITY.md) | Password/local-envelope/KMS choices, key sources, provider auth, rotation and retention |
 | Upgrade, re-encrypt, or recover objects | [Migration](MIGRATION.md) | Coordinated upgrades/rollback, explicit gateway GET→PUT, read-only audit tool, controlled recovery |

@@ -95,6 +95,14 @@ Objects in encryption-enabled buckets are encrypted before being sent to the bac
 - **Range requests**: Fetches only the encrypted chunks covering the requested plaintext byte range
 - **FIPS-compliant profile**: Build with `-tags=fips` to restrict to AES-256-GCM + HKDF-SHA256 (FIPS-140 approved). Under envelope encryption, DEK wrapping uses AES-256-GCM (AES KEK) or RSA-OAEP/SHA-256 (RSA KEK) — both FIPS-approved. The `argon2id` KDF is rejected at startup under `-tags=fips`.
 
+### Frontend Access-Key Policies
+
+Control which buckets and operations each application's gateway key may access.
+See [frontend access-key policies](docs/DEPLOYMENT.md#frontend-access-key-policies)
+for defaults, permission/grant rules, read-only/writer/manager/provisioner examples,
+and policy updates. These are authorization settings under `auth.credentials`,
+not encryption-key selection or backend IAM policies.
+
 ### Per-Bucket Policies
 
 Policies let you override **encryption behaviour** on a per-bucket basis using
@@ -109,6 +117,9 @@ tenant) or when specific buckets must bypass encryption.
 > encryption key.
 
 #### Per-client bucket authorization
+
+The authoritative [frontend policy section](docs/DEPLOYMENT.md#frontend-access-key-policies)
+contains the complete rules and role examples; the following is a quick overview.
 
 Give each application or tenant its own gateway access key and restrict it to
 only the buckets it needs. Credential scopes accept exact bucket names,

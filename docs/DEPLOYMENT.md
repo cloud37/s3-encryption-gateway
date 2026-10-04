@@ -10,6 +10,7 @@ and bucket policy. Exact fields/defaults live in [config.yaml.example](../config
 - [Quick start deployment](#quick-start-deployment)
 - [Configuration sources](#configuration-sources)
 - [Backend selection and TLS](#backend-selection-and-tls)
+- [Frontend access-key policies](#frontend-access-key-policies)
 - [Configuring gateway credentials](#configuring-gateway-credentials)
 - [Bucket encryption policies](#bucket-encryption-policies)
 - [Reverse proxies and load balancers](#reverse-proxies-and-backend-load-balancers)
@@ -145,31 +146,157 @@ insecure_skip_verify disables verification for diagnostics only. TLS settings
 cannot secure plain HTTP. Configure final endpoint/region; passthrough redirects
 are returned rather than followed/replayed to another destination.
 
-## Configuring Gateway Credentials
+## Frontend Access-Key Policies
 
-### Credential Authorization
+**Frontend keys are the gateway credentials presented by applications**, not the
+backend storage keys or encryption KEKs. Each `auth.credentials` entry attaches
+an authorization policy to one access-key/secret-key pair. The policy controls
+which buckets and operations that client may use.
 
-Gateway auth.credentials entries contain access key, secret source, optional
-label, bucket scope, object permission, and independent bucket grants. Omitted
-buckets is unrestricted, `[]` denies all, exact names/trailing prefixes restrict,
-bare `*` is broad authority. Object `ro` permits reads and `rw` writes; neither
-grants bucket lifecycle management. PROXIED_BUCKET further narrows scopes.
+| Control | Configuration | Purpose |
+|---|---|---|
+| Frontend authorization | `auth.credentials[].buckets`, `permissions`, `bucket_permissions` | Who may read/write objects or manage buckets through the gateway |
+| Encryption policy | `policies` / `GW_POLICY_N_*` | How objects in matching buckets are encrypted or explicitly bypassed |
+| Backend authorization | `backend.access_key` / `backend.secret_key` and provider IAM | What storage operations the gateway's backend identity may perform |
+
+An encryption-policy match never grants frontend access. A frontend scope never
+selects an encryption key, backend endpoint, or backend identity. A backend bucket
+policy also cannot override a gateway denial. The admin bearer token is a separate
+operational credential; `bucket_permissions: [manage]` does not grant admin API access.
+
+### Bucket scopes and defaults
+
+| Credential setting | Effective authorization |
+|---|---|
+| `buckets` omitted | Unrestricted bucket scope (backward-compatible default) |
+| `buckets: []` | Deny all bucket access; ListBuckets returns an empty filtered inventory |
+| `buckets: ["reports", "tenant-a-*"]` | Exact `reports` bucket plus names beginning with `tenant-a-` |
+| `buckets: ["*"]` | Explicit unrestricted scope; broad authority, especially with bucket grants |
+| `permissions` omitted | Object `rw` (read/write), not read-only |
+| `bucket_permissions` omitted or `[]` | No bucket creation, deletion, or configuration-mutation grants |
+
+Scope entries are exact names, one trailing-prefix `*`, or a bare `*`. Embedded
+or repeated wildcards such as `tenant-*-prod` and `tenant-**`, whitespace, empty
+entries, and duplicate entries are rejected. This is **not the general glob
+grammar of encryption policies**; other characters do not introduce wildcard
+operators. Multiple valid scope entries are alternatives, not ordered deny rules.
+
+`PROXIED_BUCKET` intersects with every credential's scope and can only narrow it.
+Use explicit scopes/permissions rather than relying on permissive defaults.
+Scope applies to bucket names, **not object-key prefixes**: `reports/*` is not a
+way to grant only certain objects inside `reports`.
+
+### Object permissions and bucket grants
+
+| Permission / grant | Allows within the effective bucket scope |
+|---|---|
+| `permissions: ro` | Supported object/configuration reads, HEAD, listings; no object mutation |
+| `permissions: rw` | Reads plus supported object writes, deletes, copies, multipart operations, tagging/ACL/retention/hold mutations |
+| `bucket_permissions: [create]` | CreateBucket, additionally requiring `ALLOW_BUCKET_CREATION=true` |
+| `bucket_permissions: [delete]` | DeleteBucket; no separate global enable switch |
+| `bucket_permissions: [manage]` | Supported bucket configuration PUT/DELETE, such as policy, CORS, lifecycle, versioning, bucket ACL, encryption, or Object Lock configuration |
+
+These controls are independent: `rw` does not imply any bucket grant; `manage`
+does not imply `create`, `delete`, or object writes. A key with `ro` and `manage`
+can modify bucket configuration while remaining unable to write/delete objects.
+Grants do not enable an unsupported S3 operation or bypass backend IAM, provider
+limits, or governance-retention safeguards. See the
+[operation-to-permission inventory](S3_API_IMPLEMENTATION.md#scope-and-interpretation).
+
+### Example frontend roles
+
+Use separate secrets for applications and management services. These are runtime
+YAML credentials, also suitable as the list in an `AUTH_CREDENTIALS_FILE` (omit the
+outer `auth.credentials` mapping for that file).
 
 ```yaml
 auth:
   credentials:
-    - access_key: tenant-a-client
-      secret_key_env: TENANT_A_SECRET
+    # Read-only reporting application.
+    - access_key: reports-reader
+      secret_key_env: REPORTS_READER_SECRET
+      buckets: [reports]
+      permissions: ro
+      bucket_permissions: []
+
+    # Tenant application: object operations only, no bucket administration.
+    - access_key: tenant-a-writer
+      secret_key_env: TENANT_A_WRITER_SECRET
       buckets: ["tenant-a-*"]
       permissions: rw
       bucket_permissions: []
+
+    # Configuration manager: may configure reports, but not write its objects.
+    - access_key: reports-manager
+      secret_key_env: REPORTS_MANAGER_SECRET
+      buckets: [reports]
+      permissions: ro
+      bucket_permissions: [manage]
+
+    # Trusted provisioning service, restricted to a bucket-name namespace.
+    - access_key: tenant-provisioner
+      secret_key_env: TENANT_PROVISIONER_SECRET
+      buckets: ["tenant-*"]
+      permissions: ro
+      bucket_permissions: [create, delete]
 ```
 
-create/delete/manage are explicit independent grants. Create also needs global
-ALLOW_BUCKET_CREATION=true; delete has no global switch; config PUT/DELETE needs
-manage. Source and destination are checked for copy. ListBuckets filters the
-effective scope for ro/rw alike; lifecycle grants do not change inventory access.
-Backend IAM remains required but is not the gateway authorization boundary.
+The provisioning example needs the global create switch to create buckets; its
+delete grant does not let it delete individual objects or bypass the backend's
+nonempty-bucket restriction. Use a bare `*` only when intentionally granting
+backend-wide authority to a trusted service.
+
+### Enforcement, updates, and verification
+
+The gateway authenticates the frontend signature, checks effective scope and
+operation permissions, then uses the separate backend identity. CopyObject and
+UploadPartCopy require both source read scope and destination write scope; a
+destination-only grant cannot read another tenant's bucket. ListBuckets is
+filtered for both `ro` and `rw`; lifecycle grants do not expand inventory scope.
+Qualifying credential-free CORS preflight is a narrow exception and still enforces
+`PROXIED_BUCKET`; the actual S3 request remains authenticated and authorized.
+
+Main-config/`AUTH_CREDENTIALS_FILE` updates reload validated credential snapshots;
+invalid replacements retain prior live credentials. Process-env/Helm values
+require restart. Remove a key or narrow its policy to deny subsequent requests,
+including presigned requests; this does not undo completed operations or promise
+to cancel a stream already accepted. Supply secret material securely, preferably
+with `secret_key_env`/Secret references, and avoid duplicate access keys.
+
+With each role, verify allowed reads/writes and explicit denials: an out-of-scope
+GET, a reader PUT/DELETE, and a writer CreateBucket/configuration PUT without
+grants. Expect gateway `403 AccessDenied` for scope/permission denials before
+backend access. Creation with a valid create grant but the global gate disabled
+has a separate 501 refusal. Test backend permissions too; gateway approval is
+not proof that storage will accept the operation.
+
+**Model limits:** there is no frontend AWS IAM JSON policy evaluator, per-object
+prefix/action-list policy, explicit-deny statement language, or per-key backend
+credential selection. For those isolation needs, use supported bucket scopes or
+separate deployments rather than assuming AWS IAM semantics.
+
+## Configuring Gateway Credentials
+
+Apply the [frontend access-key policy](#frontend-access-key-policies) using runtime
+YAML, an external credentials file, indexed environment variables, or Helm values.
+Keep frontend authorization separate from [bucket encryption policies](#bucket-encryption-policies).
+
+### Indexed environment variables
+
+| Variable | Meaning |
+|---|---|
+| `GW_CRED_N_ACCESS_KEY` / `GW_CRED_N_SECRET_KEY` | Frontend credential pair |
+| `GW_CRED_N_BUCKETS` | Comma-separated exact/prefix scope entries; present but empty means deny-all |
+| `GW_CRED_N_PERMISSIONS` | `ro` or `rw`; explicitly empty is invalid |
+| `GW_CRED_N_BUCKET_PERMISSIONS` | Comma-separated `create`, `delete`, `manage` grants |
+| `GW_CRED_N_LABEL` | Optional audit label, not an authorization selector |
+
+Start at index 0 without gaps. For a new env-defined key, an unset buckets variable
+means unrestricted; set it explicitly for tenant/app keys. If overriding an existing
+YAML credential by access key, unset policy fields retain its configured values;
+an empty bucket-grants variable does not clear existing grants. Use the runtime
+credential list to remove grants explicitly rather than assuming an empty env
+override revokes them.
 
 ### Helm credentials
 
@@ -188,9 +315,13 @@ config:
               name: gateway-auth-secrets
               key: secret-key
         label: tenant-a
+        buckets: ["tenant-a-*"]
+        permissions: rw
+        bucketPermissions: []
 ```
 
-Use schema-supported permission/scope wrappers for additional fields. Indexed
+Credential `buckets` and `bucketPermissions` are direct lists; `permissions` is
+`ro`/`rw`. Access/secret keys support `value`/`valueFrom` wrappers. Indexed
 GW_CRED_N_ACCESS_KEY/SECRET_KEY env values are process-start settings. A Secret
 with a full YAML/JSON credential list can be referenced through
 config.auth.existingCredentialsSecret.name/key; chart mounts it and sets

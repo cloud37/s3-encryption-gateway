@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Documentation
 
+- **Frontend access-key policy visibility:** Add an explicit deployment-guide
+  section for credential scope/defaults, independent object and bucket grants,
+  scoped role examples, update/revocation behavior, model limits, and env/Helm
+  configuration. Link it directly from the README and task index and distinguish
+  frontend authorization from encryption policy and backend IAM. No new guide
+  files or runtime authorization changes.
+
 - **Reader-oriented documentation consolidation:** Reduce top-level guides from
   33 to 18 by merging 15 superseded topic files into existing owners. Centralize
   S3 operation/option/SDK evidence, backend/policy setup, key rotation, metadata/FIPS,
