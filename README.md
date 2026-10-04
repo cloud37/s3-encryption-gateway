@@ -36,7 +36,20 @@ The S3 Encryption Gateway is a transparent HTTP proxy that sits between your app
                  text                               text   └─────────────────┘
 ```
 
-**Transparent**: Point your S3 endpoint URL at the gateway — that's it. No application changes required.
+**Transparent for supported S3 operations**: Point your S3 endpoint URL at the gateway instead of the backend. Check the compatibility notes below before migrating an application.
+
+## S3 Compatibility and Limitations
+
+See the [what works / what doesn't / what's planned matrix](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix)
+for supported operations, configuration requirements, backend-dependent APIs,
+known limitations, and tracking issues. The [SDK / tool test matrix](docs/SDK_COMPATIBILITY.md)
+describes automated coverage rather than promising every operation works with every client.
+
+> **Browser uploads in v0.12.3:** SigV4 presigned PUT is supported, but browser
+> POST Object form uploads are not yet supported ([#353](https://github.com/cloud37/s3-encryption-gateway/issues/353)).
+> Backend CORS alone is insufficient for encrypted paths: preflight is forwarded,
+> but gateway-generated responses lack the required CORS headers. Gateway-managed
+> preflight and response headers are planned in [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322).
 
 ## Who Needs This?
 
@@ -70,7 +83,7 @@ So we built a transparent proxy that solves the problem once, for every applicat
 
 ### Object Encryption
 
-All objects are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent — any S3 client works without modification.
+Objects in encryption-enabled buckets are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent for [supported S3 operations](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix); per-bucket policies can explicitly bypass encryption.
 
 **Recommended: Envelope encryption** with a locally-held AES-256 or RSA key, or an external KMS (Cosmian KMIP). A random per-object Data Encryption Key (DEK) is wrapped with the Key Encryption Key (KEK) at encrypt time and unwrapped at decrypt time — no key derivation on the hot path. Envelope encryption is **50–76× faster** than PBKDF2 600k for single-object uploads and over **70× faster** for range reads. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for full benchmark tables and a mode comparison.
 
@@ -1101,21 +1114,25 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 
 ## Roadmap
 
-### v1.0
+### Planned compatibility work
 
-- **AWS KMS adapter** — native envelope encryption with AWS-managed keys
-- **OpenBao / HashiCorp Vault Transit** — supported KMS adapter for envelope encryption,
-  with token, AppRole, and Kubernetes authentication, health checks, and key rotation
+- **Gateway-managed CORS** — browser preflight and headers on gateway-generated responses; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
+- **Browser POST Object** — SigV4 presigned form policies; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), depends on #322 for browser compatibility
 
-### Shipped in previous versions
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the complete changelog.
+Neither feature is available in v0.12.3; no release date is committed.
 
 ### Future
 
+- **AWS KMS adapter** — native envelope encryption with AWS-managed keys
 - Azure Key Vault and GCP Cloud KMS adapters
 - S3 Encryption Gateway Kubernetes Operator
 - Multi-arch images with SBOM and SLSA provenance
+
+### Shipped in previous versions
+
+OpenBao / HashiCorp Vault Transit is already supported. See the
+[KMS guide](docs/KMS_COMPATIBILITY.md#openbao--vault-transit-adapter) and
+[`CHANGELOG.md`](CHANGELOG.md) for shipped capabilities.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete roadmap.
 

@@ -1,6 +1,42 @@
 # Roadmap
 
-This roadmap outlines potential future improvements, grouped by milestones and tracks. Timelines are indicative and may shift based on feedback and priorities.
+## Current Direction
+
+**Reviewed October 4, 2026; released compatibility baseline: v0.12.3.**
+For what an application can use today, consult the canonical
+[application compatibility matrix](S3_API_IMPLEMENTATION.md#application-compatibility-matrix)
+and [changelog](../CHANGELOG.md). An open issue or implementation branch is not
+evidence that a feature has shipped.
+
+### Accepted, Unreleased Compatibility Work
+
+- [GH-322: gateway-managed bucket CORS](https://github.com/cloud37/s3-encryption-gateway/issues/322)
+  — opt-in gateway-side preflight and response headers, including encrypted paths;
+  intended to preserve backend passthrough as the default.
+- [GH-353: browser POST Object](https://github.com/cloud37/s3-encryption-gateway/issues/353)
+  — SigV4 presigned form policies and encrypted uploads. Browser compatibility
+  depends on GH-322; it is separate from the existing multipart-upload API.
+- [GH-356: signed Content-Length behind reverse proxies](https://github.com/cloud37/s3-encryption-gateway/issues/356)
+  — a fix is implemented on a branch but is not in v0.12.3. Affects bodiless
+  requests whose signed `Content-Length: 0` is removed by a proxy.
+
+No release date is committed for these changes. Follow the linked issues for
+updates, and update the compatibility matrix only when the changes are released.
+
+### Longer-Term Ideas
+
+AWS KMS, Azure Key Vault, and GCP Cloud KMS adapters and a Kubernetes Operator
+remain future directions, not dated commitments. OpenBao / HashiCorp Vault
+Transit is already supported; see the [KMS guide](KMS_COMPATIBILITY.md).
+
+## Historical Milestone Proposals
+
+The material below preserves the earlier roadmap for context. Its relative
+timelines and unchecked bullets are **not current delivery commitments or a list
+of missing features**. Several capabilities have since shipped, including
+encrypted multipart uploads, multipart copy, presigned URLs, Object Lock,
+credential authorization, metadata handling, and SDK/tool tests. Built-in
+compression was removed; see [migration guidance](MIGRATION.md).
 
 ## Milestone v0.4 (Near-term: 1–2 months)
 
@@ -151,4 +187,3 @@ This roadmap outlines potential future improvements, grouped by milestones and t
 
 - Semantic versioning with changelogs, upgrade notes, and migration guides.
 - Release artifacts: images (multi-arch), chart updates, docs site refresh.
-

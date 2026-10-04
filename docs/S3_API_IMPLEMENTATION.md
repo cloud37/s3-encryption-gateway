@@ -7,7 +7,60 @@ backend forwarding, while Object Lock retains its dedicated 100 KiB parser.
 
 ## Overview
 
-The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 API while transparently encrypting and decrypting object data. This document outlines the implementation strategy for S3 API compatibility.
+The S3 Encryption Gateway implements common S3 operations while transparently encrypting and decrypting object data. It is not a complete replacement for every Amazon S3 feature. The application-facing matrix below describes released behavior; the later route and handler tables provide implementation detail.
+
+## Application Compatibility Matrix
+
+**Release baseline: v0.12.3 (released October 2, 2026). Status reviewed October 4, 2026.**
+This is the canonical user-facing feature matrix. Work on an implementation branch
+is not released support. For other versions, consult the [changelog](../CHANGELOG.md)
+and [release notes](https://github.com/cloud37/s3-encryption-gateway/releases).
+
+- **Supported**: implemented, subject to the requirements and caveats in Notes.
+- **Not supported**: unavailable in this release, with the reason given below.
+- **Planned**: unavailable in this release, with accepted work linked to its issue.
+  This is not a release-date commitment.
+
+All actual S3 operations require gateway credentials, bucket scope, and the relevant
+permissions. The narrow credential-free browser preflight exception is described
+below. **Backend-dependent passthrough** means the gateway forwards an authorized,
+re-signed request; it does not implement a missing backend feature. Backend IAM
+permissions remain required. See [authorization](#authentication-and-authorization),
+[SDK / tool test coverage](SDK_COMPATIBILITY.md), and [deployment guidance](DEPLOYMENT.md).
+
+| Feature | Status | Notes / tracking |
+|---|---|---|
+| PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects | Supported | Encryption follows the bucket policy. GET/HEAD project plaintext size and metadata; deleting encrypted MPU objects also cleans up their companion manifest. |
+| Range GET | Supported | Returns plaintext byte ranges. Chunked formats fetch only the required encrypted chunks; legacy single-AEAD formats require a full read/decrypt. See [range requests](#range-requests). |
+| CopyObject / UploadPartCopy | Supported | Encrypted copies are mediated through the gateway; source read and destination write permissions are checked independently. URL-encoded source identities are fixed in v0.12.3 ([GH-346](https://github.com/cloud37/s3-encryption-gateway/issues/346)). Legacy encrypted sources have a configurable memory cap. Request ACLs are not applied by re-encrypted CopyObject; use `?acl` afterward. See [copy-source handling](#copy-source-encoding-and-identity-gh-346). |
+| Encrypted multipart upload (initiate, parts, complete, abort, list) | Supported | Requires configured Valkey-backed state and key management; encryption is enabled by default unless the bucket policy opts out. `UploadPart` defaults to a 64 MiB buffer cap (`SERVER_MAX_PART_BUFFER`). See [setup and limits](../README.md#encrypted-multipart-uploads). |
+| Retry / replace an encrypted multipart part | Supported | Identical-content retries are supported. Concurrent reservations or different replacement content return `409 OperationAborted`; abort and create a new upload to change a claimed part. This also applies to UploadPartCopy. See [multipart handling](#multipart-upload-handling). |
+| SigV4 header-signed requests | Supported | Authentication and scope checks apply before backend access. Header timestamps use the configured clock-skew window, default 5 minutes. |
+| SigV4 presigned GET / PUT | Supported | Sign for the gateway endpoint using gateway credentials. Since v0.12.3, lifetime follows signed `X-Amz-Expires` (1–604800 seconds), not the header clock-skew window. Browser CORS remains a separate requirement. See [expiration rules](#sigv4-request-time-and-presigned-expiration). |
+| Browser form upload (POST Object with policy) | Planned | Not implemented in v0.12.3; distinct from multipart upload. [GH-353](https://github.com/cloud37/s3-encryption-gateway/issues/353) tracks SigV4 policy validation, encrypted uploads, and success responses. Browser compatibility also depends on GH-322. |
+| Browser CORS: preflight plus headers on gateway responses | Planned | v0.12.3 forwards genuine unauthenticated preflights to the backend, but encrypted handlers do not propagate backend CORS headers. Backend bucket CORS alone does not make these browser flows work. [GH-322](https://github.com/cloud37/s3-encryption-gateway/issues/322) tracks gateway-managed CORS; [GH-318](https://github.com/cloud37/s3-encryption-gateway/issues/318) explains the preflight-authentication fix and remaining response gap. |
+| Bucket CORS / lifecycle / policy / versioning configuration APIs | Supported | Backend-dependent passthrough, not gateway-side policy evaluation. PUT/DELETE configuration requires `bucket_permissions: [manage]`, independently of object `rw`. The backend must implement the requested API. |
+| ListBuckets / HeadBucket / GetBucketLocation | Supported | Backend-dependent. ListBuckets is filtered to the credential's effective bucket scope, including `PROXIED_BUCKET` when configured. |
+| CreateBucket / DeleteBucket | Supported | Backend-dependent. CreateBucket requires `ALLOW_BUCKET_CREATION=true` and the explicit `create` grant; DeleteBucket requires `delete`. Object `rw` grants neither. See [bucket management](../README.md#authorized-bucket-management). |
+| Object tagging / ACL APIs | Supported | Backend-dependent passthrough; providers differ. `x-amz-tagging` on CreateMultipartUpload is not forwarded: set tags using the object `?tagging` API after completion. See [inline headers](#inline-header-passthrough). |
+| Version-specific object reads, deletes, and copy sources | Supported | Requires a versioning-capable backend. GET/HEAD/DELETE accept `versionId`; copy sources accept `?versionId=...`. This does not imply support for every S3 version-listing operation. |
+| Object Lock / retention / legal hold | Supported | Backend-dependent; retention protects ciphertext. Governance-retention bypass is refused with `403 AccessDenied`. Keep decryption keys for the retention period. See [Object Lock and provider support](#object-locking-v06-s3-2). |
+| ListObjects / ListObjectsV2 sizes | Supported | Plaintext sizes use a configured Valkey write-through cache. Unresolved cache misses, disabled translation, or unavailable Valkey can leave ciphertext sizes. Optional `list_size_translate.fallback_head_enabled` resolves misses using extra backend reads; disabled by default. See [size-cache setup](../README.md#listobjects-plaintext-size-translation). |
+| ListObjects / ListObjectsV2 ETags | Supported | Listings expose backend ETags, not plaintext MD5. GET/HEAD can restore a recorded original ETag for single-object encryption formats; MPU objects retain backend multipart ETags. Plaintext ETag translation in listings is not implemented and has no committed release date. |
+| SigV2 authentication | Supported | Deprecated, disabled by default. Temporary migration opt-in: `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true`. Prefer SigV4. |
+| Per-upload storage-class / backend SSE headers on typed PutObject and CreateMultipartUpload | Not supported | These typed upload paths do not forward the request settings; backend-configured defaults still apply. Gateway encryption is independent of backend SSE. See [inline header handling](#inline-header-passthrough); no release date is committed for extending it. |
+| Reverse-proxy deployment | Supported | TLS termination with plain HTTP to the gateway is supported; preserve the signed Host, path, query, and S3 headers. [GH-338](https://github.com/cloud37/s3-encryption-gateway/issues/338)'s outbound proxy-header signing fix shipped in v0.12.2. A known v0.12.3 exception remains when a proxy drops signed `Content-Length: 0` on bodiless requests (for example rust-s3 DELETE); [GH-356](https://github.com/cloud37/s3-encryption-gateway/issues/356) tracks an implemented but unreleased fix. See [proxy guidance](DEPLOYMENT.md#reverse-proxies-and-backend-load-balancers). |
+| SelectObjectContent | Not supported | By design: backend SQL evaluation cannot operate on gateway-encrypted objects. Returns `501 NotImplemented`; no implementation is planned. |
+| WriteGetObjectResponse (S3 Object Lambda) | Not supported | No route or integration; incompatible with the gateway's proxy model. No implementation is planned. |
+
+**Before migrating:** check the application's upload style, part sizes, listing
+size/ETag assumptions, backend configuration APIs, and reverse-proxy behavior.
+An SDK smoke-test pass is not a guarantee of every application workflow.
+
+**Maintenance:** update this matrix when a feature or compatibility fix is released,
+including its minimum version and remaining caveats. Keep accepted unreleased work
+linked here without marking it supported; use the [roadmap](ROADMAP.md) for context,
+not a second independent support matrix.
 
 ## S3 API Operations Classification
 
@@ -33,7 +86,7 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   - Restore original metadata
   - Return decrypted response
 
-#### POST Object (Multipart Upload)
+#### Multipart Upload (Create / UploadPart / Complete)
 - **Endpoints**:
   - `POST /{bucket}/{key}?uploads` - Initiate multipart upload
   - `PUT /{bucket}/{key}?partNumber=X&uploadId=Y` - Upload part
@@ -57,6 +110,10 @@ The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 AP
   - Duplicate part number detection and rejection
   - Fuzz-tested XML parser for edge case handling
    - Provider interoperability testing framework
+
+This is the S3 multipart API, not the HTML `multipart/form-data` POST Object
+operation. Browser form policies are not implemented in v0.12.3; see
+[GH-353](https://github.com/cloud37/s3-encryption-gateway/issues/353).
 
 #### PUT Object (Multipart Copy / UploadPartCopy)
 - **Endpoint**: `PUT /{bucket}/{key}?partNumber=X&uploadId=Y`, with the
@@ -194,8 +251,8 @@ and [regression commands](TESTING.md#copy-source-encoding-regressions-gh-346).
 - **Implementation**: Pass-through to backend, no decryption needed
 
 #### Bucket Operations
-- **Endpoints**: All bucket-level operations (create, delete, policy, etc.)
-- **Implementation**: Pass-through to backend, no encryption concerns
+- **Endpoints**: Registered bucket-level operations (create, delete, policy, etc.)
+- **Implementation**: Authorized passthrough to the backend; support depends on the backend. A registered route does not add a feature missing from the backend.
 
 ## S3 API Coverage Matrix (V1.0-S3-2)
 
@@ -230,7 +287,7 @@ and [regression commands](TESTING.md#copy-source-encoding-regressions-gh-346).
 | T2-07 | `GET` | `/{bucket}?lifecycle` | **GetBucketLifecycle** | `handleGetBucketLifecycle` | Proxy verbatim |
 | T2-08 | `PUT` | `/{bucket}?lifecycle` | **PutBucketLifecycle** | `handlePutBucketLifecycle` | Proxy verbatim |
 | T2-09 | `DELETE` | `/{bucket}?lifecycle` | **DeleteBucketLifecycle** | `handleDeleteBucketLifecycle` | Proxy verbatim |
-| T2-10 | `OPTIONS` | `/{bucket}\|/{bucket}/{key}` | **CORS Preflight** | `handleCORSPreflight` | Gateway-handled |
+| T2-10 | `OPTIONS` | `/{bucket}\|/{bucket}/{key}` | **CORS Preflight** | `handleCORSPreflight` | Backend passthrough |
 | T2-11 | `POST` | `/{bucket}/{key}?restore` | **RestoreObject** | `handleRestoreObject` | Proxy verbatim |
 | T2-12 | `GET` | `/{bucket}?encryption` | **GetBucketEncryption** | `handleGetBucketEncryption` | Proxy verbatim |
 | T2-13 | `PUT` | `/{bucket}?encryption` | **PutBucketEncryption** | `handlePutBucketEncryption` | Proxy verbatim |
@@ -244,6 +301,11 @@ presigned request on the preflight. The gateway still authenticates the actual
 presigned `PUT`, and `proxied_bucket` remains enforced for unauthenticated
 preflights. Incomplete or credentialed `OPTIONS` requests continue through the
 normal authentication and authorization path.
+
+This exception only lets the preflight reach the backend; it does not evaluate
+CORS rules or add CORS headers to gateway-generated encrypted responses. Browser
+uploads can therefore fail even after a successful backend preflight. See
+[GH-322](https://github.com/cloud37/s3-encryption-gateway/issues/322).
 
 ### New Operations — Tier 3 (Specialised)
 
@@ -268,14 +330,13 @@ normal authentication and authorization path.
 | T3-17 | `POST` | `/{bucket}/{key}?select` | **SelectObjectContent** | `handleSelectObjectContent` | 501 NotImplemented |
 | T3-18 | `PUT` | `/{bucket}?intelligent-tiering` | **PutBucketIntelligentTiering** | `handlePutBucketIntelligentTiering` | Proxy verbatim |
 
-### Known Limitations (V1.0-S3-2)
+### Known Limitations
 
-| Operation | Reason |
-|---|---|
-| `SelectObjectContent` | Requires server-side SQL evaluation on encrypted data — not feasible in a proxy model |
-| `WriteGetObjectResponse` | S3 Object Lambda integration — proxy model incompatible |
-| `ListObjects` / `ListObjectsV2` ETags | ETags in listings remain **backend (ciphertext) ETags**. Accurate plaintext ETag is available via `HeadObject` and `GetObject`, which decrypt metadata on a per-object basis. ETag correction in listings is tracked as a separate follow-up. |
-| `ListObjects` / `ListObjectsV2` sizes | **Fixed in V1.0-S3-3.** Sizes are translated to plaintext via a Valkey-backed write-through size cache (`plainsize:<bucket>`), populated on `PutObject`/`CompleteMultipartUpload`/`CopyObject` and evicted on delete. Cache misses return ciphertext sizes (fail-soft); opt-in `list_size_translate.fallback_head_enabled` warms misses with a bounded HEAD batch. Objects uploaded before the feature was deployed are not auto-warmed. The earlier per-object HEAD translation was removed because it caused an N-fold latency explosion; the cache restores correctness without that cost. |
+The [application compatibility matrix](#application-compatibility-matrix) is the
+authoritative overview of missing features, backend dependencies, listing-size
+and ETag caveats, encrypted-part replacement rules, and known proxy issues. In
+particular, a routed CORS preflight is not complete browser CORS support, and
+cached plaintext listing sizes are not guaranteed for unresolved objects.
 
 ### Helper Infrastructure (V1.0-S3-2)
 
@@ -285,7 +346,9 @@ normal authentication and authorization path.
 | `forwardToBackend` | `internal/api/utils.go` | Creates and sends a signed request to the configured S3 backend, returns the raw response |
 | `handlePassthrough` | `internal/api/utils.go` | Generic proxy handler wrapper: forward → copy → metric → audit |
 
-All handlers in tiers 1-3 use `handlePassthrough` as their implementation body, reducing each new handler to ~3 lines.
+Most configuration handlers use `handlePassthrough` or its body-limited variant.
+ListBuckets, bucket lifecycle, Object Lock, and explicitly unsupported operations
+have additional handling; the tables describe routing, not blanket feature parity.
 
 ### Request/Response Processing Strategy
 
@@ -714,7 +777,10 @@ compose with s4 upstream.
 
 ## Inline Header Passthrough
 
-The gateway forwards S3 standard inline headers transparently in most cases. The following tables document the exact disposition for PutObject and CreateMultipartUpload. Headers marked **Forwarded** reach the backend verbatim. Headers marked **Passed through verbatim** are forwarded with the re-signed request without being extracted into SDK struct fields.
+The following tables describe the typed SDK PutObject and CreateMultipartUpload
+paths in v0.12.3. Headers marked **Forwarded** are mapped to the corresponding
+backend input. These paths do not clone arbitrary inbound headers; do not infer
+their behavior from the generic [passthrough header contract](#passthrough-request-header-contract).
 
 ### PutObject Inline Headers
 
@@ -726,12 +792,12 @@ The gateway forwards S3 standard inline headers transparently in most cases. The
 | `x-amz-grant-read` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantRead` | |
 | `x-amz-grant-read-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantReadACP` | |
 | `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantWriteACP` | |
-| `x-amz-storage-class` | Passed through verbatim | Not extracted by gateway; forwarded on re-signed request | Provider quirk: MinIO ignores; AWS S3 respects |
-| `x-amz-server-side-encryption` | Passed through verbatim | Not extracted; backend applies its own SSE layer | Gateway performs client-side encryption independently |
+| `x-amz-storage-class` | **Not forwarded** | Not mapped to the typed PutObject input | Backend defaults apply; generic passthrough behavior is different |
+| `x-amz-server-side-encryption` | **Not forwarded** | Not mapped to the typed PutObject input | Backend-configured default SSE is independent of gateway encryption |
 | `x-amz-object-lock-mode` | **Forwarded** | Extracted via `extractObjectLockInput`, passed to SDK | |
 | `x-amz-object-lock-retain-until-date` | **Forwarded** | As above | |
 | `x-amz-object-lock-legal-hold` | **Forwarded** | As above | |
-| `x-amz-meta-*` | **Forwarded** | Extracted as user metadata map | All user-defined metadata headers forwarded |
+| `x-amz-meta-*` | **Forwarded** | Extracted as user metadata map | Gateway-reserved metadata names are rejected; backend metadata filters still apply |
 | `Content-Type` | **Forwarded** | Standard header | |
 | `Content-Encoding` | **Forwarded** | Standard header | |
 | `Cache-Control` | **Forwarded** | Standard header | |
@@ -747,15 +813,21 @@ The gateway forwards S3 standard inline headers transparently in most cases. The
 | `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to SDK `GrantWriteACP` |
 | `x-amz-tagging` | **Not forwarded** | Tags must be set via `?tagging` subresource after CompleteMultipartUpload. **Known limitation.** |
 | `x-amz-meta-*` | **Forwarded** | Extracted and passed to SDK |
-| `x-amz-server-side-encryption` | Passed through verbatim | Not extracted by gateway |
+| `x-amz-server-side-encryption` | **Not forwarded** | Not mapped to the typed CreateMultipartUpload input; backend defaults apply |
 
 ### CopyObject ACL Note
 
-On CopyObject, the destination ACL is set independently of the source. The gateway passes empty strings for all ACL headers on the destination PutObject call (re-encrypt path). Callers must set `x-amz-acl` explicitly on CopyObject if they want a non-default ACL. This is consistent with S3 semantics where CopyObject does not copy ACLs by default.
+On CopyObject, the destination ACL is not copied from the source. The re-encrypt
+path passes empty ACL/grant values to its destination PutObject call, so supplying
+`x-amz-acl` on that copy request does not set the destination ACL. Use the object
+`?acl` API afterward when the backend supports it.
 
 ### Lifecycle Response Headers
 
-When a backend applies a lifecycle rule to an object, the following response headers are forwarded verbatim by `copyProxyResponse`. Only 8 hop-by-hop headers are stripped; all `x-amz-*` headers survive.
+The following headers are retained on generic passthrough responses by
+`copyProxyResponse`, unless nominated by `Connection`. Fixed and
+`Connection`-nominated hop-by-hop fields are stripped. This does not promise these
+headers on typed GET/HEAD or gateway-generated encrypted responses.
 
 | Header | Direction | Gateway Disposition |
 |---|---|---|

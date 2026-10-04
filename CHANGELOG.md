@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+### Documentation
+
+- **Application compatibility overview (GH-357):** Add a v0.12.3-scoped
+  supported / not supported / planned feature matrix linked from the README,
+  with backend dependencies, multipart limits, listing caveats, browser POST/CORS
+  tracking, and released-versus-unreleased reverse-proxy fixes. Reconcile the
+  API guide and SDK test-coverage notes, and label earlier roadmap milestones
+  as historical rather than current delivery commitments.
+
 ## [0.12.3] — 2026-10-02
 
 This patch release fixes backend error classification during encrypted object
