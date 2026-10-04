@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Documentation
 
+- **Reader-oriented documentation consolidation:** Reduce top-level guides from
+  33 to 18 by merging 15 superseded topic files into existing owners. Centralize
+  S3 operation/option/SDK evidence, backend/policy setup, key rotation, metadata/FIPS,
+  admin/recovery procedures, coverage, and scaling. Rebuild the task index and
+  contents navigation, correct stale state-key/FIPS/migration examples, preserve
+  historical records and benchmark evidence, and repair live references without
+  adding redirect stubs or changing runtime settings.
+
 - **Application compatibility overview (GH-357):** Add a v0.12.3-scoped
   supported / not supported / planned feature matrix linked from the README,
   with backend dependencies, multipart limits, listing caveats, browser POST/CORS

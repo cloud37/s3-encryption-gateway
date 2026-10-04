@@ -167,7 +167,7 @@ jobs:
               '2. Add tests that catch the surviving mutations.',
               '3. Re-run `make mutation-report` to verify the kill-rate recovers.',
               '',
-              'See `docs/COVERAGE.md` for interpretation guidance.',
+              'See `docs/TESTING.md#coverage-policy` for interpretation guidance.',
             ].join('\n');
 
             // Dedup: close any existing open issue with the same title

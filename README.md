@@ -40,13 +40,11 @@ The S3 Encryption Gateway is a transparent HTTP proxy that sits between your app
 
 ## S3 Compatibility and Limitations
 
-See the [what works / what doesn't / what's planned matrix](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix)
-for supported operations, configuration requirements, backend-dependent APIs,
-known limitations, and tracking issues. The [SDK / tool test matrix](docs/SDK_COMPATIBILITY.md)
-describes automated coverage rather than promising every operation works with every client.
-The [complete operation inventory](docs/S3_OPERATIONS.md) lists every pinned S3
-SDK action; [request/response compatibility](docs/S3_COMPATIBILITY.md) records
-addressing, conditions, checksum, pagination, and field-level limitations.
+See the single [S3 compatibility reference](docs/S3_API_IMPLEMENTATION.md):
+[what works / what's planned](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix),
+every pinned SDK operation, request-option limitations, and SDK/backend evidence.
+Start with the [documentation task index](docs/README.md) for deployment, keys,
+migration, operations, and contribution guidance.
 
 > **Browser uploads in v0.12.3:** SigV4 presigned PUT is supported, but browser
 > POST Object form uploads are not yet supported ([#353](https://github.com/cloud37/s3-encryption-gateway/issues/353)).
@@ -88,9 +86,9 @@ So we built a transparent proxy that solves the problem once, for every applicat
 
 Objects in encryption-enabled buckets are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent for [supported S3 operations](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix); per-bucket policies can explicitly bypass encryption.
 
-**Recommended: Envelope encryption** with a locally-held AES-256 or RSA key, or an external KMS (Cosmian KMIP). A random per-object Data Encryption Key (DEK) is wrapped with the Key Encryption Key (KEK) at encrypt time and unwrapped at decrypt time — no key derivation on the hot path. Envelope encryption is **50–76× faster** than PBKDF2 600k for single-object uploads and over **70× faster** for range reads. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for full benchmark tables and a mode comparison.
+**Recommended: Envelope encryption** with a local AES-256/RSA key or supported external KMS. A random per-object DEK is wrapped with a KEK, avoiding password derivation on ordinary object hot paths. See [mode selection](docs/KMS_COMPATIBILITY.md#choosing-an-encryption-mode) and [workload-specific benchmarks](docs/PERFORMANCE.md#encryption-mode-benchmarks).
 
-**Password-derived (legacy, simpler deployment):** Derives per-object keys from a gateway password via PBKDF2 or argon2id. Requires no key infrastructure — just a single `ENCRYPTION_PASSWORD` environment variable — but runs key derivation on every request. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for throughput numbers and a [migration guide](docs/ENCRYPTION_MODES.md#migration-between-modes) if you are switching from password-derived to envelope encryption.
+**Password-derived:** PBKDF2/Argon2id derive keys with stored parameters and validated limits. See [mode selection](docs/KMS_COMPATIBILITY.md#choosing-an-encryption-mode), [benchmarks](docs/PERFORMANCE.md#encryption-mode-benchmarks), and [password-to-envelope migration](docs/MIGRATION.md#migrating-from-password-only-to-kek-envelope-encryption).
 
 - **AES-256-GCM** (default) or **ChaCha20-Poly1305**: Authenticated encryption with per-object keys
 - **Chunked streaming**: Large files are encrypted in chunks with per-chunk IVs, enabling efficient range requests
@@ -338,7 +336,7 @@ See [`docs/plans/V1.0-S3-3-plan.md`](docs/plans/V1.0-S3-3-plan.md) for the full 
 
 ### Envelope Encryption (Recommended)
 
-Envelope encryption removes key derivation from the per-request hot path: a random per-object Data Encryption Key (DEK) is wrapped with a Key Encryption Key (KEK). The KEK is loaded once at startup. This is **50–76× faster than PBKDF2 600k** and is the recommended path for all production deployments. See [`docs/ENCRYPTION_MODES.md`](docs/ENCRYPTION_MODES.md) for performance benchmarks.
+Envelope encryption removes password derivation from ordinary new-object requests. See [key management](docs/KMS_COMPATIBILITY.md) for provider/key-source/rotation setup and [performance evidence](docs/PERFORMANCE.md#encryption-mode-benchmarks) for workload comparisons.
 
 > **Migrating from password-only?** Set `encryption.password` to your existing password and enable `key_manager`. The gateway reads the password for objects encrypted before the switch and uses the KEK for all new objects — no data migration required. To re-encrypt existing objects, use the **GET-through-gateway → PUT-through-gateway** pattern with any standard S3 client. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for details.
 
@@ -684,7 +682,7 @@ docker run -p 8080:8080 \
 
 > **`ENCRYPTION_PASSWORD`** is the fallback for objects encrypted before you enabled `KEY_MANAGER`. If you have no existing objects, set it to any strong random value. If you are migrating from password-only mode, set it to your existing encryption password — existing objects will continue to decrypt transparently.
 
-This runs **envelope encryption** — per-object DEKs wrapped with a local AES-256 KEK. No key derivation on the hot path. See [Envelope Encryption](#envelope-encryption-recommended) above and [benchmark results](docs/ENCRYPTION_MODES.md).
+This runs **envelope encryption** — per-object DEKs wrapped with a local AES-256 KEK. See [key management](docs/KMS_COMPATIBILITY.md) and [benchmark evidence](docs/PERFORMANCE.md#encryption-mode-benchmarks).
 
 ### Docker — Password-only (simpler deployment, slower)
 
@@ -1052,10 +1050,8 @@ flowchart LR
     D["Middleware<br/>(logging, recovery, security, rate limit)"]
     E["Encryption Engine<br/>AES-256-GCM default<br/>ChaCha20-Poly1305"]
     K["Key Manager<br/>(AES KEK / RSA KEK / Cosmian KMIP)"]
-    CMP["Compression<br/>(optional)"]
     D --> E
     K --> |wrap / unwrap DEK| E
-    CMP -.-> |pre/post| E
   end
   G --> |S3 API| B[("S3 Backend<br/>AWS, MinIO, Wasabi, Hetzner")]
   G -.-> |MPU state + ListObjects size cache| V[("Valkey<br/>(Redis-protocol)")]
@@ -1089,8 +1085,8 @@ sequenceDiagram
 
 The gateway targets S3-compatible storage, but API subsets, bucket setup, and
 gateway option mappings vary. These are deployment targets, not full-parity
-certifications; see the [backend test-selection matrix](docs/SDK_COMPATIBILITY.md#backend-and-encryption-mode-coverage)
-and [request/response caveats](docs/S3_COMPATIBILITY.md).
+certifications; see the [backend test-selection matrix](docs/S3_API_IMPLEMENTATION.md#backend-and-encryption-mode-coverage)
+and [request/response caveats](docs/S3_API_IMPLEMENTATION.md#object-reads-and-responses).
 
 | Backend | Status | Notes |
 |---|---|---|
@@ -1156,7 +1152,7 @@ soak tests (MinIO, Garage, RustFS, SeaweedFS) and fails the job on
 
 The project enforces a **≥ 75% statement coverage gate** on every PR and push to
 `make coverage-gate`. Nightly mutation testing (Gremlins) runs on the
-critical non-crypto packages. See [`docs/COVERAGE.md`](docs/COVERAGE.md)
+critical non-crypto packages. See [coverage policy](docs/TESTING.md#coverage-policy)
 for the exclusion policy, regeneration guide, and mutation testing scope.
 
 ---
@@ -1191,4 +1187,4 @@ MIT License — see [LICENSE](LICENSE) file for details.
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/cloud37/s3-encryption-gateway/issues)
-- **Documentation**: [`docs/`](docs/) directory
+- **Documentation**: [task-oriented guide index](docs/README.md)

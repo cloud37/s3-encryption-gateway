@@ -1,36 +1,50 @@
 # Documentation
 
-This directory contains comprehensive documentation for the S3 Encryption Gateway.
+Start with the task you need to complete. Each topic below has one authoritative
+guide; current instructions take precedence over historical plans and examples.
 
-## Getting Started
+## Choose Your Task
 
-- **[DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md)** - Complete development setup, coding guidelines, and configuration schema
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Docker and Kubernetes deployment instructions
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture and design decisions
+| I need to… | Start here | What it contains |
+|---|---|---|
+| Decide whether my application will work | [S3 compatibility](S3_API_IMPLEMENTATION.md) | Released feature summary, every pinned SDK operation, request-option caveats, SDK/backend evidence |
+| Install or configure the gateway | [Deployment](DEPLOYMENT.md) | Docker/Helm, backend selection, TLS, gateway credentials, bucket policies, Valkey/spool prerequisites |
+| Configure an S3 client | [CLI tools](S3_CLI_TOOLS.md) | AWS CLI, s5cmd, mc, common recipes; consult compatibility before migration |
+| Choose/manage encryption keys | [Key management](KMS_COMPATIBILITY.md) | Password/local-envelope/KMS choices, key sources, provider auth, rotation and retention |
+| Upgrade, re-encrypt, or recover objects | [Migration](MIGRATION.md) | Coordinated upgrades/rollback, explicit gateway GET→PUT, read-only audit tool, controlled recovery |
+| Respond to an incident or use the admin API | [Operations runbook](RUNBOOK.md) | State/key recovery, listing-size cache, alert playbooks, admin auth/endpoints |
+| Configure dashboards, logs, or profiling | [Observability](OBSERVABILITY.md) | Metrics/audit/tracing, Prometheus/Grafana, profiling recipes |
+| Size the deployment or measure performance | [Performance and scaling](PERFORMANCE.md) | Benchmark evidence/methodology, HPA, graceful shutdown, memory/disk/Valkey capacity |
+| Understand the design | [Architecture](ARCHITECTURE.md) and [encryption design](ENCRYPTION_DESIGN.md) | Component/security boundaries, formats, metadata, FIPS build profile |
+| Contribute code or docs | [Contributor guide](DEVELOPMENT_GUIDE.md) | Local setup, ownership, explanatory commits, review and documentation conventions |
+| Run tests or understand quality gates | [Testing](TESTING.md) | Unit/FIPS/conformance commands, regression recipes, coverage/exclusion/mutation policy |
+| Publish a release | [Release checklist](releasing.md) | Chart/image/changelog/SBOM preparation and release automation |
+| Follow accepted future work | [Roadmap](ROADMAP.md) | Issue-linked unreleased work; no speculative delivery dates |
 
-## Technical Documentation
+## Supporting References
 
-- **[ENCRYPTION_DESIGN.md](ENCRYPTION_DESIGN.md)** - Detailed encryption system design and implementation
-- **[S3_API_IMPLEMENTATION.md](S3_API_IMPLEMENTATION.md)** - S3 API compatibility and implementation strategy
-- **[KMS_COMPATIBILITY.md](KMS_COMPATIBILITY.md)** - Key Management Service integration guide
+- [Helm chart reference](../helm/s3-encryption-gateway/README.md),
+  [example configuration](../config.yaml.example), and
+  [chart values/schema](../helm/s3-encryption-gateway/): exact deployment fields.
+- [Progressive delivery](OPS_DEPLOYMENT.md): blue/green, canary, shared-state
+  constraints, and runnable [deployment examples](examples/).
+- [Harbor integration](integrations/harbor.md): application-specific setup.
+- [Security reporting](../SECURITY.md): disclosure process. The older
+  [security audit](SECURITY_AUDIT.md) and [security findings](security/) are
+  evidence/reference material, not a claim that every historical mitigation is deployed.
+- [Diagrams](diagrams/), [benchmark evidence](perf/), and [ADRs](adr/): durable
+  supporting artifacts, separate from installation instructions.
 
-## Architecture Decision Records (ADRs)
+## Historical Records and Moved Topics
 
-- **[ADR 0001: Range Optimization Design](adr/0001-range-optimization-design.md)** - Design decisions for range-optimized decryption
-- **[ADR 0002: Multipart Upload Security Validation](adr/0002-multipart-upload-interoperability.md)** - XML validation and interoperability decisions for multipart uploads
-- **[ADR 0009: Encrypted Multipart Uploads](adr/0009-encrypted-multipart-uploads.md)** - Per-upload DEKs, deterministic IV derivation, and the Valkey-backed upload state store
-- **[ADR 0014: State Key Derivation Hardening](adr/0014-state-key-derivation-hardening.md)** - Valkey at-rest state encryption hardening (V1.0-CRYPTO-2 / V1.0-SEC-30)
+[Plans](plans/), [issues](issues/), ADRs, security findings, and milestone benchmark
+artifacts are preserved. The historical [V0.6 KeyManager sketch](V0.6-SEC-1-IMPLEMENTATION.md)
+is not the current interface specification. Historical citations retain their
+original filenames; consult the topic owners above for current instructions.
 
-## Diagrams
-
-- **[Range Optimization Flow](diagrams/range-optimization.svg)** - Visual explanation of range request optimization
-- **[Multipart Upload Flow](diagrams/multipart-upload-flow.svg)** - Multipart request validation flow; encryption behavior is documented in [ADR 0009](adr/0009-encrypted-multipart-uploads.md)
-
-## Security & Operations
-
-- **[SECURITY_AUDIT.md](SECURITY_AUDIT.md)** - STRIDE threat model, security hardening guide, and audit recommendations
-- **[RUNBOOK.md](RUNBOOK.md)** - Operations runbook, including Valkey state at-rest encryption and the **ListObjects plaintext-size cache** (V1.0-S3-3)
-
-## Planning
-
-- **[ROADMAP.md](ROADMAP.md)** - Future improvements and milestones
+The former operation/option/SDK guides are consolidated into **S3 compatibility**;
+backend/policy setup into **Deployment**; admin/metadata-key operations into the
+**Runbook**; encryption-mode/rotation into **Key management**; old KMS migration
+into **Migration**; metadata/FIPS into **Encryption design**; coverage into
+**Testing**; scaling into **Performance**; and agent guidance into the
+**Contributor guide**. No empty redirect files are maintained.

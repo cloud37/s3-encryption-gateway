@@ -1,146 +1,57 @@
-# Encryption System Design
+# Encryption Formats, Metadata, and FIPS
 
-## Overview
+This guide owns the encryption/metadata contract and FIPS build profile. For
+operator key setup use [key management](KMS_COMPATIBILITY.md); for API options
+use [S3 compatibility](S3_API_IMPLEMENTATION.md); for upgrades/recovery use
+[migration](MIGRATION.md). **Baseline: v0.12.3.**
 
-The encryption system provides client-side encryption/decryption for all S3 objects passing through the gateway. It uses authenticated encryption to ensure both confidentiality and integrity of data.
+## Contents
 
-## Encryption Algorithms
+- [Encryption and integrity boundaries](#encryption-and-integrity-boundaries)
+- [Chunked formats and range reads](#chunked-formats-and-range-reads)
+- [Encrypted multipart uploads](#encrypted-multipart-uploads)
+- [Encrypted object metadata model](#encrypted-object-metadata-model)
+- [Metadata encryption and compaction](#metadata-encryption-and-compaction)
+- [FIPS build profile](#fips-build-profile)
+- [Verification and references](#verification-and-references)
 
-- AES-256-GCM (default)
-- ChaCha20-Poly1305 (supported in later phases; selectable via configuration)
+## Encryption and Integrity Boundaries
 
-### AES-256-GCM
+Encryption-enabled buckets store authenticated ciphertext; explicitly bypassed
+buckets store the client's original bytes. AES-256-GCM is the default;
+ChaCha20-Poly1305 is supported in non-FIPS builds. AES-GCM uses 32-byte keys,
+12-byte nonces, and 16-byte tags. Nonce uniqueness is required—GCM is not
+nonce-misuse resistant.
 
-### Why AES-256-GCM?
-- **Authenticated encryption**: Provides both confidentiality and integrity
-- **Industry standard**: Widely adopted and vetted
-- **Performance**: Hardware-accelerated on modern CPUs
-- **No padding issues**: GCM handles variable-length data efficiently
-- **Nonce-based**: No counter state to maintain
+Password mode derives keys using configured PBKDF2-SHA256 (default 600,000
+iterations) or Argon2id parameters. Per-object parameters are retained for reading,
+subject to decrypt-cost limits. The legacy 100,000 iteration setting is not the
+recommended current default. Envelope mode generates a random DEK and wraps it
+with a local AES/RSA KEK or external provider, avoiding password derivation on
+ordinary new-object requests. See [mode selection](KMS_COMPATIBILITY.md#choosing-an-encryption-mode)
+and [measured performance](PERFORMANCE.md#encryption-mode-benchmarks).
 
-### AES-256-GCM Details
-- **Key size**: 256 bits (32 bytes)
-- **Block size**: 128 bits (16 bytes)
-- **Authentication tag**: 128 bits (16 bytes)
-- **Nonce/IV size**: 96 bits (12 bytes) - GCM standard
+Current payload authentication binds bucket/key identity independently of
+KeyManager advisory metadata. Backend-native moves/copies are not safe relocation;
+gateway CopyObject or an explicit gateway GET→PUT rebinds the destination.
+Classification recognizes historical formats but rejects unsupported/malformed
+markers. Do not strip encryption metadata or reinterpret crypto failures as plaintext.
 
-## Key Derivation
+Verification is record-based for streaming formats. Preflight can reject the first
+corrupt record before headers; later integrity failure can terminate an already
+started response rather than replace its status with an XML error. Clients must
+verify successful stream completion, not only the initial 200/206.
 
-### PBKDF2 Key Derivation
-```go
-func deriveKey(password string, salt []byte) []byte {
-    return pbkdf2.Key([]byte(password), salt, iterations, keyLen, sha256.New)
-}
-```
+Private temporary request spools and optional plaintext/DEK caches are part of the
+process trust boundary. Protect the gateway host, files, and keys, and bound memory
+and disk. Zeroization of owned bytes is best-effort under Go's runtime, not a
+guarantee that every intermediate historical copy was overwritten.
 
-### Parameters
-- **Password**: User-provided encryption password
-- **Salt**: 32-byte random salt per object
-- **Iterations**: 100,000 (balance between security and performance)
-- **Hash function**: SHA-256
-- **Output length**: 32 bytes (AES-256 key)
+## Chunked Formats and Range Reads
 
-### Salt Generation
-- **Per-object salt**: Ensures unique key per object
-- **Random generation**: Cryptographically secure random bytes
-- **Storage**: Stored in object metadata
-
-## Encryption Process
-
-### Data Format
-```
-Encrypted Object = Salt + IV + Encrypted Data + Authentication Tag
-```
-
-### Step-by-Step Encryption (AES-256-GCM)
-1. **Generate salt**: 32 bytes of random data
-2. **Derive key**: PBKDF2(password, salt, 100000, 32, SHA256)
-3. **Generate IV**: 12 bytes of random data
-4. **Initialize GCM**: cipher.NewGCM(cipher)
-5. **Encrypt**: ciphertext, tag := GCM.Seal(nil, iv, plaintext, nil)
-6. **Assemble**: salt + iv + ciphertext + tag
-7. **Store metadata**: encryption info in S3 metadata
-
-### Encryption Metadata
-```json
-{
-  "encrypted": true,
-  "algorithm": "AES256-GCM",
-  "key_salt": "base64-encoded-32-byte-salt",
-  "iv": "base64-encoded-12-byte-iv",
-  "auth_tag": "base64-encoded-16-byte-tag",
-  "original_size": 12345,
-  "original_etag": "original-etag-hex",
-  "compression": "none"
-}
-```
-
-## Decryption Process
-
-### Step-by-Step Decryption (AES-256-GCM)
-1. **Extract metadata**: Read encryption info from S3 metadata
-2. **Verify encryption**: Check "encrypted" flag
-3. **Derive key**: Same PBKDF2 process with stored salt
-4. **Extract components**: Parse salt, IV, ciphertext, tag
-5. **Initialize GCM**: cipher.NewGCM(cipher)
-6. **Decrypt**: plaintext, err := GCM.Open(nil, iv, ciphertext, nil)
-7. **Verify integrity**: GCM handles authentication automatically
-8. **Return data**: Original plaintext
-
-### Error Handling
-- **Invalid password**: Decryption will fail with authentication error
-- **Corrupted data**: GCM will detect and return error
-- **Missing metadata**: Assume unencrypted, pass through
-- **Wrong algorithm**: Return error for unsupported algorithms
-
-## Streaming Implementation
-
-### EncryptReader
-```go
-type EncryptReader struct {
-    source  io.Reader
-    cipher  cipher.AEAD
-    buffer  []byte
-    iv      []byte
-    salt    []byte
-}
-
-func (r *EncryptReader) Read(p []byte) (n int, err error) {
-    // Read from source
-    // Encrypt in chunks
-    // Return encrypted data
-}
-```
-
-### DecryptReader
-```go
-type DecryptReader struct {
-    source  io.Reader
-    cipher  cipher.AEAD
-    buffer  []byte
-    iv      []byte
-}
-
-func (r *DecryptReader) Read(p []byte) (n int, err error) {
-    // Read encrypted chunks
-    // Decrypt and return
-}
-```
-
-### Memory Management
-- **Chunk size**: 64KB for balanced memory/performance
-- **Buffer pooling**: Reuse buffers to reduce allocations
-- **Large objects**: Stream processing prevents memory exhaustion
-- **Small objects**: Buffer entire object if < 1MB
-
-## Range Request Optimization
-
-### Overview
-For chunked encryption, range requests can be optimized by fetching and decrypting only the necessary chunks from S3, rather than downloading the entire encrypted object. This provides significant performance improvements for large objects with small range requests.
-
-### Chunked Encryption Formats
-Chunked objects are versioned by the authenticated manifest. Version 1 remains
-readable for compatibility, while new objects use version 2:
+The default chunk size is 64 KiB. The authenticated format manifest distinguishes
+chunked v1 and v2; new current-format writes use v2. This description is the
+chunked layout, not a universal layout for buffered/fallback/MPU objects.
 
 ```text
 v1: DataRecord_0 || ... || DataRecord_(N-1)
@@ -148,438 +59,235 @@ v2: DataRecord_0 || ... || DataRecord_(N-1) || TerminalRecord
 DataRecord_i = ciphertext(P_i) || 16-byte authentication tag
 ```
 
-For v2, `TerminalRecord` is exactly 32 bytes. Its AES-256-GCM plaintext is
-`uint64_be(N) || uint64_be(sum(len(P_i)))`, and an empty object is one terminal
-record encoding `(0, 0)`. The v2 data records use AAD
-`"chunked-v2/data" || 0x00 || uint64_be(i)` and HKDF nonce info
-`"chunked-v2/data-nonce" || 0x00 || uint64_be(i)`. The terminal uses AAD
-`"chunked-v2/terminal" || 0x00` and the separate HKDF domain
-`"chunked-v2/terminal-nonce" || 0x00`. All integer fields are big-endian.
+For v2 the terminal is 32 bytes: its authenticated plaintext contains big-endian
+`uint64(N) || uint64(total plaintext length)`. An empty object contains the terminal
+encoding `(0,0)`. Data and terminal nonces/AAD use separate HKDF domains. See
+[ADR 0016](adr/0016-authenticated-chunked-completeness.md) and production format
+code for the exact encoding; location binding is an additional payload boundary.
 
-For plaintext size `P`, chunk size `S`, and `N = 0` when `P == 0`, otherwise
-`ceil(P/S)`, ciphertext sizes are `P + N*16` for v1 and `P + N*16 + 32` for
-v2. V1 uses its legacy HKDF nonce and nil AAD; it authenticates individual
-records but cannot prove that a complete trailing suffix is present. See
-[ADR 0016](adr/0016-authenticated-chunked-completeness.md).
+For plaintext length `P`, chunk size `S`, and `N=ceil(P/S)` (`N=0` for `P=0`),
+ciphertext length is `P + 16*N` for v1 and `P + 16*N + 32` for v2. V1 authenticates
+individual touched chunks but not a complete trailing suffix; it remains readable
+and is a migration candidate.
 
-### Range Request Processing
+For a plaintext range `[start,end]`, select chunks `start/S` through `end/S`, fetch
+the corresponding ciphertext records including tags, verify them, and return only
+the requested plaintext slice. Final ciphertext bounds must be clamped to actual
+stored length. V2 authenticates the terminal before success and at full-stream EOF.
+Legacy single-AEAD/fallback paths may require a full read/decrypt rather than this
+optimized range mapping. Single ranges use plaintext Content-Range/Content-Length;
+an oversized end is clamped, while an unsatisfiable start fails. Multiple ranges,
+HEAD Range, and GET part selection are not complete supported contracts; see
+[request options](S3_API_IMPLEMENTATION.md#object-reads-and-responses).
 
-#### Step 1: Calculate Required Chunks
-Given a plaintext range `[start, end]`, calculate which chunks contain the requested data:
+## Encrypted Multipart Uploads
 
-```go
-chunkSize = 65536  // 64KB chunks
-startChunk = start / chunkSize
-endChunk = end / chunkSize
-startOffset = start % chunkSize  // Offset within startChunk
-endOffset = end % chunkSize      // Offset within endChunk
-```
+Encrypted MPU has a per-upload wrapped DEK, identity binding, authenticated chunk
+records, and a companion `<key>.mpu-manifest`. In-flight Valkey state owns routing,
+first-content claims, reservation leases, and guarded completion/abort phases.
+Identical part retries can return the committed ETag; changing claimed plaintext
+is rejected rather than reusing deterministic nonces. Completion validates the
+selected ordered committed set and persists the authenticated manifest.
 
-#### Step 2: Calculate Encrypted Byte Range
-Convert plaintext chunk range to encrypted byte positions:
+The companion is integrity-critical for completed MPU reads. GET/copy fail closed
+if it cannot be used; HEAD/listing may retain ciphertext sizes under the advisory
+size exception. Historical parent versions and companion versions do not have an
+exhaustively certified recovery mapping. Keep manifests and keys and test recovery;
+do not treat backend versioning as automatic preservation. See
+[MPU lifecycle/operations](RUNBOOK.md#valkey-state-at-rest-encryption),
+[recovery](MIGRATION.md), and [ADR 0009](adr/0009-encrypted-multipart-uploads.md).
 
-```go
-encryptedChunkSize = chunkSize + 16  // Include auth tag
-encryptedStart = startChunk * encryptedChunkSize
-encryptedEnd = (endChunk + 1) * encryptedChunkSize - 1
-```
+## Encrypted Object Metadata Model
 
-#### Step 3: Optimized S3 Fetch
-Request only the necessary encrypted chunks:
-```
-GET /bucket/key HTTP/1.1
-Range: bytes=encryptedStart-encryptedEnd
-```
+The gateway treats `Content-Type`, `Cache-Control`, `Content-Disposition`,
+`Content-Encoding`, `Content-Language`, and `Expires` as one typed standard-field
+model. Encrypted values are protected/restored; bypass values use native backend
+fields. Non-reserved user `x-amz-meta-*` keys are preserved subject to configured
+backend filters. Gateway-reserved full/compact/legacy names cannot be supplied
+by clients and are never projected back as user metadata.
 
-#### Step 4: Range-Aware Decryption
-Decrypt only the chunks in the optimized range, extracting the requested plaintext portion.
+### Write paths
 
-### Performance Characteristics
+PUT, CreateMultipartUpload, CopyObject, UploadPartCopy, and size backfill share
+request parsing and persistence splitting. CopyObject's omitted/COPY directive
+inherits source plaintext metadata; REPLACE uses request metadata. MPU initiation
+freezes destination standard/user metadata; source-copy metadata does not replace it.
 
-#### Benefits
-- **Reduced network transfer**: Only fetch required chunks instead of entire object
-- **Reduced decryption overhead**: Only decrypt necessary chunks
-- **Maintained security**: All accessed chunks have authentication verified
+### Read paths and precedence
 
-#### Worst-Case Overhead
-- **Extra chunk reads**: At most 1 additional chunk if range spans chunk boundaries
-- **Memory usage**: Bounded by chunk size (default 64KB + overhead)
-- **Authentication verification**: All touched chunks verified (security requirement)
-
-#### Example Performance
-For a 1GB object with 16KB range request:
-- **Unoptimized**: Transfer 1GB + decrypt 1GB
-- **Optimized**: Transfer ~64KB + decrypt ~64KB
-- **Improvement**: ~99.99% reduction in network and compute
-
-### Content-Range Header Mapping
-
-Range responses must correctly map plaintext ranges to HTTP Content-Range headers:
-
-```
-Content-Range: bytes <start>-<end>/<total>
-Content-Length: <actual_response_size>
-```
-
-Where:
-- `<start>`, `<end>`: Requested plaintext byte range
-- `<total>`: Total plaintext object size
-- `<actual_response_size>`: Size of returned data (may be less than requested range due to bounds)
-
-### ETag Preservation
-
-Encrypted single-object responses include the quoted original object ETag when
-the format stores it; encrypted MPU responses retain their multipart ETag, and
-plaintext responses retain the backend ETag. The shared response projector
-applies the same rules to full and ranged GETs.
-
-### Error Handling
-
-#### Invalid Ranges
-- **Out of bounds**: `start < 0` or `end >= totalSize` → 416 Requested Range Not Satisfiable
-- **Invalid format**: Malformed range headers → 400 Bad Request
-- **Empty ranges**: `start > end` → Error response
-
-#### Decryption Failures
-- **Authentication failure**: Corrupted data → 500 Internal Server Error
-- **Missing chunks**: Incomplete S3 response → Retry or error
-- **Manifest errors**: Invalid chunk metadata → 500 Internal Server Error
-
-### Security Considerations
-
-#### Authentication Verification
-V2 range reads verify the separately fetched terminal before success and verify
-all selected data records. Full reads also verify the terminal at EOF, so a
-backend change after preflight cannot produce a clean complete stream. Unknown
-manifest versions fail closed before plaintext is returned. V1 range reads
-retain legacy touched-chunk verification only and are migration candidates.
-
-All chunks within the requested range have their authentication tags verified, ensuring:
-- **Integrity**: Tampered data is detected
-- **Confidentiality**: Only authorized decryption succeeds
-- **No skip attacks**: Cannot bypass authentication by requesting partial ranges
-
-#### Chunk Alignment
-Range optimization maintains chunk boundaries to ensure proper IV derivation and authentication. This prevents attacks that might exploit misaligned decryption.
-
-#### Memory Safety
-Range decryption uses streaming with bounded buffers, preventing memory exhaustion attacks on large range requests.
-
-## Key Management
-
-### Password-Based Security
-- **User responsibility**: Secure password storage and distribution
-- **No key storage**: Keys derived at runtime, never stored
-- **Password requirements**: Minimum 12 characters, complexity encouraged
-
-### Future Key Management Service (KMS) Support
-- **Interface design**: Pluggable key providers
-- **AWS KMS**: Integration with cloud KMS
-- **HashiCorp Vault**: Enterprise key management
-- **Local KMS**: File-based key storage for development
-
-## Security Considerations
-
-### Cryptographic Security
-- **Algorithm security**: AES-256-GCM is quantum-resistant for confidentiality
-- **Key derivation**: PBKDF2 provides protection against brute force
-- **IV uniqueness**: Random IV per object prevents reuse attacks
-- **Authentication**: GCM prevents tampering and ensures integrity
-
-### Operational Security
-- **Memory safety**: Keys and plaintext don't persist in memory longer than needed
-- **Secure deletion**: Overwrite sensitive data before freeing
-- **Audit logging**: Log encryption operations without exposing keys
-- **Access controls**: Restrict gateway access to authorized users
-
-### Performance vs Security Trade-offs
-- **PBKDF2 iterations**: 100,000 provides good security with acceptable performance
-- **Hardware acceleration**: Leverage AES-NI instructions when available
-- **Concurrent processing**: Multiple goroutines for parallel encryption
-
-## Metadata Handling
-
-For the complete write/read path inventory and precedence table, see
-[`docs/METADATA_MODEL.md`](METADATA_MODEL.md) and ADR
-[`0018-centralized-object-metadata.md`](adr/0018-centralized-object-metadata.md).
-The model covers six standard headers, user metadata filtering, protected
-metadata aliases, plaintext-size and MPU-manifest resolution, response
-projection, cache freshness, and format compatibility. Standard-header
-precedence is decrypted metadata > canonical > compact > legacy > native backend
-fallback for encrypted single-object responses; authenticated GET `response-*`
-overrides take precedence, while HEAD does not apply overrides.
-
-### S3 Metadata Strategy
-- **Encryption markers**: Clear indicators of encrypted objects
-- **Original preservation**: Store original metadata for restoration
-- **Size tracking**: Track original vs encrypted sizes
-- **ETag handling**: Store and restore the original ETag for encrypted single objects; preserve backend ETags for plaintext and MPU objects
-
-### Metadata Keys
-```go
-const (
-    MetaEncrypted          = "x-amz-meta-encrypted"
-    MetaAlgorithm          = "x-amz-meta-encryption-algorithm"
-    MetaKeySalt            = "x-amz-meta-encryption-key-salt"
-    MetaIV                 = "x-amz-meta-encryption-iv"
-    MetaAuthTag            = "x-amz-meta-encryption-auth-tag"
-    MetaOriginalSize       = "x-amz-meta-encryption-original-size"
-    MetaOriginalETag       = "x-amz-meta-encryption-original-etag"
-    MetaCompression        = "x-amz-meta-encryption-compression"
-    MetaCompressionEnabled = "x-amz-meta-compression-enabled"
-    MetaCompressionAlgorithm = "x-amz-meta-compression-algorithm"
-    MetaCompressionOriginalSize = "x-amz-meta-compression-original-size"
-)
-```
-
-#### Compacted Metadata Keys (Base64URL Strategy)
-For providers with strict header limits, metadata keys are compacted using shorter aliases:
-
-```go
-// Compacted keys for base64url compaction strategy
-"x-amz-meta-e"     // encrypted flag
-"x-amz-meta-a"     // algorithm
-"x-amz-meta-s"     // key salt
-"x-amz-meta-i"     // IV/nonce
-"x-amz-meta-os"    // original size
-"x-amz-meta-oe"    // original ETag
-"x-amz-meta-c"     // chunked format flag
-"x-amz-meta-cs"    // chunk size
-"x-amz-meta-cc"    // chunk count
-"x-amz-meta-m"     // manifest
-"x-amz-meta-kv"    // key version
-"x-amz-meta-ce"    // compression enabled
-"x-amz-meta-ca"    // compression algorithm
-"x-amz-meta-cos"   // compression original size
-```
-
-### Encrypted Metadata Flow
-
-When a metadata encryption key is configured, the encryption/compression metadata
-subset is sealed into a single encrypted blob before storage:
+GET planning owns format classification, size/range/integrity decisions, manifest
+resolution, and response-source selection. The shared projector applies the six
+standard fields, user filtering, ETag, size, and version policy across HEAD, full/
+ranged GET, MPU, and cache. Encrypted single-object precedence is:
 
 ```text
-Encrypt Path:
-  [Build encMetadata]
-      │
-      ├── metadataKey == nil ──► [Compact] ──► [Store in S3 headers]
-      │
-      └── metadataKey != nil ──► [Extract subset]
-                                      │
-                                      ▼
-                              [AES-256-GCM Seal]
-                                      │
-                                      ▼
-                              [Replace with single blob]
-                                      │
-                                      ▼
-                              [Compact] ──► [Store in S3 headers]
+authenticated GET override → decrypted protected value → canonical → compact/legacy → backend fallback
 ```
 
-The decryption path reverses this: after expansion, if `x-amz-meta-enc-metadata`
-(or its compacted alias `x-amz-meta-em`) is present, the blob is decrypted and
-the recovered keys are merged back into the metadata map.
+HEAD does not apply GET overrides. Plaintext/bypass native fields are authoritative
+unless GET overrides apply; MPU uses native initiation metadata and manifest size.
+GET/HEAD restore a recorded original ETag for encrypted single objects when
+available; MPU uses backend multipart ETag. Backend version wins the requested
+version fallback. Unknown backend headers are not a generic passthrough contract.
 
-### Client Response Filtering
-- **Hide encryption metadata**: Don't expose internal encryption details
-- **Restore original metadata**: Show original Content-Type, ETag, etc.
-- **Size reporting**: Report original object size, not encrypted size
+### Format compatibility
 
-## Provider-Specific Metadata Handling
+Readers recognize buffered legacy/v2, fallback v1/v2/v3, chunked v1/v2, compacted
+metadata, encrypted metadata blobs, MPU v1/v2, and plaintext. Unsupported markers
+and pointers not matching `<key>.mpu-manifest` fail closed. Golden fixtures retain
+historical ciphertext/metadata and assert HEAD/full/ranged reads and first-chunk
+tamper behavior. Compatibility is not permission to mutate backend envelopes.
 
-### Provider Profiles
-Different S3-compatible providers have varying limits on metadata headers:
+### Path-by-field inventory
 
-| Provider | User Metadata Limit | Total Header Limit | Compaction Strategy |
-|----------|-------------------|-------------------|-------------------|
-| AWS S3   | 2KB              | 8KB              | base64url         |
-| MinIO    | 2KB              | 8KB              | base64url         |
-| Wasabi   | 2KB              | 8KB              | base64url         |
-| Hetzner  | 2KB              | 8KB              | base64url         |
-| Default  | 2KB              | 8KB              | none (backward compatibility) |
+| Path | Six standard fields | User metadata | ETag / size / version |
+|---|---|---|---|
+| PUT | Parsed; protected for encrypted objects, native for bypass | Parsed; reserved names rejected | Original size stamped; backend ETag returned |
+| CreateMultipartUpload | Parsed and persisted natively | Parsed; reserved names rejected | MPU marker/binding generated by gateway |
+| CopyObject COPY | Source plaintext fields inherited | Source user keys inherited; request metadata ignored | Source size resolved; destination rebound/re-encrypted |
+| CopyObject REPLACE | Request fields; default Content-Type if absent | Request user keys only | Request Content-Length/ETag ignored |
+| UploadPartCopy | Destination metadata frozen at initiation | Same | Source format/manifest resolves plaintext part range |
+| Size backfill | Persistence model retains native/protected fields | Internal metadata retained | Exact size replaces metadata through backend COPY/REPLACE |
+| Engine buffered/chunked/fallback writes | Protected standard values stamped | Caller user fields retained | Original ETag/size retained by format |
+| Backend adapters | Standard/user split and key normalization | Backend metadata keys normalized | Typed input/output subset, not all SDK fields |
+| HEAD | Canonical > compact/legacy > backend | Non-reserved keys | Exact resolved size; original ETag when recorded; backend version wins |
+| Full/range GET | Decrypted > canonical > aliases > backend; GET override wins | Non-reserved keys | Plaintext range/size; ETag/version projected |
+| MPU GET | Native initiation fields, GET overrides | Non-reserved keys | Manifest size; backend multipart ETag/version |
+| Cache | Stored source metadata re-projected with current GET overrides | Non-reserved keys | Backend validation; ETag mismatch refreshes successful full-body entry |
+| ListObjects | Not an object response-header path | Not projected | Advisory size translation; backend ETag |
 
-### Metadata Compaction Strategies
+### Path/field ownership and precedence
 
-#### None Strategy (Default)
-- Uses full metadata keys as documented above
-- No size optimization
-- Maintains backward compatibility
+| Field | PUT / initiation | COPY / REPLACE | Part copy | HEAD / GET / range / cache |
+|---|---|---|---|---|
+| Standard headers | Case-insensitive parsing; encryption protection or native initiation fields | Source fields for COPY; request fields for REPLACE | Destination initiation metadata | Shared precedence above; HEAD has no overrides |
+| User metadata | Lowercase names; reserved aliases rejected before side effects | Source for COPY; request-only for REPLACE | Destination frozen | Filter all reserved names/blobs |
+| Content-Length | Plaintext input; ciphertext backend length; never user metadata | Destination derived from bytes, never request length | Resolved source/range size | Shared resolver; plaintext range length; MPU-manifest advisory exceptions |
+| ETag | Backend write/part/completion ETag | New destination backend ETag, not request metadata | Backend part ETag | Original encrypted ETag if available; backend for plaintext/MPU |
+| Version ID | Backend values may exist | Destination version may exist | Backend values may exist | GET/HEAD backend > requested fallback |
+| Internal markers | Engine registry / MPU control generation | Used for source processing, not user overrides | Classifier selects source; initiation owns destination | Classifier/manifest validation, then reserved filtering |
 
-#### Base64URL Strategy
-- Compacts metadata keys to shorter aliases
-- Uses base64url encoding for binary values
-- Reduces header size by ~40-50%
-- Automatically expands metadata during decryption
+Typed write/delete response shapes do not consistently expose backend destination
+version/delete-marker fields. The model is not a conditional-request, checksum-mode,
+or arbitrary backend-header guarantee; those limitations live in
+[S3 compatibility](S3_API_IMPLEMENTATION.md).
 
-### Metadata Size Estimation
-Current encryption metadata overhead (uncompacted):
-- **16 metadata keys**: ~525 bytes for key names
-- **Value data**: ~355 bytes (salts, IVs, sizes, etc.)
-- **Total**: ~880 bytes
+### Ownership rules
 
-With compaction:
-- **16 metadata keys**: ~225 bytes for compacted key names
-- **Value data**: ~355 bytes (same)
-- **Total**: ~580 bytes (34% reduction)
+- `objectmeta.Names` / `objectmeta.Standard`: ordered standard fields and splitting.
+- `crypto.MetaKeys()`: canonical/compact/legacy registry and reserved classification.
+- `crypto.ClassifyObject`: trusted format/pointer classification, no backend I/O.
+- `Handler.resolvePlaintextSize`: terminal/format/manifest size policy; no guessed
+  AEAD subtraction for fallback formats.
+- `projectObjectHeaders`: client-facing field projection; `serveObjectBody` owns
+  the selected body path rather than handlers reimplementing header policy.
+- General listings rely on exact write-through cache entries or bounded opt-in
+  HEAD fallback, not unconditional N+1 metadata calls.
 
-### Fallback Storage Strategy
-When metadata exceeds provider header limits even after compaction, the system automatically falls back to storing full metadata in the object body:
+See [ADR 0018](adr/0018-centralized-object-metadata.md),
+[object response tests](../internal/api/object_response_test.go),
+[golden fixtures](../internal/api/testdata/objectformats/), and
+[metadata conformance](../test/conformance/metadata_matrix_test.go).
 
-#### Fallback Format
-```
-Encrypted Object = AES-GCM([metadata_length][metadata_json][data])
-```
+## Metadata Encryption and Compaction
 
-Where:
-- `metadata_length`: 4-byte big-endian integer
-- `metadata_json`: Full metadata as JSON
-- `data`: Original data (optionally compressed)
+The metadata registry retains short aliases and legacy expansion rules to support
+provider header budgets. Compaction changes storage representation, not ownership
+or client-visible fields. Provider limits and fallback formats differ; do not use
+one old byte-count table as a universal envelope-size guarantee.
 
-#### Header Metadata (Minimal)
-Only essential encryption parameters are stored in headers:
-- `x-amz-meta-encrypted: true`
-- `x-amz-meta-encryption-fallback: true`
-- `x-amz-meta-encryption-algorithm: AES256-GCM`
-- `x-amz-meta-encryption-key-salt: <base64>`
-- `x-amz-meta-encryption-iv: <base64>`
-- `x-amz-meta-encryption-original-size: <size>`
-- `x-amz-meta-encryption-original-etag: <etag>`
+When configured, a separate 32-byte metadata key seals gateway encryption metadata
+into `x-amz-meta-enc-metadata` (compact alias `em`). The encryption discriminator
+remains outside the blob; user metadata is not automatically confidential. The
+read path expands aliases, authenticates/decrypts the blob, and filters reserved
+fields before response projection. Body fallback formats are authenticated format
+variants, not an invitation to synthesize a legacy salt/IV layout.
 
-#### Automatic Detection
-The system automatically detects fallback mode during decryption and extracts full metadata from the object body. This is completely transparent to users.
+Metadata-key generation, backup, loss, and safe replacement belong to the
+[runbook](RUNBOOK.md#metadata-encryption-key-management). A gateway HEAD hides
+internal encryption metadata; inspect it with authorized backend/read-only audit
+access, not a client-visible-header assertion. Built-in compression was removed;
+see [compressed-object migration](MIGRATION.md#removing-compression-v10).
 
-#### Performance Impact
-- **Header size**: Minimal (~200 bytes vs ~580 bytes compacted)
-- **Network overhead**: Metadata stored in object body adds small overhead
-- **Compatibility**: Works with all S3-compatible providers
-- **Security**: Full metadata remains encrypted and authenticated
+## FIPS Build Profile
 
-### Configuration
-```go
-// Enable compaction for AWS S3
-engine, err := crypto.NewEngineWithProvider(password, nil, "", nil, "aws")
+The optional `fips` build tag restricts local crypto to approved algorithms and
+uses Go's FIPS module. **This gateway is not itself a CMVP-certified product.**
+Verify the exact module version, binary, environment, key lifecycle, and external
+KMS posture against your compliance requirements. See
+[Go FIPS documentation](https://go.dev/security/fips140) and the NIST CMVP database
+for current upstream evidence; these build instructions do not grant accreditation.
 
-// Use default (no compaction) for backward compatibility
-engine, err := crypto.NewEngine(password)
-```
+### Approved algorithms
 
-## Compression Integration
+| Use | Build-profile behavior |
+|---|---|
+| Payload AEAD | AES-256-GCM; ChaCha20-Poly1305 excluded |
+| Password KDF | PBKDF2-HMAC-SHA256; Argon2id rejected |
+| Nonce derivation / auth | HKDF/HMAC-SHA256 |
+| Local envelope | AES-GCM KEK / RSA-OAEP-SHA256; memory provider AES key-wrap |
+| Randomness / TLS | Go runtime/module behavior; verify deployment/module boundary |
+| MD5 | S3 interoperability/non-security use, not security integrity |
 
-### Pre-Encryption Compression (Optional)
-- **Configurable**: Can be enabled/disabled based on performance requirements
-- **Algorithm**: gzip (most compatible, good compression ratio)
-- **When to compress**: Objects > 1KB, compressible content types (text, JSON, XML, etc.)
-- **Metadata tracking**: Store compression status and algorithm
-- **Decompression**: Automatic on decryption when compression was used
-- **Performance trade-off**: ~2-3x slower but saves bandwidth/storage
+External Transit/KMIP cryptography occurs in the external service. A FIPS-tagged
+gateway does not certify the KMS/HSM, and the HSM adapter remains nonfunctional.
 
-### Configuration
-```go
-type CompressionConfig struct {
-    Enabled         bool     `yaml:"enabled" env:"COMPRESSION_ENABLED"`
-    MinSize         int64    `yaml:"min_size" env:"COMPRESSION_MIN_SIZE"` // Minimum object size to compress
-    ContentTypes    []string `yaml:"content_types"` // Content types to compress
-    Algorithm       string   `yaml:"algorithm"`     // "gzip", "zstd", etc.
-    Level           int      `yaml:"level"`         // Compression level (1-9)
-}
-```
+### Building a FIPS-compliant binary
 
-### Implementation
-```go
-type CompressionEngine interface {
-    Compress(reader io.Reader, contentType string) (io.Reader, *CompressionMetadata, error)
-    Decompress(reader io.Reader, metadata *CompressionMetadata) (io.Reader, error)
-    ShouldCompress(size int64, contentType string) bool
-}
+```bash
+make build-fips VERSION=dev
+# bin/s3-encryption-gateway-fips-dev
 
-type CompressionMetadata struct {
-    Algorithm   string `json:"algorithm"`
-    OriginalSize int64  `json:"original_size"`
-    CompressedSize int64 `json:"compressed_size"`
-}
+GOFIPS140=v1.0.0 CGO_ENABLED=0 go build -tags=fips \
+  -o bin/s3-encryption-gateway-fips ./cmd/server
 ```
 
-## Performance Optimizations
+Use the pinned `go.mod` toolchain (Go 1.27.1+). `GOFIPS140` is a build setting,
+not a runtime switch that can retrofit a non-FIPS binary. The runtime must report
+`crypto/fips140.Enabled()` true; startup `AssertFIPS` fails closed otherwise.
+The shipped Dockerfile builds static binaries with **CGO disabled** using a
+Bookworm builder and distroless nonroot runtime. It does not require glibc merely
+because the image uses Debian.
 
-### Hardware Acceleration
-- **AES-NI**: Detect and use hardware AES instructions
-- **Parallel processing**: Encrypt/decrypt multiple chunks concurrently
-- **Buffer alignment**: Align buffers for optimal crypto performance
+### Docker and Helm
 
-### Caching Considerations
-- **Key caching**: Cache derived keys for same password/salt combinations
-- **Session-based**: Cache keys per encryption session
-- **Memory limits**: Bound cache size to prevent memory leaks
+```bash
+docker build -f Dockerfile.fips --build-arg VERSION=dev \
+  -t s3-encryption-gateway:dev-fips .
 
-### Benchmarking Targets
-- **Encryption speed**: > 100 MB/s on modern hardware
-- **Decryption speed**: > 100 MB/s on modern hardware
-- **Latency overhead**: < 10ms for small objects
-- **Memory usage**: < 50MB per concurrent encryption
+helm template gateway helm/s3-encryption-gateway \
+  -f helm/s3-encryption-gateway/values.fips.yaml
+```
 
-## Testing and Validation
+The FIPS overlay selects the FIPS image and sets its environment. Inspect rendered
+values and preserve normal credentials, key setup, Valkey, writable spool, TLS,
+and coordinated-upgrade prerequisites; FIPS does not bypass them. Default builds
+cannot enable the profile just by setting a runtime variable. Switching algorithm
+availability can make previously written ChaCha/Argon objects unreadable under the
+restricted profile; inventory/migrate them before cutover.
 
-### Unit Tests
-- **Algorithm correctness**: Test vectors from NIST
-- **Key derivation**: Validate PBKDF2 implementation
-- **Streaming**: Test chunked encryption/decryption
-- **Error cases**: Invalid passwords, corrupted data
+### Auditor evidence and monitoring
 
-### Integration Tests
-- **Round-trip encryption**: Encrypt ? Decrypt ? Verify identical
-- **Large files**: Test with multi-gigabyte objects
-- **Concurrent operations**: Test multiple encryptions simultaneously
-- **Memory leaks**: Profile memory usage under load
+Retain the exact source revision, build/module/toolchain settings, image digest,
+SBOM/provenance, selected algorithms and key ceremony, test results, startup crypto
+profile, and `gateway_fips_mode` metric. Separate local module evidence from external
+KMS validation. Missing runtime activation or disallowed configuration must fail
+startup/construction rather than silently fall back to a nonapproved algorithm.
 
-### Security Testing
-- **Known plaintext attacks**: Test resistance to cryptanalysis
-- **Side-channel analysis**: Timing attack resistance
-- **Key leakage**: Ensure keys don't leak in logs or errors
-- **Compliance**: Validate against security standards
+```bash
+GOFIPS140=v1.0.0 go test -tags=fips -race -short ./internal/crypto ./internal/config
+```
 
-## Future Extensions
+Full gate commands live in [testing](TESTING.md). Algorithm approval alone does
+not establish secure key storage or complete system compliance.
 
-### Additional Algorithms
-- **ChaCha20-Poly1305**: Alternative authenticated encryption
-- **AES-256-CBC**: Legacy compatibility (with HMAC)
-- **Age encryption**: Modern alternative to GPG
+## Verification and References
 
-### Advanced Features
-- **Key rotation**: Support for changing encryption keys
-- **Envelope encryption**: Encrypt data keys with master keys
-- **Client-side key derivation**: Allow clients to provide derived keys
-- **Multi-key encryption**: Support multiple passwords per object
+- [Crypto source](../internal/crypto/): registry, formats, KDF limits, key managers.
+- [Shared metadata](../internal/objectmeta/) and [API projection](../internal/api/object_response.go).
+- [ADR 0005](adr/0005-fips-crypto-profile.md), [ADR 0009](adr/0009-encrypted-multipart-uploads.md),
+  [ADR 0016](adr/0016-authenticated-chunked-completeness.md), [ADR 0018](adr/0018-centralized-object-metadata.md).
+- [FIPS Dockerfile](../Dockerfile.fips), [Makefile](../Makefile), [tests](TESTING.md).
 
-### Enterprise Features
-- **KMS integration**: AWS KMS, Azure Key Vault, GCP KMS
-- **Key versioning**: Support for key rotation and versioning
-- **Access auditing**: Detailed encryption/decryption logs
-- **Compliance reporting**: Generate reports for regulatory compliance
-
-## Implementation Roadmap
-
-### Phase 1: Core Encryption
-- AES-256-GCM implementation
-- PBKDF2 key derivation
-- Basic streaming encrypt/decrypt
-- Metadata handling
-
-### Phase 2: Performance & Security
-- Hardware acceleration detection
-- Buffer pooling and optimization
-- Comprehensive security testing
-- Memory safety improvements
-
-### Phase 3: Advanced Features
-- Compression integration
-- Multiple algorithm support
-- KMS integration interfaces
-- Key rotation support
-- **Metadata compaction for provider limits (✓ implemented)**
-- **Metadata fallback storage strategy (✓ implemented)**
-
-### Phase 4: Enterprise Features
-- Audit logging
-- Compliance reporting
-- Advanced key management
-- Performance monitoring
+Historical plans contain conceptual interfaces and old formats. They remain
+evidence, not current configuration or a claim that every workflow was certified.

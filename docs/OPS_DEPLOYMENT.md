@@ -25,7 +25,7 @@
 5. [Interaction with Key Rotation](#5-interaction-with-key-rotation)
 6. [Interaction with Encrypted Multipart Uploads (Valkey)](#6-interaction-with-encrypted-multipart-uploads)
 7. [Interaction with the FIPS Build](#7-interaction-with-the-fips-build)
-8. [Observability — per-track dashboards](#8-observability)
+8. [Observability — per-track dashboards](#8-observability--per-track-dashboards)
 9. [Troubleshooting — top 5 footguns](#9-troubleshooting)
 10. [Gateway API appendix (portable, controller-agnostic)](#10-gateway-api-appendix)
 11. [Optional: Argo Rollouts / Flagger overlay](#11-optional-argo-rollouts--flagger)
@@ -436,7 +436,7 @@ to wrap DEKs against the now-older version. This is technically safe
 after the flip — blue would be writing DEKs against an older key that has
 been superseded on green.
 
-Post-cutover rotation procedure (see `docs/ADMIN_API.md` for the admin API
+Post-cutover rotation procedure (see `docs/RUNBOOK.md#admin-api-reference` for the admin API
 endpoints):
 
 ```bash

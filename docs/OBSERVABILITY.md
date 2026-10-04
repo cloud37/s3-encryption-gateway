@@ -2,6 +2,20 @@
 
 The S3 Encryption Gateway provides comprehensive observability features including structured audit logging, Prometheus metrics, and OpenTelemetry distributed tracing.
 
+## Contents
+
+- [Audit logging](#audit-logging)
+- [Metrics](#metrics)
+- [Tracing](#distributed-tracing)
+- [Runtime profiling](#runtime-profiling)
+- [Grafana dashboard](#grafana-dashboard)
+- [Alerting](#alerting)
+
+This guide owns signals and investigation recipes. [Deployment](DEPLOYMENT.md)
+owns listener/network settings, and [runbook](RUNBOOK.md) owns incident response
+and admin API authentication. Do not treat an old copied metric name as current
+without checking exporter source and rendered dashboard/rules.
+
 ## Audit Logging
 
 Audit logging captures security-critical events such as encryption, decryption, key rotation, and access control decisions. These logs are essential for compliance and security auditing.
@@ -101,11 +115,14 @@ sum by (bucket, operation, status_code) (rate(s3_client_requests_total{bucket=~"
 
 ### Key Metrics
 
-- `s3_gateway_http_requests_total`: Total count of HTTP requests
-- `s3_gateway_http_request_duration_seconds`: Latency distribution
-- `s3_gateway_encryption_operations_total`: Count of crypto operations
-- `s3_gateway_encryption_duration_seconds`: Crypto operation latency
-- `s3_gateway_kms_rotated_reads_total`: Count of reads using non-active key versions
+- `http_requests_total`: HTTP requests
+- `http_request_duration_seconds`: Latency distribution
+- `encryption_operations_total`: Crypto operations
+- `encryption_duration_seconds`: Crypto latency
+- `kms_rotated_reads_total`: Reads using non-active key versions
+
+Use exporter definitions/rendered rules for exact families and labels. Metrics
+listener placement/access is configured separately in [deployment](DEPLOYMENT.md#health-checks-and-monitoring).
 
 ## Distributed Tracing
 
@@ -195,21 +212,26 @@ Environment variable equivalents:
 #### Recipe 1 — CPU flamegraph (interactive)
 
 ```bash
-# Capture a 30-second CPU profile and open the web UI:
-go tool pprof -http=:0 http://localhost:8081/admin/debug/pprof/profile?seconds=30
-# Add the admin bearer token via a reverse proxy or SSH tunnel in production.
+# Fetch privately with the required bearer header, then analyze locally:
+umask 077
+curl --fail-with-body -H "Authorization: Bearer $(cat /etc/s3-gateway/admin-token)" \
+  'http://localhost:8081/admin/debug/pprof/profile?seconds=30' -o cpu.pprof
+go tool pprof -http=127.0.0.1:0 cpu.pprof
 ```
 
 With TLS and bearer auth:
 
 ```bash
-PPROF_TOKEN=$(cat /etc/s3-gateway/admin-token)
-go tool pprof -http=:0 \
-  -tls_ca /etc/s3-gateway/admin-ca.crt \
-  -tls_cert /etc/s3-gateway/admin-client.crt \
-  -tls_key  /etc/s3-gateway/admin-client.key \
-  "https://admin.internal:8081/admin/debug/pprof/profile?seconds=30&Authorization=Bearer+${PPROF_TOKEN}"
+umask 077
+curl --fail-with-body --cacert /etc/s3-gateway/admin-ca.crt \
+  -H "Authorization: Bearer $(cat /etc/s3-gateway/admin-token)" \
+  'https://admin.internal:8081/admin/debug/pprof/profile?seconds=30' -o cpu.pprof
+go tool pprof -http=127.0.0.1:0 cpu.pprof
 ```
+
+Never put bearer tokens in query strings; they can leak through logs/history and
+are not the admin authentication contract. Protect/remove profile files after
+the investigation. A tunnel does not itself supply bearer authentication.
 
 Practical alternative (airgapped environments):
 
