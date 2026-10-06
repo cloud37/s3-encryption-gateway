@@ -637,6 +637,13 @@ func createCanonicalRequest(r *http.Request, isPresigned bool, signedHeaders []s
 	if _, ok := headerMap["host"]; !ok && r.Host != "" {
 		headerMap["host"] = []string{r.Host}
 	}
+	// Go transports may omit Content-Length: 0 on bodiless requests (GH-356).
+	// Recover only a known request length, preserving any explicit header. The
+	// signed-header loop below includes it only when the client signed it; -1
+	// denotes unknown/chunked length and is never a valid wire-header fallback.
+	if _, ok := headerMap["content-length"]; !ok && r.ContentLength >= 0 {
+		headerMap["content-length"] = []string{strconv.FormatInt(r.ContentLength, 10)}
+	}
 
 	sort.Strings(signedHeaders)
 	for _, h := range signedHeaders {

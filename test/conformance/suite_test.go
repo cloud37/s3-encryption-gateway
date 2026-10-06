@@ -338,6 +338,9 @@ func TestConformance(t *testing.T) {
 				{"Auth_V4_PutGetDelete", 0, testAuth_V4_PutGetDelete},
 				{"Auth_Unauthenticated_Rejected", 0, testAuth_Unauthenticated_Rejected},
 				{"Auth_WrongSecret_Rejected", 0, testAuth_WrongSecret_Rejected},
+				// GH-356: frontend Go transport drops signed Content-Length: 0.
+				{"SignedContentLength_Delete", 0, testSignedContentLengthDelete},
+				{"SignedContentLength_PresignedDelete", 0, testSignedContentLengthPresignedDelete},
 				{"Auth_PresignedURL_Valid", 0, testAuth_PresignedURL_Valid},
 				{"Auth_PresignedURL_Expired", 0, testAuth_PresignedURL_Expired},
 				// GH-345: inbound gateway auth, not backend presigning capability.

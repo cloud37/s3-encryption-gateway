@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v1.0 – Unreleased
 
+### Fixed
+
+- **Signed Content-Length behind reverse proxies (GH-356):** SigV4 requests
+  whose `SignedHeaders` includes `content-length` can authenticate when a Go-based
+  frontend proxy omits `Content-Length: 0` on a bodiless request such as DELETE.
+  Recover missing canonical values from the request's known nonnegative length,
+  preserve explicit headers, and never infer an unknown/chunked length. Header
+  and presigned authentication share the fix; incorrect signatures still return
+  403 `SignatureDoesNotMatch` before backend access. Includes independently
+  signed Tier 1 validator/middleware and real-proxy route regressions, plus
+  provider-neutral Tier 2 encrypted-object deletion cases confirmed red before
+  the fix and green afterward on all four local providers. No credential,
+  encryption-policy, or object-format migration is required. See the
+  [frontend proxy guidance](docs/DEPLOYMENT.md#signed-zero-content-length-gh-356).
+
 ## [0.12.3] — 2026-10-02
 
 This patch release fixes backend error classification during encrypted object

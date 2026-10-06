@@ -378,6 +378,30 @@ and its opt-in policy are unchanged. See the AWS references for
 [presigned parameters](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-query-string-auth.html)
 and [S3 error codes](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/ErrorResponses.html).
 
+### SigV4 Signed Content-Length (GH-356)
+
+When `content-length` appears in the client's `SignedHeaders`, the canonical
+request uses its explicit header value. If that header is absent, the gateway
+uses the decimal value of Go's incoming `Request.ContentLength` **only when it
+is known and nonnegative**. This mirrors the existing missing-`host` recovery
+from `Request.Host` and applies to both header and presigned authentication.
+
+For example, a client can sign `Content-Length: 0` on DELETE, but a Go-based
+frontend reverse proxy may omit it when forwarding the bodiless request. The
+gateway still receives a known zero request length and reconstructs
+`content-length:0` for signature verification. The fallback is local to
+canonicalization: it does not modify request headers, add unsigned headers to
+the signature, or bypass HMAC/payload verification, authorization, or time checks.
+
+Explicit header values take precedence; unknown/chunked length (`-1`) is never
+formatted as a fallback header or assumed to be zero. This is not general proxy
+signature repair: changes to signed host, path, query, other headers, or framing
+that loses a known signed length can still cause 403 `SignatureDoesNotMatch`.
+Invalid signatures stop before backend access. SigV2 is unchanged.
+
+See [operator guidance](DEPLOYMENT.md#signed-zero-content-length-gh-356) and
+[Tier 1/Tier 2 regression commands](TESTING.md#signed-content-length-regressions-gh-356).
+
 ## Header and Metadata Handling
 
 The canonical encrypted-object metadata inventory, field ownership, and
