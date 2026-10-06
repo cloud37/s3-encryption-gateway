@@ -31,6 +31,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   remains unchanged and does not gain a durability requirement. Runtime API
   updates are not reloaded from configuration files.
 
+### Documentation
+
+- **Frontend access-key policy visibility:** Add an explicit deployment-guide
+  section for credential scope/defaults, independent object and bucket grants,
+  scoped role examples, update/revocation behavior, model limits, and env/Helm
+  configuration. Link it directly from the README and task index and distinguish
+  frontend authorization from encryption policy and backend IAM. No new guide
+  files or runtime authorization changes.
+
+- **Reader-oriented documentation consolidation:** Reduce top-level guides from
+  33 to 18 by merging 15 superseded topic files into existing owners. Centralize
+  S3 operation/option/SDK evidence, backend/policy setup, key rotation, metadata/FIPS,
+  admin/recovery procedures, coverage, and scaling. Rebuild the task index and
+  contents navigation, correct stale state-key/FIPS/migration examples, preserve
+  historical records and benchmark evidence, and repair live references without
+  adding redirect stubs or changing runtime settings.
+
+- **Application compatibility overview (GH-357):** Add a v0.12.3-scoped
+  supported / not supported / planned feature matrix linked from the README,
+  with backend dependencies, multipart limits, listing caveats, browser POST/CORS
+  tracking, and released-versus-unreleased reverse-proxy fixes. Reconcile the
+  API guide and SDK test-coverage notes, and label earlier roadmap milestones
+  as historical rather than current delivery commitments.
+- **Complete S3 documentation (GH-357 follow-up):** Inventory all 112 pinned SDK
+  operations, legacy action aliases, and browser extensions; add option-level
+  addressing, conditional-request, checksum, listing/part-pagination, write-field,
+  and recovery caveats. Document backend/SDK/encryption-mode test selection,
+  correct unsupported inline-lock/virtual-host claims, and distinguish route
+  support from provider workflow certification. No runtime behavior changes.
+
 ## [0.12.3] — 2026-10-02
 
 This patch release fixes backend error classification during encrypted object

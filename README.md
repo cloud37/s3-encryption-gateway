@@ -36,7 +36,26 @@ The S3 Encryption Gateway is a transparent HTTP proxy that sits between your app
                  text                               text   └─────────────────┘
 ```
 
-**Transparent**: Point your S3 endpoint URL at the gateway — that's it. No application changes required.
+**Transparent for supported S3 operations**: Point your S3 endpoint URL at the gateway instead of the backend. Check the compatibility notes below before migrating an application.
+
+## S3 Compatibility and Limitations
+
+See the single [S3 compatibility reference](docs/S3_API_IMPLEMENTATION.md):
+[what works / what's planned](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix),
+every pinned SDK operation, request-option limitations, and SDK/backend evidence.
+Start with the [documentation task index](docs/README.md) for deployment, keys,
+migration, operations, and contribution guidance.
+
+> **Browser uploads in v0.12.3:** SigV4 presigned PUT is supported, but browser
+> POST Object form uploads are not yet supported ([#353](https://github.com/cloud37/s3-encryption-gateway/issues/353)).
+> Backend CORS alone is insufficient for encrypted paths: preflight is forwarded,
+> but gateway-generated responses lack the required CORS headers. Gateway-managed
+> preflight and response headers are planned in [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322).
+
+**Unreleased main:** GH-322 gateway-managed CORS and GH-356 signed Content-Length
+recovery are now implemented, but neither is in the v0.12.3 image. See the
+[current CORS contract](docs/S3_API_IMPLEMENTATION.md#gateway-managed-cors-gh-322)
+and [signed-length contract](docs/S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356).
 
 ## Who Needs This?
 
@@ -70,16 +89,24 @@ So we built a transparent proxy that solves the problem once, for every applicat
 
 ### Object Encryption
 
-All objects are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent — any S3 client works without modification.
+Objects in encryption-enabled buckets are encrypted before being sent to the backend and decrypted on retrieval. Encryption is transparent for [supported S3 operations](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix); per-bucket policies can explicitly bypass encryption.
 
-**Recommended: Envelope encryption** with a locally-held AES-256 or RSA key, or an external KMS (Cosmian KMIP). A random per-object Data Encryption Key (DEK) is wrapped with the Key Encryption Key (KEK) at encrypt time and unwrapped at decrypt time — no key derivation on the hot path. Envelope encryption is **50–76× faster** than PBKDF2 600k for single-object uploads and over **70× faster** for range reads. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for full benchmark tables and a mode comparison.
+**Recommended: Envelope encryption** with a local AES-256/RSA key or supported external KMS. A random per-object DEK is wrapped with a KEK, avoiding password derivation on ordinary object hot paths. See [mode selection](docs/KMS_COMPATIBILITY.md#choosing-an-encryption-mode) and [workload-specific benchmarks](docs/PERFORMANCE.md#encryption-mode-benchmarks).
 
-**Password-derived (legacy, simpler deployment):** Derives per-object keys from a gateway password via PBKDF2 or argon2id. Requires no key infrastructure — just a single `ENCRYPTION_PASSWORD` environment variable — but runs key derivation on every request. See the [Encryption Modes Guide](docs/ENCRYPTION_MODES.md) for throughput numbers and a [migration guide](docs/ENCRYPTION_MODES.md#migration-between-modes) if you are switching from password-derived to envelope encryption.
+**Password-derived:** PBKDF2/Argon2id derive keys with stored parameters and validated limits. See [mode selection](docs/KMS_COMPATIBILITY.md#choosing-an-encryption-mode), [benchmarks](docs/PERFORMANCE.md#encryption-mode-benchmarks), and [password-to-envelope migration](docs/MIGRATION.md#migrating-from-password-only-to-kek-envelope-encryption).
 
 - **AES-256-GCM** (default) or **ChaCha20-Poly1305**: Authenticated encryption with per-object keys
 - **Chunked streaming**: Large files are encrypted in chunks with per-chunk IVs, enabling efficient range requests
 - **Range requests**: Fetches only the encrypted chunks covering the requested plaintext byte range
 - **FIPS-compliant profile**: Build with `-tags=fips` to restrict to AES-256-GCM + HKDF-SHA256 (FIPS-140 approved). Under envelope encryption, DEK wrapping uses AES-256-GCM (AES KEK) or RSA-OAEP/SHA-256 (RSA KEK) — both FIPS-approved. The `argon2id` KDF is rejected at startup under `-tags=fips`.
+
+### Frontend Access-Key Policies
+
+Control which buckets and operations each application's gateway key may access.
+See [frontend access-key policies](docs/DEPLOYMENT.md#frontend-access-key-policies)
+for defaults, permission/grant rules, read-only/writer/manager/provisioner examples,
+and policy updates. These are authorization settings under `auth.credentials`,
+not encryption-key selection or backend IAM policies.
 
 ### Per-Bucket Policies
 
@@ -95,6 +122,9 @@ tenant) or when specific buckets must bypass encryption.
 > encryption key.
 
 #### Per-client bucket authorization
+
+The authoritative [frontend policy section](docs/DEPLOYMENT.md#frontend-access-key-policies)
+contains the complete rules and role examples; the following is a quick overview.
 
 Give each application or tenant its own gateway access key and restrict it to
 only the buckets it needs. Credential scopes accept exact bucket names,
@@ -296,36 +326,14 @@ When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to 
 
 #### Browser uploads with gateway-managed CORS
 
-Use `cors.mode: gateway` only when browser clients require gateway-owned policy;
-`passthrough` remains the default. Gateway credentials should normally use
-`allow_credentials: false`. The opt-in `true` mode is a nonstandard extension:
-it echoes a validated concrete request Origin and never combines credentials
-with `Access-Control-Allow-Origin: *`.
-
-Configure a bucket with authenticated S3 `PUT /bucket?cors`, for example:
-
-```xml
-<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-  <CORSRule>
-    <AllowedOrigin>https://console.example.com</AllowedOrigin>
-    <AllowedMethod>PUT</AllowedMethod>
-    <AllowedMethod>POST</AllowedMethod>
-    <AllowedHeader>content-type</AllowedHeader>
-    <AllowedHeader>x-amz-*</AllowedHeader>
-    <ExposeHeader>ETag</ExposeHeader>
-    <MaxAgeSeconds>3600</MaxAgeSeconds>
-  </CORSRule>
-</CORSConfiguration>
-```
-
-Set `<ExposeHeader>ETag</ExposeHeader>` when JavaScript must read upload or
-multipart ETags. Gateway CORS mode makes Valkey the durable source of truth:
-before opting in, enable persistence on retained storage and verify an
-independent backup/restore procedure. Runtime API changes are not recreated
-from config files. A lost Valkey dataset returns 404 for a known-policy
-`GET ?cors`, denies preflight with 403 absent fallback, and may activate a
-broader configured fallback; readiness can still be healthy. Restore from
-backup or authenticated XML re-application is required.
+**Unreleased main (GH-322):** Opt-in `cors.mode: gateway` owns preflight and actual
+response headers; default passthrough is unchanged. Shared Valkey becomes durable
+policy: retained-storage persistence and independently tested backup/restore are
+required, and API edits are not recreated from config. Configure explicit origins,
+PUT/POST methods, and exposed ETag with a scoped manage credential. Normal
+allow_credentials is false; true is a nonstandard concrete-origin-only opt-in.
+See the single [setup/XML example](docs/DEPLOYMENT.md#gateway-managed-cors-gh-322)
+and [data-loss/fallback recovery procedure](docs/RUNBOOK.md#gateway-cors-valkey-data-loss-and-recovery).
 
 ### ListObjects Plaintext Size Translation
 
@@ -355,7 +363,7 @@ See [`docs/plans/V1.0-S3-3-plan.md`](docs/plans/V1.0-S3-3-plan.md) for the full 
 
 ### Envelope Encryption (Recommended)
 
-Envelope encryption removes key derivation from the per-request hot path: a random per-object Data Encryption Key (DEK) is wrapped with a Key Encryption Key (KEK). The KEK is loaded once at startup. This is **50–76× faster than PBKDF2 600k** and is the recommended path for all production deployments. See [`docs/ENCRYPTION_MODES.md`](docs/ENCRYPTION_MODES.md) for performance benchmarks.
+Envelope encryption removes password derivation from ordinary new-object requests. See [key management](docs/KMS_COMPATIBILITY.md) for provider/key-source/rotation setup and [performance evidence](docs/PERFORMANCE.md#encryption-mode-benchmarks) for workload comparisons.
 
 > **Migrating from password-only?** Set `encryption.password` to your existing password and enable `key_manager`. The gateway reads the password for objects encrypted before the switch and uses the KEK for all new objects — no data migration required. To re-encrypt existing objects, use the **GET-through-gateway → PUT-through-gateway** pattern with any standard S3 client. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for details.
 
@@ -701,7 +709,7 @@ docker run -p 8080:8080 \
 
 > **`ENCRYPTION_PASSWORD`** is the fallback for objects encrypted before you enabled `KEY_MANAGER`. If you have no existing objects, set it to any strong random value. If you are migrating from password-only mode, set it to your existing encryption password — existing objects will continue to decrypt transparently.
 
-This runs **envelope encryption** — per-object DEKs wrapped with a local AES-256 KEK. No key derivation on the hot path. See [Envelope Encryption](#envelope-encryption-recommended) above and [benchmark results](docs/ENCRYPTION_MODES.md).
+This runs **envelope encryption** — per-object DEKs wrapped with a local AES-256 KEK. See [key management](docs/KMS_COMPATIBILITY.md) and [benchmark evidence](docs/PERFORMANCE.md#encryption-mode-benchmarks).
 
 ### Docker — Password-only (simpler deployment, slower)
 
@@ -845,7 +853,7 @@ go build -o bin/s3-encryption-gateway ./cmd/server
 
 ## Configuration
 
-Gateway-managed CORS is opt-in; use one shared Valkey for every replica and
+On **unreleased main**, gateway-managed CORS is opt-in; use one shared Valkey for every replica and
 roll replicas to gateway mode together. Its keys are durable policy, not
 disposable per-upload state. Persistence on retained storage plus an independent
 tested backup/restore is required before enabling the mode. Empty-store recovery
@@ -1082,10 +1090,8 @@ flowchart LR
     D["Middleware<br/>(logging, recovery, security, rate limit)"]
     E["Encryption Engine<br/>AES-256-GCM default<br/>ChaCha20-Poly1305"]
     K["Key Manager<br/>(AES KEK / RSA KEK / Cosmian KMIP)"]
-    CMP["Compression<br/>(optional)"]
     D --> E
     K --> |wrap / unwrap DEK| E
-    CMP -.-> |pre/post| E
   end
   G --> |S3 API| B[("S3 Backend<br/>AWS, MinIO, Wasabi, Hetzner")]
   G -.-> |MPU state + ListObjects size cache| V[("Valkey<br/>(Redis-protocol)")]
@@ -1117,18 +1123,21 @@ sequenceDiagram
 
 ## Compatible Backends
 
-The gateway works with any S3-compatible storage service. Tested and compatible backends:
+The gateway targets S3-compatible storage, but API subsets, bucket setup, and
+gateway option mappings vary. These are deployment targets, not full-parity
+certifications; see the [backend test-selection matrix](docs/S3_API_IMPLEMENTATION.md#backend-and-encryption-mode-coverage)
+and [request/response caveats](docs/S3_API_IMPLEMENTATION.md#object-reads-and-responses).
 
 | Backend | Status | Notes |
 |---|---|---|
-| AWS S3 | Tested | Full compatibility |
+| AWS S3 | External test target | Credential-gated scenarios; not every S3 feature or request option |
 | MinIO | Tested | Primary development backend |
 | Hetzner Object Storage | Tested | Production use |
-| Wasabi | Tested | Full compatibility |
+| Wasabi | External test target | Credential-gated subset; verify required backend APIs |
 | Ceph RGW | Compatible | S3-compatible mode |
 | Cloudflare R2 | Compatible | S3-compatible API |
 | DigitalOcean Spaces | Compatible | S3-compatible API |
-| Backblaze B2 | Compatible | S3-compatible API |
+| Backblaze B2 | External test target | Credential-gated subset; SDK/capability coverage differs from AWS |
 
 Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-encryption-gateway/issues) to let us know about your experience.
 
@@ -1147,21 +1156,25 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 
 ## Roadmap
 
-### v1.0
+### Planned compatibility work
 
-- **AWS KMS adapter** — native envelope encryption with AWS-managed keys
-- **OpenBao / HashiCorp Vault Transit** — supported KMS adapter for envelope encryption,
-  with token, AppRole, and Kubernetes authentication, health checks, and key rotation
+- **Gateway-managed CORS** — implemented on unreleased main, not v0.12.3; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
+- **Browser POST Object** — SigV4 presigned form policies; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), depends on #322 for browser compatibility
 
-### Shipped in previous versions
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the complete changelog.
+Neither feature is available in v0.12.3; no release date is committed.
 
 ### Future
 
+- **AWS KMS adapter** — native envelope encryption with AWS-managed keys
 - Azure Key Vault and GCP Cloud KMS adapters
 - S3 Encryption Gateway Kubernetes Operator
 - Multi-arch images with SBOM and SLSA provenance
+
+### Shipped in previous versions
+
+OpenBao / HashiCorp Vault Transit is already supported. See the
+[KMS guide](docs/KMS_COMPATIBILITY.md#openbao--vault-transit-adapter) and
+[`CHANGELOG.md`](CHANGELOG.md) for shipped capabilities.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete roadmap.
 
@@ -1179,7 +1192,7 @@ soak tests (MinIO, Garage, RustFS, SeaweedFS) and fails the job on
 
 The project enforces a **≥ 75% statement coverage gate** on every PR and push to
 `make coverage-gate`. Nightly mutation testing (Gremlins) runs on the
-critical non-crypto packages. See [`docs/COVERAGE.md`](docs/COVERAGE.md)
+critical non-crypto packages. See [coverage policy](docs/TESTING.md#coverage-policy)
 for the exclusion policy, regeneration guide, and mutation testing scope.
 
 ---
@@ -1214,4 +1227,4 @@ MIT License — see [LICENSE](LICENSE) file for details.
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/cloud37/s3-encryption-gateway/issues)
-- **Documentation**: [`docs/`](docs/) directory
+- **Documentation**: [task-oriented guide index](docs/README.md)

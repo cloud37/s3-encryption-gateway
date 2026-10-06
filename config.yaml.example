@@ -120,7 +120,7 @@ backend:
   #   insecure_skip_verify: false # diagnostics only; do not use in production
   # backend.type selects the storage transport implementation.
   # Supported values: "s3" (default), "gcs", "azure".
-  # See docs/BACKENDS.md for per-backend caveats.
+  # See docs/DEPLOYMENT.md#backend-selection-and-tls for per-backend caveats.
   # type: s3
   #
   # Azure Blob Storage backend settings (only used when type: "azure").
@@ -472,7 +472,7 @@ metrics:
 
 # The admin API runs on a separate listener from the S3 data-plane.
 # All endpoints require bearer-token authentication; non-loopback addresses
-# require TLS. See docs/ADMIN_API.md for full endpoint reference.
+# require TLS. See docs/RUNBOOK.md#admin-api-reference for endpoint reference.
 
 admin:
   enabled: false          # Set ADMIN_ENABLED=true to enable

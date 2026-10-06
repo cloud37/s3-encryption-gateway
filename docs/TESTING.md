@@ -7,6 +7,17 @@ S3 Encryption Gateway. It supersedes the four older README files
 
 ---
 
+## Contents
+
+- [Test tier taxonomy](#test-tier-taxonomy)
+- [Canonical commands](#running-each-tier-locally)
+- [Provider eligibility](#capability-bitmap-reference)
+- [Regression and extension recipes](#how-to-add-a-new-test)
+- [CI matrix](#ci-matrix)
+- [Coverage policy](#coverage-policy)
+- [Mutation testing](#mutation-testing)
+- [Troubleshooting](#troubleshooting)
+
 ## Test tier taxonomy
 
 Tests are divided into three tiers. A test lives in **exactly one** tier.
@@ -319,6 +330,13 @@ The `provider.Capabilities` bitmask controls which conformance tests run
 against each backend. Tests call `t.Skipf` when the tested capability is
 absent from the provider's bitmap.
 
+Capability selection is **not full compatibility certification**. Eligible tests
+can have additional skips, and a backend capability cannot enable an option
+missing from the gateway's typed SDK mapping. See the current
+[backend/encryption-mode tables](S3_API_IMPLEMENTATION.md#backend-and-encryption-mode-coverage),
+[operation inventory](S3_API_IMPLEMENTATION.md#object-and-multipart-operations), and
+[option contract](S3_API_IMPLEMENTATION.md#writes-copies-and-multipart-options).
+
 | Constant                   | Meaning                                                           |
 |----------------------------|-------------------------------------------------------------------|
 | `CapObjectLock`            | S3 Object Lock / WORM retention                                   |
@@ -347,7 +365,7 @@ can be disabled with the corresponding environment variable.
 | `minio`    | `chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f` | `GATEWAY_TEST_SKIP_MINIO=1` | Primary reference; PR-gated local provider |
 | `garage`   | `dxflrs/garage:v2.4.1`          | `GATEWAY_TEST_SKIP_GARAGE=1`    | Rust-based; requires bootstrap via admin REST API  |
 | `rustfs`   | `rustfs/rustfs:v1.0.0-rc.5`     | `GATEWAY_TEST_SKIP_RUSTFS=1`    | Alpha-quality; PR-gated, capability bitmap conservative |
-| `seaweedfs`| `chrislusf/seaweedfs:4.46`      | `GATEWAY_TEST_SKIP_SEAWEEDFS=1` | Blob-store-backed; PR-gated local provider       |
+| `seaweedfs`| `chrislusf/seaweedfs:4.48`      | `GATEWAY_TEST_SKIP_SEAWEEDFS=1` | Blob-store-backed; PR-gated local provider       |
 
 All four local providers (MinIO, Garage, RustFS, and SeaweedFS) run in the
 pull-request conformance gate. RustFS compatibility failures are reported and
@@ -358,41 +376,20 @@ its authors as of 2026. The provider is included to test gateway behaviour
 against an actively-developed implementation and to provide early signal on
 compatibility.
 
-Confirmed capability gaps (full conformance run 2026-04-22):
-- **Object Lock** (`CapObjectLock` absent): RustFS accepts the `ObjectLockConfiguration`
-  at bucket-creation time but does not persist or return the
-  `x-amz-object-lock-mode` / `x-amz-object-lock-legal-hold` response headers.
-  Re-enable `CapObjectLock` once the upstream implementation is complete.
+The current released-source selection tables supersede earlier April/May
+blanket pass claims. RustFS omits Object Lock, versioning, and conditional-write
+capabilities. Garage omits Object Lock (fixture bucket setup differs), object
+tagging, and versioning; the source records PutBucketVersioning returning 501 on
+v2.4.1. SeaweedFS selects versioning but omits Object Lock and conditional writes.
+MinIO selects bucket management/policy/lifecycle but not Object Lock, versioning,
+CORS, or ACL bits. These are test-selection facts, not product-wide support claims.
 
-All other capabilities pass, including KMS envelope encryption, encrypted MPU,
-UploadPartCopy, tagging, presigned URLs, load tests, and chaos tests.
-
-**Garage note**: Garage v2.3.0 does not implement the `?tagging` subresource
-for `PutObjectTagging` / `GetObjectTagging` (returns 501 `NotImplemented`).
-Inline tagging via `x-amz-tagging` on `PutObject` (`CapInlinePutTagging`) works
-correctly.
-
-Confirmed capability gaps (full conformance run 2026-05-14):
-- **Object tagging** (`CapObjectTagging` absent): `?tagging` subresource not
-  implemented in Garage v2.3.x. Re-enable `CapObjectTagging` when a supported
-  version ships.
-
-**SeaweedFS note**: SeaweedFS uses a blob-store-backed S3 gateway architecture.
-
-Confirmed capability gaps (full conformance run 2026-04-22):
-- **Object Lock** (`CapObjectLock` absent): SeaweedFS accepts the
-  `ObjectLockConfiguration` at bucket-creation time but does not persist or
-  return the `x-amz-object-lock-mode` / `x-amz-object-lock-legal-hold`
-  response headers — identical behaviour to RustFS.  `ObjectLock_BypassRefused`
-  passes; `ObjectLock_Retention` and `ObjectLock_LegalHold` fail.
-- **Conditional writes** (`CapConditionalWrites` absent): `If-None-Match` /
-  `If-Match` on PUT not verified against SeaweedFS.
-
-`CapKMSIntegration` **passes** — KMS envelope encryption works correctly.
-All other capabilities pass, including encrypted MPU, UploadPartCopy,
-versioning, tagging, presigned URLs, load tests, and chaos tests.
-Note: `Load_Multipart` throughput (~15 req/s) is significantly lower than
-MinIO/RustFS (~30 req/s) due to SeaweedFS's multi-component architecture.
+Typed PutObject does not persist parsed inline lock fields, so a skipped inline
+lock test cannot prove backend retention or identify a provider bug. Review
+production input mappings and explicit lock persistence before attributing
+behavior to provider support. Actual current run logs are required for pass/fail
+and performance conclusions; historical throughput observations do not certify
+the pinned image or deployment in use.
 
 ---
 
@@ -409,7 +406,7 @@ MinIO/RustFS (~30 req/s) due to SeaweedFS's multi-component architecture.
    corresponding build tag.
 
 The metadata model and response-precedence contract are documented in
-[`METADATA_MODEL.md`](METADATA_MODEL.md). Legacy object-format fixtures belong
+[encryption metadata model](ENCRYPTION_DESIGN.md#encrypted-object-metadata-model). Legacy object-format fixtures belong
 in `internal/api/testdata/objectformats/`. The object-format golden fixtures
 contain authentic encrypted backend bodies and are exercised through the
 production handlers, as detailed below.
@@ -607,7 +604,7 @@ GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
 
 These focused commands supplement the full Tier 1, local conformance, and
 isolation gates; they do not replace them. Reload publication and operator
-recovery are documented in [Policy Configuration](POLICY_CONFIGURATION.md).
+recovery are documented in [deployment policy/reload guidance](DEPLOYMENT.md#atomic-reloads).
 
 ### Presigned URL Lifetime Regressions (GH-345)
 
@@ -753,7 +750,7 @@ GATEWAY_TEST_SKIP_EXTERNAL=1 go test -race -tags=conformance \
 The regression tests assert the intended corrected contract: before the fix,
 the failure cases must be red, not skipped or changed to expect 500. These
 focused checks supplement the full Tier 1/FIPS, local conformance and isolation
-gates. See [S3 error translation](S3_API_IMPLEMENTATION.md#backend-error-translation)
+gates. See [S3 error translation](S3_API_IMPLEMENTATION.md#error-handling-and-translation)
 and [failure observability](OBSERVABILITY.md#object-read-failure-classification-gh-344).
 
 ### Copy-source encoding regressions (GH-346)
@@ -916,3 +913,54 @@ SKIP: aws credentials not set (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_BUC
 ```
 
 Set the env vars to activate the provider in the test run.
+
+## Coverage Policy
+
+CI's conformance workflow invokes the default and FIPS coverage gates at **75%**.
+The local Makefile currently defaults `COVERAGE_THRESHOLD` to **80%**. These are
+different invocation settings, not one universal threshold; inspect Makefile and
+workflow changes before claiming parity.
+
+```bash
+make coverage-gate                         # current local Makefile default
+make coverage-gate COVERAGE_THRESHOLD=75   # explicit CI-equivalent threshold
+make coverage-html
+GOFIPS140=v1.0.0 make coverage-fips COVERAGE_THRESHOLD=75
+```
+
+### Gate threshold and exclusions
+
+`scripts/coverage-gate.sh` measures statement coverage excluding entries in
+`scripts/coverage-exclude.txt`. Current rationales cover process entrypoint
+`cmd/server`, debug-route registration, and harness/provider code needing real
+external/Testcontainers fixtures. Exact entries, including provider file names,
+belong in that audited list. Add an exclusion only with an explicit rationale
+and review; do not create a second diverging package list here.
+
+Successful gates generate coverage profiles; HTML reports derive from them.
+CI uploads default/FIPS profiles and HTML using workflow-defined artifact names
+and retention (currently 7 days in conformance.yml), not an old claimed 30-day policy.
+
+## Mutation Testing
+
+The nightly mutation workflow targets critical non-crypto packages using Gremlins.
+Crypto has dedicated fuzz/property/conformance coverage; mutating primitives is
+not a substitute for meaningful security tests. Exact package selection and gate
+arguments live in `.github/workflows/mutation.yml` and the Makefile.
+
+```bash
+make mutation-report
+make mutation-report-pkg PKG=./internal/config
+make test-fuzz
+```
+
+Use repository-pinned tool setup rather than arbitrary old installation commands.
+Interpret results alongside behavioral regressions: percentage alone cannot prove
+all S3 options/provider workflows pass. See [S3 scenario evidence](S3_API_IMPLEMENTATION.md#backend-and-encryption-mode-coverage).
+
+## Documentation Validation
+
+For documentation-only changes, check local links **and anchors**, table structure,
+source/version inventories, and `git diff --check`. Preserve historical records;
+if a guide is consolidated, update live references rather than leaving empty stubs.
+A link check or route-parity test is not a full provider conformance report.

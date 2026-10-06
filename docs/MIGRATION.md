@@ -7,6 +7,23 @@
 
 ## Overview
 
+Use this guide for coordinated upgrades, password/KMS migration, explicit
+re-encryption, and controlled recovery. Key source/rotation setup lives in
+[key management](KMS_COMPATIBILITY.md), not a separate migration tutorial.
+
+## Contents
+
+- [0.12 coordinated upgrade](#012-upgrade-notice-including-0123)
+- [Location binding](#object-location-binding)
+- [Controlled recovery and re-encryption](#supported-re-encryption-patterns)
+- [Read-only audit tool](#audit-tool-s3eg-cli)
+- [No-AAD recovery](#no-aad-recovery-pre-marker-objects)
+- [Removing compression](#removing-compression-v10)
+- [Password to envelope/KMS](#migrating-from-password-only-to-kek-envelope-encryption)
+
+**Never use an in-place no-op sync as proof of re-encryption.** Preserve original
+bytes, complete metadata, manifests, and keys before any recovery procedure.
+
 ## 0.12 upgrade notice (including 0.12.3)
 
 The 0.12 release line changes encryption write formats and deployment
@@ -205,22 +222,26 @@ GET-through-reader → PUT-through-bypass-writer workflow above.
 # 1. Inspect objects before migration (optional but recommended)
 s3eg-cli inspect --config gateway.yaml my-bucket path/to/object.txt
 
-# 2. Download through gateway, re-upload through gateway
-aws s3 cp s3://my-bucket/path/to/object.txt \
-  s3://my-bucket/path/to/object.txt \
-  --endpoint-url https://gateway.example.com
-
-# Or with s5cmd:
-s5cmd cp "s3://my-bucket/path/to/*" "s3://my-bucket/path/to/" \
-  --endpoint-url https://gateway.example.com
+# 2. Use a protected workspace: the intermediate file contains plaintext.
+umask 077
+workdir="$(mktemp -d)"
+aws s3 cp s3://my-bucket/path/to/object.txt "$workdir/object" \
+  --endpoint-url https://reader-gateway.example.com
+# Verify application bytes; retain standard/user metadata for the destination PUT.
+aws s3 cp "$workdir/object" s3://my-bucket/path/to/object.txt \
+  --endpoint-url https://writer-gateway.example.com
 
 # 3. Verify the object was re-encrypted
 s3eg-cli inspect --config gateway.yaml my-bucket path/to/object.txt
 ```
 
-The gateway's `Decrypt` path transparently handles all legacy formats. The
-`Encrypt` path produces the current v2 chunked format, including its
-authenticated terminal record.
+Use reader/writer credentials and settings appropriate to each endpoint; they
+may be the same only when it is safe for the intended migration. A local-file PUT
+does not automatically preserve source standard headers, tags, ACLs, retention,
+or user metadata: inventory and deliberately restore required fields, then verify
+GET/HEAD/application integrity. Protect and remove the temporary plaintext using
+your storage policy after verification. Unsupported/hard-limit formats need the
+appropriate prior trusted reader, not unconditional “all legacy formats” fallback.
 
 ### Chunked v1 completeness migration
 
@@ -244,9 +265,9 @@ round-trip safely upgrades the object.
 # List all encrypted objects using s3eg-cli audit (dry-run first)
 s3eg-cli list-algorithm --config gateway.yaml my-bucket
 
-# Re-encrypt via awscli sync
-aws s3 sync s3://my-bucket/ s3://my-bucket/ \
-  --endpoint-url https://gateway.example.com
+# Download a controlled inventory to protected local storage, then upload each
+# verified object through the intended writer. Use the single-object procedure.
+# An S3-to-same-S3 sync may skip unchanged objects and is NOT re-encryption.
 
 # Verify no legacy objects remain
 s3eg-cli list-algorithm --config gateway.yaml my-bucket --output json
@@ -265,9 +286,7 @@ correct KDF based on per-object metadata. To explicitly upgrade:
 # 2. Roll gateway pods to pick up the new config.
 
 # 3. Re-encrypt each object via GET → PUT through the gateway.
-aws s3 cp s3://my-bucket/path/to/legacy-object \
-  s3://my-bucket/path/to/legacy-object \
-  --endpoint-url https://gateway.example.com
+# Follow the explicit download → verified upload procedure above.
 
 # 4. Verify via inspect
 s3eg-cli inspect --config gateway.yaml my-bucket path/to/legacy-object
@@ -338,14 +357,14 @@ gated on the marker being `"true"`.
 2. **Roll the gateway pods.** The new setting takes effect immediately.
 
 3. **Use `s3eg-cli inspect` to find affected objects:**
-   Look for objects where `AAD Scheme: v1-no-aad` — these are objects that
-   decrypt via the no-AAD path because the flag is active.
+   Treat inspection as envelope classification, not proof of successful decrypt.
+   Confirm actual readability with the controlled prior reader and application
+   integrity verification; never infer it solely from the recovery flag.
 
 4. **Re-encrypt each affected object via GET → PUT through the gateway:**
    ```bash
-   aws s3 cp s3://my-bucket/path/to/legacy-object \
-     s3://my-bucket/path/to/legacy-object \
-     --endpoint-url https://gateway.example.com
+    # Explicitly download via the isolated recovery reader, verify the bytes,
+    # and PUT via the normal bound-format writer as described above.
    ```
 
 5. **Disable the recovery flag:**
@@ -384,9 +403,9 @@ compression removal:
 2. For each affected object, download through the *old* gateway and re-upload
    through the new gateway (or any version with compression disabled):
    ```bash
-   aws s3 cp s3://my-bucket/path/to/object \
-     s3://my-bucket/path/to/object \
-     --endpoint-url https://old-gateway.example.com
+    # GET plaintext through the OLD compression-capable reader into protected
+    # local storage, then PUT through the NEW writer with compression disabled.
+    # Do not do both operations through the old endpoint.
    ```
 
 ## Upgrading to Argon2id KDF
@@ -405,10 +424,7 @@ PBKDF2-SHA256 objects to Argon2id:
 
 3. Re-encrypt each object via GET → PUT through the gateway:
    ```bash
-   # Use any S3 tool to copy objects through the gateway
-   aws s3 cp s3://my-bucket/path/to/object \
-     s3://my-bucket/path/to/object \
-     --endpoint-url https://gateway.example.com
+    # Use the explicit gateway download → verified upload procedure above.
    ```
 
 4. Verify via `s3eg-cli inspect` — the KDF params will show the Argon2id
@@ -416,23 +432,60 @@ PBKDF2-SHA256 objects to Argon2id:
 
 ## Migrating from password-only to KEK envelope encryption
 
-1. Configure the key manager in `gateway.yaml`:
+### Before you begin
+
+Inventory objects/formats/KDF limits, legacy MPU/state envelopes, metadata keys,
+and backup recovery requirements. Retain original password and complete backend
+backups. Set up a persistent KEK or healthy external KMS with correct TLS/auth,
+and validate against a nonproduction copy before switching writers. An ephemeral
+memory-provider key is not recoverable after restart; its hex/raw decoder differs
+from self-contained AES's base64 input.
+
+### Configure and verify
+
+1. Configure the actual persistent key source, not just a provider name:
    ```yaml
    encryption:
      password: "<existing-password>"  # kept for decrypting old objects
      key_manager:
-       enabled: true
-       provider: "self_contained"
+        enabled: true
+        provider: "self_contained"
+        self_contained:
+          type: aes
+          aes:
+            active_version: 1
+            keys:
+              - version: 1
+                key_source: "env:S3EG_AES_KEK"
    ```
 
-2. Roll gateway pods. New objects use the KEK; old objects are decrypted
-   transparently via the password fallback.
+2. Apply a reviewed deployment retaining the existing password and old key material.
+   New objects use the configured KEK. Existing password objects/MPU envelopes use
+   password compatibility; this is separate from provider dual-read windows.
 
-3. Re-encrypt existing password-only objects via GET → PUT to migrate them
-   to KEK wrapping. No migration window is required — the gateway handles
-   mixed modes transparently.
+3. Verify a newly written object, an old single-object read, and an old MPU read
+   where applicable. Inspect envelope/key version with read-only `s3eg-cli` or
+   authorized backend access; gateway HEAD hides internal metadata.
+4. Rewrite the controlled inventory with explicit GET→PUT when retiring the old
+   password. Keep decryption material until cold objects, state, metadata, manifests,
+   and required backups no longer depend on it. Follow the existing coordinated
+   upgrade/MPU constraints if binaries or writer formats change too.
 
-## Comp Copy of the Old Migration Tool
+For Cosmian use its key IDs/TLS config; for OpenBao/Vault use Transit auth/key
+policy. Provider-specific examples, retention, and first rotation are in
+[key management](KMS_COMPATIBILITY.md#dual-read-window-and-key-rotation).
+
+### Rollback and troubleshooting
+
+Rollback must retain the provider/key that can read new envelope writes as well
+as original password-readable objects. Simply disabling KMS cannot decrypt its
+new ciphertext. Pause writes, restore a compatible retained config/provider,
+verify both generations, and diagnose endpoint/TLS/key-policy or source problems.
+Do not use a gateway metadata query as proof that a key version is absent; use
+backend/read-only inspection and successful plaintext round trips. Preserve keys
+for locked data and state-key envelopes, not only actively accessed objects.
+
+## Deprecated Migration Tool
 
 The old `s3eg-migrate` binary is still published as a **deprecation shim** that
 prints a usage notice and exits non-zero. It is available at the same download

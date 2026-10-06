@@ -1,878 +1,649 @@
-# S3 API Implementation Strategy
+# S3 Compatibility Reference
 
-Bucket configuration PUT/DELETE subresources require scoped
-`bucket_permissions: [manage]`; object `rw` and bucket `create`/`delete` grants
-remain independent. Raw configuration payloads are limited to 1 MiB before
-backend forwarding, while Object Lock retains its dedicated 100 KiB parser.
+**Release baseline: v0.12.3. Merge review: October 6, 2026.**
 
-## Overview
+The inventory and released-behavior tables describe v0.12.3. **Unreleased `main`**
+now also contains gateway-managed CORS (GH-322) and signed Content-Length recovery
+(GH-356); their contracts are identified separately below. Do not assume they are
+available in the v0.12.3 image merely because the implementation is on `main`.
 
-The S3 Encryption Gateway must maintain full compatibility with the Amazon S3 API while transparently encrypting and decrypting object data. This document outlines the implementation strategy for S3 API compatibility.
+This guide owns application compatibility, request/response options, SDK/backend
+evidence, and the explicit disposition for **all 112 operations in the pinned
+AWS SDK for Go v2 S3 module v1.114.0**, plus the four legacy lifecycle/notification
+names in the [AWS S3 action index](https://docs.aws.amazon.com/AmazonS3/latest/API/API_Operations_Amazon_Simple_Storage_Service.html),
+HTML POST Object, and CORS OPTIONS. It is an inventory, not a claim of full S3
+feature parity. Start with the summary below before migrating an application.
 
-## S3 API Operations Classification
+## Contents
 
-### Operations Requiring Encryption/Decryption
+- [Application compatibility matrix](#application-compatibility-matrix)
+- [Scope, permissions, and release interpretation](#scope-and-interpretation)
+- [Object and multipart operations](#object-and-multipart-operations)
+- [Bucket operations](#bucket-operations)
+- [Unsupported SDK operations](#unsupported-sdk-operations)
+- [Legacy names and browser extensions](#legacy-names-and-browser-extensions)
+- [Addressing and authentication](#addressing-and-authentication)
+- [Unreleased gateway-managed CORS](#gateway-managed-cors-gh-322)
+- [Unreleased signed Content-Length recovery](#sigv4-signed-content-length-gh-356)
+- [Object reads and responses](#object-reads-and-responses)
+- [Listings and pagination](#listings-and-pagination)
+- [Writes, copies, and multipart options](#writes-copies-and-multipart-options)
+- [Body integrity and resource limits](#body-integrity-and-resource-limits)
+- [SDK/tool coverage](#sdk--tool-compatibility)
+- [Backend and encryption-mode coverage](#backend-and-encryption-mode-coverage)
+- [Evidence index](#evidence-index)
 
-#### PUT Object
-- **Endpoint**: `PUT /{bucket}/{key}`
-- **Encryption**: Required for object data
-- **Implementation**:
-  - Parse request body as stream
-  - Encrypt data using configured algorithm
-  - Preserve original metadata
-  - Add encryption metadata markers
-  - Forward to backend with encrypted data
+## Application Compatibility Matrix
 
-#### GET Object
-- **Endpoint**: `GET /{bucket}/{key}`
-- **Decryption**: Required for object data
-- **Implementation**:
-  - Check if object is encrypted (metadata marker)
-  - Fetch encrypted data from backend
-  - Decrypt data stream
-  - Restore original metadata
-  - Return decrypted response
+**Supported** means an implemented subset with the notes below, not every AWS
+option or every client workflow. **Planned** is unreleased accepted work without
+a promised date. **Not supported** explicitly marks absent behavior. Backend
+configuration passthrough cannot implement a missing provider feature.
 
-#### POST Object (Multipart Upload)
-- **Endpoints**:
-  - `POST /{bucket}/{key}?uploads` - Initiate multipart upload
-  - `PUT /{bucket}/{key}?partNumber=X&uploadId=Y` - Upload part
-  - `POST /{bucket}/{key}?uploadId=Y` - Complete multipart upload
-- **Encryption**: Conditional per bucket policy. Encrypted MPUs use a per-upload
-  DEK, chunked ciphertext, and a finalization manifest.
-- **Implementation**:
-  - Plaintext MPUs are forwarded unchanged; encrypted parts are claimed before encryption.
-  - Preserve ordering and part ETags
-  - Complete uploads by passing part list to backend
-  - Identical encrypted retries return the stored ETag without rewriting the part.
-- **Security Considerations**:
-   - Encrypted MPU parts are encrypted by the gateway with a per-upload DEK and authenticated chunk framing before they are sent to the backend.
-   - Each part is reserved by an authenticated content claim before encryption. Identical retries return the stored ETag without rewriting; changed content returns `409 OperationAborted`.
-   - Complete validates the exact ordered selected part set against durable committed state and writes the corresponding manifest before backend completion.
-   - Legacy records are accepted only for the abort migration path. New uploads always use the current state schema; legacy uploads must be aborted and recreated before writing parts or completing.
-- **Security Features**:
-  - Robust XML parsing with 10MB size limits to prevent DoS
-  - Comprehensive validation of part numbers (1-10000 range)
-  - ETag format validation with proper quoting requirements
-  - Duplicate part number detection and rejection
-  - Fuzz-tested XML parser for edge case handling
-   - Provider interoperability testing framework
-
-#### PUT Object (Multipart Copy / UploadPartCopy)
-- **Endpoint**: `PUT /{bucket}/{key}?partNumber=X&uploadId=Y`, with the
-  `x-amz-copy-source` request header
-- **Description**: Copies a byte range from a source object as a part in a multipart upload
-- **Encryption**: Conditional based on source encryption status
-- **Implementation**:
-  - **Routing**: Requests with `x-amz-copy-source` header are dispatched to dedicated `handleUploadPartCopy`
-  - **Source Classification Matrix**:
-    | Source Type | Metadata Flag | Strategy |
-    |---|---|---|
-    | Plaintext | None | Fast path: backend-native `UploadPartCopy` (zero bytes through gateway) |
-    | Chunked-encrypted | `x-amz-meta-encryption-chunked=true` | Mediated: translate plaintext range → encrypted range via `CalculateEncryptedRangeForPlaintextRange`, GET encrypted range, `DecryptRange`, stream to `UploadPart` |
-    | Legacy single-AEAD | `x-amz-meta-encrypted=true` (without chunked flag) | Mediated (slow): GET full object, decrypt, slice plaintext by range, stream to `UploadPart` |
-  - **Range Handling**: `x-amz-copy-source-range: bytes=first-last` is parsed and respected
-    - For chunked sources: efficiently decrypts only the required chunks
-    - For legacy sources: full object decryption with warning logged
-    - Omitted range: copies entire source object (up to 5 GiB limit)
-  - **MPU Part-Size Enforcement**:
-    - Non-final parts: `5 MiB ≤ size ≤ 5 GiB`
-    - Any single copy source range: `≤ 5 GiB`
-    - Source object > 5 GiB without range: returns `400 InvalidRequest`
-- **Response Contract**:
-  ```xml
-  <CopyPartResult>
-    <ETag>"..."</ETag>
-    <LastModified>2026-04-17T10:00:00.000Z</LastModified>
-  </CopyPartResult>
-  ```
-  - ETag is the backend's raw UploadPart or UploadPartCopy ETag (not re-encrypted)
-   - LastModified reflects part write time
-- **Encrypted MPU replacement contract**: encrypted destinations claim the
-  first plaintext for each part number. An identical retry returns `200` and
-  the stored ETag without destination encryption or mutation. A concurrent
-  reservation or changed source returns `409 OperationAborted`; clients must
-  abort and create a new upload. Legacy encrypted in-flight state is also
-  abort-only and returns `409`.
-- **Error Codes**:
-  - `400 InvalidArgument`: Malformed x-amz-copy-source or x-amz-copy-source-range
-  - `400 InvalidRequest`: Source object > 5 GiB with no range; or multipart uploads disabled
-  - `404 NoSuchKey` / `404 NoSuchBucket`: Source not found
-  - `416 InvalidRange`: Range start ≥ object size
-  - `501 NotImplemented`: Proxy mode without mediation support
-- **Security Considerations**:
-   - Destination parts remain plaintext only for non-encrypted MPUs (per ADR
-     0002); encrypted MPU destinations are re-encrypted after claim validation
-  - Source-bucket read authorization is explicitly checked independent of destination write authorization
-  - Cross-key-space (different source/destination buckets) is supported and tested
-  - Config mismatch (plaintext source to encrypted-destination bucket) triggers hard refusal with audit event
-
-#### PUT Object Copy
-- **Endpoint**: `PUT /{bucket}/{key}`, with the `x-amz-copy-source` request header
-- **Encryption**: Conditional based on source encryption status
-- **Implementation**:
-  - Check if source object is encrypted
-  - Copy operation may require decryption then re-encryption
-
-#### Copy-source encoding and identity (GH-346)
-
-Both copy operations accept a URL-encoded `x-amz-copy-source` header in the
-form `bucket/key` or `/bucket/key`, optionally followed by
-`?versionId=<version>`. This is a **header**, not a destination URL parameter.
-
-The gateway separates the raw version suffix before percent-decoding the path
-exactly once with path semantics. A literal `+` stays `+`; `%20` becomes a
-space; `%2F` inside a key becomes a slash. A key containing the literal text
-`%2F` must be sent as `%252F`. Encoded `?`, `#`, and `?versionId=` remain key
-data rather than selecting a query or fragment. Only the optional slash before
-the bucket is removed; leading/repeated key slashes and dot segments are not
-normalized. An opaque version ID is decoded separately, preserving literal
-`+` and `/`; an empty version suffix retains the existing latest-version
-behavior.
-
-| Source key | Valid header value for bucket `b` |
-|---|---|
-| `dir/with space.txt` | `b/dir/with%20space.txt` |
-| `dir/umlaut-ä.txt` | `b/dir/umlaut-%C3%A4.txt` |
-| `dir/a+b&c.txt` | `b/dir/a%2Bb%26c.txt` |
-| `dir/plain.txt` (PHP-style escaped slashes) | `/b/dir%2Fplain.txt` |
-| `dir/literal%2F.txt` | `b/dir/literal%252F.txt` |
-| `name?versionId=literal`, version `v+/=` | `b/name%3FversionId%3Dliteral?versionId=v%2B%2F%3D` |
-
-Authorization and backend reads use the same decoded bucket/key identity.
-The incoming signed header is never rewritten. Backend-native CopyObject and
-UploadPartCopy construct a separate correctly encoded header from the decoded
-identities; the AWS SDK for Go v2 does not escape `CopySource` automatically.
-
-Malformed percent escapes in the path/version and empty bucket/key components
-return `400 InvalidArgument` with `Invalid x-amz-copy-source header`, without
-backend requests. After authentication and destination permission checks,
-malformed syntax is distinct from a valid source outside the credential or
-`PROXIED_BUCKET` scope, which returns `403 AccessDenied`. Existing authentication
-and read-only/destination-denial precedence is retained.
-
-See [operator compatibility guidance](DEPLOYMENT.md#url-encoded-copy-sources-gh-346)
-and [regression commands](TESTING.md#copy-source-encoding-regressions-gh-346).
-
-### Operations NOT Requiring Encryption
-
-#### List Objects
-- **Endpoints**:
-  - `GET /{bucket}?list-type=2` (ListObjectsV2)
-  - `GET /{bucket}` (ListObjects)
-  - `GET /{bucket}?delimiter=...` (ListObjects with delimiter)
-- **Implementation**: Object bodies are passed through unmodified, but
-  per-object **sizes are translated** as of V1.0-S3-3 (see below).
-- **Size translation (V1.0-S3-3)**: `handleListObjects` resolves plaintext
-  sizes via a Valkey-backed write-through size cache (`plainsize:<bucket>`
-  hash, single `HMGET` per page) populated by `PutObject`,
-  `CompleteMultipartUpload`, and `CopyObject`. Cache hits return plaintext
-  sizes with zero per-object `HeadObject` calls; an opt-in bounded HEAD batch
-  (`list_size_translate.fallback_head_enabled`) warms misses. **Fail-soft**:
-  if Valkey is unavailable, ciphertext sizes are returned (no `5xx`). ETags
-  remain ciphertext ETags. See `docs/plans/V1.0-S3-3-plan.md`.
-
-#### Head Bucket
-- **Endpoint**: `HEAD /{bucket}`
-- **Implementation**:
-  - Validate bucket-level existence/access against backend
-  - Return `200 OK` with empty body on success
-  - Return translated S3 error codes (`NoSuchBucket`, `AccessDenied`, etc.) on failure
-
-
-#### Head Object
-- **Endpoint**: `HEAD /{bucket}/{key}`
-- **Implementation**:
-  - Fetch metadata from backend
-  - If encrypted, modify metadata to show original values
-  - Hide encryption-specific metadata
-
-#### Delete Object
-- **Endpoints**:
-  - `DELETE /{bucket}/{key}`
-  - `POST /{bucket}?delete` (DeleteObjects)
-- **Implementation**: Pass-through to backend, no decryption needed
-
-#### Bucket Operations
-- **Endpoints**: All bucket-level operations (create, delete, policy, etc.)
-- **Implementation**: Pass-through to backend, no encryption concerns
-
-## S3 API Coverage Matrix (V1.0-S3-2)
-
-### New Operations — Tier 1 (Critical)
-
-| # | Method | Route | Operation | Handler | Handling |
-|---|---|---|---|---|---|
-| T1-01 | `DELETE` | `/{bucket}` | **DeleteBucket** | `handleDeleteBucket` | Guarded proxy (+audit) |
-| T1-02 | `GET` | `/` | **ListBuckets** | `handleListBuckets` | Filtered to effective scope |
-| T1-03 | `GET` | `/{bucket}?location` | **GetBucketLocation** | `handleGetBucketLocation` | Proxy verbatim |
-| T1-04 | `GET` | `/{bucket}?versioning` | **GetBucketVersioning** | `handleGetBucketVersioning` | Proxy verbatim |
-| T1-05 | `PUT` | `/{bucket}?versioning` | **PutBucketVersioning** | `handlePutBucketVersioning` | Proxy verbatim |
-| T1-06 | `GET` | `/{bucket}?uploads` | **ListMultipartUploads** | `handleListMultipartUploads` | Proxy verbatim |
-| T1-07 | `GET` | `/{bucket}/{key}?tagging` | **GetObjectTagging** | `handleGetObjectTagging` | Proxy verbatim |
-| T1-08 | `PUT` | `/{bucket}/{key}?tagging` | **PutObjectTagging** | `handlePutObjectTagging` | Proxy verbatim |
-| T1-09 | `DELETE` | `/{bucket}/{key}?tagging` | **DeleteObjectTagging** | `handleDeleteObjectTagging` | Proxy verbatim |
-| T1-10 | `GET` | `/{bucket}?acl` | **GetBucketACL** | `handleGetBucketACL` | Proxy verbatim |
-| T1-11 | `PUT` | `/{bucket}?acl` | **PutBucketACL** | `handlePutBucketACL` | Proxy verbatim |
-| T1-12 | `GET` | `/{bucket}/{key}?acl` | **GetObjectACL** | `handleGetObjectACL` | Proxy verbatim |
-| T1-13 | `PUT` | `/{bucket}/{key}?acl` | **PutObjectACL** | `handlePutObjectACL` | Proxy verbatim |
-
-### New Operations — Tier 2 (Common)
-
-| # | Method | Route | Operation | Handler | Handling |
-|---|---|---|---|---|---|
-| T2-01 | `GET` | `/{bucket}?policy` | **GetBucketPolicy** | `handleGetBucketPolicy` | Proxy verbatim |
-| T2-02 | `PUT` | `/{bucket}?policy` | **PutBucketPolicy** | `handlePutBucketPolicy` | Proxy verbatim |
-| T2-03 | `DELETE` | `/{bucket}?policy` | **DeleteBucketPolicy** | `handleDeleteBucketPolicy` | Proxy verbatim |
-| T2-04 | `GET` | `/{bucket}?cors` | **GetBucketCors** | `handleGetBucketCors` | Mode-dependent: passthrough proxies; gateway reads shared Valkey XML (404 `NoSuchCORSConfiguration`, 503 on store failure) |
-| T2-05 | `PUT` | `/{bucket}?cors` | **PutBucketCors** | `handlePutBucketCors` | Mode-dependent: passthrough proxies; gateway validates ≤64 KiB S3 XML/Content-MD5 and stores after a bucket existence probe |
-| T2-06 | `DELETE` | `/{bucket}?cors` | **DeleteBucketCors** | `handleDeleteBucketCors` | Mode-dependent: passthrough proxies; gateway idempotently deletes policy after a bucket existence probe |
-| T2-07 | `GET` | `/{bucket}?lifecycle` | **GetBucketLifecycle** | `handleGetBucketLifecycle` | Proxy verbatim |
-| T2-08 | `PUT` | `/{bucket}?lifecycle` | **PutBucketLifecycle** | `handlePutBucketLifecycle` | Proxy verbatim |
-| T2-09 | `DELETE` | `/{bucket}?lifecycle` | **DeleteBucketLifecycle** | `handleDeleteBucketLifecycle` | Proxy verbatim |
-| T2-10 | `OPTIONS` | `/{bucket}\|/{bucket}/{key}` | **CORS Preflight** | `handleCORSPreflight` | Mode-dependent: passthrough forwards; gateway evaluates matching bucket policy locally without backend access |
-| T2-11 | `POST` | `/{bucket}/{key}?restore` | **RestoreObject** | `handleRestoreObject` | Proxy verbatim |
-| T2-12 | `GET` | `/{bucket}?encryption` | **GetBucketEncryption** | `handleGetBucketEncryption` | Proxy verbatim |
-| T2-13 | `PUT` | `/{bucket}?encryption` | **PutBucketEncryption** | `handlePutBucketEncryption` | Proxy verbatim |
-| T2-14 | `DELETE` | `/{bucket}?encryption` | **DeleteBucketEncryption** | `handleDeleteBucketEncryption` | Proxy verbatim |
-
-Browser CORS preflight requests are permitted to reach the `OPTIONS` handler
-without gateway SigV4 credentials when they contain both `Origin` and
-`Access-Control-Request-Method` and no gateway authentication material. This is
-required because browsers do not send the credentials from a subsequent
-presigned request on the preflight. The gateway still authenticates the actual
-presigned `PUT`, and `proxied_bucket` remains enforced for unauthenticated
-preflights. Incomplete or credentialed `OPTIONS` requests continue through the
-normal authentication and authorization path.
-
-### Gateway-managed CORS (GH-322)
-
-The compatible default is `cors.mode: passthrough`. In `gateway` mode, bucket
-CORS XML is stored in shared non-expiring Valkey; GET/PUT/DELETE `?cors` retain
-read/manage authorization. The management existence probe returns `NoSuchBucket`
-only for an explicit backend `NoSuchBucket`; `AccessDenied`, throttling,
-transport failures and ambiguous outcomes map to fixed `503 ServiceUnavailable`
-and leave any existing rules unchanged. Backends denying `ListObjects` prevent
-gateway-mode `?cors` management. Invalid XML or Content-MD5 returns 400 (oversize returns 413),
-missing configuration is 404, and Valkey failure is 503. A genuinely malformed
-request Origin/ACR value returns 400 `InvalidArgument`, without authorization
-headers (including when credentials mode is enabled). Preflight requires
-Origin, requested method and every requested header to match a rule; mismatch
-returns 403 without allow headers. Matched actual responses receive
-Allow-Origin and explicitly configured Expose-Headers; ETag is not exposed by
-default. Gateway mode strips upstream CORS headers. A global fallback applies
-only to genuinely missing bucket policy and is never returned by GET or used to
-mask corruption/outage. See ADR 0019 and operator durability/recovery guidance.
-If backend `DeleteBucket` succeeds but Valkey policy cleanup fails, the gateway
-returns 503 and logs that the backend may already be deleted. Retry cleanup and
-resolve the stale key before reusing that bucket name; gateway-mediated create
-will not proceed if stale-key deletion itself fails.
-
-Preflight response summary:
-
-| Condition | Status | Allow headers | `Vary` |
-|---|---:|---|---|
-| Matching rule | 200 | Origin, matched methods, requested allowed headers, configured expose/max-age, optional credentials | `Origin`, `Access-Control-Request-Method`, `Access-Control-Request-Headers` |
-| No matching rule | 403 `AccessDenied` | None | Same three tokens |
-| Malformed Origin / request headers | 400 `InvalidArgument` | None | Same three tokens |
-| Missing policy without matching fallback | 403 `AccessDenied` | None | Same three tokens |
-| Valkey unavailable/corrupt policy | 503 `ServiceUnavailable` | None | Same three tokens |
-
-On actual S3 responses, including absent-origin requests, gateway mode strips
-all backend `Access-Control-*` policy headers. On a matched request it sets only
-Allow-Origin, configured Expose-Headers, and optional credentials; no methods,
-allowed-headers, or max-age are added to actual responses. It preserves existing
-`Vary` values and adds `Origin` when relevant.
-
-The existence probe uses `ListObjects(MaxKeys=1)` and therefore requires a
-backend credential permitted to list the bucket. A backend-side ListObjects
-denial prevents gateway-managed `?cors` administration even if other bucket
-operations are permitted. With `allow_credentials: true`, the gateway echoes
-only a validated concrete Origin (never `*`); this is a nonstandard deployment
-opt-in and defaults off.
-
-Gateway-mode management response and error contract (passthrough continues to
-forward the backend response unchanged):
-
-| Operation | Condition | HTTP status | Body / S3 error |
-|---|---|---:|---|
-| `GET /{bucket}?cors` | Configured policy | 200 | CORS XML (`application/xml`) |
-| `GET /{bucket}?cors` | No stored policy | 404 | S3 XML `NoSuchCORSConfiguration` |
-| `GET /{bucket}?cors` | Missing bucket | 404 | S3 XML `NoSuchBucket` |
-| `GET /{bucket}?cors` | Valkey unavailable or stored record corrupt | 503 | S3 XML `ServiceUnavailable` |
-| `PUT /{bucket}?cors` | Valid XML stored | 200 | Empty |
-| `PUT /{bucket}?cors` | Malformed XML or invalid origin authority | 400 | S3 XML `MalformedXML` |
-| `PUT /{bucket}?cors` | XML exceeds 64 KiB | 413 | S3 XML `EntityTooLarge` |
-| `PUT /{bucket}?cors` | Malformed `Content-MD5` encoding or digest length | 400 | S3 XML `InvalidDigest` |
-| `PUT /{bucket}?cors` | `Content-MD5` does not match request body | 400 | S3 XML `BadDigest` |
-| `PUT /{bucket}?cors` | Missing bucket | 404 | S3 XML `NoSuchBucket` |
-| `PUT /{bucket}?cors` | Valkey unavailable or write failure | 503 | S3 XML `ServiceUnavailable`; prior policy remains unchanged |
-| `DELETE /{bucket}?cors` | Existing bucket, whether or not a policy existed | 204 | Empty; deletion is idempotent |
-| `DELETE /{bucket}?cors` | Missing bucket | 404 | S3 XML `NoSuchBucket` |
-| `DELETE /{bucket}?cors` | Valkey unavailable or delete failure | 503 | S3 XML `ServiceUnavailable` |
-
-Only an explicit backend `NoSuchBucket` from the bounded existence probe maps
-to 404 `NoSuchBucket`. A backend that denies the probe with `AccessDenied`, or
-returns throttling, transport failure, or another ambiguous result, produces a
-fixed 503 `ServiceUnavailable`; it is not treated as a missing bucket. The
-probe uses `ListObjects(MaxKeys=1)`, so a backend-side list denial also prevents
-gateway-mode CORS management.
-
-### New Operations — Tier 3 (Specialised)
-
-| # | Method | Route | Operation | Handler | Handling |
-|---|---|---|---|---|---|
-| T3-01 | `GET` | `/{bucket}?notification` | **GetBucketNotification** | `handleGetBucketNotification` | Proxy verbatim |
-| T3-02 | `PUT` | `/{bucket}?notification` | **PutBucketNotification** | `handlePutBucketNotification` | Proxy verbatim |
-| T3-03 | `GET` | `/{bucket}?replication` | **GetBucketReplication** | `handleGetBucketReplication` | Proxy verbatim |
-| T3-04 | `PUT` | `/{bucket}?replication` | **PutBucketReplication** | `handlePutBucketReplication` | Proxy verbatim |
-| T3-05 | `DELETE` | `/{bucket}?replication` | **DeleteBucketReplication** | `handleDeleteBucketReplication` | Proxy verbatim |
-| T3-06 | `GET` | `/{bucket}?logging` | **GetBucketLogging** | `handleGetBucketLogging` | Proxy verbatim |
-| T3-07 | `PUT` | `/{bucket}?logging` | **PutBucketLogging** | `handlePutBucketLogging` | Proxy verbatim |
-| T3-08 | `GET` | `/{bucket}?requestPayment` | **GetBucketRequestPayment** | `handleGetBucketRequestPayment` | Proxy verbatim |
-| T3-09 | `PUT` | `/{bucket}?requestPayment` | **PutBucketRequestPayment** | `handlePutBucketRequestPayment` | Proxy verbatim |
-| T3-10 | `GET` | `/{bucket}?website` | **GetBucketWebsite** | `handleGetBucketWebsite` | Proxy verbatim |
-| T3-11 | `PUT` | `/{bucket}?website` | **PutBucketWebsite** | `handlePutBucketWebsite` | Proxy verbatim |
-| T3-12 | `DELETE` | `/{bucket}?website` | **DeleteBucketWebsite** | `handleDeleteBucketWebsite` | Proxy verbatim |
-| T3-13 | `GET` | `/{bucket}?inventory` | **GetBucketInventory** | `handleGetBucketInventory` | Proxy verbatim |
-| T3-14 | `PUT` | `/{bucket}?inventory` | **PutBucketInventory** | `handlePutBucketInventory` | Proxy verbatim |
-| T3-15 | `DELETE` | `/{bucket}?inventory` | **DeleteBucketInventory** | `handleDeleteBucketInventory` | Proxy verbatim |
-| T3-16 | `GET` | `/{bucket}?analytics` | **GetBucketAnalytics** | `handleGetBucketAnalytics` | Proxy verbatim |
-| T3-17 | `POST` | `/{bucket}/{key}?select` | **SelectObjectContent** | `handleSelectObjectContent` | 501 NotImplemented |
-| T3-18 | `PUT` | `/{bucket}?intelligent-tiering` | **PutBucketIntelligentTiering** | `handlePutBucketIntelligentTiering` | Proxy verbatim |
-
-### Known Limitations (V1.0-S3-2)
-
-| Operation | Reason |
-|---|---|
-| `SelectObjectContent` | Requires server-side SQL evaluation on encrypted data — not feasible in a proxy model |
-| `WriteGetObjectResponse` | S3 Object Lambda integration — proxy model incompatible |
-| `ListObjects` / `ListObjectsV2` ETags | ETags in listings remain **backend (ciphertext) ETags**. Accurate plaintext ETag is available via `HeadObject` and `GetObject`, which decrypt metadata on a per-object basis. ETag correction in listings is tracked as a separate follow-up. |
-| `ListObjects` / `ListObjectsV2` sizes | **Fixed in V1.0-S3-3.** Sizes are translated to plaintext via a Valkey-backed write-through size cache (`plainsize:<bucket>`), populated on `PutObject`/`CompleteMultipartUpload`/`CopyObject` and evicted on delete. Cache misses return ciphertext sizes (fail-soft); opt-in `list_size_translate.fallback_head_enabled` warms misses with a bounded HEAD batch. Objects uploaded before the feature was deployed are not auto-warmed. The earlier per-object HEAD translation was removed because it caused an N-fold latency explosion; the cache restores correctness without that cost. |
-
-### Helper Infrastructure (V1.0-S3-2)
-
-| Helper | File | Purpose |
+| Feature | Status | Requirements / limitations / tracking |
 |---|---|---|
-| `copyProxyResponse` | `internal/api/utils.go` | Copies status code, filtered headers, and body from upstream response to client |
-| `forwardToBackend` | `internal/api/utils.go` | Creates and sends a signed request to the configured S3 backend, returns the raw response |
-| `handlePassthrough` | `internal/api/utils.go` | Generic proxy handler wrapper: forward → copy → metric → audit |
+| Put/Get/Head/DeleteObject and DeleteObjects | Supported | Gateway auth/scope, policy-selected encryption or explicit bypass. Typed input/output subset; see option tables. |
+| Range GET | Supported | Single plaintext range; optimized chunk/MPU paths and full-decrypt legacy fallback. No multiple-range or HEAD Range parity. |
+| CopyObject / UploadPartCopy | Supported | Source read and destination write scope; mediated encrypted copy. Encoded-source identity fixed in v0.12.3 ([#346](https://github.com/cloud37/s3-encryption-gateway/issues/346)). |
+| Encrypted multipart upload | Supported | Configured Valkey/key manager; 64 MiB default UploadPart cap. Immutable first-content claims; changed part replacement returns 409 OperationAborted. |
+| ListObjects v1/v2 | Supported | Basic listing/token pagination; plaintext-size cache advisory, listing ETags backend-defined. Some pagination/response fields ignored—see below. |
+| ListParts | Supported | First backend page only; ignores pagination and emits IsTruncated=false. Not complete large-upload part inventory. |
+| SigV4 header/presigned GET/PUT | Supported | Gateway credentials. Signed expiry honored in v0.12.3 ([#345](https://github.com/cloud37/s3-encryption-gateway/issues/345)); 1–604800 seconds. |
+| SigV2 | Supported | Deprecated, disabled by default; explicit `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true` temporary migration opt-in. |
+| POST Object form policies | Planned | Separate from MPU; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353). |
+| Complete browser CORS | Planned for release | Not in v0.12.3. [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322) is implemented on unreleased main; see [mode-dependent contract](#gateway-managed-cors-gh-322). Passthrough alone remains incomplete for encrypted browser flows. |
+| Bucket configuration / ACL / tagging / lifecycle | Supported | Registered backend-dependent subsets. Independent manage grant for bucket config mutation; object tagging does not imply bucket tagging. |
+| Create/DeleteBucket | Supported | Explicit create/delete grants; create also requires ALLOW_BUCKET_CREATION=true. |
+| Version-specific reads/deletes/copy sources | Supported | Backend versioning required; no ListObjectVersions or exhaustive historical MPU recovery guarantee. |
+| Explicit Object Lock / retention / hold APIs | Supported | Provider setup required. Inline PUT/initiation lock fields are not persisted; verify retention via explicit APIs/backend defaults. Bypass refused. |
+| Reverse proxies | Supported | Preserve signed Host/path/query/headers. Outbound filtering fixed in v0.12.2 ([#338](https://github.com/cloud37/s3-encryption-gateway/issues/338)); signed zero Content-Length exception remains in v0.12.3 ([#356](https://github.com/cloud37/s3-encryption-gateway/issues/356), fixed on unreleased main). |
+| Inbound virtual-host addressing / STS / S3 Express | Not supported | Use path-style gateway URLs; DNS/backend addressing flags do not add inbound host routing. |
+| Typed conditional object requests | Not supported | If-Match/If-None-Match and related conditions not enforced; not an atomic write-if-absent boundary. |
+| Per-upload backend SSE/storage-class fields | Not supported | Typed input mapping absent; backend defaults are independent of gateway encryption. |
+| GetObjectAttributes / plaintext checksum retrieval | Not supported | Upload integrity verification is not durable checksum-mode retrieval. |
+| SelectObjectContent / WriteGetObjectResponse | Not supported | SQL on gateway ciphertext/Object Lambda integration not implemented; explicit Select returns 501. |
 
-All handlers in tiers 1-3 use `handlePassthrough` as their implementation body, reducing each new handler to ~3 lines.
+Choose [deployment and bucket policy](DEPLOYMENT.md) for setup,
+[key management](KMS_COMPATIBILITY.md) for key selection, and
+[migration](MIGRATION.md) for upgrades/recovery. This is the single compatibility
+reference; other guides link here rather than maintain parallel support matrices.
 
-### Request/Response Processing Strategy
+## Scope and Interpretation
 
-### Request Parsing
-```go
-type S3Request struct {
-    Method      string
-    Bucket      string
-    Key         string
-    QueryParams map[string]string
-    Headers     map[string]string
-    Body        io.Reader
-    IsEncrypted bool // For GET requests
-}
-```
+- **Supported** means a production handler or deliberate dispatch implements the
+  operation, subject to the listed subset and backend requirements. **Not supported**
+  means no semantic implementation, even if its URL can match another operation's
+  route. **Planned** means unavailable but accepted work has a tracking issue.
+- Every supported row is available in the **v0.12.3 baseline**. This is not a claim
+  that v0.12.3 introduced it. Earliest introduction was not audited for every row;
+  use the [changelog](../CHANGELOG.md) for release history. GH-338 proxy filtering
+  requires v0.12.2; GH-345 presigned lifetime and GH-346 copy-source fixes require
+  v0.12.3. Branch implementations are not released support.
+- Paths below use inbound **path-style** addressing. `B` is `/{bucket}` and `O`
+  is `/{bucket}/{key}`. The backend's addressing mode is a separate setting.
+  Selectors such as `?cors` must have an empty value. The optional SDK `x-id`
+  parameter is not an operation selector; required value parameters are shown.
+- **R**: bucket in credential scope, object permission `ro` or `rw`.
+  **W**: bucket in scope and object permission `rw`. **M**: bucket in scope and
+  independent `bucket_permissions: [manage]`. **C/D**: explicit `create`/`delete`
+  grants; C also requires `ALLOW_BUCKET_CREATION=true`. **L**: authenticated
+  `ro`/`rw`, with the result filtered to effective scope. `PROXIED_BUCKET` narrows
+  all applicable scopes. Copy requires source read and destination write scope.
+- All supported operations require a usable backend and backend IAM permissions.
+  **Typed** operations construct a restricted SDK request and transform bodies or
+  metadata; they do not forward every S3 option. **Proxy** operations re-sign and
+  forward permitted headers and query fields. Neither implements missing provider
+  capabilities. Encrypted MPU requires Valkey state and a key manager; plaintext
+  MPU requires an explicit policy opt-out. See [setup](../README.md#encrypted-multipart-uploads).
+- S3 Control (access-point administration, account-level public access settings,
+  Batch Operations, Multi-Region Access Points), S3 Tables, S3 Vectors, STS/IAM,
+  and native non-S3 cloud APIs are **out of scope** and are not implemented by this
+  S3 endpoint. No support or tracking commitment is implied for these families.
 
-### Response Modification
-```go
-type S3Response struct {
-    StatusCode  int
-    Headers     map[string]string
-    Body        io.Reader
-    IsEncrypted bool
-}
-```
+## Object and Multipart Operations
 
-## Authentication and Authorization
+All rows here depend on backend object/multipart support. Encryption follows the
+bucket policy; object subresources operate on the stored ciphertext object's
+backend metadata or configuration rather than decrypting their XML bodies.
 
-### Strategy
-- **Per-credential gateway authentication**: Every inbound request must present a valid access key configured in `auth.credentials`. The gateway validates AWS Signature V4 (and V2) against the stored secret before any backend interaction.
-- **Per-credential bucket scope**: Each credential can be restricted to exact bucket names and trailing-`*` prefixes. An omitted `buckets` list or explicit `[*]` means unrestricted; an explicit empty list `[]` denies all buckets. A bare `*` is broad authority and is appropriate only for trusted provisioning credentials.
-- **Object permissions**: `ro` permits reads only; `rw` permits reads and mutations. Both default to `rw` when omitted.
-- **Bucket permissions**: Explicit grants `create` and `delete` are required for CreateBucket and DeleteBucket. `rw` does not imply either.
+| Official operation | HTTP | Status | Grant | Handling, limitations, evidence |
+|---|---|---|---|---|
+| `AbortMultipartUpload` | DELETE O `?uploadId=...` | Supported | W | Typed abort plus guarded encrypted-state cleanup; 204 on success. Disabled MPU returns 501. [MPU evidence](#evidence-index). |
+| `CompleteMultipartUpload` | POST O `?uploadId=...` | Supported | W | Typed part-number/ETag list; encrypted committed-state validation and companion manifest. Additional checksum fields and conditional completion are not implemented. [MPU evidence](#evidence-index). |
+| `CopyObject` | PUT O, `x-amz-copy-source` | Supported | W + source R | Mediated decrypt/re-encrypt; COPY/REPLACE standard/user metadata. Request ACLs, tagging-directive parity, conditions, and backend SSE options are not fully implemented. [Copy evidence](#evidence-index). |
+| `CreateMultipartUpload` | POST O `?uploads` | Supported | W | Typed initiation; standard/user metadata and ACL fields. Inline tagging, storage class, SSE, and Object Lock initiation settings are not mapped. [MPU evidence](#evidence-index). |
+| `DeleteObject` | DELETE O, optional `versionId` | Supported | W | Typed delete; best-effort MPU companion cleanup. 204; backend delete-marker/version response headers are not projected. Governance bypass refused. [Object evidence](#evidence-index). |
+| `DeleteObjects` | POST B `?delete` | Supported | W | Typed XML Key/VersionId batch with per-key results and cleanup. `Quiet` is parsed but not honored; newer conditional XML fields are not mapped. [Object evidence](#evidence-index). |
+| `DeleteObjectTagging` | DELETE O `?tagging`, optional `versionId` | Supported | W | Proxy; requires backend tagging support. [Configuration evidence](#evidence-index). |
+| `GetObject` | GET O, optional `versionId` | Supported | R | Typed plaintext body/range and response-header projection; conditional headers, part selection, and checksum-mode responses are not implemented. [Object evidence](#evidence-index). |
+| `GetObjectAcl` | GET O `?acl`, optional `versionId` | Supported | R | Proxy; backend object ACL support required. [Configuration evidence](#evidence-index). |
+| `GetObjectLegalHold` | GET O `?legal-hold`, optional `versionId` | Supported | R | Typed Object Lock API; returns XML. [Lock evidence](#evidence-index). |
+| `GetObjectRetention` | GET O `?retention`, optional `versionId` | Supported | R | Typed Object Lock API; returns XML. [Lock evidence](#evidence-index). |
+| `GetObjectTagging` | GET O `?tagging`, optional `versionId` | Supported | R | Proxy; backend tagging support required. [Configuration evidence](#evidence-index). |
+| `HeadObject` | HEAD O, optional `versionId` | Supported | R | Typed metadata/size projection; missing MPU manifest can leave ciphertext length. No conditional, HEAD Range, or part-number semantics. [Object evidence](#evidence-index). |
+| `ListMultipartUploads` | GET B `?uploads` | Supported | R | Proxy, including accepted pagination parameters; provider owns result semantics. [MPU evidence](#evidence-index). |
+| `ListObjects` | GET B | Supported | R | Typed backend ListObjectsV2 adapted to listing XML; v1 marker supported, other field/size/ETag caveats apply. [Listing evidence](#evidence-index). |
+| `ListObjectsV2` | GET B `?list-type=2` | Supported | R | Shared typed listing handler; continuation-token supported, `start-after`, `fetch-owner`, and `encoding-type` ignored. XML is a subset. [Listing evidence](#evidence-index). |
+| `ListParts` | GET O `?uploadId=...` | Supported | R | Typed first backend page; `max-parts`/`part-number-marker` ignored and `IsTruncated=false` emitted. State can translate part sizes. [MPU evidence](#evidence-index). |
+| `PutObject` | PUT O | Supported | W | Typed encrypted/bypass body; standard/user metadata, tags, ACL fields. Conditions, inline Object Lock persistence, storage class, SSE, and durable checksum projection are not implemented by this adapter. [Object evidence](#evidence-index). |
+| `PutObjectAcl` | PUT O `?acl`, optional `versionId` | Supported | W | Proxy; backend object ACL support required. [Configuration evidence](#evidence-index). |
+| `PutObjectLegalHold` | PUT O `?legal-hold`, optional `versionId` | Supported | W | Typed validated ON/OFF XML, 100 KiB parser limit. [Lock evidence](#evidence-index). |
+| `PutObjectLockConfiguration` | PUT B `?object-lock` | Supported | M | Typed validated bucket lock XML, 100 KiB parser limit. Backend must support Object Lock. [Lock evidence](#evidence-index). |
+| `GetObjectLockConfiguration` | GET B `?object-lock` | Supported | R | Typed bucket lock configuration XML. [Lock evidence](#evidence-index). |
+| `PutObjectRetention` | PUT O `?retention`, optional `versionId` | Supported | W | Typed validated future retention date/mode; 100 KiB parser limit, governance bypass refused. [Lock evidence](#evidence-index). |
+| `PutObjectTagging` | PUT O `?tagging`, optional `versionId` | Supported | W | Proxy XML; backend validates the tag document. Inline PutObject tagging has separate gateway validation. [Configuration evidence](#evidence-index). |
+| `RestoreObject` | POST O `?restore` | Supported | W | Proxy restore of backend ciphertext. No archive retrieval orchestration; adding `versionId` to this POST is rejected by current authorization. Route verified; provider restore workflow not independently covered. |
+| `UploadPart` | PUT O `?partNumber=...&uploadId=...` | Supported | W | Typed part body, default 64 MiB buffer cap; encrypted immutable content claims and identical retries. [MPU evidence](#evidence-index). |
+| `UploadPartCopy` | PUT O `?partNumber=...&uploadId=...`, `x-amz-copy-source` | Supported | W + source R | Native copy only for compatible plaintext path; otherwise mediated plaintext-range copy. Source versions and immutable encrypted claims supported; copy conditions not mapped. [Copy evidence](#evidence-index). |
 
-CreateBucket is disabled by default and requires the global gate, credential
-scope, and explicit create grant. Authorized requests preserve the raw
-LocationConstraint body and backend response. DeleteBucket is independently
-authorized by scope and explicit delete grant; backend IAM remains authoritative.
-- **Global intersection**: If `PROXIED_BUCKET` is set, the effective scope is the credential's buckets intersected with the proxied bucket name.
-- **Copy operations**: Both the source bucket and destination bucket must be within the credential's scope, and destination mutations require `rw`.
-- **ListBuckets**: Responses are filtered to only buckets the credential is authorized to access.
-- **Audit**: Every request generates an `auth.authorization_denied` event with a bounded reason (`bucket_scope`, `read_only`, `bucket_create`, `bucket_delete`, `unknown_operation`) when access is denied.
+## Bucket Operations
 
-### Implementation
-Credentials are stored in an atomic snapshot compiled from `config.yaml`, environment variables, or an external credentials file. Changes to the main configuration file or `AUTH_CREDENTIALS_FILE` trigger a reload that validates the complete configuration before atomically replacing the snapshot. Credentials supplied through process environment variables, including Helm-rendered values, require a process restart when changed.
+These depend on provider support for the specified bucket API. Proxy configuration
+documents do not grant gateway authorization or change its encryption policy.
+For example, PutBucketPolicy changes backend IAM policy, not gateway credential
+scope; PutBucketEncryption changes backend defaults, not gateway key selection.
+Most configuration PUT/DELETE bodies are capped at 1 MiB.
 
-### Presigned URL Compatibility Caveats
-1.  **Host Header Mismatch**: Presigned URLs generated by clients usually sign the `Host` header. When the gateway forwards this request to the real backend, the `Host` header changes, invalidating the signature.
-    *   **Solution**: The gateway intercepts the Presigned URL request, validates the signature locally using the gateway's configured credentials, and then creates a *new* request to the backend using the gateway's backend credentials.
-    *   **Requirement**: The client must use credentials that are configured in `auth.credentials`. The gateway validates the signature against the principal's secret before any backend interaction.
-2.  **Path Style vs Virtual Host Style**: Clients should prefer Path Style addressing when generating presigned URLs for the gateway to avoid DNS resolution issues, though the gateway handles virtual host style if DNS is configured correctly.
+| Official operation | HTTP | Status | Grant | Handling, limitations, evidence |
+|---|---|---|---|---|
+| `CreateBucket` | PUT B | Supported | C | Proxy raw LocationConstraint XML, 64 KiB body cap and bucket-name validation. Backend handles Object Lock creation options. [Bucket evidence](#evidence-index). |
+| `DeleteBucket` | DELETE B | Supported | D | Guarded proxy; backend must permit deleting the bucket. [Bucket evidence](#evidence-index). |
+| `DeleteBucketCors` | DELETE B `?cors` | Supported | M | Proxy; no gateway-side CORS store in this release. [Configuration evidence](#evidence-index). |
+| `DeleteBucketEncryption` | DELETE B `?encryption` | Supported | M | Proxy backend encryption defaults. [Configuration evidence](#evidence-index). |
+| `DeleteBucketInventoryConfiguration` | DELETE B `?inventory&id=...` | Supported | M | Proxy named configuration; route parity covered, provider workflow not independently covered. |
+| `DeleteBucketLifecycle` | DELETE B `?lifecycle` | Supported | M | Proxy. Lifecycle acts on ciphertext and does not coordinate key/companion retention. [Configuration evidence](#evidence-index). |
+| `DeleteBucketPolicy` | DELETE B `?policy` | Supported | M | Proxy backend policy, not gateway credential policy. [Configuration evidence](#evidence-index). |
+| `DeleteBucketReplication` | DELETE B `?replication` | Supported | M | Proxy; route parity covered, replication workflow not independently covered. |
+| `DeleteBucketWebsite` | DELETE B `?website` | Supported | M | Proxy; route parity covered, website workflow not independently covered. |
+| `GetBucketAcl` | GET B `?acl` | Supported | R | Proxy. [Configuration evidence](#evidence-index). |
+| `GetBucketAnalyticsConfiguration` | GET B `?analytics&id=...` | Supported | R | Proxy named configuration; route parity covered, provider workflow not independently covered. |
+| `GetBucketCors` | GET B `?cors` | Supported | R | Proxy; does not make gateway-generated responses CORS-readable. [Configuration evidence](#evidence-index). |
+| `GetBucketEncryption` | GET B `?encryption` | Supported | R | Proxy backend defaults. [Configuration evidence](#evidence-index). |
+| `GetBucketInventoryConfiguration` | GET B `?inventory&id=...` | Supported | R | Proxy named configuration; route parity covered, provider workflow not independently covered. |
+| `GetBucketLifecycleConfiguration` | GET B `?lifecycle` | Supported | R | Proxy. [Configuration evidence](#evidence-index). |
+| `GetBucketLocation` | GET B `?location` | Supported | R | Proxy backend region document. [Bucket evidence](#evidence-index). |
+| `GetBucketLogging` | GET B `?logging` | Supported | R | Proxy; route parity covered, provider logging workflow not independently covered. |
+| `GetBucketNotificationConfiguration` | GET B `?notification` | Supported | R | Proxy backend events; route parity covered, event delivery not independently covered. |
+| `GetBucketPolicy` | GET B `?policy` | Supported | R | Proxy backend IAM policy. [Configuration evidence](#evidence-index). |
+| `GetBucketReplication` | GET B `?replication` | Supported | R | Proxy; ciphertext replication, manifest/key portability not certified. Route parity covered. |
+| `GetBucketRequestPayment` | GET B `?requestPayment` | Supported | R | Proxy; route parity covered, requester-pays workflow not independently covered. |
+| `GetBucketVersioning` | GET B `?versioning` | Supported | R | Proxy; does not imply ListObjectVersions support or historical MPU-manifest recovery. [Configuration evidence](#evidence-index). |
+| `GetBucketWebsite` | GET B `?website` | Supported | R | Proxy configuration, not an anonymous website-serving endpoint. Route parity covered. |
+| `HeadBucket` | HEAD B | Supported | R | Typed existence/access probe using backend ListObjects; not a complete backend HeadBucket header contract. [Bucket evidence](#evidence-index). |
+| `ListBucketAnalyticsConfigurations` | GET B `?analytics` | Supported | R | Shared proxy route without `id`; first-page backend passthrough only. `continuation-token` is rejected. No independent list/pagination test. |
+| `ListBucketInventoryConfigurations` | GET B `?inventory` | Supported | R | Shared proxy route without `id`; first-page backend passthrough only. `continuation-token` is rejected. No independent list/pagination test. |
+| `ListBuckets` | GET `/` | Supported | L | Proxy request then filtered/rebuilt XML; new pagination/filter queries rejected and successful-response continuation/region fields not projected. [Bucket evidence](#evidence-index). |
+| `PutBucketAcl` | PUT B `?acl` | Supported | M | Proxy; independent manage grant required. [Configuration evidence](#evidence-index). |
+| `PutBucketCors` | PUT B `?cors` | Supported | M | Proxy only. Gateway-managed evaluation remains [GH-322](https://github.com/cloud37/s3-encryption-gateway/issues/322). [Configuration evidence](#evidence-index). |
+| `PutBucketEncryption` | PUT B `?encryption` | Supported | M | Proxy backend defaults, not gateway encryption policy. [Configuration evidence](#evidence-index). |
+| `PutBucketIntelligentTieringConfiguration` | PUT B `?intelligent-tiering&id=...` | Supported | M | Proxy named configuration; GET/list/delete counterpart operations are not implemented. Route parity covered, provider workflow not independently covered. |
+| `PutBucketInventoryConfiguration` | PUT B `?inventory&id=...` | Supported | M | Proxy named configuration; report contents are backend ciphertext metadata, not translated plaintext metadata. Route parity covered. |
+| `PutBucketLifecycleConfiguration` | PUT B `?lifecycle` | Supported | M | Proxy; backend owns transition/expiry. [Configuration evidence](#evidence-index). |
+| `PutBucketLogging` | PUT B `?logging` | Supported | M | Proxy; logs are backend-side requests, not a substitute for gateway audit. Route parity covered. |
+| `PutBucketNotificationConfiguration` | PUT B `?notification` | Supported | M | Proxy; events describe backend writes, including gateway internal writes. Event delivery not independently covered. |
+| `PutBucketPolicy` | PUT B `?policy` | Supported | M | Proxy; does not grant gateway access. [Configuration evidence](#evidence-index). |
+| `PutBucketReplication` | PUT B `?replication` | Supported | M | Proxy configuration; backend copies are not automatically re-bound for another gateway bucket/key. Route parity covered, recovery not certified. |
+| `PutBucketRequestPayment` | PUT B `?requestPayment` | Supported | M | Proxy configuration; typed object requests do not map requester-pays headers. Route parity covered. |
+| `PutBucketVersioning` | PUT B `?versioning` | Supported | M | Proxy configuration; provider capability required. [Configuration evidence](#evidence-index). |
+| `PutBucketWebsite` | PUT B `?website` | Supported | M | Proxy configuration; gateway still authenticates S3 reads. Route parity covered, website serving not implemented. |
+
+## Unsupported SDK Operations
+
+Each operation below is explicitly **not supported in v0.12.3**. Except where a
+reason/tracker is specified, there is no committed implementation plan or release
+date. Do not assume backend support makes it accessible through the gateway.
+Grant `—` means there is no supported gateway authorization contract for that
+operation; changing credential grants cannot enable it. Evidence is source
+inspection of routes, authorization, and SDK bindings, not individual runtime
+tests of all these requests. See [unsupported request behavior](#unsupported-request-behavior).
+
+| Official operation | AWS HTTP shape (path-style shorthand) | Status | Grant | Reason / tracking |
+|---|---|---|---|---|
+| `CreateBucketMetadataConfiguration` | POST B `?metadataConfiguration` | Not supported | — | No metadata-table control API. |
+| `CreateBucketMetadataTableConfiguration` | POST B `?metadataTable` | Not supported | — | No metadata-table control API. |
+| `CreateSession` | GET B `?session` | Not supported | — | S3 Express session authentication is not implemented. |
+| `DeleteBucketAnalyticsConfiguration` | DELETE B `?analytics&id=...` | Not supported | — | No delete route; GET-only analytics subset. |
+| `DeleteBucketIntelligentTieringConfiguration` | DELETE B `?intelligent-tiering&id=...` | Not supported | — | Only PUT configuration is routed. |
+| `DeleteBucketMetadataConfiguration` | DELETE B `?metadataConfiguration` | Not supported | — | No metadata-table control API. |
+| `DeleteBucketMetadataTableConfiguration` | DELETE B `?metadataTable` | Not supported | — | No metadata-table control API. |
+| `DeleteBucketMetricsConfiguration` | DELETE B `?metrics&id=...` | Not supported | — | Backend S3 metrics configuration is distinct from gateway Prometheus metrics. |
+| `DeleteBucketOwnershipControls` | DELETE B `?ownershipControls` | Not supported | — | No ownership-controls route. |
+| `DeleteBucketTagging` | DELETE B `?tagging` | Not supported | — | Object tagging support does not include bucket tagging. |
+| `DeleteObjectAnnotation` | DELETE O `?annotation` | Not supported | — | No object-annotation API. |
+| `DeletePublicAccessBlock` | DELETE B `?publicAccessBlock` | Not supported | — | No bucket public-access-block route. |
+| `GetBucketAbac` | GET B `?abac` | Not supported | — | Backend ABAC configuration is distinct from gateway credential scopes. |
+| `GetBucketAccelerateConfiguration` | GET B `?accelerate` | Not supported | — | No acceleration configuration or accelerated gateway endpoint. |
+| `GetBucketIntelligentTieringConfiguration` | GET B `?intelligent-tiering&id=...` | Not supported | — | Only PUT configuration is routed. |
+| `GetBucketMetadataConfiguration` | GET B `?metadataConfiguration` | Not supported | — | No metadata-table control API. |
+| `GetBucketMetadataTableConfiguration` | GET B `?metadataTable` | Not supported | — | No metadata-table control API. |
+| `GetBucketMetricsConfiguration` | GET B `?metrics&id=...` | Not supported | — | Not the gateway `/metrics` endpoint. |
+| `GetBucketOwnershipControls` | GET B `?ownershipControls` | Not supported | — | No ownership-controls route. |
+| `GetBucketPolicyStatus` | GET B `?policyStatus` | Not supported | — | GetBucketPolicy support does not include policy-status evaluation. |
+| `GetBucketTagging` | GET B `?tagging` | Not supported | — | No bucket tagging route. |
+| `GetObjectAnnotation` | GET O `?annotation` | Not supported | — | No object-annotation API. |
+| `GetObjectAttributes` | GET O `?attributes`, `x-amz-object-attributes` | Not supported | — | No plaintext size/checksum/part attribute API. |
+| `GetObjectTorrent` | GET O `?torrent` | Not supported | — | No torrent operation for encrypted objects. |
+| `GetPublicAccessBlock` | GET B `?publicAccessBlock` | Not supported | — | No bucket public-access-block route. |
+| `ListBucketIntelligentTieringConfigurations` | GET B `?intelligent-tiering` | Not supported | — | No list route. |
+| `ListBucketMetricsConfigurations` | GET B `?metrics` | Not supported | — | No list route. |
+| `ListDirectoryBuckets` | GET `/`, SDK `x-id=ListDirectoryBuckets` | Not supported | — | No directory-bucket inventory; `x-id` alone can match ordinary ListBuckets, not this semantic operation. |
+| `ListObjectAnnotations` | GET O `?annotation` | Not supported | — | No annotation listing. |
+| `ListObjectVersions` | GET B `?versions` | Not supported | — | Version-specific object access does not include version inventory or delete-marker listing. |
+| `PutBucketAbac` | PUT B `?abac` | Not supported | — | No backend ABAC route. |
+| `PutBucketAccelerateConfiguration` | PUT B `?accelerate` | Not supported | — | No acceleration configuration route. |
+| `PutBucketAnalyticsConfiguration` | PUT B `?analytics&id=...` | Not supported | — | Only analytics GET/list first-page proxying is routed. |
+| `PutBucketMetricsConfiguration` | PUT B `?metrics&id=...` | Not supported | — | No backend metrics configuration route. |
+| `PutBucketOwnershipControls` | PUT B `?ownershipControls` | Not supported | — | No ownership-controls route. |
+| `PutBucketTagging` | PUT B `?tagging` | Not supported | — | No bucket tagging route. |
+| `PutObjectAnnotation` | PUT O `?annotation` | Not supported | — | No object-annotation API. |
+| `PutPublicAccessBlock` | PUT B `?publicAccessBlock` | Not supported | — | No bucket public-access-block route. |
+| `RenameObject` | PUT O `?renameObject`, rename-source header | Not supported | — | S3 Express rename is not gateway CopyObject plus DeleteObject. |
+| `SelectObjectContent` | POST O `?select&select-type=2` | Not supported | R to reach refusal | Explicit `501 NotImplemented` after auth; backend SQL cannot evaluate gateway ciphertext. By design; [Configuration evidence](#evidence-index). |
+| `UpdateBucketMetadataAnnotationTableConfiguration` | PUT B `?metadataAnnotationTable` | Not supported | — | No metadata-table control API. |
+| `UpdateBucketMetadataInventoryTableConfiguration` | PUT B `?metadataInventoryTable` | Not supported | — | No metadata-table control API. |
+| `UpdateBucketMetadataJournalTableConfiguration` | PUT B `?metadataJournalTable` | Not supported | — | No metadata-table control API. |
+| `UpdateObjectEncryption` | PUT O `?encryption` | Not supported | — | Backend SSE changes are not gateway key rotation/re-encryption. |
+| `WriteGetObjectResponse` | POST `/WriteGetObjectResponse` | Not supported | — | No S3 Object Lambda response integration; by design. |
+
+## Legacy Names and Browser Extensions
+
+These entries are additional to the pinned SDK's 112 operations. Legacy XML
+schemas are not independently certified merely because they share a route with a
+modern Configuration API. Consult backend-specific compatibility for old clients.
+
+| Operation / extension | HTTP | Status | Grant | Handling / tracking |
+|---|---|---|---|---|
+| `GetBucketLifecycle` | GET B `?lifecycle` | Supported | R | Same proxy route as GetBucketLifecycleConfiguration; legacy schema not independently verified. |
+| `PutBucketLifecycle` | PUT B `?lifecycle` | Supported | M | Same proxy route as PutBucketLifecycleConfiguration; backend must accept the legacy document. |
+| `GetBucketNotification` | GET B `?notification` | Supported | R | Same proxy route as GetBucketNotificationConfiguration; legacy schema not independently verified. |
+| `PutBucketNotification` | PUT B `?notification` | Supported | M | Same proxy route as PutBucketNotificationConfiguration; backend must accept the legacy document. |
+| POST Object (presigned HTML form) | POST B, `multipart/form-data` | Planned | — currently; intended W | Not implemented. [GH-353](https://github.com/cloud37/s3-encryption-gateway/issues/353); browser response CORS depends on GH-322. |
+| CORS preflight OPTIONS | OPTIONS B or O | Supported | Credential-free qualifying preflight, otherwise R | Narrow authentication exception; backend passthrough only. Complete gateway-owned browser CORS is planned in [GH-322](https://github.com/cloud37/s3-encryption-gateway/issues/322). |
+
+## Evidence Index
+
+Test references identify **existing source scenarios**, not a fresh pass report or
+certification of all options. Provider gates and fixtures can skip scenarios; see
+[SDK/backend coverage](#backend-and-encryption-mode-coverage).
+
+- **Route evidence for all routed rows:** [`RegisterRoutes`](../internal/api/handlers.go),
+  [`authorization.go`](../internal/api/authorization.go), and
+  [`TestRouteClassificationParity`](../internal/api/route_parity_test.go).
+  Shared analytics/inventory list shapes use the existing GET route; they lack
+  independently asserted list/pagination conformance.
+- **Object:** [`put_get_test.go`](../test/conformance/put_get_test.go),
+  [`ranged_test.go`](../test/conformance/ranged_test.go),
+  [`metadata_matrix_test.go`](../test/conformance/metadata_matrix_test.go),
+  [`object_response_test.go`](../internal/api/object_response_test.go),
+  and [`object_read_backend_test.go`](../test/conformance/object_read_backend_test.go).
+- **Listing:** [`listobjects_size_test.go`](../test/conformance/listobjects_size_test.go)
+  and ListObjects prefix/delimiter/marker/token unit tests in
+  [`handlers_test.go`](../internal/api/handlers_test.go). These do not certify
+  `start-after`, `fetch-owner`, `encoding-type`, or complete XML parity.
+- **MPU:** Multipart_Basic / Multipart_Abort / Multipart_ListParts registrations
+  in [`suite_test.go`](../test/conformance/suite_test.go),
+  [`encrypted_mpu_test.go`](../test/conformance/encrypted_mpu_test.go), and
+  [`sec38_complete_handler_test.go`](../internal/api/sec38_complete_handler_test.go).
+  Small ListParts scenarios do not certify pagination.
+- **Copy:** [`copy_source_test.go`](../test/conformance/copy_source_test.go),
+  [`upload_part_copy_test.go`](../test/conformance/upload_part_copy_test.go), and
+  [`sec38_copy_http_test.go`](../internal/api/sec38_copy_http_test.go).
+- **Bucket:** [`bucket_management_test.go`](../test/conformance/bucket_management_test.go),
+  [`bucket_management_test.go`](../internal/api/bucket_management_test.go),
+  and ListBuckets/GetBucketLocation cases in the configuration suite below.
+- **Configuration:** [`s3_compat_test.go`](../test/conformance/s3_compat_test.go),
+  [`bucket_configuration_authorization_test.go`](../test/conformance/bucket_configuration_authorization_test.go),
+  and [`passthrough_headers_test.go`](../test/conformance/passthrough_headers_test.go).
+  Round trips exist for selected ACL, tagging, CORS, lifecycle, policy, versioning,
+  and encryption operations. Notification, replication, logging, website, restore,
+  inventory, analytics, and intelligent-tiering workflows are not independently
+  certified by a route-parity assertion.
+- **Lock:** [`object_lock_test.go`](../internal/api/object_lock_test.go),
+  [`object_lock_test.go`](../test/conformance/object_lock_test.go), and typed SDK
+  mapping in [`client.go`](../internal/s3/client.go). Inline-lock intent in tests
+  must not be read as proof that typed PutObject persists those settings.
+
+## Keeping the Inventory Complete
+
+On an SDK or release update, compare this inventory with `api_op_*.go` in the
+pinned `github.com/aws/aws-sdk-go-v2/service/s3` module and the AWS action index.
+Review `RegisterRoutes`, header-based copy dispatch, query authorization, typed
+SDK input/output mappings, and provider gates before changing a status. Record
+options separately; do not promote an operation to full parity because its base
+route or a small smoke test passes. Keep unknown/untested combinations explicit
+and add tracking links only when a real issue exists.
+
+## Addressing and Authentication
+
+| Mode | Released behavior |
+|---|---|
+| Path style | Supported: `https://gateway/bucket/key`; bucket/key come from the path. |
+| Virtual host | No `bucket.gateway` host-to-bucket mapping. DNS alone cannot enable it; do not rewrite a signed Host/path to compensate. Backend addressing settings are independent. |
+| Access-point/Outposts/Object Lambda ARNs, S3 Express/directory buckets | No endpoint/ARN/session routing contract. Ordinary scopes/routes do not implement these modes. |
+| SigV4 header | Gateway access key/secret, default 5-minute clock skew; operation fields and signed-body integrity are separate contracts. |
+| SigV4 presigned GET/PUT | Sign gateway endpoint with gateway credentials; expiry single integer 1–604800 seconds. Permission changes still apply. |
+| SigV2 | Disabled by default; explicit deprecated migration opt-in. |
+| STS/session credentials | No token issuance/expiry authority or configured session-token validation; a token present in a signed request is not session-credential certification. |
+| Anonymous/website reads | Backend public policy does not bypass gateway auth. System probes/qualifying credential-free OPTIONS are narrow exceptions. |
+| Browser forms/CORS | Unreleased #353/#322 work; ordinary presigned PUT support does not imply complete browser uploads. |
 
 ### SigV4 Request Time and Presigned Expiration
 
-Header-signed requests and presigned URLs have different validity windows:
+Header timestamps must fall within `auth.clock_skew_tolerance` (default `5m`).
+Presigned timestamps cannot exceed that tolerance into the future; past age is
+bounded by `X-Amz-Date + X-Amz-Expires`, with no grace past the signed deadline.
+Expiry is checked when authentication starts, not by interrupting an accepted
+download. Scope date follows the signing date; crossing midnight is valid.
+Malformed/duplicate/zero/negative/overflowing expiry is rejected before backend
+access; altering expiry without re-signing fails HMAC verification.
 
-- **Header authentication:** the absolute difference between the signing
-  timestamp and server time must not exceed `auth.clock_skew_tolerance`
-  (`AUTH_CLOCK_SKEW_TOLERANCE`, default `5m`). The header-auth replay window is
-  unchanged by the GH-345 fix.
-- **Presigned authentication:** `X-Amz-Date` may not be more than the configured
-  skew tolerance in the future. Past signature age is bounded by
-  `X-Amz-Date + X-Amz-Expires`, not by the clock-skew window. The tolerance does
-  not extend this deadline; requests strictly after it are expired. Expiration
-  is checked when authentication begins;
-  an accepted download is not interrupted merely because its deadline passes.
-- **Required expiry:** `X-Amz-Expires` must occur exactly once and contain a
-  decimal integer from `1` through `604800` seconds (seven days), inclusive.
-  Empty, signed, fractional, negative, duplicate, and overflowing values are
-  invalid. Bounds are checked before duration conversion.
-- **Authentication still applies:** the credential must remain configured and
-  permitted for the operation. The scope date must match the signing
-  timestamp's UTC date, not the current server date. Crossing midnight does
-  not invalidate a URL. Changing the URL's expiry without re-signing fails
-  signature verification; the expiry check follows HMAC verification.
-
-The gateway returns fixed S3 XML messages without signatures or internal
-diagnostic details:
-
-| Failure | HTTP status | S3 code | Message |
-| --- | --- | --- | --- |
-| Authenticated presigned URL past its deadline | 403 | `AccessDenied` | `Request has expired.` |
-| Header timestamp outside the skew window, or presigned timestamp too far in the future | 403 | `RequestTimeTooSkewed` | `The difference between the request time and the server's time is too large.` |
-| Authenticated presigned request with invalid/missing expiry | 400 | `InvalidArgument` | `X-Amz-Expires must be a single integer between 1 and 604800 seconds.` |
-| Incorrect HMAC signature | 403 | `SignatureDoesNotMatch` | Existing fixed signature-mismatch message |
-
-All rejected requests stop before backend interaction. Other malformed
-authentication errors retain the existing opaque response. Legacy SigV2 timing
-and its opt-in policy are unchanged. See the AWS references for
-[presigned parameters](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-query-string-auth.html)
-and [S3 error codes](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/ErrorResponses.html).
+| Failure | HTTP | S3 code / fixed message |
+|---|---|---|
+| Authenticated expired URL | 403 | AccessDenied: `Request has expired.` |
+| Excessive timestamp skew | 403 | RequestTimeTooSkewed: `The difference between the request time and the server's time is too large.` |
+| Authenticated invalid/missing expiry | 400 | InvalidArgument: `X-Amz-Expires must be a single integer between 1 and 604800 seconds.` |
+| Incorrect HMAC | 403 | SignatureDoesNotMatch; no internal signing diagnostics |
 
 ### SigV4 Signed Content-Length (GH-356)
 
-When `content-length` appears in the client's `SignedHeaders`, the canonical
-request uses its explicit header value. If that header is absent, the gateway
-uses the decimal value of Go's incoming `Request.ContentLength` **only when it
-is known and nonnegative**. This mirrors the existing missing-`host` recovery
-from `Request.Host` and applies to both header and presigned authentication.
+**Unreleased main:** If the client signs `content-length`, use its explicit header
+value; when absent, recover the decimal `Request.ContentLength` only if known and
+nonnegative. This applies to header and presigned auth, analogous to missing Host
+recovery. A proxy can omit signed `Content-Length: 0` on DELETE while the gateway
+still knows zero; unknown/chunked length (-1) is never inferred or forced to zero.
 
-For example, a client can sign `Content-Length: 0` on DELETE, but a Go-based
-frontend reverse proxy may omit it when forwarding the bodiless request. The
-gateway still receives a known zero request length and reconstructs
-`content-length:0` for signature verification. The fallback is local to
-canonicalization: it does not modify request headers, add unsigned headers to
-the signature, or bypass HMAC/payload verification, authorization, or time checks.
+Recovery is local to canonicalization and does not mutate inbound headers, alter
+SignedHeaders, bypass HMAC/body verification, or weaken authorization/time checks.
+Explicit headers retain precedence. This is not general repair for changed signed
+Host/path/query/other fields; invalid signatures still stop before backend access.
+SigV2 is unchanged. v0.12.3 does not contain this fix. See
+[deployment guidance](DEPLOYMENT.md#signed-zero-content-length-gh-356) and
+[regression commands](TESTING.md#signed-content-length-regressions-gh-356).
 
-Explicit header values take precedence; unknown/chunked length (`-1`) is never
-formatted as a fallback header or assumed to be zero. This is not general proxy
-signature repair: changes to signed host, path, query, other headers, or framing
-that loses a known signed length can still cause 403 `SignatureDoesNotMatch`.
-Invalid signatures stop before backend access. SigV2 is unchanged.
+## Gateway-managed CORS (GH-322)
 
-See [operator guidance](DEPLOYMENT.md#signed-zero-content-length-gh-356) and
-[Tier 1/Tier 2 regression commands](TESTING.md#signed-content-length-regressions-gh-356).
+**Unreleased main:** `cors.mode: passthrough` remains the default, forwarding backend
+behavior. Opt-in `gateway` mode owns bucket XML, preflight, and headers on encrypted,
+gateway-generated, proxied, and error responses. Shared Valkey is durable policy
+without TTL; enable retained-storage persistence and independently tested backup/
+restore before opting in. See [deployment](DEPLOYMENT.md#gateway-managed-cors-gh-322)
+and [data-loss recovery](RUNBOOK.md#gateway-cors-valkey-data-loss-and-recovery).
 
-## Header and Metadata Handling
+GET ?cors requires bucket read access; PUT/DELETE require independent manage grants.
+All management operations probe existence via `ListObjects(MaxKeys=1)`, so backend
+list permission is required. Only explicit NoSuchBucket maps to 404. AccessDenied,
+throttling, transport, or ambiguous probe failures return fixed 503 ServiceUnavailable
+without modifying policy. Gateway mode does not require native backend CORS.
 
-The canonical encrypted-object metadata inventory, field ownership, and
-response precedence rules are documented in
-[`docs/METADATA_MODEL.md`](METADATA_MODEL.md).
+| Management request | Condition | HTTP / body |
+|---|---|---|
+| GET ?cors | Configured policy | 200 CORS XML, application/xml |
+| GET ?cors | No stored policy | 404 NoSuchCORSConfiguration |
+| GET/PUT/DELETE ?cors | Explicit missing bucket | 404 NoSuchBucket |
+| GET/PUT/DELETE ?cors | Ambiguous/denied probe or unavailable policy store | 503 ServiceUnavailable |
+| GET ?cors | Corrupt stored policy | 503 ServiceUnavailable |
+| PUT ?cors | Valid XML stored | 200 empty body |
+| PUT ?cors | Malformed XML / invalid origin authority | 400 MalformedXML |
+| PUT ?cors | XML over 64 KiB | 413 EntityTooLarge |
+| PUT ?cors | Malformed Content-MD5 encoding/digest length | 400 InvalidDigest |
+| PUT ?cors | Content-MD5 mismatch | 400 BadDigest |
+| PUT ?cors | Store write failure | 503 ServiceUnavailable; prior policy unchanged |
+| DELETE ?cors | Existing bucket, with or without policy | 204 empty; idempotent |
+| DELETE ?cors | Store delete failure | 503 ServiceUnavailable |
 
-The shared response projector restores the six standard fields
-(`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`,
-`Content-Language`, and `Expires`) across HEAD, full/ranged GET, MPU, and cache
-responses. It filters all registered reserved metadata; authenticated GET
-`response-*` overrides precede encrypted protected metadata; backend version
-IDs precede the requested `versionId` fallback. The Tier 2 matrix asserts PUT,
-COPY, COPY REPLACE, encrypted MPU, and UploadPartCopy in chunked/non-chunked
-self-contained configurations, along with real cache hit and ETag-mismatch
-refresh behavior. See `docs/TESTING.md` for fixtures and the full validation
-matrix.
+Preflight is local with no backend round trip: Origin/method/every requested header
+must match an ordered rule. Qualifying credential-free browser OPTIONS retains the
+narrow auth exception and PROXIED_BUCKET restriction; actual requests remain signed.
 
-For response ETags, encrypted single-object formats restore the quoted original
-ETag when recorded; MPU responses retain the backend multipart ETag and
-plaintext objects retain their backend ETag. ListObjects continues to expose
-backend ETags as documented separately below.
+| Preflight condition | HTTP / allow headers | Vary |
+|---|---|---|
+| Matching rule | 200; origin, matched methods, requested allowed headers, configured expose/max-age, optional credentials | Origin, Access-Control-Request-Method, Access-Control-Request-Headers |
+| No match / absent policy without matching fallback | 403 AccessDenied; no allow headers | Same three tokens |
+| Malformed Origin/ACR fields | 400 InvalidArgument; no allow headers, including credentials mode | Same three tokens |
+| Store unavailable/corrupt | 503 ServiceUnavailable; no allow headers | Same three tokens |
 
-### Preserved Headers
-- `Content-Type`
-- `Content-Length` (modified for encryption overhead)
-- `ETag` (modified for encrypted content)
-- `Last-Modified`
-- `x-amz-meta-*` (user metadata)
-- `x-amz-tagging` (validated: max 10 tags, key ≤128 chars, value ≤256 chars)
-- `x-amz-version-id`
+Matched actual responses receive only Allow-Origin, configured Expose-Headers,
+optional credentials—not preflight methods/headers/max-age. **ETag must be exposed
+explicitly**. Existing Vary is preserved and Origin added where relevant. Gateway
+mode strips upstream Access-Control-* policy headers even on absent-origin requests;
+policy lookup errors suppress authorization rather than activating fallback.
+allow_credentials defaults false; true is a nonstandard opt-in that reflects only
+validated concrete Origin, never wildcard with credentials.
+
+Fallback applies only to genuinely missing policy; never to corruption/outage and
+never returned by GET ?cors. Empty-store reset can activate fallback despite healthy
+readiness; restore known rules, not a broad fallback. Runtime XML API edits are not
+configuration-file reloads. Successful backend DeleteBucket with failed policy
+cleanup returns 503 and may already have deleted the bucket. Resolve stale policy
+before reuse; gateway create also refuses if required stale-key cleanup fails.
+See [ADR 0019](adr/0019-gateway-managed-cors.md).
+
+Evidence: [CORS handlers](../internal/api/cors_handlers.go),
+[response middleware](../internal/api/cors_middleware.go),
+[rule tests](../internal/api/cors_rules_test.go), and
+S3Compat_GatewayCORSWithoutBackend in the [suite](../test/conformance/suite_test.go).
+Its fixture uses encrypted MPU capability for shared state, not CapBucketCors;
+passthrough CORS tests still use native backend gates. This source/test inventory
+is not a new full-provider pass report.
+
+## Object Reads and Responses
+
+| Field / option | Released behavior |
+|---|---|
+| GET/HEAD `versionId` | Typed backend mapping; provider versioning required. |
+| GET Range | Single closed/open/suffix plaintext range, 206 with projected length/range. Encrypted chunks/MPU translated; legacy/full fallback may read entire object. Multiple ranges absent. |
+| HEAD Range / GET/HEAD `partNumber` | Not mapped/applied even when query authorization accepts it. |
+| Conditional headers | If-Match/If-None-Match/If-Modified-Since/If-Unmodified-Since/If-Range not mapped/evaluated on typed GET/HEAD. No guaranteed conditional 304/412 or If-Range behavior. |
+| Six GET response overrides | Content type/language/encoding/disposition, cache control, expires override projected values on authenticated GET/range/cache; not HEAD. |
+| Checksum mode / attributes | No durable plaintext checksum response contract; typed reads do not map checksum-mode. GetObjectAttributes absent. |
+| ETag | Original recorded encrypted single-object ETag if available; otherwise backend. MPU uses backend multipart ETag; PUT/listing backend ETag, not universal plaintext MD5. |
+| Metadata | Six standard fields and filtered user metadata through shared projector; internal markers/aliases/blobs hidden. See [encryption metadata model](ENCRYPTION_DESIGN.md#encrypted-object-metadata-model). |
+| Version/delete-marker output | GET/HEAD backend version wins requested fallback. Typed write/delete responses do not consistently project destination version/delete-marker fields. |
+| Other backend headers | Typed reads are not generic passthrough: do not assume lifecycle/restore/SSE/checksum/CORS headers survive. |
+| Manifest/cache | Missing MPU manifests fail GET/copy; HEAD/list size may retain ciphertext. Cache revalidates metadata/ETag and projects overrides but adds no conditional/checksum semantics. |
+
+## Listings and Pagination
+
+| Option | Released behavior |
+|---|---|
+| ListObjects v1/v2 | Shared backend ListObjectsV2 adapter; prefix/delimiter/positive max-keys/continuation-token mapped. |
+| v1 marker | Maps to backend StartAfter; NextMarker derived from last returned object. |
+| v2 start-after | Accepted but ignored; handler reads marker instead. Use token pagination. |
+| encoding-type/fetch-owner | Accepted but not applied; ordinary XML escaping, no requested URL encoding/owner output. |
+| XML parity | Name/Prefix/Delimiter/MaxKeys/IsTruncated/NextContinuationToken/Contents/CommonPrefixes and derived NextMarker; KeyCount/echoed continuation/start-after/EncodingType fields incomplete. |
+| zero/invalid max-keys | No strict AWS validation/zero-page contract; adapter sets only positive MaxKeys. |
+| StorageClass / size / ETag | StorageClass reconstructed as STANDARD; advisory Valkey/HEAD size translation, unresolved ciphertext sizes possible; ETag backend-defined. |
+| Manifest suffix | `.mpu-manifest` filtered as internal namespace; not safe for ordinary app keys. Counts/pages can differ after filtering. |
+| ListParts pagination | One backend page, requested max-parts/marker ignored; emits MaxParts=1000/marker=0/IsTruncated=false. Large uploads can have incomplete unsignaled inventory. |
+| ListParts size | Positive stored plaintext size substituted when available; otherwise backend encrypted size. |
+| ListMultipartUploads | Proxy preserves accepted prefix/delimiter/encoding/key-marker/upload-id-marker/max-uploads; provider owns pagination. Not the admin state inventory. |
+| ListBuckets | New prefix/region/max-buckets/token queries rejected; success XML only Owner and Name/CreationDate, incomplete pagination/region output. |
+| Analytics/inventory list | Shared first-page GET proxy without id; continuation-token rejected, not independently verified pagination. |
+| ListObjectVersions | Not implemented; version-specific access is not version inventory. |
+
+## Writes, Copies, and Multipart Options
+
+### Copy-source Encoding and Identity (GH-346)
+
+Copy-source headers accept `bucket/key` or `/bucket/key`, optionally followed by
+`?versionId=...`. Split the raw version suffix **before** one path-percent decode;
+literal `+` stays `+`, `%20` becomes space, `%252F` is literal `%2F`, encoded `?`
+or `#` remain key data. Do not normalize repeated slashes/dot segments. Decode
+opaque version separately; source authorization and backend reads use that same
+identity. Backend copy builds a separately escaped header, never mutating signed
+inbound source fields. Malformed escapes/empty components return 400 InvalidArgument;
+valid out-of-scope identity returns 403. v0.12.3 fixes old wrong-sibling selection;
+audit prior escaped-key copies/moves using [migration](MIGRATION.md).
+
+| Option | Released behavior |
+|---|---|
+| Standard/user metadata | Shared six-field parser/persistence; reserved names rejected, backend filters apply. Initiation freezes destination fields. |
+| PUT/DELETE/completion conditions | Typed If-Match/If-None-Match and newer delete conditions absent; not an atomic compare-and-swap boundary. |
+| PUT ACL/grants | Parsed/mapped; provider permissions required. Copy re-encrypt does not set request ACL; use object ACL afterward. |
+| PUT tags | Validated/mapped inline; XML subresources proxy provider validation. Initiation tags not forwarded; set after completion. |
+| Backend SSE/storage class | SSE-S3/SSE-KMS/SSE-C/DSSE and storage-class input mapping absent on typed writes/parts/copy; backend defaults independent. |
+| Owner/requester-pays/MFA | Proxy permitted x-amz fields preserved; typed methods do not generally map them. No full requester-pays/MFA-delete contract. |
+| Content-MD5/checksum headers | Not a general inbound validation/persistence contract. Adapter computes outgoing MD5 for seekable bytes, possibly ciphertext. Signed-body modes below verify inbound integrity. |
+| Copy identity/version/range | Decode source once; source version and plaintext part range supported. Location-bound ciphertext must not be backend-relocated. |
+| Copy source conditions | x-amz-copy-source-if-* not mapped by typed source/native part inputs. |
+| Metadata/tagging directive | COPY inherits source fields, REPLACE request fields; invalid metadata directive rejected. Tagging-directive not full source-tag COPY/REPLACE parity. |
+| Part retry/replacement | Immutable first-content claims: identical retry supported; changed content/reservation conflict 409 OperationAborted. Abort/new upload to change part. |
+| Completion XML | Selected ordered PartNumber/ETag set validated; additional per-part checksum XML not carried into backend input. |
+| Inline Object Lock | PUT parses/validates but typed adapter does not persist; initiation fields not captured. Native copy maps lock; re-encrypted copy has PUT limitation. Completion retention/hold uses separate post-completion calls, not atomic. |
+| Governance bypass | Truthy bypass refused with 403 on retention/delete paths; no S3 admin override. |
+| DeleteObjects | Key/VersionId mapped, per-key results; Quiet ignored, conditional fields and full marker-version output absent. |
 
 ### Passthrough Request Header Contract
 
-`forwardToBackend` is an S3 forwarding boundary, not a generic HTTP proxy.
-Before backend SigV4 signing it builds an independent header set containing:
+Registered proxy APIs construct independent backend headers before signing:
+allowed `x-amz-*` operation fields (not incoming authentication), six standard
+content fields plus Content-MD5, conditional/range headers, and CORS inputs.
+Client Authorization/X-Amz-Date/X-Amz-Content-Sha256/security token and query
+authentication are replaced/removed. Signed inbound headers are not mutated.
+Proxy identity/cookies/tracing/arbitrary fields and fixed/Connection-nominated
+hop-by-hop fields are excluded. Proxy responses keep end-to-end fields except
+hop-by-hop nominations; redirects are returned, not followed. This is **not** the
+typed object adapter's option mapping. See [proxy deployment](DEPLOYMENT.md#frontend-header-preservation).
 
-- `x-amz-*` operation headers (including metadata, checksums, ACLs,
-  expected-owner, requester-pays, and MFA), except client authentication fields.
-- `Content-Type`, `Content-MD5`, `Cache-Control`, `Content-Disposition`,
-  `Content-Encoding`, `Content-Language`, and `Expires`.
-- `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`,
-  `If-Range`, and `Range`.
-- CORS inputs: `Origin`, `Access-Control-Request-Method`, and
-  `Access-Control-Request-Headers`.
+Unreleased main gateway-CORS middleware strips upstream Access-Control-* policy
+headers and applies the matched local decision before status/body commit on every
+S3 response, including ListBuckets/locally generated paths. Passthrough preserves
+end-to-end backend CORS fields. Both retain fixed/Connection-nominated hop-by-hop
+filtering. See [CORS contract](#gateway-managed-cors-gh-322).
 
-Client `Authorization`, `X-Amz-Date`, `X-Amz-Content-Sha256`, and
-`X-Amz-Security-Token` are not copied. Existing SigV2/SigV4 query authentication
-is removed without rewriting the remaining raw S3 subresource selectors.
-The gateway supplies the backend host, derives Content-Length from the buffered
-body, and generates its own authentication fields when backend credentials are
-configured. The same filtering applies to unsigned backend requests.
+## Body Integrity and Resource Limits
 
-Everything else is excluded, including `X-Forwarded-*`, `Forwarded`, `Via`,
-`X-Real-IP`, cookies, client request IDs, and tracing headers. Fixed hop-by-hop
-fields and every field nominated by any `Connection` value are removed
-case-insensitively, even if an otherwise allowed S3 header is nominated.
-Filtering does not mutate inbound headers used for gateway auditing and
-trusted-proxy IP extraction. An HTTP transport may add its own unsigned
-transport headers; these are not copied client identity.
+Concrete lowercase SHA-256 signed bodies are verified/spooled before dispatch;
+UNSIGNED-PAYLOAD declines that preflight. Exact streaming modes accepted:
+STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER,
+STREAMING-UNSIGNED-PAYLOAD-TRAILER. Signed chunks/terminal and declared trailers
+are verified before storage. Trailer algorithms: CRC64NVME, CRC32, CRC32C,
+SHA-1, SHA-256. Unknown/ambiguous modes fail closed; no stored-checksum retrieval implied.
 
-The policy covers both the generic passthrough wrapper and the direct
-ListBuckets forwarding call. In gateway-managed CORS mode, response middleware
-strips backend `Access-Control-*` policy headers on every S3 response and
-applies only the gateway's matched decision before status/body commit. In
-passthrough mode proxy responses retain end-to-end S3/CORS headers. Both modes
-strip fixed and `Connection`-nominated hop-by-hop fields, including `Trailer`.
-See [reverse-proxy deployment](DEPLOYMENT.md#reverse-proxies-and-backend-load-balancers)
-and [GH-338 testing](TESTING.md#reverse-proxy-header-regressions-gh-338).
+| Limit | Default / behavior |
+|---|---|
+| UploadPart | 64 MiB `SERVER_MAX_PART_BUFFER`, plaintext/encrypted; reject before write |
+| Verified spools | 5 GiB request / 10 GiB aggregate process budget; request 413 EntityTooLarge, aggregate 503 SlowDown; operation caps also apply |
+| Legacy encrypted copy | 256 MiB configurable source cap; full decrypt; general copy may buffer ciphertext |
+| CreateBucket XML | 64 KiB |
+| Config PUT/DELETE | 1 MiB body-limited proxy; Object Lock parser 100 KiB |
+| Complete XML | 10 MiB plus part/order validation; provider object limits independent |
 
-### Added Encryption Metadata
-- `x-amz-meta-encrypted`: "true"
-- `x-amz-meta-encryption-algorithm`: "AES256-GCM" or "ChaCha20-Poly1305"
-- `x-amz-meta-encryption-key-salt`: base64-encoded salt
-- `x-amz-meta-encryption-original-size`: original size (canonical key)
-- `x-amz-meta-original-etag`: original ETag
+See [deployment](DEPLOYMENT.md) for spool/timeout config and [security contract](../SECURITY.md).
+Bounds do not certify every upload mode/provider accepts that size.
 
-### Encrypted Metadata (Opt-in)
-When `metadata_encryption_key_file` or `metadata_encryption_key` is configured,
-all gateway-generated encryption metadata is stored as a single encrypted blob:
-- `x-amz-meta-enc-metadata`: Base64-encoded AES-256-GCM ciphertext (JSON payload)
-- `x-amz-meta-encrypted`: still `"true"` (outside the blob, for `IsEncrypted`)
-- User-supplied `x-amz-meta-*` headers: remain visible in S3
+## Backend-Managed Features and Recovery
 
-### Hidden Headers
-- Never expose backend-specific headers
-- Filter internal encryption metadata from client responses
+Lifecycle/replication/inventory/logging/events operate on ciphertext and gateway
+internal writes; they do not coordinate manifest/key retention or translated sizes.
+Cross-location backend replication can conflict with authenticated binding.
+Historical MPU parent/manifest versions are not a fully certified recovery mapping.
+Companion cleanup is best-effort. Explicit lock APIs/backend defaults must be
+verified; accepted inline headers alone do not establish retention. Archived restore
+still needs readable ciphertext and keys. See [migration](MIGRATION.md) and [runbook](RUNBOOK.md).
 
-## Object Tagging Support
+## Unsupported Request Behavior
 
-### PUT Object Tagging
-- **Endpoint**: `PUT /{bucket}/{key}?tagging`
-- **Implementation**:
-  - Validates tag format and limits before forwarding to backend
-  - Tags are passed through unchanged to maintain compatibility
+Missing/invalid credentials fail first. Unknown query shapes normally return
+403 AccessDenied before backend access; a new grant cannot enable an absent API.
+`x-id` is not a trusted operation discriminator—ordinary ListBuckets can match
+a directory-list-shaped request without implementing directory semantics.
+SelectObjectContent and disabled MPU/CreateBucket have explicit 501 handlers;
+registered proxies can return provider failures. Not every unsupported request
+returns 501, and every unimplemented wire shape is not independently tested.
 
-### GET Object Tagging
-- **Endpoint**: `GET /{bucket}/{key}?tagging`
-- **Implementation**:
-  - Retrieves tags from backend and returns them unchanged
+### Error Handling and Translation
 
-### Tag Validation (PUT Operations)
-- **Maximum Tags**: 10 tags per object
-- **Key Constraints**:
-  - Length: 1-128 characters
-  - Characters: alphanumeric, spaces, and symbols: `+ - = . _ : /`
-  - Cannot be empty or contain only whitespace
-- **Value Constraints**:
-  - Length: 0-256 characters (empty values allowed)
-  - Characters: alphanumeric, spaces, and symbols: `+ - = . _ : /`
-- **Error Response**: InvalidArgument (400) with descriptive message for validation failures
+Typed backend errors use fixed S3 XML messages: NoSuchBucket/NoSuchKey → 404,
+AccessDenied → 403, InvalidArgument/InvalidBucketName → 400,
+SlowDown/ServiceUnavailable → 503, unclassified failures → 500 InternalError.
+GET planning preserves backend error provenance, not false crypto/tamper attribution.
+Key-manager failures remain crypto failures; missing companion manifests keep their
+documented integrity/advisory policy. HEAD has no response body; late streaming
+errors cannot replace written headers. Proxy APIs retain upstream response semantics
+and use their own forwarding-error path. Do not infer universal error codes from
+this typed mapping.
 
-## Encryption Metadata Format
+## SDK / Tool Compatibility
 
-### Storage Format
-```json
-{
-  "encrypted": true,
-  "algorithm": "AES256-GCM" | "ChaCha20-Poly1305",
-  "key_salt": "base64-encoded-salt",
-  "original_size": 12345,
-  "original_etag": "original-etag-value",
-  "iv": "base64-encoded-iv"
-}
+The following is **source scenario coverage**, not fresh certification of all
+operations/tool versions. Pins reflect v0.12.3. ✓ means directly exercised; — means
+not independently exercised by that runner, not unsupported by the tool.
+
+| Tool | Pin | Basic PUT/GET/LIST/DELETE | HEAD | MPU | Copy | Caveat |
+|---|---|---|---|---|---|---|
+| Go SDK v2 | S3 v1.114.0 | ✓ | ✓ | ✓ | ✓ | Seven-operation in-process runner |
+| boto3 | 1.43.107 | ✓ | ✓ | ✓ | — | Separate HTTPS trailer MPU scenario |
+| AWS CLI | 2.37.8 | ✓ | ✓ | ✓ | ✓ | HEAD via s3api, separate MPU/copy-metadata scenarios |
+| s5cmd | 2.3.0 | ✓ | — | — | — | Listing command, not plaintext ETag, tested |
+| rclone | 1.75 | ✓ | — | — | — | Size-cache/fallback sync tests separate; basic copy-cutoff flag not proof of S3-to-S3 copy |
+| minio-py | 7.2.20 | ✓ | ✓ | — | — | Runner strips endpoint scheme and sets secure for HTTP fixture |
+
+Runner images: amazon/aws-cli:2.37.8, peakcom/s5cmd:v2.3.0,
+rclone/rclone:1.75, python:3.14-slim (package pins above), restic/restic:0.19.1.
+See [runner source](../test/conformance/compat_runners.go) and [go.mod](../go.mod).
+Image pins are Renovate-managed; an updated version is not a passed test report.
+
+Restic has bypass-policy init/backup/restore/hybrid scenarios and encrypts its own
+repository, not gateway-encrypted-MPU certification. minio-go has a separate MPU
+scenario, not full tool coverage. Java/JS/PHP/.NET/rust-s3 and other clients have no
+exhaustive tool matrix. PHP-informed copy fixes and the unreleased rust-s3 proxy fix
+do not certify every operation. Dedicated presigned/KMS scenarios are not complete
+per-tool combinations. CI runs on Linux; Windows/macOS workflows not certified.
+
+```bash
+make test-conformance-compat
+GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 \
+GATEWAY_TEST_SKIP_SEAWEEDFS=1 GATEWAY_TEST_SKIP_EXTERNAL=1 \
+  go test -count=1 -tags=conformance -race -v -timeout 15m \
+  -run 'TestConformance/minio/Compat_Boto3' ./test/conformance/...
 ```
 
-### Metadata Keys
-- Use `x-amz-meta-` prefix for S3 compatibility
-- Compress metadata if it exceeds header size limits
-- Store in separate metadata object for large metadata
+## Backend and Encryption-Mode Coverage
 
-## Error Handling and Translation
+S = fixture capability selects gated scenarios, — = not selected. Selection is
+not a fresh pass report, product-wide support assertion, or complete field mapping.
+Ungated tests still run and some have their own skips/upstream fixtures. Source
+owners: [providers](../test/provider/) and [suite](../test/conformance/suite_test.go).
 
-### Backend Error Translation
+| Fixture | MPU/copy | Object tags / inline | Versions | Lock | Encrypted MPU | Size cache |
+|---|---|---|---|---|---|---|
+| MinIO | S/S | S/S | — | — | S | S |
+| Garage | S/S | —/S | — | — | S | S |
+| RustFS | S/S | S/S | — | — | S | S |
+| SeaweedFS | S/S | S/S | S | — | S | S |
+| AWS external | S/S | S/S | S | S | S | S |
+| B2 external | S/S | —/— | — | — | S | S |
+| Hetzner / Wasabi external | S/S | S/S | — | — | S | — |
+| GCS / Azure configured endpoints | S/— | S/— | — | — | — | — |
 
-`internal/api/errors.go:TranslateError` maps wrapped S3 SDK error codes to
-fixed client-facing messages. Backend diagnostics remain in structured logs,
-not in response messages.
+Bucket management/policy/lifecycle bits selected for MinIO; bucket CORS/ACL/object
+ACL/encryption bits absent across these current fixtures. AWS supports many such
+APIs but the fixture does not select their gated tests. Conditional PUT bits:
+MinIO/AWS/GCS/Azure; native SSE bit: AWS. **These bits do not implement missing
+gateway typed conditions/SSE.** Batch-delete/presigned bits selected for all above;
+load-test bits for four locals; backend TLS bit conditional on MinIO setup.
 
-| Backend S3 code | Client S3 code | HTTP status |
+All seven tool bits selected for four locals and AWS; B2 selects boto3/CLI/s5cmd
+only; Hetzner/Wasabi/GCS/Azure select no tool bits. Ceph/R2/Spaces/Swift lack
+registered fixture-wide certification. GCS/Azure configured endpoints are not a
+native non-S3 API or turnkey cloud-support promise.
+
+| Mode | Existing evidence | Boundary |
 |---|---|---|
-| `NoSuchBucket` | `NoSuchBucket` | 404 |
-| `NoSuchKey`, `NotFound` | `NoSuchKey` | 404 |
-| `AccessDenied` | `AccessDenied` | 403 |
-| `InvalidBucketName`, `InvalidArgument` | Same code | 400 |
-| `SlowDown` | `SlowDown` | 503 |
-| `ServiceUnavailable` | `ServiceUnavailable` | 503 |
-| Unrecognized errors, including unclassified transport timeouts | `InternalError` | 500 |
+| Password single-object | Basic/tool/KDF/chunked cases | Not every option/KDF/tool/size |
+| Bypass | Metadata/body and restic workflows | No gateway confidentiality; not encrypted MPU |
+| Encrypted MPU | EncryptedMPU/SEC38/SEC46/metadata with Valkey | Explicit wiring; generic tool MPU not proof |
+| Local AES/RSA envelope | SelfContained/metadata cases | Not every tool × key type × backend |
+| Cosmian | Capability on four locals/AWS/B2 | Dedicated KMS tests, not all tools/failures |
+| OpenBao/Vault | Capability on four locals | Dedicated rotation/failure tests, not cloud/tool product |
+| FIPS | Unit/race/vet build jobs | No separate full SDK/backend matrix |
+| Streaming | Signed integrity/HTTPS CLI/boto3 | No durable plaintext checksum API |
+| Legacy | Golden read fixtures | Not arbitrary relocation or historical MPU recovery |
 
-**Object-read preflight (GH-344):** Chunked-v2 terminal acquisition and
-planning HEAD calls retain explicit storage-error provenance through the
-shared planner and plaintext-size resolver. Full/ranged GET, cache validation,
-HEAD, CopyObject, and UploadPartCopy translate these failures as backend
-errors, without failed-decrypt or tamper accounting. HEAD error responses have
-no body. Copy preflight errors identify the source resource and are returned
-before destination writes. A successful initial GET followed by terminal
-`NoSuchKey` therefore returns 404, even on a backend with inconsistent
-read-after-delete behavior; a cached body must not bypass failed validation.
-
-Storage provenance is not inferred from an SDK error interface: a key-manager
-SDK failure remains a crypto failure. A missing gateway-owned MPU companion
-manifest remains `ErrMissingMPUManifest`, not a claim that the parent object is
-missing; its established GET/copy diagnostic and HEAD/list fail-soft policy
-are retained. Other marked companion storage failures use backend translation.
-
-This classification does not eliminate separate backend reads or provide
-snapshot consistency. The full ciphertext stream still authenticates its
-records and terminal independently. Errors while consuming an already-open
-crypto stream retain the existing stream-integrity policy.
-
-### Encryption Error Handling
-- **Decryption failures**: Return 500 Internal Server Error
-- **Key derivation errors**: Return 500 Internal Server Error
-- **Corrupted data**: Return 500 Internal Server Error with specific message
-
-### Client Error Responses
-- **Invalid requests**: 400 Bad Request
-- **Authentication failures**: 403 Forbidden
-- **Not found**: 404 Not Found
-- **Method not allowed**: 405 Method Not Allowed
-
-## Streaming vs Buffered Operations
-
-### Streaming Strategy
-- **PUT operations**: Stream encryption to avoid memory pressure
-- **GET operations**: Stream decryption for large objects
-- **Memory limits**: Configure maximum buffer size
-- **Fallback**: Buffer small objects, stream large ones
-
-### Implementation
-```go
-type StreamProcessor interface {
-    Process(reader io.Reader) io.Reader
-}
-
-func (e *EncryptionEngine) EncryptStream(reader io.Reader) io.Reader {
-    return &encryptReader{source: reader, cipher: e.cipher}
-}
-
-func (e *EncryptionEngine) DecryptStream(reader io.Reader) io.Reader {
-    return &decryptReader{source: reader, cipher: e.cipher}
-}
-```
-
-## Multipart Upload Handling
-
-Encrypted multipart uploads use immutable first-content claims for each part
-number. A byte-identical retry returns the committed ETag without rewriting the
-backend part. A different replacement is rejected with `OperationAborted`
-(HTTP 409); clients must abort the upload and create a new one. `Complete`
-requires strictly ascending selected parts with committed, matching ETags and
-returns `InvalidPart` or `InvalidPartOrder` before manifest/backend I/O when
-validation fails. `UploadPartCopy` applies the same rules after source
-plaintext acquisition and before destination encryption or mutation.
-
-### Strategy
-- Encrypt each part individually
-- Maintain part boundaries and sizes
-- Store encryption metadata per part
-- Reassemble with correct encryption order
-
-### Metadata Storage
-- Store part encryption metadata in separate object
-- Use multipart upload ID as key for metadata
-- Clean up metadata on completion/failure
-
-## Edge Cases and Special Handling
-
-### Range Requests
-- **GET with Range header**: Optimized for chunked encryption format
-- **Implementation**:
-  - If object uses chunked encryption: compute encrypted byte range and fetch only needed chunks from backend; decrypt only those chunks, respond with 206 and correct Content-Range
-  - If legacy (buffered) encryption or plaintext: forward client range to backend or decrypt fully then apply range
-- **Performance impact**: Significantly reduced bandwidth and CPU for chunked format
-
-### Object Versioning
-- **Versioned objects**: Encrypt/decrypt specific versions
-- **Version metadata**: Store encryption info per version
-- **Delete markers**: Handle appropriately
-
-### Object Locking (V0.6-S3-2)
-
-Implemented as of v0.6. See `docs/adr/0008-object-lock-ciphertext-semantics.md`
-for the full rationale. High-level contract:
-
-- **Subresource endpoints routed and forwarded to backend**:
-  - `PUT  /{bucket}/{key}?retention` — PutObjectRetention
-  - `GET  /{bucket}/{key}?retention` — GetObjectRetention
-  - `PUT  /{bucket}/{key}?legal-hold` — PutObjectLegalHold
-  - `GET  /{bucket}/{key}?legal-hold` — GetObjectLegalHold
-  - `PUT  /{bucket}?object-lock` — PutObjectLockConfiguration
-  - `GET  /{bucket}?object-lock` — GetObjectLockConfiguration
-- **Request headers forwarded end-to-end** on `PutObject`,
-  `CopyObject`, and `CompleteMultipartUpload`:
-  `x-amz-object-lock-mode`, `x-amz-object-lock-retain-until-date`,
-  `x-amz-object-lock-legal-hold`. Invalid values produce `400
-  InvalidArgument` at the gateway; zero silent drops.
-- **Response headers surfaced** on `GET` and `HEAD` from
-  `HeadObjectOutput` / `GetObjectOutput`.
-- **`x-amz-bypass-governance-retention` is refused** with `403
-  AccessDenied` on PutObjectRetention, DeleteObject, and
-  DeleteObjects — pending V0.6-CFG-1's admin authorization.
-  Operators needing to reduce a governance-mode retention must
-  target the backend directly in v0.6.
-- **Ciphertext-locking.** Retention/LegalHold apply to the
-  ciphertext blob the backend stores. Key-rotation workers skip
-  locked objects and emit `gateway_rotation_skipped_locked_total`.
-  Operators must align KMS/KEK retention with the maximum Object
-  Lock retention window in use.
-
-#### Provider support matrix
-
-| Provider | Retention | Legal Hold | Bucket Config | Notes |
-|---|---|---|---|---|
-| AWS S3 | yes | yes | yes | Reference implementation. |
-| MinIO >= RELEASE.2021-01-30 | yes | yes | yes | Bucket must be created with `--with-lock`. |
-| Ceph RGW >= Pacific | yes | yes | yes | Feature-flagged; operator must enable. |
-| Wasabi (Immutable Storage) | yes | yes | yes | Underlying primitive is Wasabi Immutable Storage. |
-| Backblaze B2 S3-compat | partial | partial | partial | 501 on the unsupported subset. |
-| Hetzner Object Storage | partial | partial | partial | 501 on the unsupported subset. |
-| DigitalOcean Spaces | no | no | no | Returns 501 NotImplemented. |
-| Cloudflare R2 | no | no | no | Returns 501 NotImplemented. |
-| Garage | no | no | no | Returns 501 NotImplemented. |
-
-Unsupported providers return `501 NotImplemented`; the response
-references this matrix.
-
-### Compression (Removed in v1.0)
-
-Built-in compression was removed in V1.0-MAINT-2. For client-side compression,
-compose with s4 upstream.
-
-## Testing Strategy
-
-### API Compatibility Testing
-- **AWS SDK tests**: Use official AWS SDK test suites
-- **Third-party tools**: Test with rclone, s3cmd, MinIO client
-- **S3 compatibility suites**: Use existing S3 compatibility test frameworks
-
-### Encryption Testing
-- **Round-trip tests**: Encrypt → Decrypt → Verify identical
-- **Corruption tests**: Test behavior with corrupted encrypted data
-- **Key rotation tests**: Test key change scenarios
-- **Large file tests**: Test with objects > 5GB
-
-### Performance Testing
-- **Throughput**: Measure encryption/decryption speeds
-- **Concurrent requests**: Test under load
-- **Memory usage**: Monitor memory consumption
-- **Latency**: Measure request latency impact
-
-## Implementation Phases
-
-### Phase 1: Basic Operations
-- Implement PUT/GET for simple objects
-- Basic encryption/decryption
-- Single backend provider (AWS)
-
-### Phase 2: Advanced Operations
-- Multipart uploads
-- Range requests
-- Object versioning
-- Multiple backend providers
-
-### Phase 3: Production Hardening
-- Error handling improvements
-- Performance optimizations
-- Comprehensive testing
-- Monitoring and metrics
-
-### Phase 4: Advanced Features
-- Key rotation
-- Compression integration
-- Custom encryption algorithms
-- Advanced S3 features support
-
----
-
-## Inline Header Passthrough
-
-The gateway forwards S3 standard inline headers transparently in most cases. The following tables document the exact disposition for PutObject and CreateMultipartUpload. Headers marked **Forwarded** reach the backend verbatim. Headers marked **Passed through verbatim** are forwarded with the re-signed request without being extracted into SDK struct fields.
-
-### PutObject Inline Headers
-
-| Header | Disposition | Mechanism | Notes |
-|---|---|---|---|
-| `x-amz-tagging` | **Forwarded** | Extracted, validated, passed to `PutObjectInput.Tagging` | |
-| `x-amz-acl` | **Forwarded** | Extracted, mapped to `types.ObjectCannedACL`, passed to `PutObjectInput.ACL` | |
-| `x-amz-grant-full-control` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantFullControl` | |
-| `x-amz-grant-read` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantRead` | |
-| `x-amz-grant-read-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantReadACP` | |
-| `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to `PutObjectInput.GrantWriteACP` | |
-| `x-amz-storage-class` | Passed through verbatim | Not extracted by gateway; forwarded on re-signed request | Provider quirk: MinIO ignores; AWS S3 respects |
-| `x-amz-server-side-encryption` | Passed through verbatim | Not extracted; backend applies its own SSE layer | Gateway performs client-side encryption independently |
-| `x-amz-object-lock-mode` | **Forwarded** | Extracted via `extractObjectLockInput`, passed to SDK | |
-| `x-amz-object-lock-retain-until-date` | **Forwarded** | As above | |
-| `x-amz-object-lock-legal-hold` | **Forwarded** | As above | |
-| `x-amz-meta-*` | **Forwarded** | Extracted as user metadata map | All user-defined metadata headers forwarded |
-| `Content-Type` | **Forwarded** | Standard header | |
-| `Content-Encoding` | **Forwarded** | Standard header | |
-| `Cache-Control` | **Forwarded** | Standard header | |
-
-### CreateMultipartUpload Inline Headers
-
-| Header | Disposition | Notes |
-|---|---|---|
-| `x-amz-acl` | **Forwarded** | Extracted, mapped to `CreateMultipartUploadInput.ACL` |
-| `x-amz-grant-full-control` | **Forwarded** | Extracted, passed to SDK `GrantFullControl` |
-| `x-amz-grant-read` | **Forwarded** | Extracted, passed to SDK `GrantRead` |
-| `x-amz-grant-read-acp` | **Forwarded** | Extracted, passed to SDK `GrantReadACP` |
-| `x-amz-grant-write-acp` | **Forwarded** | Extracted, passed to SDK `GrantWriteACP` |
-| `x-amz-tagging` | **Not forwarded** | Tags must be set via `?tagging` subresource after CompleteMultipartUpload. **Known limitation.** |
-| `x-amz-meta-*` | **Forwarded** | Extracted and passed to SDK |
-| `x-amz-server-side-encryption` | Passed through verbatim | Not extracted by gateway |
-
-### CopyObject ACL Note
-
-On CopyObject, the destination ACL is set independently of the source. The gateway passes empty strings for all ACL headers on the destination PutObject call (re-encrypt path). Callers must set `x-amz-acl` explicitly on CopyObject if they want a non-default ACL. This is consistent with S3 semantics where CopyObject does not copy ACLs by default.
-
-### Lifecycle Response Headers
-
-When a backend applies a lifecycle rule to an object, the following response headers are forwarded verbatim by `copyProxyResponse`. Only 8 hop-by-hop headers are stripped; all `x-amz-*` headers survive.
-
-| Header | Direction | Gateway Disposition |
-|---|---|---|
-| `x-amz-expiration` | Response | **Forwarded verbatim** |
-| `x-amz-restore` | Response | **Forwarded verbatim** |
-| `x-amz-delete-marker` | Response | **Forwarded verbatim** |
-
-### Provider Quirks
-
-| Feature | AWS S3 | MinIO (default) | Garage | Wasabi |
-|---|---|---|---|---|
-| `x-amz-acl` on PutObject | ✅ Full support | ⚠️ Default container requires IAM policy | ⚠️ Limited; `private` and `public-read` accepted | ✅ Full support |
-| `x-amz-grant-*` on PutObject | ✅ Full support | ❌ Not supported in default container | ❌ | ✅ Full support |
-| `x-amz-tagging` on PutObject | ✅ | ✅ | ✅ | ✅ |
-| `?tagging` subresource | ✅ | ✅ | ✅ | ✅ |
-| `?acl` subresource (bucket) | ✅ | ⚠️ Not in default cap bitmap | ⚠️ | ✅ |
-| `?acl` subresource (object) | ✅ | ⚠️ Same | ⚠️ | ✅ |
-| `?lifecycle` subresource | ✅ | ⚠️ Not in default cap bitmap | ✅ | ✅ |
-| `x-amz-expiration` response | ✅ | Returned when lifecycle rule matches | ✅ | ✅ |
-| `x-amz-storage-class` | ✅ | ⚠️ Ignored in most configs | ❌ | ✅ |
+No complete scenario matrix covers every unsupported wire error, pagination option,
+conditions, SSE/owner/requester-pays/MFA field, replication/event delivery, archive
+restore, anonymous website, historical MPU recovery, or every SDK/proxy/KMS/backend.
+Known missing mappings above are limitations, not just absent tests. Inspect real
+[CI logs/workflow](../.github/workflows/conformance.yml) and fixture policy/state/key
+wiring before asserting coverage; external jobs require credentials and can skip.

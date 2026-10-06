@@ -1,4 +1,4 @@
-# Performance
+# Performance, Benchmarks, and Scaling
 
 This page is the public face of the V0.6-QA-1 per-provider performance
 baseline corpus. The detailed implementation plan lives at
@@ -6,6 +6,20 @@ baseline corpus. The detailed implementation plan lives at
 (committed, per-milestone) live under [`docs/perf/v0.6-qa-1/`](perf/v0.6-qa-1/).
 
 ## 1. Overview
+
+## Contents
+
+- [Benchmark methodology](#2-methodology)
+- [Baseline evidence](#3-per-provider-baseline-table)
+- [Regeneration and thresholds](#5-how-to-regenerate)
+- [Encryption-mode benchmarks](#encryption-mode-benchmarks)
+- [Horizontal scaling](#horizontal-scaling)
+- [HPA and graceful shutdown](#hpa-and-graceful-shutdown)
+- [Valkey and spool capacity](#valkey-and-spool-capacity)
+
+Measurements below are evidence from specified workloads, not performance promises
+or universal replica/resource recommendations. Use current toolchain/config/provider
+versions and compare like-for-like before deployment sizing.
 
 We track two distinct classes of measurement:
 
@@ -201,7 +215,122 @@ address them or ship the matching baseline refresh.
 - Roadmap "Performance baseline per provider" — [`docs/ROADMAP.md`](ROADMAP.md)
 - Plan — [`docs/plans/V0.6-QA-1-plan.md`](plans/V0.6-QA-1-plan.md)
 - SLO annex — [`docs/perf/v0.6-qa-1/slo-summary.md`](perf/v0.6-qa-1/slo-summary.md)
-- **V1.0-PERF-1 -- Horizontal Scaling Guide** — [`docs/SCALING.md`](SCALING.md).
-  Supplements the V0.6-QA-1 baseline with high-concurrency profiling data,
-  tuned HPA configuration, empirical sizing tables, and SLO definitions
-  for horizontal autoscaling.
+- [Horizontal scaling](#horizontal-scaling): high-concurrency profiling, HPA,
+  resource/state/disk accounting and SLOs in this guide.
+
+## Encryption-Mode Benchmarks
+
+Historical `make benchmark-local` results used 5-second runs, four concurrent
+workers, and local backends; ranges below exclude the slowest backend bottleneck.
+These are workload-specific comparisons, not proof of equivalent KDF security or
+current absolute throughput on another deployment. See mode choices in
+[key management](KMS_COMPATIBILITY.md#choosing-an-encryption-mode).
+
+| Mode | Chunked PUT 1 MiB (Mbps) | MPU 4×50 MiB (Mbps) | Range 200 KiB, five ranges (Mbps) |
+|---|---|---|---|
+| PBKDF2 600k | 45–49 | 92–96 | 2.3–2.5 |
+| PBKDF2 100k (legacy comparison, not recommended default) | 250–264 | 192–224 | 13.4–13.8 |
+| Argon2id t=2/m=19456 KiB/p=1 | 199–209 | 176–208 | 10.3–10.5 |
+| AES-GCM local KEK | 2387–3710 | 236–304 | 111–172 |
+| RSA-OAEP local KEK | 1705–2266 | 240–292 | 97–111 |
+| Cosmian local test KMS | 1949–3010 | 236–288 | 95–141 |
+
+Envelope mode avoids password derivation on ordinary object hot paths. MPU costs,
+remote KMS latency, network ceilings, concurrency, and caching change the comparison.
+Local KMIP latency is not a guarantee for remote production KMS. Regenerate on your
+hardware; keep committed [benchmark evidence](perf/) unchanged as historical data.
+
+## Horizontal Scaling
+
+Replicas share backend/key configuration and Valkey MPU state/size-cache authority;
+per-process spools/caches/admin promotion state are not shared. “Stateless HTTP”
+does not mean no cross-replica coordination is needed for state versions, key
+rollouts, or local admin rotation. Consult [progressive delivery](OPS_DEPLOYMENT.md)
+and [migration](MIGRATION.md).
+
+| Bottleneck | Signal | Action to test |
+|---|---|---|
+| CPU/KDF | CPU saturation and high p99 | Envelope mode if appropriate; scale replicas |
+| Memory/buffering | Heap/GC/OOM and simultaneous copy/part load | Account per-part/copy cap × concurrency, not just chunk size |
+| Valkey | State operation latency/timeouts, memory pressure | Size persistence/pool/server; don't create isolated per-replica state |
+| KMS | Wrap/unwrap failures/latency | Provider quota/auth/TLS; optional sensitive DEK cache |
+| Network/backend | Flat throughput, upstream throttling | Measure backend baseline and traffic amplification |
+| Spool/disk | 503 SlowDown/admission pressure | Size process aggregate budget and node ephemeral storage |
+
+### Historical sizing evidence
+
+Local workstation spike-profile measurements (100 KiB objects, MinIO, 60 seconds)
+reported ~3.1/7.5/15/28 MB/s at 10/25/50/100 clients, with p99 PUT approximately
+100/200/370/700 ms. These do not establish that 200m CPU or a fixed replica count
+satisfies your current workload. Measure object/part size, KDF/provider, disk,
+concurrency, request retries, and backend latency before deriving resources.
+
+## HPA and Graceful Shutdown
+
+The maintained [HPA example](../helm/s3-encryption-gateway/examples/values-hpa-tuned.yaml)
+provides CPU/memory targets and asymmetric stabilization; the
+[KEDA example](../helm/s3-encryption-gateway/examples/values-keda-example.yaml)
+shows custom metrics. Inspect current chart schema rather than copying a second
+full values table. KEDA example divisors need kube-state-metrics or a deliberate
+alternative. Scale-to-zero is not an automatic recommendation for an always-needed
+S3 endpoint.
+
+Choose termination grace from measured p99 longest part/request latency plus
+routing propagation and preStop drain time. A nominal 120-second/50-MiB example
+is a starting experiment, not guaranteed safety. Completed durable parts can be
+retried through another compatible replica; ambiguous reservations may need the
+bounded lease to expire. Clients must retry identical content, not replace a claim.
+
+### Load profiles and SLOs
+
+```bash
+make test-load-smoke
+make test-load-soak
+make test-load-spike
+make test-load-high-throughput
+make bench-load-capture
+```
+
+Current named preset parameters live in Makefile: smoke 3 workers/10s/100 KiB;
+soak 10/60s/50 MiB/10 MiB parts; spike 50/60s/100 KiB;
+high-throughput 5/120s/50 MiB/10 MiB parts. Some labels/comments are historical;
+the actual environment and test invocation determine workload.
+
+Capture NDJSON throughput, latency p50/p95/p99, errors, retries, and heap high-water
+marks. A throughput_mbps field may describe MB/s in the harness—verify units in
+source before conversion. Define availability/latency/throughput SLOs for your
+workload; 99.9%/30-day availability allows ~43.2 minutes, not proof CI meets it.
+Alert on rate/burn behavior through [observability](OBSERVABILITY.md).
+
+## Valkey and Spool Capacity
+
+State memory is proportional to **concurrent uploads × parts per upload**, plus
+metadata/envelope/protocol overhead and size-cache entries. Historical rough input
+of 1 KiB/upload + 200 B/part with 2× headroom gives:
+
+```text
+estimated bytes = uploads × (1024 + parts × 200) × 2
+```
+
+For 1,000×100 parts that is ~40 MiB; 5,000×1,000 ~1.9 GiB;
+10,000×10,000 ~37 GiB—not 4 GiB. Current encrypted claims/keys, allocator overhead,
+replication/persistence buffers, and permanent size-cache entries require measured
+headroom beyond this rough model. Use real state snapshots/load tests and never
+apply the old inconsistent sizing examples as limits. TTL expiry can orphan uploads;
+keep the wrapped state DEK and backup dependencies separate from disposable records.
+
+Verified spools default to 5 GiB/request and 10 GiB/process aggregate. N replicas
+can consume N times the process capacity, subject to shared node/backend limits.
+Ephemeral storage must cover the admitted budget; do not put plaintext spools on
+unbounded or publicly readable storage. 503 SlowDown is a retryable admission
+signal, not a reason to disable payload verification. Also size 64 MiB default
+part buffers and 256 MiB legacy copy caps × active concurrency.
+
+### Capacity planning checklist
+
+1. Inventory object/part sizes, concurrency, KDF/key provider, and listing/copy patterns.
+2. Measure baseline backend/KMS/state latency and disk/heap peaks.
+3. Size shared Valkey persistence and key recovery; account size-cache growth.
+4. Size per-replica CPU/memory/spool and node limits; configure HPA/draining.
+5. Test spike/soak/long-request/identical-retry behavior and fleet upgrade/rollback.
+6. Record workload-specific SLOs and retained benchmark artifacts.

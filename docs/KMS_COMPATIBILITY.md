@@ -1,108 +1,105 @@
-# KMS Compatibility Guide
+# Encryption Modes, Key Management, and Rotation
 
-This document explains how to create a Key Management Service (KMS) compatible with the S3 Encryption Gateway, or how to integrate with existing KMS solutions.
+**Baseline: v0.12.3.** This guide owns key-provider selection, key sources,
+provider authentication, rotation, and retention. Encryption formats/FIPS live in
+[encryption design](ENCRYPTION_DESIGN.md); upgrades and re-encryption live in
+[migration](MIGRATION.md); admin HTTP contracts live in the [runbook](RUNBOOK.md#admin-api-reference).
 
-## Overview
+## Contents
 
-The S3 Encryption Gateway supports two key management modes:
+- [Choosing an encryption mode](#choosing-an-encryption-mode)
+- [Supported adapters](#supported-adapters)
+- [Self-contained AES and RSA](#self-contained-adapter)
+- [Cosmian KMIP](#cosmian-kmip-adapter)
+- [OpenBao / Vault Transit](#openbao--vault-transit-adapter)
+- [Memory adapter](#memory-adapter)
+- [Production hardening](#production-hardening)
+- [Dual-read window and key rotation](#dual-read-window-and-key-rotation)
+- [Custom adapter contract](#key-manager-interface)
+- [Troubleshooting](#troubleshooting)
 
-1. **Single Password Mode** (default): Uses a single password for all encryption operations
-   - Simple and backward compatible
-   - No key rotation support
-   - Suitable for small deployments
+## Choosing an Encryption Mode
 
-2. **Key Manager (KMS) Mode**: Uses a KeyManager interface for advanced key management
-   - Supports key rotation
-   - Multiple key versions for backward compatibility
-   - Suitable for enterprise deployments
+| Mode | Key source | When appropriate | Important constraint |
+|---|---|---|---|
+| Password PBKDF2-SHA256 | Gateway password, per-object parameters | Simpler deployment or legacy reads | Default 600,000 iterations; derivation adds request cost, retain configured decrypt limits |
+| Password Argon2id | Gateway password and memory/time parameters | Password-only non-FIPS deployments | Not available in FIPS build; budget memory/concurrency and KDF limits |
+| Local envelope (recommended low-latency path) | AES-256 or RSA KEK from protected env/file | No external KMS, controlled key lifecycle | KEK loss makes wrapped DEKs unreadable; preserve versions |
+| External envelope | Cosmian or OpenBao/Vault Transit | External key custody/auth/rotation | Availability, TLS, policy, and retained provider versions are dependencies |
 
-## Implementation Status
+Password configuration examples:
 
-### Supported Adapters (v0.6)
-
-All adapters below are registered in the global adapter registry (`internal/crypto/keymanager_registry.go`)
-and can be selected via `encryption.key_manager.provider` in configuration.
-
-| Provider name | Status | Notes |
-|---------------|--------|-------|
-| `cosmian` / `kmip` | ✅ Production-ready (v0.5+) | Cosmian KMIP — JSON/HTTP and binary |
-| `memory` | ✅ Stable (v0.6) | In-process AES-256 key-wrap; no external deps |
-| `hsm` | 🚧 Skeleton (v0.6) | PKCS#11 stub; functional in v1.0 (needs `-tags hsm`) |
-| `self_contained` | ✅ Stable (v1.0) | AES-256-GCM or RSA-OAEP KEK; no external deps |
-| `openbao` / `openbao-transit` / `vault` / `vault-transit` | ✅ Stable (v1.0) | OpenBao / HashiCorp Vault Transit; token/AppRole/Kubernetes auth; in-process token renewal |
-
-#### `cosmian` / `kmip` adapter
-
-- **JSON/HTTPS protocol**: Fully tested and verified in CI
-  - Endpoint format: `https://host:9998/kmip/2_1`. Plain `http://` endpoints require `insecure_allow_plaintext_transport: true` and are intended only for trusted development environments.
-  - No TLS client certificates required unless mTLS is configured
-  - TLS `ca_cert` recommended for HTTPS
-- **Binary KMIP protocol**: Implemented; requires proper TLS
-  - Endpoint format: `host:5696`
-  - Requires `ca_cert`, `client_cert`, `client_key` for mutual TLS
-- Dual-read window for key rotation
-- Health checks integrated into readiness endpoint
-- Integration tests with Docker-based Cosmian KMS server
-
-#### `memory` adapter
-
-In-process AES-256 key-wrap (RFC 3394). No network I/O, no external dependencies.
-Suitable for:
-- Unit and integration tests (replaces the KMIP mock server in hot-path tests)
-- Local development without a KMS
-- Single-node deployments where the master key can be stored securely in env/file
-
-Configuration:
 ```yaml
 encryption:
-  key_manager:
-    enabled: true
-    provider: memory
-    memory:
-      master_key_source: "env:MY_MASTER_KEY"  # or "file:/path/to/key" or "" (auto-generate)
+  password: "<secret supplied securely>"
+  kdf:
+    algorithm: pbkdf2-sha256
+    pbkdf2:
+      iterations: 600000
 ```
 
-#### `hsm` adapter
+For Argon2id use `algorithm: argon2id` with `time: 2`, `memory: 19456` KiB,
+`threads: 1` under `encryption.kdf.argon2id`, subject to validation/decrypt limits.
+Stored parameters select legacy readers; changing the new-write setting does not
+rewrite old objects. Do not equate different KDF settings with identical security
+without deployment-specific assessment. Measured historical throughput and
+methodology are in [performance](PERFORMANCE.md#encryption-mode-benchmarks).
 
-PKCS#11 skeleton. Compile with `-tags hsm` to include it. All methods return
-`ErrProviderUnavailable` until the functional implementation ships in v1.0.
-See [docs/adr/0004-hsm-adapter-contract.md](adr/0004-hsm-adapter-contract.md) for the
-full integration contract.
+Envelope mode generates a per-object DEK and wraps it with a KEK. The production
+server still requires an encryption password/key-file source; retain the original
+password for legacy object/MPU reads. Password fallback is distinct from a KMS
+dual-read window and cannot decrypt arbitrary objects wrapped by an unavailable KMS.
 
-#### `self_contained` adapter
+## Supported Adapters
 
-Self-contained envelope encryption with no external KMS dependencies. Supports
-two wrapping modes selected via the `type` field:
+| Configured provider | Released status / key lifecycle |
+|---|---|
+| `self_contained` | Local AES-GCM/RSA-OAEP envelope; versioned AES keys and explicit rotation |
+| `cosmian` / `kmip` | Cosmian KMIP; JSON/HTTPS conformance and binary TLS path with narrower evidence |
+| `openbao`, `openbao-transit`, `vault`, `vault-transit` | Transit API; token/AppRole/Kubernetes authentication and renewal |
+| `memory` | In-process AES key-wrap; explicit persistent secret required outside disposable tests |
+| `hsm` | Nonfunctional PKCS#11 skeleton/stub; not supported deployment or a promised release |
+| AWS KMS / Azure Key Vault / GCP KMS | Not implemented provider adapters; no date commitment |
 
-- **AES-256-GCM** (`type: aes`): authenticated encryption using AES-GCM with a
-  12-byte random nonce per wrap call. Tamper-resistant: modified ciphertext is
-  rejected on unwrap. Multiple versioned KEKs are supported for dual-read
-  rotation.
+Selecting an unknown provider fails; a conceptual historical example is not a
+registered adapter. See [`BuildKeyManager`](../internal/api/crypto_factory.go).
 
-- **RSA-OAEP** (`type: rsa`): asymmetric wrapping using RSA-OAEP with SHA-256.
-  Minimum key size is 2048 bits. Operators can use existing PKI infrastructure
-  to control DEK access without a network KMS call.
+## Self-Contained Adapter
 
-Configuration (AES):
+### AES KEK
+
+Generate and securely retain a base64 32-byte KEK:
+
+```bash
+openssl rand -base64 32
+```
+
 ```yaml
 encryption:
+  password: "<existing password for legacy reads>"
   key_manager:
     enabled: true
     provider: self_contained
     self_contained:
       type: aes
       aes:
-        active_version: 2
+        active_version: 1
         keys:
           - version: 1
-            key_source: "env:AES_KEK_V1"   # base64-encoded 32-byte key
-          - version: 2
-            key_source: "env:AES_KEK_V2"
+            key_source: "env:S3EG_AES_KEK"
 ```
 
-Configuration (RSA):
+AES key sources: `env:VAR`, `base64:DATA`, or `file:PATH`, decoded as base64 key
+material. Use protected secret files/env, not committed literal keys. Multiple
+versions support retained reads and explicit active-version promotion. AES-GCM
+wrapping uses random nonces; observe key-volume/retirement policy and do not
+interpret a convenient nominal wrap count as an unlimited safe key lifetime.
+
+### RSA KEK
+
 ```yaml
 encryption:
+  password: "<existing password>"
   key_manager:
     enabled: true
     provider: self_contained
@@ -113,754 +110,212 @@ encryption:
         key_version: 1
 ```
 
-Key source formats for AES KEKs:
-- `"env:VAR"` — base64-decode the environment variable `VAR`
-- `"base64:DATA"` — decode the literal base64 string
-- `"file:PATH"` — read and base64-decode file at `PATH`
+RSA private-key sources accept `file:`, `env:` PEM, or literal PEM; minimum key
+size 2048 bits, wrapping RSA-OAEP/SHA256. Key replacement is not an automatic
+multi-version RSA rollout—preserve ability to read old envelopes and migrate
+before removing the old private key. Go big.Int zeroization is best-effort;
+the unsupported HSM stub is not a remedy.
 
-Key source formats for RSA private keys:
-- `"env:VAR"` — PEM-encoded key from environment variable `VAR`
-- `"file:PATH"` — PEM-encoded key from file at `PATH`
-- Literal PEM — inline PEM block in configuration
+## Cosmian KMIP Adapter
 
-**Security properties:**
-- AES-GCM: unique 96-bit nonce per wrap; AEAD authentication prevents
-  ciphertext tampering; maximum safe object count per KEK is ~2^32.
-- RSA-OAEP: SHA-256 hash; minimum 2048-bit key enforced at construction.
-- All key material zeroized on `Close()`.
-- No KEK material appears in log output or error messages.
-
-**Rotation:** `AESKEKManager` implements `RotatableKeyManager` with
-`AddVersion` / `PrepareRotation` / `PromoteActiveVersion`. RSA key rotation
-requires manual key pair replacement and re-instantiation.
-
-**Known limitations:**
-- KEK loss = permanent DEK irrecoverability. Operators must maintain secure
-  key backups (e.g., split-key backup with Shamir Secret Sharing or stored in
-  Vault).
-- RSA private key zeroization is best-effort (Go's `big.Int` may retain
-  internal copies). For higher-assurance deployments, use the HSM adapter.
-- No automatic lazy re-wrapping of historical DEKs after rotation; re-wrapping
-  happens on the next write.
-
-### Planned for v1.0
-
-- 🔜 **AWS KMS**: Planned for v1.0 (see [V1.0-KMS-2](../issues/v1.0-issues.md#v10-kms-2-aws-kms-adapter))
-  - Deferred from v0.5 due to cloud provider access requirements for testing
-  - Will use AWS SDK v2
-  - Support for key aliases, ARNs, and key versioning
-
-- ✅ **OpenBao / HashiCorp Vault Transit**: Implemented in v1.0 (see [V1.0-KMS-3](../issues/v1.0-issues.md#v10-kms-3-hashicorp-vault-transit-adapter)).
-  See the [`openbao` / `vault` adapter](#openbao--vault-transit-adapter) section below.
-
-**Note**: The AWS KMS example below is **conceptual only** and demonstrates the
-interface pattern. It is not yet implemented and should not be used in production.
-
-#### `openbao` / `vault` Transit adapter
-
-The Transit secrets engine is an encryption-as-a-service backend: the gateway
-sends the per-object DEK to `transit/encrypt/<key>` to wrap it and to
-`transit/decrypt/<key>` to unwrap it. The KEK never leaves the server and is
-non-exportable. The identical Transit API is served by OpenBao (MPL-2.0) and by
-HashiCorp Vault, so one adapter covers both — selectable as `openbao`,
-`openbao-transit`, `vault`, or `vault-transit`.
-
-Server prerequisites (run once, out of band):
-
-```bash
-bao secrets enable transit
-bao write -f transit/keys/s3gw-dek type=aes256-gcm96   # non-exportable by default
-```
-
-Recommended in-cluster auth (Kubernetes ServiceAccount JWT — no static secret):
+Use an existing TLS-protected Cosmian KMS and create a wrapping key through its
+authorized management interface. The local test fixture uses a container; its
+HTTP ports are not production TLS configuration.
 
 ```yaml
 encryption:
+  password: "<existing password>"
+  key_manager:
+    enabled: true
+    provider: cosmian
+    dual_read_window: 2
+    cosmian:
+      endpoint: "https://kms.example.com/kmip/2_1"
+      ca_cert: /etc/gateway/kms-ca.pem
+      timeout: 10s
+      keys:
+        - id: "active-wrapping-key"
+          version: 2
+        - id: "retained-wrapping-key"
+          version: 1
+```
+
+- JSON/HTTPS full path or base URL accepted; binary KMIP uses `host:5696` with
+  CA/client certificate/client key. JSON has the broader automated evidence;
+  binary requires separate deployment verification.
+- Plain HTTP carries plaintext DEKs and is rejected unless explicit
+  `insecure_allow_plaintext_transport: true` development override is set.
+- Normal TLS verifies chain and hostname. The configured `insecure_skip_verify`
+  exception requires a CA and skips hostname matching only; do not use it as a
+  generic production trust solution.
+- The first configured key is active; retained keys and dual-read limits govern
+  eligible unwrap behavior. Use explicit versions rather than relying on order-derived ones.
+
+See [Cosmian installation](https://docs.cosmian.com/key_management_system/installation/installation_getting_started/)
+for server TLS/auth. The repository's conformance fixtures, not a static old image
+version here, define current test pins.
+
+## OpenBao / Vault Transit Adapter
+
+Transit keeps the KEK nonexportable server-side; the gateway submits DEKs for
+wrap/unwrap. Aliases select the same adapter. Example setup with authorized `bao`:
+
+```bash
+bao secrets enable transit
+bao write -f transit/keys/s3gw-dek type=aes256-gcm96
+```
+
+```yaml
+encryption:
+  password: "<existing password>"
   key_manager:
     enabled: true
     provider: openbao
     openbao:
       address: "https://bao.internal:8200"
-      transit_path: "transit"
-      key_name: "s3gw-dek"
+      transit_path: transit
+      key_name: s3gw-dek
       auth:
         method: kubernetes
-        role: s3-encryption-gateway     # auth/kubernetes role bound to the pod SA
+        role: s3-encryption-gateway
       tls:
-        ca_cert: "/etc/ssl/bao-ca.pem"
+        ca_cert: /etc/ssl/bao-ca.pem
 ```
 
-Required OpenBao policy (scope tightly; omit `create` so a missing key is a hard
-error, not a silently-created empty KEK):
+Auth methods: token (token or `env:`/`file:` token source), AppRole (role ID and
+secret-ID/source), Kubernetes (role and projected JWT path). Scope provider policy:
 
 ```hcl
 path "transit/encrypt/s3gw-dek" { capabilities = ["update"] }
 path "transit/decrypt/s3gw-dek" { capabilities = ["update"] }
-path "transit/keys/s3gw-dek"    { capabilities = ["read"] }   # HealthCheck + ActiveKeyVersion
-# only if the gateway drives rotation via the admin API:
+path "transit/keys/s3gw-dek" { capabilities = ["read"] }
+# Required only for gateway-driven rotation:
 path "transit/keys/s3gw-dek/rotate" { capabilities = ["update"] }
-# The adapter also calls auth/token/lookup-self (HealthCheck, to detect token
-# expiry) and auth/token/renew-self (the renewal goroutine). BOTH are granted by
-# the built-in `default` policy, so no extra rule is needed unless the role sets
-# token_no_default_policy=true — then add both explicitly:
-# path "auth/token/lookup-self" { capabilities = ["read"] }
-# path "auth/token/renew-self"  { capabilities = ["update"] }
+# Also needed if the role omits the default token policy:
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self" { capabilities = ["update"] }
 ```
 
-Granting `lookup-self` without `renew-self` degrades quietly: nothing on the
-request path renews, so only the background goroutine is broken and it re-logs-in
-under backoff instead. The symptom is a slow climb in `gateway_kms_reauth_total`,
-not a user-visible failure.
+Do not grant create merely to hide a missing Transit key. Health checks verify
+token validity and readable key existence, not just server sys/health.
+AppRole/Kubernetes re-authenticate on renewal failure and request 401/403, with
+coalescing/backoff; fixed-token lifecycle remains operator-owned. Missing renew
+permission can cause recurring re-login despite successful requests. Watch
+`gateway_kms_reauth_total` and provider audit without exposing tokens.
 
-Auth methods: `token` (`auth.token` or `auth.token_source` = `env:`/`file:`),
-`approle` (`role_id` + `secret_id`/`secret_id_source`), and `kubernetes`
-(`role` + `jwt_path`). No Vault Agent sidecar is required. Prefer a **periodic**
-token on the role.
+Transit self-routes old ciphertext by its `vault:vN:` version. There is no provider
+dual-read-window equivalence: preserve old Transit decrypt versions until all
+dependent envelopes/objects/manifests/state are migrated. Raising minimum decrypt
+version is destructive if dependencies remain. The FIPS-tagged gateway does not
+certify the external Transit deployment.
 
-For `approle`/`kubernetes` the token is kept alive on two paths: the background
-goroutine re-logs-in as soon as a renewal fails, and any request rejected with
-401/403 triggers a re-login and one retry. Both are needed — the watcher only
-notices a dead token at its next renewal attempt, up to ~2/3 of the lease away,
-so a token that dies out-of-band would otherwise 403 every request until the
-lease clock caught up. Concurrent 403s coalesce into one re-login and every login
-attempt is floored at one per second, so recovery cannot become a stampede. If
-the credential is refused outright, requests fail until an operator fixes the
-role; `gateway_kms_reauth_total{outcome="failure"}` is the signal. The `token`
-method is not re-authenticated — the operator owns that credential's lifecycle.
+## Memory Adapter
 
-Key rotation: a single `transit/keys/<key>/rotate` advances `latest_version`;
-new objects wrap with the new version while older objects keep decrypting
-(Transit self-routes by the `vault:vN:` ciphertext prefix). Rotation flows
-through the gateway's existing `/admin/kms/rotate/*` drain-and-cutover API.
-Retiring old versions is a deliberate server-side operation: rewrap stored
-envelopes forward (`transit/rewrap`), then raise `min_decryption_version`.
-There is intentionally **no `dual_read_window`** for this provider.
+The memory provider uses RFC3394 AES wrap and accepts persistent hex/raw AES key
+material from `env:VAR` or `file:PATH` (16/24/32 bytes); **not the base64 decoder
+used by self-contained AES**. An empty source generates an ephemeral key which is
+lost on restart and must be restricted to disposable tests.
 
-Security properties: tokens/secret IDs are never logged or placed in a
-KeyEnvelope; the KEK is non-exportable; TLS 1.2+ with restricted suites. FIPS:
-the adapter builds under `-tags=fips` and performs no local AES (wrapping is
-server-side); note that no upstream FIPS-140-validated OpenBao build exists yet
-([openbao#1409](https://github.com/openbao/openbao/issues/1409)) — the Transit
-backend's FIPS posture depends on the OpenBao deployment.
-
-## Production Hardening (V1.0-KMS-1)
-
-Production-ready KMS adapters are wrapped with a decorator stack that provides
-retry, circuit-breaking, and DEK caching:
-
-| Decorator | Default | Purpose |
-|-----------|---------|---------|
-| `RetryingKeyManager` | Enabled (30 s window) | Retries transient network errors |
-| `CircuitBreakerKeyManager` | Disabled | Fails fast during sustained outages |
-| `CachingKeyManager` | Disabled | Caches DEK unwrap results (read path) |
-| Health-check goroutine | Enabled (30 s interval) | Drives `gateway_kms_healthy` gauge |
-
-### HealthCheck contract per adapter
-
-| Adapter | HealthCheck implementation |
-|---------|--------------------------|
-| `cosmian` | KMIP `Get` on active key |
-| `memory` | Verifies key bytes are present and non-zero |
-| `self_contained` (AES) | Verifies `len(keys[activeVersion]) == 32` |
-| `self_contained` (RSA) | Verifies modulus consistency |
-| `aws` (V1.0-KMS-2) | `DescribeKey` — key state must be ENABLED |
-| `openbao` / `vault` (V1.0-KMS-3) | `GET auth/token/lookup-self` (token validity — sys/health returns 200 with a dead token) **plus** `GET transit/keys/<name>` (key exists & readable; `404 → ErrKeyNotFound`) |
-
-## Key Manager Interface
-
-The gateway uses the `KeyManager` interface from `internal/crypto/keymanager.go`:
-
-```go
-type KeyManager interface {
-    Provider() string
-    WrapKey(ctx context.Context, plaintext []byte, metadata map[string]string) (*KeyEnvelope, error)
-    UnwrapKey(ctx context.Context, envelope *KeyEnvelope, metadata map[string]string) ([]byte, error)
-    ActiveKeyVersion(ctx context.Context) (int, error)
-    HealthCheck(ctx context.Context) error
-    Close(ctx context.Context) error
-}
-
-// Sentinel errors — wrap with fmt.Errorf("...: %w", ErrXxx) for errors.Is support.
-var (
-    ErrProviderUnavailable = errors.New("keymanager: provider unavailable")
-    ErrKeyNotFound         = errors.New("keymanager: key not found")
-    ErrUnwrapFailed        = errors.New("keymanager: unwrap failed")
-    ErrInvalidEnvelope     = errors.New("keymanager: invalid envelope")
-)
+```yaml
+encryption:
+  password: "<existing password>"
+  key_manager:
+    enabled: true
+    provider: memory
+    memory:
+      master_key_source: "file:/run/secrets/memory-kek.hex"
 ```
 
-### Interface invariants
+Generate a persistent 32-byte hex key with `openssl rand -hex 32`, store securely,
+and retain it across all replicas/restarts that need existing envelopes. Prefer
+versioned self-contained AES for an operator-managed local key lifecycle.
 
-Every implementation MUST satisfy these invariants:
+## Production Hardening
 
-1. All methods are **safe for concurrent use** by multiple goroutines.
-2. `ctx` is **honoured**: return `ctx.Err()` wrapped when cancellation occurs.
-3. Plaintext DEKs returned by `UnwrapKey` are **owned by the caller** (caller zeroizes); the
-   implementation MUST NOT retain a reference to the returned slice.
-4. `WrapKey` MUST NOT log or export plaintext input.
-5. `Close` is **idempotent**; subsequent calls return nil. After `Close`, all other
-   methods MUST return `ErrProviderUnavailable`.
-6. A nil `KeyManager` is never valid; callers must check.
+Configured decorators apply retry → circuit breaker → optional DEK unwrap cache.
+Retry defaults to a bounded 30-second window; breaker/cache default disabled.
+Use config/schema for exact fields rather than assuming every provider shares a
+health/rotation policy. Cache is sensitive local memory and only caches unwrap
+results; it does not grant new writes during provider outage. Key wrapping and
+health are separate, and failure statuses depend on the API path.
 
-7. The `metadata` argument to `WrapKey` and `UnwrapKey` is **advisory
-   context only**. Provider adapters may ignore it and deployments MUST NOT
-   rely on it for bucket, key, or object-location integrity. The gateway's
-   payload AEAD `ObjectContext` binding is the independent, universal
-   integrity boundary for password mode and every `KeyManager` mode.
-
-### Registering a third-party adapter
-
-Call `crypto.Register` from your own package's `init()` function:
-
-```go
-package myadapter
-
-import (
-    "context"
-    "github.com/cloud37/s3-encryption-gateway/internal/crypto"
-)
-
-func init() {
-    crypto.Register("myadapter", func(ctx context.Context, cfg map[string]any) (crypto.KeyManager, error) {
-        endpoint, _ := cfg["endpoint"].(string)
-        return NewMyAdapter(endpoint)
-    })
-}
-```
-
-Then configure the gateway with `provider: myadapter`. The adapter is discovered
-automatically at startup without any changes to the engine or factory code.
-
-### Testing your adapter
-
-Use `crypto.ConformanceSuite` to verify your implementation passes all invariant checks:
-
-```go
-func TestMyAdapter(t *testing.T) {
-    crypto.ConformanceSuite(t, func(t *testing.T) crypto.KeyManager {
-        km, err := myadapter.New(myTestConfig)
-        if err != nil { t.Fatal(err) }
-        return km
-    })
-}
-```
-
-Run with `-race` to verify concurrency safety:
-
-```bash
-go test -race ./...
-```
-
-The envelope returned by `WrapKey` is persisted alongside object metadata:
-
-* `x-amz-meta-encryption-wrapped-key` – DEK ciphertext (base64)
-* `x-amz-meta-encryption-kms-id` – wrapping key identifier/ARN
-* `x-amz-meta-encryption-kms-provider` – provider hint (e.g. `cosmian-kmip`)
-* `x-amz-meta-encryption-key-version` – human-friendly version counter
-
-At decrypt time the engine builds the same envelope and calls `UnwrapKey`. This allows dual-read windows and phased rotations—the key manager implementation decides how many historical keys to keep and how to interpret the metadata.
+Retain TLS trust, key backups, provider policy, bounded retries, health metrics,
+and tested recovery. Key material/tokens must not appear in logs or persisted
+envelopes. Rotation via a shared load-balancer address is unsafe when promotion
+state is process-local; operate per replica or use a coordinated fleet deployment.
 
 ## Dual-Read Window and Key Rotation
 
-The gateway supports **dual-read windows** for seamless key rotation. This allows objects encrypted with older key versions to be decrypted even after rotation, without requiring immediate re-encryption.
-
-### How Dual-Read Works
-
-When decrypting an object, the gateway:
-
-1. **Reads the key version** from object metadata (`x-amz-meta-encryption-key-version`)
-2. **Attempts decryption** with the key version specified in metadata
-3. **Falls back to previous versions** if the primary key fails (up to `dual_read_window` versions)
-4. **Tracks rotated reads** via metrics and audit logs
-
-### Configuration
-
-Configure the dual-read window in your gateway configuration:
-
-```yaml
-encryption:
-  key_manager:
-    enabled: true
-    provider: "cosmian"
-    dual_read_window: 2  # Allow reading with previous 2 key versions
-    rotation_policy:
-      enabled: true
-      grace_window: 168h  # 7 days grace period (optional)
-    cosmian:
-      keys:
-        - id: "key-id-2"
-          version: 2  # Active key
-        - id: "key-id-1"
-          version: 1  # Previous key (for dual-read)
-```
-
-**Key Settings:**
-- `dual_read_window`: Number of previous key versions to attempt during decryption (default: 1)
-- `rotation_policy.enabled`: Enable rotation policy tracking and audit events
-- `rotation_policy.grace_window`: Optional grace period after rotation (default: 0, uses `dual_read_window`)
-
-### Rotation Policy
-
-The rotation policy provides:
-
-1. **Metrics**: Track rotated reads via `kms_rotated_reads_total` metric
-   - Labels: `key_version` (version used), `active_version` (current active version)
-2. **Audit Logging**: Decrypt events include metadata when rotated keys are used
-   - `rotated_read: true`
-   - `key_version_used`: The version used for decryption
-   - `active_key_version`: The current active version
-3. **Monitoring**: Monitor key rotation status and usage patterns
-
-### Rotation Workflow
-
-**Step 1: Prepare New Key**
-- Create a new wrapping key in your KMS (e.g., Cosmian KMS UI)
-- Note the new key ID and assign it version number (e.g., version 2)
-
-**Step 2: Update Configuration**
-- Add the new key to the `keys` list as the first entry (primary/active)
-- Keep previous keys in the list for dual-read support
-- Update `dual_read_window` if needed (should be >= number of old keys to support)
-
-**Step 3: Restart Gateway**
-- Restart the gateway to load the new configuration
-- New objects will be encrypted with the new key version
-- Old objects remain accessible via dual-read window
-
-**Step 4: Monitor Rotated Reads**
-- Check metrics: `kms_rotated_reads_total{key_version="1",active_version="2"}`
-- Review audit logs for `rotated_read: true` events
-- Monitor until all objects are accessed and can be re-encrypted (optional)
-
-**Step 5: Optional Cleanup**
-- After grace period, remove old keys from configuration
-- Old objects encrypted with removed keys will no longer be decryptable
-- Ensure all critical objects have been accessed/re-encrypted before cleanup
-
-### Example: Rotation Scenario
-
-```yaml
-# Before rotation
-encryption:
-  key_manager:
-    dual_read_window: 1
-    cosmian:
-      keys:
-        - id: "key-v1"
-          version: 1
-
-# After rotation (new key v2 is active, v1 still supported)
-encryption:
-  key_manager:
-    dual_read_window: 2
-    rotation_policy:
-      enabled: true
-      grace_window: 168h  # 7 days
-    cosmian:
-      keys:
-        - id: "key-v2"      # Active key
-          version: 2
-        - id: "key-v1"      # Previous key (dual-read)
-          version: 1
-```
-
-**Behavior:**
-- New objects → Encrypted with key v2
-- Old objects (v1) → Decrypted using key v1 (via dual-read)
-- Metrics → `kms_rotated_reads_total{key_version="1",active_version="2"}` incremented
-- Audit logs → Include `rotated_read: true` for v1 objects
-
-### Monitoring Rotated Reads
-
-**Prometheus Query:**
-```promql
-# Count rotated reads by key version
-sum(rate(kms_rotated_reads_total[5m])) by (key_version, active_version)
-
-# Alert when rotated reads exceed threshold
-rate(kms_rotated_reads_total[1h]) > 100
-```
-
-**Audit Log Example:**
-```json
-{
-  "timestamp": "2024-01-15T10:30:00Z",
-  "event_type": "decrypt",
-  "operation": "decrypt",
-  "bucket": "my-bucket",
-  "key": "object-v1.dat",
-  "algorithm": "AES256-GCM",
-  "key_version": 1,
-  "success": true,
-  "metadata": {
-    "rotated_read": true,
-    "key_version_used": 1,
-    "active_key_version": 2
-  }
-}
-```
-
-### Cosmian KMIP Quick Start
-
-Cosmian publishes an all-in-one Docker image that exposes the HTTPS admin UI on port `9998` and KMIP endpoints on ports `5696` (binary) and `9998` (JSON/HTTP). The quickest way to start a local instance is:
-
-```bash
-docker run -d --rm --name cosmian-kms \
-  -p 5696:5696 -p 9998:9998 --entrypoint cosmian_kms ghcr.io/cosmian/kms:5.22.0
-```
-
-**Recommended: JSON/HTTPS Endpoint** (tested and verified):
-- Endpoint (full URL, recommended): `https://kms.example.com:9998/kmip/2_1`
-- Endpoint (base URL, also works): `https://kms.example.com:9998` (path `/kmip/2_1` is automatically appended)
-- Plain HTTP transmits plaintext DEKs and requires the explicit `insecure_allow_plaintext_transport: true` development-only override.
-- No TLS client certificates required unless mTLS is configured
-- TLS `ca_cert` recommended for HTTPS (production)
-- Fully tested and verified in CI
-
-**Advanced: Binary KMIP Endpoint** (requires TLS):
-- Endpoint: `localhost:5696`
-- Requires proper TLS configuration: `ca_cert`, `client_cert`, `client_key` (mutual TLS)
-- Not fully tested in CI - use with caution
-- Suitable for production with proper certificate management
-
-Once the container is running:
-1. Access the Cosmian KMS UI at http://localhost:9998/ui
-2. Create a wrapping key via the UI and note its identifier
-3. Configure the gateway with the key ID under `encryption.key_manager.cosmian.keys`
-
-Refer to the [Cosmian installation guide](https://docs.cosmian.com/key_management_system/installation/installation_getting_started/?utm_source=openai) for production-grade TLS and identity settings.
-
-The repository ships with integration tests (`test/cosmian_kms_integration_test.go`) that exercise the JSON/HTTP KMIP flow. These tests run as part of `go test ./...` or `make test-comprehensive` and ensure that wrapping/unwrapping as well as metadata propagation work correctly.
-
-## Implementing a Custom KMS
-
-To create a KMS-compatible system, implement the `KeyManager` interface. Here's how:
-
-### Step 1: Implement the Interface
-
-```go
-type YourKMS struct {
-    client kmip.Client
-    active wrappingKey
-}
-
-func (k *YourKMS) Provider() string {
-    return "your-kms"
-}
-
-func (k *YourKMS) WrapKey(ctx context.Context, plaintext []byte, _ map[string]string) (*crypto.KeyEnvelope, error) {
-    ciphertext, err := k.client.Encrypt(ctx, k.active.ID, plaintext)
-    if err != nil {
-        return nil, err
-    }
-    return &crypto.KeyEnvelope{
-        KeyID:      k.active.ID,
-        KeyVersion: k.active.Version,
-        Provider:   k.Provider(),
-        Ciphertext: ciphertext,
-    }, nil
-}
-
-func (k *YourKMS) UnwrapKey(ctx context.Context, env *crypto.KeyEnvelope, _ map[string]string) ([]byte, error) {
-    return k.client.Decrypt(ctx, env.KeyID, env.Ciphertext)
-}
-
-func (k *YourKMS) ActiveKeyVersion(ctx context.Context) (int, error) {
-    return k.active.Version, nil
-}
-
-func (k *YourKMS) Close(ctx context.Context) error {
-    return k.client.Close(ctx)
-}
-```
-
-### Step 2: Integration Points
-
-The gateway calls the KeyManager in these scenarios:
-
-1. **Encryption**: Calls `GetActiveKey()` to get the current password
-2. **Decryption**: Uses the metadata-stored envelope to call `UnwrapKey()`
-3. **Key Rotation**: Uses `RotateKey()` when keys need to be rotated
-
-### Step 3: Key Versioning Strategy
-
-The gateway stores key version information in object metadata:
-
-- **Metadata Key**: `x-amz-meta-encryption-key-version`
-- **Format**: Integer version number (1, 2, 3, ...)
-
-Your KMS should:
-- Assign sequential version numbers
-- Track which version is active
-- Retain old versions for decryption
-- Support deactivating old versions
-
-### Step 4: Password/Key Format
-
-The gateway expects:
-- **Type**: String (UTF-8)
-- **Length**: Minimum 12 characters
-- **Usage**: Used as-is for PBKDF2 key derivation
-
-Your KMS can:
-- Generate random passwords automatically
-- Use passwords provided by administrators
-- Derive passwords from other sources (master keys, etc.)
-
-## Example: AWS KMS Integration (Conceptual - Not Yet Implemented)
-
-> **⚠️ This is a conceptual example only.** AWS KMS adapter is planned for v1.0. See [V1.0-KMS-2](../issues/v1.0-issues.md#v10-kms-2-aws-kms-adapter) for implementation details.
-
-Here's a conceptual example of how AWS KMS integration would work:
-
-```go
-package awskms
-
-import (
-    "github.com/aws/aws-sdk-go-v2/service/kms"
-    "github.com/cloud37/s3-encryption-gateway/internal/crypto"
-)
-
-type AWSKMSManager struct {
-    client     *kms.Client
-    keyID      string
-    keyVersions map[int]string
-    currentVersion int
-}
-
-func (k *AWSKMSManager) GetActiveKey() (string, int, error) {
-    // Decrypt the current version's key from AWS KMS
-    result, err := k.client.Decrypt(context.TODO(), &kms.DecryptInput{
-        CiphertextBlob: k.getCiphertextForVersion(k.currentVersion),
-    })
-    if err != nil {
-        return "", 0, err
-    }
-    
-    return string(result.Plaintext), k.currentVersion, nil
-}
-
-func (k *AWSKMSManager) RotateKey(newPassword string, deactivateOld bool) error {
-    // Encrypt new password with AWS KMS
-    encryptResult, err := k.client.Encrypt(context.TODO(), &kms.EncryptInput{
-        KeyId:     &k.keyID,
-        Plaintext: []byte(newPassword),
-    })
-    if err != nil {
-        return err
-    }
-    
-    // Store new version
-    newVersion := k.currentVersion + 1
-    k.keyVersions[newVersion] = base64.StdEncoding.EncodeToString(encryptResult.CiphertextBlob)
-    k.currentVersion = newVersion
-    
-    // Optionally disable old versions in AWS KMS
-    if deactivateOld {
-        // Implement key alias rotation or disable old keys
-    }
-    
-    return nil
-}
-```
-
-## HashiCorp Vault / OpenBao Integration (Implemented)
-
-> ✅ **Implemented in v1.0.** OpenBao and HashiCorp Vault are supported via the
-> Transit secrets engine — see the
-> [`openbao` / `vault` Transit adapter](#openbao--vault-transit-adapter)
-> section above for configuration, auth methods, policy, and rotation. The
-> conceptual KV-based sketch that previously lived here was superseded by the
-> real Transit adapter (`internal/crypto/keymanager_openbao.go`,
-> [ADR 0015](adr/0015-openbao-vault-transit-adapter.md)).
-
-## Example: Database-Backed KMS
-
-```go
-package dbkms
-
-import (
-    "database/sql"
-    "github.com/cloud37/s3-encryption-gateway/internal/crypto"
-)
-
-type DatabaseKMSManager struct {
-    db *sql.DB
-}
-
-func (d *DatabaseKMSManager) GetActiveKey() (string, int, error) {
-    var password string
-    var version int
-    
-    err := d.db.QueryRow(`
-        SELECT password, version 
-        FROM encryption_keys 
-        WHERE active = true 
-        ORDER BY version DESC 
-        LIMIT 1
-    `).Scan(&password, &version)
-    
-    return password, version, err
-}
-
-func (d *DatabaseKMSManager) RotateKey(newPassword string, deactivateOld bool) error {
-    tx, err := d.db.Begin()
-    if err != nil {
-        return err
-    }
-    defer tx.Rollback()
-    
-    // Get next version
-    var maxVersion int
-    tx.QueryRow("SELECT COALESCE(MAX(version), 0) FROM encryption_keys").Scan(&maxVersion)
-    newVersion := maxVersion + 1
-    
-    // Insert new key
-    _, err = tx.Exec(`
-        INSERT INTO encryption_keys (version, password, active, created_at)
-        VALUES ($1, $2, true, NOW())
-    `, newVersion, newPassword)
-    if err != nil {
-        return err
-    }
-    
-    // Deactivate old keys if requested
-    if deactivateOld {
-        _, err = tx.Exec(`
-            UPDATE encryption_keys 
-            SET active = false, rotated_at = NOW()
-            WHERE active = true AND version < $1
-        `, newVersion)
-        if err != nil {
-            return err
-        }
-    }
-    
-    return tx.Commit()
-}
-```
-
-## Configuration
-
-Enable KMS mode in your configuration:
-
-```yaml
-encryption:
-  password: "initial-password-or-kms-master-key"  # Still required for initialization
-  key_manager:
-    enabled: true  # Enable KMS mode
-```
-
-Or via environment variable:
-
-```bash
-export KEY_MANAGER_ENABLED=true
-export ENCRYPTION_PASSWORD="your-initial-password"
-```
-
-## Key Rotation Workflow (Updated)
-
-When using KMS mode with external KMS (e.g., Cosmian KMIP), the rotation workflow is:
-
-1. **Current State**: All objects encrypted with key version 1
-2. **Create New Key**: Create a new wrapping key in your KMS (e.g., via Cosmian KMS UI)
-   - Assign it version 2
-   - Note the key ID
-3. **Update Configuration**: Add new key to `encryption.key_manager.cosmian.keys` as first entry
-   - Keep old key(s) in the list for dual-read support
-   - Set `dual_read_window` appropriately
-4. **Restart Gateway**: Restart to load new configuration
-   - New objects → Encrypted with version 2
-   - Old objects → Still decryptable with version 1 (via dual-read)
-5. **Monitor**: Track rotated reads via metrics and audit logs
-6. **Optional Cleanup**: After grace period, remove old keys from configuration
-   - Ensure all critical objects have been accessed/re-encrypted
-   - Objects encrypted with removed keys will no longer be decryptable
-
-See the [Dual-Read Window and Key Rotation](#dual-read-window-and-key-rotation) section above for detailed configuration and monitoring guidance.
-
-## Best Practices
-
-### Security
-- **Never log passwords**: Keys should be encrypted at rest
-- **Use secure storage**: Store keys in encrypted databases, HSMs, or cloud KMS
-- **Access control**: Implement proper access controls for key retrieval
-- **Audit logging**: Log all key access and rotation events
-
-### Performance
-- **Key caching**: Cache active keys in memory (with TTL)
-- **Connection pooling**: For database-backed KMS
-- **Retry logic**: Handle transient failures gracefully
-
-### Operations
-- **Key rotation schedule**: Establish regular rotation schedule
-- **Backup keys**: Always backup keys before rotation
-- **Version retention**: Keep old versions until all objects are migrated
-- **Monitoring**: Monitor key usage and rotation status
-
-## Testing Your KMS
-
-Create a test to verify your KMS implementation:
-
-```go
-func TestYourKMS(t *testing.T) {
-    kms := NewYourKMS(...)
-    
-    // Test GetActiveKey
-    key, version, err := kms.GetActiveKey()
-    assert.NoError(t, err)
-    assert.GreaterOrEqual(t, len(key), 12)
-    assert.Greater(t, version, 0)
-    
-    // Test RotateKey
-    err = kms.RotateKey("new-password-123", false)
-    assert.NoError(t, err)
-    
-    // Verify new key is active
-    newKey, newVersion, err := kms.GetActiveKey()
-    assert.NoError(t, err)
-    assert.Equal(t, "new-password-123", newKey)
-    assert.Greater(t, newVersion, version)
-    
-    // Test Wrap/Unwrap cycle
-    env, err := kms.WrapKey(ctx, []byte("plaintext-dek"), nil)
-    assert.NoError(t, err)
-    plaintext, err := kms.UnwrapKey(ctx, env, nil)
-    assert.NoError(t, err)
-    assert.Equal(t, []byte("plaintext-dek"), plaintext)
-}
-```
-
-## Migration from Single Password Mode
-
-To migrate from single password to KMS mode:
-
-1. **Backup**: Ensure you have backups of all encrypted objects
-2. **Enable KMS**: Set `key_manager.enabled: true` in config
-3. **Initialize**: Start with your current password
-4. **Rotate**: After verifying everything works, rotate to a new key
-5. **Monitor**: Watch for decryption failures (indicates version issues)
-
-The gateway will continue to work with objects encrypted with the original password, and new objects will use the new key.
+### Pre-rotation checklist
+
+- Inventory active/retained key versions and their dependent objects, MPU manifests,
+  Valkey state DEK, metadata key, and backups. Cold/locked objects still matter.
+- Back up config and required keys; verify current provider health and old-object reads.
+- Choose provider-specific promotion: explicit AES active version, Cosmian key order,
+  or Transit server version. Retain old decrypt capability across the fleet.
+- Drain/coordinate writers and long-running requests where required; consult the
+  [progressive delivery runbook](OPS_DEPLOYMENT.md) and [upgrade constraints](MIGRATION.md).
+- Prepare a rollback that can read **both** old and newly written envelopes.
+
+### Rotation procedure
+
+1. Provision the new wrapping key/version without removing old keys.
+2. Deploy retained key material/policy to every replica. For AES, keep old
+   `active_version` until intended cutover; for Cosmian, reordering keys already
+   changes the active writer on restart—do not then assume admin start performs
+   the original cutover. Follow one reviewed deployment/promotion strategy.
+3. Where the loaded provider implements RotatableKeyManager, call admin
+   start/status/commit against each intended replica, or coordinate a fleet
+   restart. The [admin reference](RUNBOOK.md#admin-api-reference) defines wire responses.
+4. Verify readiness, new object write/read, old object read, and key version with
+   read-only `s3eg-cli`/authorized backend inspection. Gateway HEAD intentionally
+   hides internal envelope fields; do not use it to prove active key version.
+5. Monitor `kms_rotated_reads_total` and crypto/provider errors. Reading an object
+   does **not** establish that all cold objects or stored envelopes were rewritten.
+6. Re-encrypt verified inventory through the [explicit GET→PUT workflow](MIGRATION.md#standard-re-encryption-get--put)
+   if required. A no-op sync or elapsed grace period does not prove migration.
+7. Retire old versions only after all required objects, manifests, state, metadata
+   and backups can be recovered without them. Record exceptions and earliest
+   retirement dates for locked data.
+
+### Rollback and Object Lock
+
+Do not disable/remove a key manager to handle an outage: it cannot turn its old
+ciphertext into password-readable objects. Restore connectivity/policy or a
+retained compatible provider/config, keeping new keys available too. Explicit
+governance bypass is refused at the gateway. Backend lock protects ciphertext
+bytes, not the continued availability of decryption keys. Preserve KEKs for the
+entire required recovery/retention window; test explicit retention persistence
+rather than trusting accepted inline PUT headers.
+
+## Key Manager Interface
+
+The production interface in [`internal/crypto/keymanager.go`](../internal/crypto/keymanager.go)
+defines Provider, WrapKey, UnwrapKey, ActiveKeyVersion, HealthCheck, and Close.
+Methods are concurrent-safe, honor contexts, return caller-owned DEKs, avoid
+logging plaintext, and close idempotently. Metadata is advisory; payload AEAD
+ObjectContext binding is the independent location-integrity boundary.
+
+Factories register with `crypto.Register`; `crypto.Open` discovers linked
+providers. Typed startup configuration must supply required factory options;
+registry presence alone does not invent a YAML schema. Wrap/unwrap envelopes
+contain key ID/version/provider/ciphertext, not a string password API. Verify
+adapters with the existing conformance suite and race/error/closure tests before
+shipping. Do not copy historical GetActiveKey/RotateKey password sketches as the
+current interface.
 
 ## Troubleshooting
 
-### "no active key found"
-- Check that your KMS is returning valid keys
-- Verify the key meets minimum length requirements (12 chars)
+| Symptom | Check / response |
+|---|---|
+| Provider initialization or readiness fails | Endpoint/TLS/key ID/policy; distinguish unavailable network from rejected credentials |
+| Old objects fail after promotion | Retained version/key/password, provider decrypt limits, object metadata; don't strip markers |
+| New key unexpected | Loaded config/active AES version or Cosmian order; read-only inspect and new-write round trip |
+| High rotated reads | Expected historical-key traffic; not proof of automatic migration or reason to remove keys |
+| Memory key lost after restart | Restore original persistent secret; generated key is irrecoverable without backup |
+| Transit re-login churn | Default token lookup/renew policy, role TTL, credential source; fixed tokens are operator-owned |
+| KMS outage | Restore provider/policy/TLS; optional unwrap cache may serve some reads, no blanket status or write guarantee |
 
-### Decryption failures after rotation
-- Ensure old key versions are still accessible
-- Check that `WrapKey()/UnwrapKey()` round-trip correctly
-- Verify metadata includes correct version number
-
-### Performance issues
-- Implement key caching in your KMS
-- Use connection pooling for remote KMS services
-- Monitor KMS response times
-
-## Additional Resources
-
-- See `internal/crypto/keymanager.go` for the reference implementation
-- See `internal/crypto/keymanager_test.go` for test examples
-- See [`DEVELOPMENT_NOTES.md`](DEVELOPMENT_NOTES.md) for development notes on key rotation
+Use the [incident runbook](RUNBOOK.md), [observability](OBSERVABILITY.md), and
+[migration recovery](MIGRATION.md). Security recommendations here were checked
+against repository code; no external O'Reilly MCP verification was available.

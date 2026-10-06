@@ -7,7 +7,7 @@
 #     -f helm/s3-encryption-gateway/values.prod.yaml \
 #     -f helm/s3-encryption-gateway/examples/values-hpa-tuned.yaml
 #
-# Design rationale (see docs/SCALING.md §4.1 for detail):
+# Design rationale (see docs/PERFORMANCE.md#hpa-and-graceful-shutdown):
 #   - targetCPU: 60% provides 10pp headroom before 70% memory target,
 #     reducing request queuing during scale-out latency.
 #   - scaleUp stabilizationWindow: 15s (vs 0s in defaults) allows faster

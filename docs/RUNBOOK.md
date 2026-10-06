@@ -1,624 +1,339 @@
-# S3 Encryption Gateway — Operations Runbook
+# Operations Runbook and Admin API
 
-This runbook covers operational procedures for the S3 Encryption Gateway.
+**Baseline: v0.12.3.** Use this guide for recovery, state/key operations, incidents,
+and the admin HTTP reference. Runtime setup: [deployment](DEPLOYMENT.md); key
+provider/rotation: [key management](KMS_COMPATIBILITY.md); dashboards/profiling:
+[observability](OBSERVABILITY.md); upgrades: [migration](MIGRATION.md).
 
----
+Gateway-managed CORS recovery below applies to **unreleased main (GH-322)**;
+the v0.12.3 release does not include that mode.
+
+## Contents
+
+- [First response](#first-response)
+- [Valkey state at-rest encryption](#valkey-state-at-rest-encryption)
+- [ListObjects plaintext-size cache](#listobjects-plaintext-size-cache-v10-s3-3)
+- [Unreleased gateway CORS data-loss recovery](#gateway-cors-valkey-data-loss-and-recovery)
+- [Metadata encryption key management](#metadata-encryption-key-management)
+- [Admin API reference](#admin-api-reference)
+- [Alert playbooks](#alert-playbooks)
+- [Per-bucket traffic](#per-bucket-traffic)
+
+## First Response
+
+1. Preserve the failing request shape, object identity, version, timing, and logs
+   without credentials/signatures/plaintext. Determine whether failure is auth,
+   backend availability, key-provider, state, or integrity.
+2. Check `/ready` dependency results and liveness separately. A healthy probe is
+   not proof that signed S3 uploads, writable spools, or every object can be read.
+3. Before recovery changes, back up ciphertext **and complete metadata**, manifests,
+   necessary state, keys/config, and versions. Pause writes where consistency requires.
+4. Use the established backend/key identity. Never disable encryption, remove
+   metadata, relocate ciphertext, or discard state keys as a generic fix.
+5. Verify recovered application bytes, GET/HEAD, new writes, and relevant state
+   before resuming traffic. Record which focused checks versus full workflows ran.
 
 ## Valkey State At-Rest Encryption
 
-### Overview
-
-As of v1.0 (V1.0-CRYPTO-2), the multipart-upload state store encrypts all
-`UploadState` blobs in Valkey using AES-256-GCM. The encryption key is derived
-from a dedicated password via HKDF-SHA256 with a fixed public salt
-`"s3eg-mpu-state-v1"` that is distinct from any other key in the system.
-
-When `valkey.encrypt_state=true` (the default), every `Create` writes an
-opaque ciphertext blob to Valkey. A read-only attacker with access to Valkey
-memory dumps, RDB/AOF files, or replication streams sees only random-looking
-bytes. They cannot recover bucket names, object keys, IV prefixes, wrapped
-DEKs, or any other upload metadata without the encryption key.
-
----
-
-### Enabling Encryption
-
-**Step 1 — Set the encryption password secret.**
-
-```bash
-# Kubernetes — create or update the secret
-kubectl create secret generic s3gw-valkey-enc \
-  --from-literal=VALKEY_ENCRYPTION_PASSWORD="$(openssl rand -base64 32)" \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-**Step 2 — Configure the gateway.**
-
-In `config.yaml`:
+New state metadata is encrypted with a random shared DEK wrapped by KeyManager.
+The envelope is stored under **`mpu:state-key-wrapped`** with atomic initialization;
+replicas unwrap the same key. It is a required recovery dependency, not a disposable
+upload record. The main/password fallback manager can support legacy wraps; keep
+the original password when those envelopes remain in use.
 
 ```yaml
 multipart_state:
   valkey:
-    encryption_password_env: "VALKEY_ENCRYPTION_PASSWORD"
-    encrypt_state: true   # default; can be omitted
+    addr: valkey.internal:6379
+    password_env: VALKEY_PASSWORD
+    tls:
+      enabled: true
+      ca_file: /etc/gateway/valkey-ca.pem
+    encrypt_state: true
+    allow_legacy_plaintext_state: false
+    state_v2_writer: true
 ```
 
-Or via environment variables:
+At-rest encryption defaults enabled. TLS is independently required unless an
+explicit development plaintext override is selected. Some hash protocol fields
+must remain available to Valkey scripts; “metadata encryption” is not a claim that
+the store exposes no operational identifiers. Exact fields and limits live in config.
 
-```bash
-export VALKEY_ENCRYPTION_PASSWORD_ENV="VALKEY_ENCRYPTION_PASSWORD"
-export VALKEY_ENCRYPT_STATE="true"
-```
+### Enabling encryption and verification
 
-**Step 3 — Inject the secret into the gateway pod.**
+Configure a persistent key manager (or the consistent password-based manager),
+Valkey address/auth/TLS, and the state-v2 writer. Verify initialization/readiness,
+create/upload/retry/abort/complete, and the encrypted-state metrics. Inspect backend
+state only through authorized tooling; do not print keys or full sensitive records.
 
-```yaml
-# Helm values
-multipartState:
-  valkey:
-    encryptionPasswordEnv: "VALKEY_ENCRYPTION_PASSWORD"
-    encryptState: true
+The legacy `encryption_password_env`/HKDF material is read compatibility for old
+state, **not the new-state encryption authority**. New ciphertext depends on the
+wrapped state DEK. Keep its provider key/version in backup and retirement inventories.
 
-env:
-  - name: VALKEY_ENCRYPTION_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: s3gw-valkey-enc
-        key: VALKEY_ENCRYPTION_PASSWORD
-```
+### Legacy plaintext migration
 
-**Step 4 — Rolling restart.**
+AEAD failures do not silently downgrade to plaintext by default.
+`VALKEY_ALLOW_LEGACY_PLAINTEXT_STATE=true` is an explicit one-time migration
+escape hatch. Drain/abort legacy encrypted uploads under the
+[coordinated upgrade](MIGRATION.md#012-upgrade-notice-including-0123); old encrypted
+state is abort-only for modern part/complete paths. Disable the escape hatch after
+the approved migration window, and monitor legacy read/in-flight metrics.
 
-Restart all gateway replicas. The new password takes effect immediately for
-all new `CreateMultipartUpload` calls. In-flight uploads that were created
-before the restart use the old (plaintext) state, which the fallback path
-handles transparently (see "Legacy Plaintext Migration" below).
+Do not shorten TTL blindly to force migration; state expiration can orphan backend
+MPUs. Missing state fails closed rather than switching an encrypted upload to
+plaintext. `MPU_ALLOW_UNTRACKED_PLAINTEXT_UPLOADS` is a separate temporary legacy
+plaintext-routing exception, not a recovery setting for encrypted uploads.
 
----
+### Rotation and recovery
 
-### Verifying Encryption Is Active
+Preserve the state-key envelope and old unwrap capability when rotating KEKs.
+Promoting a provider version does not itself rewrap all state/backups. Never delete
+`mpu:state-key-wrapped` to “reset” state while dependent uploads exist. Test backup
+restore with the matching provider keys. Losing state can require backend abort/
+cleanup and starting new uploads; surviving ciphertext parts alone are insufficient.
 
-Scrape the Prometheus endpoint and check:
-
-```promql
-# Encrypted writes — should be > 0 after the first multipart upload
-rate(gateway_mpu_state_encrypted_writes_total[5m])
-
-# Legacy reads — should decrease toward 0 as old uploads expire
-rate(gateway_mpu_state_legacy_reads_total[5m])
-```
-
-**Expected steady state:** `encrypted_writes_total` increases with every
-multipart upload; `legacy_reads_total` is 0 after all pre-migration uploads
-have completed or expired via TTL (default: 7 days).
-
----
-
-### Legacy Plaintext Migration
-
-The gateway uses a **lazy migration** strategy. No operator action is required:
-
-1. New uploads are always written encrypted.
-2. Old plaintext blobs are read with a transparent fallback: if AES-GCM
-   decryption fails, the raw JSON is parsed as plaintext. A single `WARN`
-   log is emitted (de-duplicated via `sync.Once`):
-   ```
-   Unencrypted Valkey state detected — enable valkey.encrypt_state=true
-   ```
-3. Each legacy fallback increments `gateway_mpu_state_legacy_reads_total`.
-4. Plaintext blobs expire automatically via the Valkey TTL (default 7 days).
-   After the TTL window, no plaintext state remains.
-
-**No manual re-encryption step is needed.** Operators who want to accelerate
-the migration can reduce `valkey.ttl_seconds` temporarily (forcing faster
-expiry of old uploads) — but this risks aborting in-flight uploads. Do not
-change TTL unless all in-flight uploads are complete or aborted.
-
----
-
-### Rotating the Encryption Key
-
-Key rotation requires a brief window where both the old and new keys must be
-available. Because the gateway does not support simultaneous dual-key decryption
-for state blobs, the recommended procedure is:
-
-1. **Complete or abort all in-flight multipart uploads.** Query
-   `ListMultipartUploads` across all buckets and wait for the list to drain,
-   or issue `AbortMultipartUpload` for stale uploads.
-
-2. **Set the new password in the secret store** and update the Kubernetes
-   secret (or equivalent).
-
-3. **Rolling restart** the gateway replicas with the new
-   `VALKEY_ENCRYPTION_PASSWORD`. Replicas with the new key write new blobs
-   encrypted with the new key. Any blobs written by the old replicas (with
-   the old key) that are still in Valkey will fail decryption and trigger the
-   legacy plaintext fallback — but since those blobs were encrypted (not
-   plaintext), they will return `ErrStateDecryptFailed` and the upload will
-   fail. This is why Step 1 is critical.
-
-4. **Verify** that `gateway_mpu_state_legacy_reads_total` remains 0 after
-   the restart.
-
-> **Warning:** Password loss = inability to read in-flight MPU state. The
-> underlying object encryption DEK is safe (it is wrapped by the
-> `KeyManager`), but the upload's Valkey metadata becomes unreadable. Always
-> back up the password in a secure secrets manager (e.g., Vault, AWS Secrets
-> Manager, GCP Secret Manager).
-
----
-
-### Disabling Encryption (Deprecated)
-
-Setting `encrypt_state: false` disables at-rest encryption. This option is
-**deprecated as of v1.0** and will be removed in v2.0.
-
-A startup warning is logged when this option is set:
-
-```
-multipart_state.valkey.encrypt_state is false — at-rest encryption is
-disabled for Valkey multipart state (deprecated, will be removed in v2.0)
-```
-
-Use this option only as a temporary escape hatch during a migration or for
-local development. Do not use in production.
-
----
-
-### Monitoring Alerts
-
-Recommended alert rules:
-
-```yaml
-# Alert if legacy reads appear in steady state (after migration window)
-- alert: MPUStateLegacyReadsActive
-  expr: increase(gateway_mpu_state_legacy_reads_total[1h]) > 0
-  for: 30m
-  labels:
-    severity: warning
-  annotations:
-    summary: "Unencrypted Valkey state blobs are being read"
-    description: >
-      gateway_mpu_state_legacy_reads_total is increasing. Unencrypted
-      multipart-upload state blobs are present in Valkey. These will expire
-      via TTL after {{ $labels.valkey_ttl_seconds }} seconds. If this alert
-      fires more than 7 days after enabling encrypt_state=true, investigate
-      whether a gateway replica is still running with encryption disabled.
-
-# Alert if encrypted writes stop (encryption may have been accidentally disabled)
-- alert: MPUStateEncryptedWritesStopped
-  expr: rate(gateway_mpu_state_encrypted_writes_total[15m]) == 0
-    and rate(gateway_mpu_state_store_ops_total{op="create",result="success"}[15m]) > 0
-  for: 5m
-  labels:
-    severity: critical
-  annotations:
-    summary: "MPU state encrypted writes have stopped despite active creates"
-    description: >
-      Multipart upload creates are succeeding but the encrypted-writes counter
-      is not incrementing. This may indicate encrypt_state was set to false or
-      the encryption key is missing.
-```
-
----
+Disabling `encrypt_state` is not a recommended incident workaround. Changing TLS,
+passwords, provider versions, and writer capability needs coordinated rollout,
+not a mixed fleet. See [key retention](KMS_COMPATIBILITY.md#dual-read-window-and-key-rotation).
 
 ## ListObjects Plaintext Size Cache (V1.0-S3-3)
 
-### Overview
+The advisory `plainsize:<bucket>` cache is written through on PUT/copy/completion
+and evicted on deletes; one HMGET resolves a page. It shares Valkey connectivity
+with MPU state but has different failure semantics: unresolved sizes can remain
+ciphertext while MPU state must fail closed. ETags remain backend-defined.
 
-`handleListObjects` resolves plaintext sizes for encrypted objects via a
-write-through Valkey hash (`plainsize:<bucket>`) instead of issuing one
-`HeadObject` per listed key. The index is populated by `PutObject`,
-`CompleteMultipartUpload`, and `CopyObject`, and evicted by `DeleteObject` /
-`DeleteObjects`. A whole listing page resolves with a single `HMGET`.
-
-This is what makes sync clients (rclone, restic, Duplicati, s5cmd) observe
-`ListObjects[i].Size == HeadObject(key).Content-Length`. Without it, every
-encrypted object looks "modified" on every sync run and is re-transferred.
-
-The size cache shares the **same Valkey instance and connection pool** as the
-multipart-upload state store — there is no second Valkey deployment. Unlike MPU
-state, the size cache is **fail-soft**: if Valkey is unavailable, listings
-return ciphertext sizes (the pre-v0.11.1 behaviour) with no `5xx`. Valkey is
-strongly recommended for ListObjects, not a hard dependency.
-
-### Metrics to watch
-
-| Metric | Meaning |
-|---|---|
-| `list_size_cache_hits_total{bucket}` | Keys resolved from the cache (good) |
-| `list_size_cache_misses_total{bucket}` | Keys absent from the cache |
-| `list_size_fallback_head_total{bucket,result}` | `HeadObject` calls from the opt-in fallback batch (`hit`/`timeout`/`error`) |
-
-Track the warm-up ratio:
-
-```promql
-sum(rate(list_size_cache_hits_total[5m]))
-  /
-(sum(rate(list_size_cache_hits_total[5m])) + sum(rate(list_size_cache_misses_total[5m])))
-```
-
-A ratio climbing toward 1.0 during normal traffic means the cache is warming.
-A rising `list_size_fallback_head_total` indicates billing exposure on
-per-API-call backends (Wasabi, R2, B2) — disable `fallback_head_enabled` if
-cost is a concern.
-
-### Warming legacy objects
-
-Objects uploaded before V1.0-S3-3 was deployed are **not** auto-indexed. They
-populate naturally as they are re-uploaded or copied. To warm them via normal
-listing traffic, temporarily enable the fallback HEAD batch:
-
-> **Warning:** Do not enable `fallback_head_enabled` without a persistent
-> Valkey/KeyDB store. Without persistent cache storage, every listing starts
-> cold and can issue one `HeadObject` request per uncached object. On a large
-> bucket or a remote provider this causes severe latency and can amplify
-> per-request API or billing costs.
+Watch `list_size_cache_hits_total`, `list_size_cache_misses_total`, and
+`list_size_fallback_head_total{result}`. To warm previously uncached objects:
 
 ```yaml
 list_size_translate:
   enabled: true
-  fallback_head_enabled: true      # opt-in; bounded by concurrency + timeout
+  fallback_head_enabled: true
   fallback_head_concurrency: 10
   fallback_head_timeout: 5s
 ```
 
-Watch `list_size_fallback_head_total` and the warm-up ratio; once misses trend
-to near-zero, set `fallback_head_enabled: false` again to stop the HEAD cost.
-A proactive admin warm-up endpoint (`POST /admin/warm-size-cache`) is noted as
-a follow-up in the plan but is not yet implemented.
+This adds backend HEAD/format reads and billing/latency. Use durable cache storage,
+bounded settings, and monitor before enabling on large buckets. Disable fallback
+when it is no longer needed. There is no implemented admin warm-cache endpoint.
+During Valkey outage, listings can still succeed with incorrect encrypted sizes;
+sync tools may re-transfer. Restore Valkey, then warm through writes or deliberate
+fallback. A successful listing is not proof of correct size/ETag parity; see
+[listing limits](S3_API_IMPLEMENTATION.md#listings-and-pagination).
 
-### Behaviour during a Valkey outage
+## Metadata Encryption Key Management
 
-- `ListObjects` keeps serving `200 OK` with **ciphertext sizes** for all keys.
-  No `5xx`, no panic. Expect a log line at `WARN` level:
-  `handleListObjects: size cache GetBatch failed; returning ciphertext sizes`.
-- Sync clients will flag every encrypted object as modified and re-transfer
-  until Valkey recovers and the cache re-warms. This is a correctness/
-  efficiency regression, not a data-loss event.
-- Multipart uploads are unaffected by the size cache; they remain fail-closed
-  on Valkey outage (see [valkey-down](#valkey-down)).
-- On recovery, the cache re-warms through normal write traffic (or the fallback
-  HEAD batch if enabled). There is no manual repair step.
+The separate metadata key protects gateway crypto metadata, not all user metadata.
+Generate a base64 32-byte key with `openssl rand -base64 32` and save it in a
+protected secret file (`0600`, appropriate service ownership). Do not reuse a
+published example key. Configure `encryption.metadata_encryption_key_file` /
+`ENCRYPTION_METADATA_KEY_FILE`. The mutually exclusive inline field requires at
+least 128 characters and is hashed to 32 bytes; prefer protected secret sources.
 
----
+Startup wraps the loaded key through the active KeyManager when available. This
+does not replace your persistent metadata-key source/backup with a magical server
+registry. **Key loss can make existing encrypted metadata and data unreadable.**
+Retain the original key and provider dependencies, including backups and cold objects.
+
+Metadata-key replacement has no general automatic old-key registry. Do not simply
+replace the key and assume old objects stay readable: use an isolated reader with
+the old key and a writer with the new key, explicitly GET→PUT, preserve metadata,
+and verify before retiring anything. See [migration](MIGRATION.md).
+
+Verification uses authorized backend/read-only `s3eg-cli` inspection plus a
+gateway plaintext round trip. Gateway HEAD hides `enc-metadata` and other reserved
+markers; their absence from client responses is expected, not evidence the feature
+is disabled. See [metadata model](ENCRYPTION_DESIGN.md#encrypted-object-metadata-model)
+and actual metadata metrics in [observability](OBSERVABILITY.md).
+
+## Admin API Reference
+
+The admin listener is separate from the S3 data plane, disabled by default, normally
+loopback-bound. Non-loopback requires TLS. Bearer tokens are distinct from S3 keys.
+
+```yaml
+admin:
+  enabled: true
+  address: 127.0.0.1:8081
+  auth:
+    type: bearer
+    token_file: /etc/gateway/admin-token
+  rate_limit:
+    requests_per_minute: 30
+```
+
+Token file permissions `0600` or stricter; minimum token size is validated.
+Inline token requires explicit development opt-in. Environment counterparts:
+ADMIN_ENABLED, ADMIN_ADDRESS, ADMIN_TLS_ENABLED/CERT_FILE/KEY_FILE,
+ADMIN_AUTH_TYPE/TOKEN_FILE/TOKEN, ADMIN_ALLOW_INLINE_TOKEN, ADMIN_RATE_LIMIT_RPM.
+File token refresh/rotation follows server behavior; do not expose bearer material.
+
+### Rotation endpoints
+
+All requests use `Authorization: Bearer <token>`, with JSON request bodies.
+Promotion state is process-local; target each intended replica or coordinate
+deployment, not arbitrary load-balanced start/status/commit calls.
+
+| Method/path | Input | Success / errors |
+|---|---|---|
+| POST `/admin/kms/rotate/start` | Optional target_version, grace_period (default 30s) | 202 rotation_id/phase/current/target/provider; 501 unsupported manager, 400 ambiguous/bad request, 404 missing key, 409 conflict |
+| GET `/admin/kms/rotate/status` | None | 200 snapshot with phases and in-flight wraps |
+| POST `/admin/kms/rotate/commit` | Optional force; use cautiously | 200 snapshot; 409 not ready, 500 promotion failure |
+| POST `/admin/kms/rotate/abort` | None | 200 aborted snapshot when phase permits; conflict/error otherwise |
+
+Phases: idle, draining, ready_for_cutover, committing, committed, aborted.
+The HTTP contract is not a proof that all loaded providers can promote versions.
+Follow [provider-specific rotation](KMS_COMPATIBILITY.md#dual-read-window-and-key-rotation).
+
+```bash
+ADMIN=http://127.0.0.1:8081
+TOKEN="$(cat /etc/gateway/admin-token)"
+curl --fail-with-body -X POST "$ADMIN/admin/kms/rotate/start" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"target_version":2,"grace_period":"30s"}'
+curl --fail-with-body "$ADMIN/admin/kms/rotate/status" -H "Authorization: Bearer $TOKEN"
+# After checking the ready phase and the intended replica:
+curl --fail-with-body -X POST "$ADMIN/admin/kms/rotate/commit" -H "Authorization: Bearer $TOKEN"
+```
+
+### Multipart administration
+
+| Method/path | Response / operational warning |
+|---|---|
+| GET `/admin/mpu/list` | 200 active_uploads/count/timestamp from state store; not all backend orphan MPUs |
+| POST `/admin/mpu/abort/{uploadId}` | 200 status/upload/bucket/key after state deletion; 404 NoSuchUpload, 400 empty ID, 500 state failures |
+
+Admin abort attempts backend abort best-effort, then deletes state **even if the
+backend abort failed**. A 200 therefore does not prove no backend orphan remains.
+Use it only with a reviewed cleanup procedure and inspect backend uploads afterward.
+
+### Profiling endpoints and metrics
+
+Profiling is opt-in under `admin.profiling.enabled`, inherits bearer/rate controls,
+and can contain sensitive process data. `/admin/debug/pprof/` exposes cmdline,
+profile, symbol, trace, heap, goroutine, allocs, block, mutex, threadcreate.
+CPU/trace seconds are capped and concurrency bounded (429 Retry-After); invalid
+seconds returns 400. Canonical settings/endpoints/recipes are in
+[observability](OBSERVABILITY.md#runtime-profiling), not duplicated here.
+
+Rotation emits key_rotation.start/committed/aborted audit events and bounded
+operation/duration/in-flight/active-version metrics. Profiling emits fetch audit
+and request metrics. See source and observable families rather than relying on
+an old copied metric inventory.
 
 ## Alert Playbooks
 
 ### high-error-rate
 
-**Alert:** `S3GatewayHighErrorRate`
-**Severity:** critical
-**Expression:** `rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05`
-
-**Symptom:** The gateway is returning 5xx errors for more than 5% of requests.
-
-**Diagnosis:**
-1. Check the backend S3 provider health and connectivity.
-2. Examine gateway logs for error stacks: `kubectl logs -l app=s3-encryption-gateway --tail=100 | grep -E '"level":"error"'`.
-3. Check if the issue is isolated to specific routes: `sum by (path) (rate(http_requests_total{status=~"5.."}[5m]))`.
-4. Verify the encryption engine and KMS are operational.
-
-**Mitigation:**
-- If backend is degraded, fail over to a secondary S3 endpoint if configured.
-- If KMS is unreachable, ensure the KMS endpoint is accessible (see #kms-unhealthy).
-- If the gateway is overloaded, scale up replicas: `kubectl scale deployment s3-encryption-gateway --replicas=N`.
-- Restart a single replica to confirm if the issue is process-level (memory leak, goroutine leak).
-
----
+Check backend status, scope/auth failures, dependency readiness, and logs. Separate
+storage failures from decrypt/tamper errors. Reduce load or repair upstream health;
+do not move ciphertext to an arbitrary failover bucket or silently downgrade crypto.
 
 ### high-latency
 
-**Alert:** `S3GatewayHighLatency`
-**Severity:** warning
-**Expression:** `histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 2`
-
-**Symptom:** P99 request latency exceeds 2 seconds.
-
-**Diagnosis:**
-1. Check CPU and memory metrics in the Runtime dashboard row.
-2. Verify backend S3 latency: `rate(s3_operation_duration_seconds_sum[5m]) / rate(s3_operation_duration_seconds_count[5m])`.
-3. Check Valkey latency for MPU operations: `rate(gateway_mpu_state_store_latency_seconds_sum[5m]) / rate(gateway_mpu_state_store_latency_seconds_count[5m])`.
-4. Look for GC pressure: check goroutines and heap memory.
-
-**Mitigation:**
-- If backend latency is high, check the upstream S3 provider.
-- If Valkey latency is high, scale Valkey or add replicas.
-- Increase gateway replica count to spread load.
-- Consider increasing `chunk_size` if small chunks cause excessive per-chunk overhead.
-
----
+Inspect CPU/heap/GC, backend latency, Valkey/KMS retries, spool pressure, and listing
+HEAD amplification. Scale based on measured bottlenecks. Increasing buffers/chunks
+without memory/concurrency accounting is not a universal fix.
 
 ### encryption-errors
 
-**Alert:** `S3GatewayEncryptionErrors`
-**Severity:** critical
-**Expression:** `increase(encryption_errors_total[5m]) > 0`
-
-**Symptom:** Encryption operations are failing.
-
-**Diagnosis:**
-1. Check the error type: `sum by (error_type) (rate(encryption_errors_total[5m]))`.
-2. Verify KMS connectivity (see #kms-unhealthy).
-3. Check if the operation is Encrypt or Decrypt: `rate(encryption_operations_total[5m])`.
-4. Examine gateway logs for AEAD or key-derivation errors.
-
-**Mitigation:**
-- If KMS-related: ensure the KMS endpoint is reachable and the key exists.
-- If algorithm mismatch: the gateway might not support the algorithm used to encrypt stored objects. Verify `supported_algorithms` in config.
-- If memory-related: ensure the gateway has sufficient memory for chunked encryption.
-- Restart the gateway pod if the error is transient.
-
----
+Preserve bytes/metadata/version. Check keys, allowed formats/KDF costs, location
+binding, and genuine tamper/truncation. Backend availability errors have their own
+provenance. Do not strip markers or serve ciphertext as recovered plaintext.
 
 ### kms-unhealthy
 
-**Alert:** `S3GatewayKMSUnhealthy`
-**Severity:** critical
-**Expression:** `gateway_kms_healthy == 0`
-
-**Symptom:** KMS health check has been failing for more than 2 minutes.
-
-**Diagnosis:**
-1. Read the readiness body: `curl -s http://POD_IP:8438/ready`. A connection
-   error (refused, timeout, DNS) means the KMS is **unreachable**; `401`/`403`
-   means it is reachable and rejected the gateway's **credential** — see
-   [kms-auth-token-expired](#kms-auth-token-expired).
-2. Check KMS provider endpoint from the gateway pod: `kubectl exec POD -- curl -v http://kms-endpoint:port/`.
-3. Verify network policies allow egress to the KMS endpoint.
-4. Check TLS certificates if the KMS uses mTLS.
-5. Inspect KMS server logs (external system).
-
-**Mitigation:**
-- Restart the KMS service if self-hosted (Cosmian, Vault).
-- If using AWS KMS, check AWS health dashboard.
-- If the outage is prolonged, consider switching to a different KMS provider (requires config change and restart).
-- As a last resort, switch to password-only mode (no KMS) to restore service, then resolve the KMS issue.
+Check provider-specific health, TLS chain/hostname, egress, key existence, and auth.
+An HTTP server response is not a successful wrap/unwrap. Restore the same provider
+identity/old keys; switching to password mode cannot decrypt KMS-wrapped objects.
 
 ### kms-outage-degraded-mode
 
-**Scenario:** KMS is fully unavailable (network partition, KMS service down).
-
-**Behaviour under V1.0-KMS-1 harness:**
-- The retry wrapper will exhaust `max_elapsed_time` (default 30 s) per request,
-  then return an error.
-- If the circuit breaker is enabled (recommended), after `consecutive_failures`
-  failures (default 5) it trips open and all subsequent WrapKey/UnwrapKey calls
-  fail immediately with `ErrProviderUnavailable` (503 to clients). This prevents
-  goroutine pile-up during prolonged outages.
-- The DEK cache (if enabled) continues to serve previously-cached unwrap results
-  for up to `ttl` seconds (default 60 s). READ operations for recently-accessed
-  objects continue to succeed from cache; write operations (new PutObject,
-  UploadPart) fail immediately.
-- The health-check goroutine updates `gateway_kms_healthy` to 0, triggering the
-  `S3GatewayKMSUnhealthy` alert.
-
-**Recovery:**
-1. When the KMS recovers, the circuit breaker Half-Open probe succeeds and the
-   breaker closes automatically.
-2. The health-check goroutine updates `gateway_kms_healthy` to 1.
-3. If the auth token did not survive the outage, the adapter re-authenticates on
-   its own — see [kms-auth-token-expired](#kms-auth-token-expired).
-4. No gateway restart is required.
-
-**Fail-closed guarantee:** Write operations (new object encryption) always
-require a successful `WrapKey` call; the DEK cache covers only reads. A
-gateway running with a downed KMS will accept GET requests for cached objects
-but reject PUT/POST operations. This is the correct degraded-mode posture.
-
----
+Bounded retry/breaker may fail fast; optional cached unwrap results can serve some
+reads until TTL, not all objects or new writes. Failure codes vary by API path.
+Restore provider connectivity/policy and verify wrap/unwrap plus reads/writes;
+do not promise every PUT/part has one universal failure status.
 
 ### kms-auth-token-expired
 
-**Scenario:** the KMS is reachable but rejects the gateway's credential —
-`403 permission denied` on every wrap/unwrap and in the readiness body. For
-OpenBao/Vault the token was revoked, hit its `max_ttl`, or lost its lease while
-the server was unreachable (a raft quorum loss will do it).
-
-**Behaviour:** self-healing. The renewal goroutine re-logs-in as soon as a
-renewal fails, and any request rejected with 401/403 triggers a re-login and one
-retry, so recovery does not wait for the lease clock. It is bounded by the login
-floor rather than instant — expect failures for up to a second — and concurrent
-requests coalesce into a single re-login. This assumes the credential is
-recoverable; if the login itself is refused, requests fail until an operator
-fixes the role.
-
-**Diagnosis:**
-1. `gateway_kms_reauth_total{outcome="success"}` above the startup login means
-   tokens are dying early and being recovered — look at `token_ttl`/`max_ttl` or
-   KMS stability, not at the gateway. A slow steady rate with no user-visible
-   errors usually means the role can log in but not renew: it is missing
-   `auth/token/renew-self` (see `docs/KMS_COMPATIBILITY.md`). Harmless, but it
-   churns the KMS lease table.
-2. `{outcome="failure"}` climbing while the KMS is reachable means
-   re-authentication itself is broken — the role, its policy, or the credential
-   source, not an expiring token. A restart will NOT help.
-3. For Kubernetes auth, confirm the ServiceAccount token is still projected and
-   the role's bound SA name/namespace still match.
-
-**Mitigation:** nothing, normally. If `outcome="failure"` dominates, fix the
-role/policy; restarting the pod will not help, because the credential itself is
-being refused.
-
----
+Transit AppRole/Kubernetes can re-login on renewal/request failure; fixed-token
+lifecycle is operator-owned. Check role/JWT/secret source and lookup/renew policy.
+Growing reauth failure indicates broken credentials, not a problem solved by restart.
 
 ### valkey-down
 
-**Alert:** `S3GatewayValkeyDown`
-**Severity:** critical
-**Expression:** `gateway_mpu_valkey_up == 0`
-
-**Symptom:** Valkey (Redis) has been unreachable for more than 2 minutes.
-
-**Diagnosis:**
-1. Check Valkey pod status: `kubectl get pods -l app=valkey`.
-2. Test connectivity from the gateway pod: `kubectl exec POD -- nc -zv valkey 6379`.
-3. Verify Valkey configuration (address, TLS, credentials).
-4. Check Valkey server logs.
-
-**Mitigation:**
-- Restart the Valkey pod: `kubectl rollout restart deployment/valkey`.
-- If Valkey has persistent storage, check for disk or memory pressure.
-- In-flight multipart uploads will fail until Valkey is restored — the uploads are not lost on the S3 side, but the state store is temporarily unavailable.
-- `ListObjects` **degrades, not fails**: listings return `200 OK` with ciphertext sizes, so sync clients (rclone, restic, s5cmd) will re-transfer encrypted objects until Valkey recovers and the size cache re-warms. No data loss; see [ListObjects Plaintext Size Cache](#listobjects-plaintext-size-cache-v10-s3-3).
-- After Valkey recovers, in-flight uploads with active TTLs will be readable again, and the size cache re-warms through normal write traffic.
-- Recovery of an empty Valkey does **not** restore gateway CORS rules. For gateway-managed CORS, distinguish `503 ServiceUnavailable` (same data store unavailable) from `404 NoSuchCORSConfiguration` (key absent/reset). Probe an authorized `GET /<known-configured-bucket>?cors`; review/disable any broad fallback before recovery. Restore the Valkey backup or re-apply the known XML with authenticated `PUT ?cors` using a credential with the bucket `manage` grant. Verify `OPTIONS` and an actual ETag-readable response on every replica. Do not assume static templates contain API mutations or use an unaudited broad fallback as a substitute.
+Check TLS/auth/DNS, pod/disk/memory state, and persistent data. Required MPUs fail
+closed; listings can retain ciphertext sizes. Recovery needs original state-key
+envelope and provider keys. If state is gone, drain/abort backend uploads and create
+new ones; do not assume the old encrypted MPU can resume from backend parts alone.
 
 ### Gateway CORS Valkey data loss and recovery
 
-Before enabling gateway mode, confirm retained-storage persistence, an
-independent backup, and an exercised restore; the startup persistence warning
-does not establish backup health.
+**Unreleased main (GH-322):** Before enabling gateway mode, confirm retained-storage
+persistence, an independent backup, and an exercised restore. A startup persistence
+warning/check does not establish backup health. CORS rules are durable Valkey policy
+without TTL, not disposable upload state, and are not recreated by config reload.
 
-Gateway-mode bucket rules are durable Valkey records with no TTL. Readiness can
-be healthy after an empty reset, so use an authorized `GET ?cors` for a known
-configured bucket to check policy presence. A 503 indicates store outage; a 404
-`NoSuchCORSConfiguration` indicates an absent key. Review fallback before
-restoring because it may broaden visibility. Restore the tested Valkey backup
-or re-apply the known XML using signed `PUT ?cors` with a bucket `manage` grant.
-Then verify preflight and the actual ETag response against each replica. Static
-configuration files do not include API edits unless those rules were exported.
+Readiness can be healthy after an empty reset: probe an authorized `GET ?cors` for
+a known configured bucket. Store outage/corruption returns 503 ServiceUnavailable;
+a missing policy returns 404 NoSuchCORSConfiguration and can activate configured
+fallback. Review/disable broad fallback before recovery. Restore the tested Valkey
+backup or re-apply exported known XML with signed `PUT ?cors` using a bucket manage
+grant. Verify preflight and an actual ETag-readable response on **each replica**.
+Static templates cannot recover API mutations unless those policies were exported.
 
 ### Encrypted MPU nonce-safety rollout
 
-Before deploying a binary containing MPU state version 2:
-
-1. Inventory `mpu:*` keys and identify uploads without `state_version=2`.
-2. Drain or abort encrypted uploads before the rollout. Legacy encrypted
-   uploads are abort-only after the new binary is enabled.
-3. Complete a separate scale-down to exactly one old replica before upgrading.
-   For Helm-managed deployments, run `helm upgrade RELEASE CHART
-   --reuse-values --set replicaCount=1` and wait for `kubectl rollout status
-   deployment/DEPLOYMENT` before applying the new image. Do not combine the
-   scale-down and image upgrade. Old and new MPU writers cannot run together
-   because old writers can bypass immutable claims. The Helm chart uses
-   `maxSurge: 0` and `maxUnavailable: 1`, so the single old writer terminates
-   before its replacement starts.
-4. Enable `config.multipartState.valkey.stateV2Writer.enabled.value: "true"` in the
-   second Helm upgrade. The chart sets the fixed
-   `VALKEY_MPU_STATE_V2_WRITER=true` value in every state-v2 replica. The
-   gateway derives the internal protocol capability. The first state-v2 writer
-   atomically initializes `mpu:writer-version`; later replicas verify it. An
-   incompatible stored value keeps `mpu_writer` readiness false. The new-replica
-   heartbeats are supplementary checks, not proof that
-   legacy writers are absent. Confirm
-   `gateway_mpu_legacy_inflight` is zero or has an owner-approved abort plan.
-5. Monitor `gateway_mpu_part_claims_total` by result. A rise in `mismatch` or
-   `legacy_rejected` indicates client replacement attempts or incomplete drain.
-6. Alert on `gateway_mpu_legacy_inflight > 0` and page on sustained
-   `gateway_mpu_part_claims_total{result="mismatch"}`. Keep dashboards split by
-   `result`, and do not add bucket, key, upload ID, claim, token, or revision
-   labels.
-   Dashboards should graph claim results, transition results by bounded
-   `from`/`to`, and the legacy gauge. Alert on any non-zero legacy gauge,
-   repeated claim mismatches, transition errors, or a missing `mpu_writer`
-   readiness check during rollout.
-
-Rollback requires draining or aborting all version-2 encrypted uploads first;
-never point a version-1 binary at version-2 state.
-
----
+Follow [coordinated migration](MIGRATION.md#012-upgrade-notice-including-0123):
+drain/abort legacy encrypted MPUs, separately scale down old writers before image
+upgrade, enable state-v2 writers uniformly, verify writer capability/readiness.
+Do not mix old mutable writers with immutable content claims. Changed-content
+409s require abort/new upload, not retry with another nonce. Rollback requires
+draining v2 uploads and retaining a reader capable of stored object formats.
 
 ### valkey-insecure
 
-**Alert:** `S3GatewayValkeyInsecure`
-**Severity:** warning
-**Expression:** `gateway_mpu_valkey_insecure == 1`
-
-**Symptom:** Valkey connection is established without TLS.
-
-**Diagnosis:**
-1. Check Helm values or config YAML for `multipart_state.valkey.tls.enabled`.
-2. Verify that Valkey is configured with TLS enabled.
-3. Check if `insecure_allow_plaintext: true` is set.
-
-**Mitigation:**
-- Set `multipartState.valkey.tls.enabled: true` in Helm values.
-- Configure Valkey with TLS certificates.
-- Remove `insecure_allow_plaintext` from production config.
-- Rolling restart the gateway.
-
----
+Remove development plaintext/TLS-verification overrides, configure trusted CA and
+matching hostname/client auth, and coordinate restart. State encryption does not
+replace transport confidentiality.
 
 ### tls-cert-expiry
 
-**Alert:** `S3GatewayTLSCertExpiringSoon` (warning, < 7 days) / `S3GatewayTLSCertExpiryCritical` (critical, < 2 days)
-**Expression:** `gateway_tls_cert_expiry_seconds < 604800` / `gateway_tls_cert_expiry_seconds < 172800`
-
-**Symptom:** The gateway's TLS serving certificate is approaching its expiration date.
-
-**Diagnosis:**
-1. Check certificate details: `openssl x509 -in /path/to/cert.crt -noout -enddate`.
-2. Verify the cert file path matches `tls.cert_file` in config.
-3. Check the `role` label (data_plane, admin, metrics) on the metric to identify which listener.
-
-**Mitigation:**
-1. Generate a new certificate and key.
-2. Update the Kubernetes secret or mounted file with the new cert.
-3. Rolling restart the gateway pods.
-4. Verify the new cert: `echo | openssl s_client -connect GATEWAY:443 -servername GATEWAY 2>/dev/null | openssl x509 -noout -enddate`.
-
----
+Check certificate expiry and issuing trust for the actual listener/backend/KMS.
+Rotate secrets/certificates through supported deployment, verify handshake and
+signed S3 requests. Avoid global insecure verification as an expiry workaround.
 
 ### backend-retries
 
-**Alert:** `S3GatewayHighRetryGiveUpRate`
-**Severity:** warning
-**Expression:** `rate(s3_backend_retry_give_ups_total[5m]) > 0.1`
-
-**Symptom:** The gateway is giving up on backend S3 requests at a high rate.
-
-**Diagnosis:**
-1. Check which operation is failing: `sum by (final_reason) (rate(s3_backend_retry_give_ups_total[5m]))`.
-2. Verify backend S3 health.
-3. Check backend retry configuration: `initial_backoff`, `max_attempts`, `mode`.
-4. Look for network issues between gateway and backend.
-
-**Mitigation:**
-- Increase `backend.retry.max_attempts` if the backend is experiencing transient failures.
-- Check for throttling by the upstream S3 provider (request rate limiting).
-- Verify network stability between gateway and backend.
-- If the backend is degraded, fail over to a secondary endpoint.
-
----
+Inspect retry give-up reason, provider throttling, endpoint/region, and seekable-body
+semantics. More retries can amplify load; repair the bottleneck and validate the
+operation's mutation/idempotence behavior before raising limits.
 
 ### valkey-legacy-state
 
-**Alert:** `S3GatewayLegacyValkeyStateReads`
-**Severity:** info
-**Expression:** `increase(gateway_mpu_state_legacy_reads_total[1h]) > 0`
-
-**Symptom:** The gateway is reading unencrypted Valkey state blobs.
-
-**Diagnosis:**
-1. Check if a recent migration to `encrypt_state: true` is still in progress.
-2. If the alert fires more than 7 days after the migration, investigate whether a gateway replica has encryption disabled.
-3. Check `valkey.ttl_seconds` — default is 7 days (604800 seconds).
-
-**Mitigation:**
-- No action required if this is during the TTL-based migration window (up to 7 days after enabling encrypt_state).
-- If persistent beyond 7 days, verify all replicas have `encrypt_state: true` and the encryption password is correctly injected.
-- If a replica is running without encryption, rolling restart with the correct configuration.
-
----
+Investigate explicit legacy fallback, restored old snapshots, or mismatched replica
+settings. Retain required legacy decrypt material during approved drain/abort;
+disable plaintext fallback afterward. Elapsed TTL alone is not an audit proving
+all backups/state have migrated.
 
 ## Troubleshooting
 
-| Symptom | Likely Cause | Remediation |
-|---|---|---|
-| Gateway fails to start: `"valkey state encryption enabled but no encryption password available"` | `VALKEY_ENCRYPTION_PASSWORD` env var is empty or the named env var is not injected | Verify the secret is mounted; check `kubectl describe pod` for env vars |
-| `gateway_mpu_state_legacy_reads_total` is increasing after migration window | A gateway replica was restarted without the new password, or a plaintext backup was restored | Ensure all replicas use the same `VALKEY_ENCRYPTION_PASSWORD`; check for Valkey RDB restores |
-| Multipart uploads fail with `mpu: state decrypt failed` | Encryption password was rotated without draining in-flight uploads | Follow the key-rotation procedure (drain uploads first) |
-| Startup warning: `encrypt_state is false` | `valkey.encrypt_state: false` is set in config | Remove the override to re-enable at-rest encryption |
-## Per-Bucket Traffic
+| Symptom | Check |
+|---|---|
+| Ready but signed uploads fail | Writable spool, operation caps, backend signing/proxy behavior |
+| State decrypt / unwrap failure | Wrapped state DEK, original provider/password, retained versions, matching snapshot |
+| Listing sync loops | Advisory ciphertext size misses, fallback costs, backend ETags |
+| Old objects fail after key change | Retained keys/metadata key, identity binding, reader limits; isolate recovery |
+| Admin abort succeeded but uploads persist | Best-effort backend abort; inspect and explicitly clean backend orphans |
 
-Use the client-boundary metrics to distinguish application traffic from backend
-and encryption throughput:
+## Per-Bucket Traffic
 
 ```promql
 sum by (bucket, direction) (rate(s3_client_bytes_total[5m]))
 sum by (bucket, operation, status_code) (rate(s3_client_requests_total[5m]))
 ```
 
-These counters exclude headers, TLS framing, backend retries, and internal
-server-side copies.
+These count application-body traffic, not backend/internal encrypted traffic.
+Bucket labels can increase cardinality/expose names; see
+[client traffic metrics](OBSERVABILITY.md#client-traffic-metrics-v10-obs-2).

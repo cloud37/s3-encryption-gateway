@@ -1,13 +1,14 @@
 # Using S3 CLI Tools with s3-encryption-gateway
 
-The gateway implements the S3 API. Any S3-compatible client works against it
-without modification, using the gateway's credentials as the AWS access/secret
-key pair. This document shows how to configure and use three widely-adopted
+The gateway implements a documented S3 subset. Check [compatibility](S3_API_IMPLEMENTATION.md)
+before migrating and use gateway credentials as the client access/secret pair.
+This document shows how to configure and use three widely-adopted
 tools — `awscli`, `s5cmd`, and `mc` (MinIO Client) — for common operations.
 
 For gateway-specific operations that standard tools cannot perform (inspecting
 ciphertext envelopes, auditing key usage, algorithm scanning), see
-`docs/MIGRATION.md` and the `s3eg-migrate` binary.
+[migration](MIGRATION.md) and read-only `s3eg-cli`. `s3eg-migrate` is a deprecation
+shim, not an operational migration tool.
 
 ---
 
@@ -575,8 +576,8 @@ If the gateway is working correctly, the raw backend bytes are ciphertext
 
 The `s3eg-cli` binary (see `docs/MIGRATION.md`) includes an `inspect`
 sub-command that decodes the encryption envelope from the backend object and
-reports the algorithm, key ID, IV, and AAD scheme without requiring you to
-configure direct backend access:
+reports the algorithm/key/envelope classification using backend credentials
+from the config. It is read-only but still requires authorized backend access:
 
 ```bash
 s3eg-cli inspect \
@@ -647,7 +648,7 @@ runtime gates, retaining the complete previous bucket-policy set (GH-339).
 File and environment policies are published together; policy files are not
 independently watched, so use SIGHUP after editing them when hot reload is
 enabled. This does not make every runtime component one global transaction.
-See [atomic policy reloads](POLICY_CONFIGURATION.md#atomic-reloads) and
+See [atomic policy reloads](DEPLOYMENT.md#atomic-reloads) and
 [recovery of earlier bypass-bucket miswrites](MIGRATION.md#recovering-gh-339-bypass-bucket-miswrites).
 
 ---
