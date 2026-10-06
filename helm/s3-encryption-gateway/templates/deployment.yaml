@@ -75,7 +75,22 @@ spec:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_MAX_VERIFIED_SPOOL_BYTES" "value" .Values.config.server.maxVerifiedSpoolBytes.value "valueFrom" .Values.config.server.maxVerifiedSpoolBytes.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "SERVER_MAX_AGGREGATE_SPOOL_BYTES" "value" .Values.config.server.maxAggregateSpoolBytes.value "valueFrom" .Values.config.server.maxAggregateSpoolBytes.valueFrom) | nindent 8 }}
          {{- include "s3-encryption-gateway.envVar" (dict "name" "LOG_LEVEL" "value" .Values.config.logLevel.value "valueFrom" .Values.config.logLevel.valueFrom) | nindent 8 }}
-         {{- include "s3-encryption-gateway.envVar" (dict "name" "ALLOW_BUCKET_CREATION" "value" .Values.config.allowBucketCreation.value "valueFrom" .Values.config.allowBucketCreation.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "ALLOW_BUCKET_CREATION" "value" .Values.config.allowBucketCreation.value "valueFrom" .Values.config.allowBucketCreation.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "CORS_MODE" "value" .Values.config.cors.mode.value "valueFrom" .Values.config.cors.mode.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "CORS_ALLOW_CREDENTIALS" "value" .Values.config.cors.allowCredentials.value "valueFrom" .Values.config.cors.allowCredentials.valueFrom) | nindent 8 }}
+        {{- range $setting := list
+              (dict "env" "CORS_FALLBACK_ALLOWED_ORIGINS" "leaf" $.Values.config.cors.fallback.allowedOrigins)
+              (dict "env" "CORS_FALLBACK_ALLOWED_METHODS" "leaf" $.Values.config.cors.fallback.allowedMethods)
+              (dict "env" "CORS_FALLBACK_ALLOWED_HEADERS" "leaf" $.Values.config.cors.fallback.allowedHeaders)
+              (dict "env" "CORS_FALLBACK_EXPOSE_HEADERS" "leaf" $.Values.config.cors.fallback.exposeHeaders) }}
+        {{- if .leaf.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" .env "value" "" "valueFrom" .leaf.valueFrom) | nindent 8 }}
+        {{- else if .leaf.value }}
+        - name: {{ .env }}
+          value: {{ toJson .leaf.value | quote }}
+        {{- end }}
+        {{- end }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "CORS_FALLBACK_MAX_AGE_SECONDS" "value" .Values.config.cors.fallback.maxAgeSeconds.value "valueFrom" .Values.config.cors.fallback.maxAgeSeconds.valueFrom) | nindent 8 }}
         {{- if and .Values.config.proxiedBucket (or .Values.config.proxiedBucket.value .Values.config.proxiedBucket.valueFrom) }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "PROXIED_BUCKET" "value" (default "" .Values.config.proxiedBucket.value) "valueFrom" .Values.config.proxiedBucket.valueFrom) | nindent 8 }}
         {{- end }}

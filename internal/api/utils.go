@@ -286,9 +286,12 @@ func (h *Handler) forwardToBackend(r *http.Request) (*http.Response, error) {
 		})
 	}
 
-	transport, err := backends3.NewBackendHTTPTransport(h.config.Backend.TLS)
-	if err != nil {
-		return nil, fmt.Errorf("build backend transport: %w", err)
+	transport := h.proxyTransport
+	if transport == nil {
+		transport, err = backends3.NewBackendHTTPTransport(h.config.Backend.TLS)
+		if err != nil {
+			return nil, fmt.Errorf("build backend transport: %w", err)
+		}
 	}
 	client := &http.Client{
 		Transport: transport,
@@ -337,15 +340,19 @@ func (h *Handler) handlePassthroughWithBodyLimit(w http.ResponseWriter, r *http.
 	if maxBody > 0 && r.Body != nil {
 		if r.ContentLength > maxBody {
 			(&S3Error{Code: "InvalidRequest", Message: "The request body is too large.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}).WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start), 0)
+			if !gatewayLifecycleAccountingOwned(r) {
+				h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start), 0)
+			}
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 		_ = r.Body.Close()
 		if err != nil || int64(len(body)) > maxBody {
 			(&S3Error{Code: "InvalidRequest", Message: "The request body is too large.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}).WriteXML(w)
-			h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start), 0)
-			if h.auditLogger != nil {
+			if !gatewayLifecycleAccountingOwned(r) {
+				h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start), 0)
+			}
+			if h.auditLogger != nil && !gatewayLifecycleAccountingOwned(r) {
 				err := fmt.Errorf("request body exceeds %d bytes", maxBody)
 				if operation == "CreateBucket" || operation == "DeleteBucket" {
 					h.auditManagement(r, operation, bucket, false, err)
@@ -381,9 +388,11 @@ func (h *Handler) handlePassthroughWithBodyLimit(w http.ResponseWriter, r *http.
 			}
 		}
 		s3Err.WriteXML(w)
-		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
-		h.metrics.RecordS3Error(r.Context(), operation, bucket, s3Err.Code)
-		if h.auditLogger != nil {
+		if !gatewayLifecycleAccountingOwned(r) {
+			h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+			h.metrics.RecordS3Error(r.Context(), operation, bucket, s3Err.Code)
+		}
+		if h.auditLogger != nil && !gatewayLifecycleAccountingOwned(r) {
 			if operation == "CreateBucket" || operation == "DeleteBucket" {
 				h.auditManagement(r, operation, bucket, false, err)
 			} else {
@@ -395,15 +404,17 @@ func (h *Handler) handlePassthroughWithBodyLimit(w http.ResponseWriter, r *http.
 	defer resp.Body.Close()
 
 	bytesOut, copyErr := copyProxyResponse(w, resp)
-	h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), bytesOut)
-	h.metrics.RecordS3Operation(r.Context(), operation, bucket, time.Since(start))
-	if resp.StatusCode >= http.StatusBadRequest {
-		h.metrics.RecordS3Error(r.Context(), operation, bucket, strconv.Itoa(resp.StatusCode))
+	if !gatewayLifecycleAccountingOwned(r) {
+		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), bytesOut)
+		h.metrics.RecordS3Operation(r.Context(), operation, bucket, time.Since(start))
+		if resp.StatusCode >= http.StatusBadRequest {
+			h.metrics.RecordS3Error(r.Context(), operation, bucket, strconv.Itoa(resp.StatusCode))
+		}
+		if copyErr != nil {
+			h.metrics.RecordS3Error(r.Context(), operation, bucket, "client_stream")
+		}
 	}
-	if copyErr != nil {
-		h.metrics.RecordS3Error(r.Context(), operation, bucket, "client_stream")
-	}
-	if h.auditLogger != nil {
+	if h.auditLogger != nil && !gatewayLifecycleAccountingOwned(r) {
 		if operation == "CreateBucket" || operation == "DeleteBucket" {
 			h.auditManagement(r, operation, bucket, true, nil)
 		} else {

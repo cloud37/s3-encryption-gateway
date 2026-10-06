@@ -19,6 +19,25 @@ multipart_state:
   # Valid range: 10s–15m. Default: 2m.
   reservation_lease: "2m"
 
+# Bucket CORS. Default passthrough preserves backend-native behavior. In gateway
+# mode, durable shared Valkey is authoritative: runtime PUT/DELETE ?cors changes
+# are not loaded from this file. Before enabling it, configure persistence on
+# retained storage and test an independent backup/restore procedure.
+cors:
+  mode: passthrough # passthrough | gateway
+  allow_credentials: false
+  # Optional virtual rule used only when a bucket has no stored CORS XML.
+  # Environment array values use strict JSON, not comma-separated strings:
+  # CORS_FALLBACK_ALLOWED_ORIGINS, CORS_FALLBACK_ALLOWED_METHODS,
+  # CORS_FALLBACK_ALLOWED_HEADERS, CORS_FALLBACK_EXPOSE_HEADERS.
+  # CORS_FALLBACK_MAX_AGE_SECONDS is a decimal integer.
+  fallback:
+    allowed_origins: []
+    allowed_methods: []
+    allowed_headers: []
+    expose_headers: [] # list ETag explicitly to expose upload part ETags
+    max_age_seconds: 0
+
 auth:
   # Maximum acceptable clock skew for SigV4 timestamp validation.
   # Default: 5m (matching AWS SigV4 specification).

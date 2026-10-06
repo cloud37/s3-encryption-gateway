@@ -22,6 +22,7 @@ type options struct {
 	auditLogger        audit.Logger
 	encryptedMPU       bool
 	valkeyAddr         string
+	corsMode           string
 	// encryptedMPUBucket is a glob pattern for which encrypted MPU is enabled.
 	// When set the harness auto-creates a PolicyManager with
 	// EncryptMultipartUploads=true for that pattern (unless policyManager is
@@ -132,6 +133,9 @@ func WithEncryptedMPU(enabled bool) Option {
 func WithValkeyAddr(addr string) Option {
 	return func(o *options) { o.valkeyAddr = addr }
 }
+
+// WithCORSMode selects gateway-managed or passthrough bucket CORS behavior.
+func WithCORSMode(mode string) Option { return func(o *options) { o.corsMode = mode } }
 
 // WithEncryptedMPUForBucket enables the encrypted multipart upload feature for
 // the given bucket glob pattern. The harness creates a PolicyManager with

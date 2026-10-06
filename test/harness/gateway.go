@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -131,6 +132,10 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	// Apply optional config mutator last.
 	if o.extraConfig != nil {
 		o.extraConfig(cfg)
+	}
+	// Convenience option is applied after the mutator when explicitly set.
+	if o.corsMode != "" {
+		cfg.CORS.Mode = o.corsMode
 	}
 	// StartGateway constructs Config directly rather than through LoadConfig.
 	// Preserve production defaults so the shared SEC-49 manager has a usable
@@ -251,7 +256,21 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		o.mpuStore = store
 		t.Cleanup(func() { _ = store.Close() })
 	}
-
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" && o.mpuStore == nil {
+		listener.Close()
+		t.Fatalf("harness.StartGateway: gateway CORS requires a shared Valkey-backed state store; configure WithValkeyAddr")
+	}
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" && o.valkeyAddr == "" {
+		listener.Close()
+		t.Fatalf("harness.StartGateway: gateway CORS requires WithValkeyAddr; in-memory CORS state is not supported")
+	}
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" {
+		_, storeErr := gatewayCORSValkeyStore(o.mpuStore)
+		if storeErr != nil {
+			listener.Close()
+			t.Fatalf("harness.StartGateway: %v", storeErr)
+		}
+	}
 	// Encrypted-MPU: if a bucket glob is configured, build a PolicyManager
 	// with EncryptMultipartUploads=true for that glob (unless caller already
 	// provided one).
@@ -295,6 +314,9 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		s3Client, encryptionEngine, logger, m,
 		o.keyManager, nil, o.auditLogger, cfg, o.policyManager,
 	).WithSpoolManager(spoolManager)
+	if o.backendTransport != nil {
+		handler.WithProxyTransport(o.backendTransport)
+	}
 	if cfg.Cache.Enabled {
 		handler.WithCache(cache.NewMemoryCache(cfg.Cache.MaxSize, cfg.Cache.MaxItems, cfg.Cache.DefaultTTL))
 	}
@@ -309,6 +331,12 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 			handler.WithSizeCache(sc)
 		}
 	}
+	var corsStore api.CORSStore
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" {
+		valkeyStore, _ := gatewayCORSValkeyStore(o.mpuStore)
+		corsStore = api.NewValkeyCORSStore(valkeyStore.Client())
+		handler.WithCORSStore(corsStore)
+	}
 
 	// Router.
 	router := mux.NewRouter()
@@ -320,7 +348,6 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	// before gorilla/mux performs route matching. Mirrors the production
 	// middleware chain in cmd/server/main.go. See issue #198.
 	httpHandler := middleware.StripBucketTrailingSlash(router)
-	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)
 	httpHandler = middleware.LoggingMiddleware(logger, &cfg.Logging)(httpHandler)
 
 	// Wire auth middleware if credentials are configured (V1.0-AUTH-1).
@@ -333,6 +360,10 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, nil)(httpHandler)
 		httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, nil, cfg.Auth.AllowLegacySignatureV2, spoolManager, api.SpoolLimitsForConfig(cfg))(httpHandler)
 	}
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" {
+		httpHandler = api.CORSMiddleware(cfg.CORS, corsStore, logger)(httpHandler)
+	}
+	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)
 
 	// HTTP server.
 	server := &http.Server{
@@ -469,6 +500,25 @@ ready:
 	})
 
 	return gw
+}
+
+// ValidateGatewayCORSStateStore is an internal test seam for asserting that
+// gateway mode cannot bind CORS to a process-local or unrelated store.
+func ValidateGatewayCORSStateStore(store mpu.StateStore) error {
+	_, err := gatewayCORSValkeyStore(store)
+	return err
+}
+
+func gatewayCORSValkeyStore(store mpu.StateStore) (*mpu.ValkeyStateStore, error) {
+	valkeyStore, ok := store.(*mpu.ValkeyStateStore)
+	if !ok || valkeyStore == nil {
+		return nil, fmt.Errorf("gateway CORS requires a shared Valkey-backed MPU state store")
+	}
+	value := reflect.ValueOf(valkeyStore.Client())
+	if !value.IsValid() || ((value.Kind() == reflect.Ptr || value.Kind() == reflect.Interface) && value.IsNil()) {
+		return nil, fmt.Errorf("gateway CORS requires a non-nil shared Valkey client")
+	}
+	return valkeyStore, nil
 }
 
 // HTTPClient returns a plain *http.Client suitable for issuing requests to the

@@ -137,6 +137,34 @@ ingress:
 
 config:
 
+  # Gateway-owned bucket CORS. Keep passthrough for backend-native behavior.
+  # WARNING: gateway mode makes Valkey the authoritative, non-expiring policy
+  # store. Enable persistence on retained storage and test independent backup /
+  # restore before opting in; API PUT/DELETE changes are not loaded from files.
+  cors:
+    mode:
+      value: passthrough
+      valueFrom: {}
+    allowCredentials:
+      value: "false"
+      valueFrom: {}
+    fallback:
+      allowedOrigins:
+        value: []
+        valueFrom: {}
+      allowedMethods:
+        value: []
+        valueFrom: {}
+      allowedHeaders:
+        value: []
+        valueFrom: {}
+      exposeHeaders:
+        value: []
+        valueFrom: {}
+      maxAgeSeconds:
+        value: "0"
+        valueFrom: {}
+
   # Bucket creation is disabled unless explicitly enabled and granted per credential.
   allowBucketCreation:
     value: "false"
@@ -587,7 +615,10 @@ config:
       retryBackoff:
         value: "1s"
 
-  # ── Encrypted multipart upload state store (V0.6-SEC-3 / ADR-0009) ─────────
+  # ── Shared Valkey state store (MPU and optional durable CORS policy) ───────
+  # Gateway CORS rules are API-managed and are not reconstructed from this
+  # chart on restart. Production gateway mode requires shared Valkey, retained
+  # persistent storage, independent backups, and a tested restore procedure.
   # When `valkey.enabled: true` (below, top-level), the deployment template
   # auto-wires VALKEY_ADDR to the Valkey subchart's primary service. The
   # values below are for supplying an external Valkey cluster instead; leave
@@ -992,6 +1023,8 @@ ephemeralStorage:
   limits: ""
 
 valkey:
+  # Development subchart defaults are not proof of durable production policy
+  # storage. Configure persistence and backups independently before gateway CORS.
   enabled: false
   architecture: standalone
   auth:

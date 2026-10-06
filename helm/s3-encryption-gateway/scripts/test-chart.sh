@@ -132,6 +132,89 @@ fi
 grep -q 'name: operator-tmp' <<<"$CUSTOM_TMP" || { echo "✗ custom /tmp volume missing"; exit 1; }
 echo "✓ default spool and custom /tmp mount rendered without conflicts"
 
+# Gateway CORS: durable shared Valkey requirement and JSON-array environment encoding.
+echo ""
+echo "Test 1e: gateway CORS Valkey and fallback"
+CORS_OUTPUT=$(helm template cors "$CHART_DIR" \
+  --set-string config.cors.mode.value=gateway \
+  --set valkey.enabled=true \
+  --set-json 'config.cors.fallback.allowedOrigins.value=["https://app.example.com"]' \
+  --set-json 'config.cors.fallback.allowedMethods.value=["GET","PUT"]' \
+  --set-json 'config.cors.fallback.allowedHeaders.value=["content-type","x-amz-*"]' \
+  --set-json 'config.cors.fallback.exposeHeaders.value=["ETag"]' \
+  --set-string config.cors.allowCredentials.value=true \
+  --set-string config.cors.fallback.maxAgeSeconds.value=900)
+grep -q 'name: CORS_MODE' <<<"$CORS_OUTPUT" || { echo "✗ CORS_MODE missing"; exit 1; }
+grep -q 'value: "gateway"' <<<"$CORS_OUTPUT" || { echo "✗ gateway mode missing"; exit 1; }
+grep -q 'name: CORS_FALLBACK_ALLOWED_ORIGINS' <<<"$CORS_OUTPUT" || { echo "✗ CORS origin fallback missing"; exit 1; }
+grep -Fq 'value: "[\"https://app.example.com\"]"' <<<"$CORS_OUTPUT" || { echo "✗ CORS array not JSON encoded"; exit 1; }
+for expected in CORS_ALLOW_CREDENTIALS CORS_FALLBACK_ALLOWED_METHODS CORS_FALLBACK_ALLOWED_HEADERS CORS_FALLBACK_EXPOSE_HEADERS CORS_FALLBACK_MAX_AGE_SECONDS; do
+  grep -q "name: $expected" <<<"$CORS_OUTPUT" || { echo "✗ $expected missing"; exit 1; }
+done
+grep -Fq 'value: "true"' <<<"$CORS_OUTPUT" || { echo "✗ CORS credentials missing"; exit 1; }
+grep -Fq 'value: "900"' <<<"$CORS_OUTPUT" || { echo "✗ CORS max-age missing"; exit 1; }
+if helm template cors "$CHART_DIR" --set config.cors.mode.value=gateway --set valkey.enabled=false > /dev/null 2>&1; then
+  echo "✗ schema-only gateway Valkey invariant must reject missing Valkey"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set valkey.enabled=false \
+  --set config.cors.mode.valueFrom.secretKeyRef.name=cors-mode \
+  --set config.cors.mode.valueFrom.secretKeyRef.key=mode > /dev/null 2>&1; then
+  echo "✗ indirect CORS mode must conservatively require Valkey"; exit 1
+fi
+FROM_OUTPUT=$(helm template cors "$CHART_DIR" \
+  --set-string config.cors.mode.value=gateway --set valkey.enabled=false \
+  --set config.multipartState.valkey.addr.value=valkey.example:6379 \
+  --set config.cors.fallback.allowedOrigins.valueFrom.secretKeyRef.name=cors-config \
+  --set config.cors.fallback.allowedOrigins.valueFrom.secretKeyRef.key=origins)
+grep -q 'secretKeyRef:' <<<"$FROM_OUTPUT" || { echo "✗ CORS valueFrom missing"; exit 1; }
+grep -q 'name: CORS_MODE' <<<"$FROM_OUTPUT" || { echo "✗ CORS mode valueFrom env missing"; exit 1; }
+grep -q 'name: CORS_FALLBACK_ALLOWED_ORIGINS' <<<"$FROM_OUTPUT" || { echo "✗ CORS valueFrom origin env missing"; exit 1; }
+grep -q 'name: VALKEY_ADDR' <<<"$FROM_OUTPUT" || { echo "✗ external Valkey addr env missing"; exit 1; }
+if helm template cors "$CHART_DIR" --set-string config.cors.mode.value=gateway --set valkey.enabled=false > /dev/null 2>&1; then
+  echo "✗ gateway CORS without Valkey should fail"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set valkey.enabled=true --set-string config.cors.mode.value=invalid > /dev/null 2>&1; then
+  echo "✗ invalid CORS mode should fail"; exit 1
+fi
+MODE_FROM_OUTPUT=$(helm template cors "$CHART_DIR" --set valkey.enabled=true \
+  --set config.cors.mode.valueFrom.secretKeyRef.name=cors-mode \
+  --set config.cors.mode.valueFrom.secretKeyRef.key=mode)
+grep -q 'name: CORS_MODE' <<<"$MODE_FROM_OUTPUT" || { echo "✗ CORS mode valueFrom env missing"; exit 1; }
+grep -q 'secretKeyRef:' <<<"$MODE_FROM_OUTPUT" || { echo "✗ CORS mode valueFrom ref missing"; exit 1; }
+MODE_EXTERNAL_OUTPUT=$(helm template cors "$CHART_DIR" --set valkey.enabled=false \
+  --set config.cors.mode.valueFrom.secretKeyRef.name=cors-mode \
+  --set config.cors.mode.valueFrom.secretKeyRef.key=mode \
+  --set config.multipartState.valkey.addr.value=valkey.example:6379)
+grep -q 'name: VALKEY_ADDR' <<<"$MODE_EXTERNAL_OUTPUT" || { echo "✗ indirect mode with direct external Valkey addr must render"; exit 1; }
+MODE_CONFLICT_OUTPUT=$(helm template cors "$CHART_DIR" --set valkey.enabled=false \
+  --set-string config.cors.mode.value=passthrough \
+  --set config.cors.mode.valueFrom.secretKeyRef.name=cors-mode \
+  --set config.cors.mode.valueFrom.secretKeyRef.key=mode \
+  --set config.multipartState.valkey.addr.value=valkey.example:6379)
+grep -q 'name: CORS_MODE' <<<"$MODE_CONFLICT_OUTPUT" || { echo "✗ conflicting indirect mode did not render"; exit 1; }
+if grep -A3 -B1 'name: CORS_MODE' <<<"$MODE_CONFLICT_OUTPUT" | grep -q 'value: "passthrough"'; then
+  echo "✗ mode valueFrom must take precedence over direct value"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set valkey.enabled=false \
+  --set-string config.cors.mode.value=passthrough \
+  --set config.cors.mode.valueFrom.secretKeyRef.name=cors-mode \
+  --set config.cors.mode.valueFrom.secretKeyRef.key=mode > /dev/null 2>&1; then
+  echo "✗ valueFrom precedence must not bypass the Valkey guard"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set-string config.cors.mode.value=gateway --set valkey.enabled=false --set-json 'config.cors.fallback.allowedOrigins.value="https://app.example.com"' --set config.multipartState.valkey.addr.value=valkey.example:6379 > /dev/null 2>&1; then
+  echo "✗ CORS origin array must reject scalar string"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set-string config.cors.mode.value=gateway --set valkey.enabled=false --set config.multipartState.valkey.addr.value=valkey.example:6379 --set config.cors.allowCredentials.value=true > /dev/null 2>&1; then
+  echo "✗ CORS credentials must reject boolean"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set-string config.cors.mode.value=gateway --set valkey.enabled=false --set config.multipartState.valkey.addr.value=valkey.example:6379 --set-string config.cors.fallback.maxAgeSeconds.value=-1 > /dev/null 2>&1; then
+  echo "✗ CORS negative max-age must fail schema validation"; exit 1
+fi
+if helm template cors "$CHART_DIR" --set-json 'config.cors.fallback.allowedOrigins.value=["https://app.example.com"]' > /dev/null 2>&1; then
+  echo "✗ passthrough mode must reject fallback settings"; exit 1
+fi
+echo "✓ gateway CORS renders JSON arrays/valueFrom and rejects missing Valkey or invalid mode"
+
 # Test 2: existingCredentialsSecret rendering
 echo ""
 echo "Test 2: existingCredentialsSecret"

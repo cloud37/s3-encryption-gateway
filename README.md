@@ -292,7 +292,40 @@ valkey:
 
 When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to the subchart's `<release>-valkey:6379` service. You can also point at an external Valkey cluster via the `config.multipartState.valkey` values stanza — the two paths are mutually exclusive.
 
-> **Cost note for Wasabi / Glacier / S3 IA users:** The Valkey state store exists precisely to avoid writing state objects to S3 — which on backends with minimum-storage-duration policies (Wasabi: 90 days on Pay-Go; Glacier / Standard-IA / One Zone-IA: 30–180 days) would incur significant phantom-storage charges. Your *data* objects still land on whichever backend you choose; only the ephemeral per-upload state lives in Valkey.
+> **Cost note for Wasabi / Glacier / S3 IA users:** The Valkey state store exists precisely to avoid writing state objects to S3 — which on backends with minimum-storage-duration policies (Wasabi: 90 days on Pay-Go; Glacier / Standard-IA / One Zone-IA: 30–180 days) would incur significant phantom-storage charges. Your *data* objects still land on whichever backend you choose; MPU state remains ephemeral, but gateway-managed CORS rules become durable Valkey policy when that mode is enabled.
+
+#### Browser uploads with gateway-managed CORS
+
+Use `cors.mode: gateway` only when browser clients require gateway-owned policy;
+`passthrough` remains the default. Gateway credentials should normally use
+`allow_credentials: false`. The opt-in `true` mode is a nonstandard extension:
+it echoes a validated concrete request Origin and never combines credentials
+with `Access-Control-Allow-Origin: *`.
+
+Configure a bucket with authenticated S3 `PUT /bucket?cors`, for example:
+
+```xml
+<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <CORSRule>
+    <AllowedOrigin>https://console.example.com</AllowedOrigin>
+    <AllowedMethod>PUT</AllowedMethod>
+    <AllowedMethod>POST</AllowedMethod>
+    <AllowedHeader>content-type</AllowedHeader>
+    <AllowedHeader>x-amz-*</AllowedHeader>
+    <ExposeHeader>ETag</ExposeHeader>
+    <MaxAgeSeconds>3600</MaxAgeSeconds>
+  </CORSRule>
+</CORSConfiguration>
+```
+
+Set `<ExposeHeader>ETag</ExposeHeader>` when JavaScript must read upload or
+multipart ETags. Gateway CORS mode makes Valkey the durable source of truth:
+before opting in, enable persistence on retained storage and verify an
+independent backup/restore procedure. Runtime API changes are not recreated
+from config files. A lost Valkey dataset returns 404 for a known-policy
+`GET ?cors`, denies preflight with 403 absent fallback, and may activate a
+broader configured fallback; readiness can still be healthy. Restore from
+backup or authenticated XML re-application is required.
 
 ### ListObjects Plaintext Size Translation
 
@@ -812,6 +845,13 @@ go build -o bin/s3-encryption-gateway ./cmd/server
 
 ## Configuration
 
+Gateway-managed CORS is opt-in; use one shared Valkey for every replica and
+roll replicas to gateway mode together. Its keys are durable policy, not
+disposable per-upload state. Persistence on retained storage plus an independent
+tested backup/restore is required before enabling the mode. Empty-store recovery
+does not recreate rules: `GET ?cors` returns 404, preflight returns 403 without
+fallback, readiness may pass, and fallback can widen browser visibility.
+
 Create a `config.yaml` file (see `config.yaml.example` for reference):
 
 ```yaml
@@ -910,6 +950,12 @@ audit:
     batch_size: 100
     flush_interval: "5s"
 ```
+
+For browser access, configure a bucket's S3 CORS XML through `PUT ?cors`, for
+example allowing a specific application origin/method and listing
+`<ExposeHeader>ETag</ExposeHeader>` so JavaScript can read the ETag. Manage that
+XML with a credential having the bucket `manage` grant. See the deployment and
+runbook recovery steps before opting into `cors.mode: gateway`.
 
 Environment variables are also supported for every setting:
 

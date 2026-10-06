@@ -44,6 +44,7 @@ type Handler struct {
 	// getS3Client. It is a test seam for observing that authorization
 	// precedes backend client acquisition.
 	clientAcquirer                 func(*http.Request) (s3.Client, error)
+	proxyTransport                 http.RoundTripper
 	encryptionEngine               crypto.EncryptionEngine
 	logger                         *logrus.Logger
 	metrics                        *metrics.Metrics
@@ -56,6 +57,7 @@ type Handler struct {
 	policyManager                  *config.PolicyManager
 	engineCache                    *ttlEngineCache // TTL cache for per-policy engines (V1.0-SEC-20)
 	mpuStateStore                  mpu.StateStore  // nil when encrypted MPU is not configured
+	corsStore                      CORSStore
 	sizeCache                      sizecache.SizeCache
 	// Test seams for API metadata classification failures. Nil uses production
 	// implementations; keeping these private avoids changing the public API.
@@ -157,6 +159,19 @@ func (h *Handler) AllowUntrackedPlaintextUploads() bool {
 // When non-nil, buckets with EncryptMultipartUploads=true will use this store.
 func (h *Handler) WithMPUStateStore(store mpu.StateStore) {
 	h.mpuStateStore = store
+}
+
+// WithCORSStore attaches the shared durable store used by gateway-managed CORS.
+func (h *Handler) WithCORSStore(store CORSStore) *Handler {
+	h.corsStore = store
+	return h
+}
+
+// WithProxyTransport injects the transport used by generic proxy forwarding.
+// It is intended for the conformance harness and fault-injection tests.
+func (h *Handler) WithProxyTransport(transport http.RoundTripper) *Handler {
+	h.proxyTransport = transport
+	return h
 }
 
 // WithSizeCache sets the size cache used for ListObjects plaintext size resolution.
@@ -668,6 +683,9 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 		if capable, ok := h.mpuStateStore.(interface{ WriterCapabilityReady(context.Context) error }); ok {
 			checks = append(checks, metrics.ReadyCheck{Name: "mpu_writer", Check: capable.WriterCapabilityReady})
 		}
+	}
+	if h.gatewayCORSMode() && h.corsStore != nil {
+		checks = append(checks, metrics.ReadyCheck{Name: "cors_valkey", Check: h.corsStore.HealthCheck})
 	}
 
 	// Wrap w so we can read back the status code for the metric without
@@ -1485,7 +1503,6 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		h.writeObjectError(w, r, "ListObjects", s3Err, start)
 		return
 	}
-
 	ctx := r.Context()
 
 	// Get S3 client (may use client credentials if enabled)
@@ -1948,6 +1965,33 @@ func (h *Handler) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 		s3Err := &S3Error{Code: "InvalidBucketName", Message: err.Error(), Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
 		h.writeObjectError(w, r, "CreateBucket", s3Err, start)
 		h.auditManagement(r, "CreateBucket", bucket, false, s3Err)
+		return
+	}
+	if h.gatewayCORSMode() {
+		client, err := h.getS3Client(r)
+		if err != nil {
+			h.failGatewayBucketLifecycle(w, r, "CreateBucket", bucket, err, false)
+			return
+		}
+		_, existsErr := client.ListObjects(r.Context(), bucket, "", s3.ListOptions{MaxKeys: 1})
+		if existsErr == nil {
+			h.handleGatewayCreateBucketForward(w, r, bucket)
+			return
+		}
+		translated := TranslateError(existsErr, bucket, "")
+		if translated == nil || translated.Code != "NoSuchBucket" {
+			h.failGatewayBucketLifecycle(w, r, "CreateBucket", bucket, existsErr, false)
+			return
+		}
+		if h.corsStore == nil {
+			h.failGatewayBucketLifecycle(w, r, "CreateBucket", bucket, ErrCORSUnavailable, false)
+			return
+		}
+		if err := h.corsStore.Delete(r.Context(), bucket); err != nil {
+			h.failGatewayBucketLifecycle(w, r, "CreateBucket", bucket, err, false)
+			return
+		}
+		h.handleGatewayCreateBucketForward(w, r, bucket)
 		return
 	}
 	h.handlePassthroughWithBodyLimit(w, r, "CreateBucket", bucket, "", 64<<10)
@@ -4736,6 +4780,12 @@ func sanitizeBackendForwardError(err error) error {
 // handleDeleteBucket handles DELETE /{bucket} — DeleteBucket.
 func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 	bucket := mux.Vars(r)["bucket"]
+	if h.gatewayCORSMode() {
+		if err := ValidateBucketName(bucket); err != nil {
+			h.writeObjectError(w, r, "DeleteBucket", ErrInvalidBucketName, time.Now())
+			return
+		}
+	}
 	credential, authorized := CredentialFromContext(r)
 	if !authorized || !credential.AllowsBucket(bucket) || !credential.HasBucketPermission(config.BucketPermissionDelete) || (h.config != nil && h.config.ProxiedBucket != "" && h.config.ProxiedBucket != bucket) {
 		s3Err := &S3Error{Code: "AccessDenied", Message: "Access Denied", Resource: r.URL.Path, HTTPStatus: http.StatusForbidden}
@@ -4751,7 +4801,49 @@ func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 			}).Warn("Deleting bucket with active policy reference")
 		}
 	}
+	if h.gatewayCORSMode() {
+		h.handleGatewayDeleteBucket(w, r, bucket)
+		return
+	}
 	h.handlePassthrough(w, r, "DeleteBucket", bucket, "")
+}
+
+func (h *Handler) handleGatewayDeleteBucket(w http.ResponseWriter, r *http.Request, bucket string) {
+	start := time.Now()
+	resp, err := h.forwardToBackend(r)
+	if err != nil {
+		h.failGatewayBucketLifecycle(w, r, "DeleteBucket", bucket, err, false)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bytesWritten, _ := copyProxyResponse(w, resp)
+		if h.metrics != nil {
+			h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), bytesWritten)
+			h.metrics.RecordS3Operation(r.Context(), "DeleteBucket", bucket, time.Since(start))
+			h.metrics.RecordS3Error(r.Context(), "DeleteBucket", bucket, strconv.Itoa(resp.StatusCode))
+		}
+		if h.auditLogger != nil {
+			h.auditManagement(r, "DeleteBucket", bucket, false, fmt.Errorf("backend returned %s", resp.Status))
+		}
+		return
+	}
+	if h.corsStore == nil {
+		h.failGatewayBucketLifecycle(w, markGatewayDeleteUpstreamSucceeded(r), "DeleteBucket", bucket, ErrCORSUnavailable, true)
+		return
+	}
+	if err := h.corsStore.Delete(r.Context(), bucket); err != nil {
+		h.failGatewayBucketLifecycle(w, markGatewayDeleteUpstreamSucceeded(r), "DeleteBucket", bucket, err, true)
+		return
+	}
+	bytesWritten, _ := copyProxyResponse(w, resp)
+	if h.metrics != nil {
+		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, resp.StatusCode, time.Since(start), bytesWritten)
+		h.metrics.RecordS3Operation(r.Context(), "DeleteBucket", bucket, time.Since(start))
+	}
+	if h.auditLogger != nil {
+		h.auditManagement(r, "DeleteBucket", bucket, true, nil)
+	}
 }
 
 func (h *Handler) auditManagement(r *http.Request, operation, bucket string, success bool, err error) {
@@ -4808,16 +4900,28 @@ func (h *Handler) handleDeleteBucketPolicy(w http.ResponseWriter, r *http.Reques
 
 // handleGetBucketCors handles GET /{bucket}?cors — GetBucketCors.
 func (h *Handler) handleGetBucketCors(w http.ResponseWriter, r *http.Request) {
+	if h.gatewayCORSMode() {
+		h.serveGatewayCORSManagement(w, r, "GetBucketCors", h.handleGatewayGetBucketCors)
+		return
+	}
 	h.handlePassthrough(w, r, "GetBucketCors", mux.Vars(r)["bucket"], "")
 }
 
 // handlePutBucketCors handles PUT /{bucket}?cors — PutBucketCors.
 func (h *Handler) handlePutBucketCors(w http.ResponseWriter, r *http.Request) {
+	if h.gatewayCORSMode() {
+		h.serveGatewayCORSManagement(w, r, "PutBucketCors", h.handleGatewayPutBucketCors)
+		return
+	}
 	h.handlePassthroughWithBodyLimit(w, r, "PutBucketCors", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
 // handleDeleteBucketCors handles DELETE /{bucket}?cors — DeleteBucketCors.
 func (h *Handler) handleDeleteBucketCors(w http.ResponseWriter, r *http.Request) {
+	if h.gatewayCORSMode() {
+		h.serveGatewayCORSManagement(w, r, "DeleteBucketCors", h.handleGatewayDeleteBucketCors)
+		return
+	}
 	h.handlePassthroughWithBodyLimit(w, r, "DeleteBucketCors", mux.Vars(r)["bucket"], "", maxBucketConfigurationBody)
 }
 
@@ -4968,6 +5072,10 @@ func (h *Handler) handleRestoreObject(w http.ResponseWriter, r *http.Request) {
 
 // handleCORSPreflight handles OPTIONS requests for S3 resources.
 func (h *Handler) handleCORSPreflight(w http.ResponseWriter, r *http.Request) {
+	if h.gatewayCORSMode() {
+		h.handleGatewayCORSPreflight(w, r)
+		return
+	}
 	h.handlePassthrough(w, r, "CORSPreflight", mux.Vars(r)["bucket"], mux.Vars(r)["key"])
 }
 

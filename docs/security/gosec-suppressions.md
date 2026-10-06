@@ -129,21 +129,24 @@ drive fault timing/probability, never cryptographic keys or authorization.
 <!-- BEGIN GENERATED GOSEC SUPPRESSIONS -->
 | Source location | Rules | Scope | Verified justification / precondition |
 |---|---|---|---|
-| `cmd/server/main.go:409` | G703 | Production | CONFIG_PATH is operator-selected; existence check only, not request input |
+| `cmd/server/main.go:423` | G703 | Production | CONFIG_PATH is operator-selected; existence check only, not request input |
 | `internal/api/aws_chunked_reader.go:142` | G115 | Production | remaining is checked non-negative |
+| `internal/api/cors_coverage_test.go:7` | G401 | Test fixture | fixture for invalid/oversized CORS digests |
+| `internal/api/cors_handlers.go:6` | G501, G401 | Production | S3 Content-MD5 is required for wire compatibility and is not used for security or authentication |
+| `internal/api/cors_handlers_test.go:5` | G401 | Test fixture | validates S3 Content-MD5 compatibility |
 | `internal/api/crypto_factory.go:252` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the configured CA chain and emits a warning |
 | `internal/api/crypto_factory.go:414` | G402 | Production | explicit hostname-only opt-in; VerifyConnection checks the pinned CA chain on every handshake including resumption |
 | `internal/api/crypto_factory.go:435` | G402 | Production | operator-only diagnostic opt-in with ERROR warning; no certificate authentication, never a secure production mode |
 | `internal/api/crypto_factory.go:466` | G304 | Production | token or SecretID file reference is chosen by the operator, never by an S3 request |
-| `internal/api/handlers.go:4269` | G115 | Production | negative sizes are rejected above |
+| `internal/api/handlers.go:4313` | G115 | Production | negative sizes are rejected above |
 | `internal/api/upload_part_copy.go:1065` | G115 | Production | chunkCount is bounded by MaxInt32 above |
 | `internal/api/utils.go:5` | G501 | Production | S3 Content-MD5 interoperability header |
-| `internal/api/utils.go:301` | G704 | Production | host/scheme come only from operator backend config; requests supply path/query and redirects are disabled |
-| `internal/api/utils.go:360` | G401 | Production | required by S3 lifecycle APIs |
+| `internal/api/utils.go:304` | G704 | Production | host/scheme come only from operator backend config; requests supply path/query and redirects are disabled |
+| `internal/api/utils.go:367` | G401 | Production | required by S3 lifecycle APIs |
 | `internal/api/utils_bucket_management_test.go:64` | G401 | Test fixture | test expected S3 header |
 | `internal/audit/sink.go:283` | G402 | Production | operator-only diagnostic opt-in emits WARN; secure default verifies chain and hostname |
 | `internal/audit/sink.go:479` | G304 | Production | operator-controlled directory/path; no-follow exclusive creation and inode/type/mode revalidation precede writes |
-| `internal/config/config.go:2048` | G703 | Production | AUTH_CREDENTIALS_FILE is operator-selected; HTTP requests cannot choose its path |
+| `internal/config/config.go:2119` | G703 | Production | AUTH_CREDENTIALS_FILE is operator-selected; HTTP requests cannot choose its path |
 | `internal/crypto/engine.go:145` | G115 | Production | field count was checked above |
 | `internal/crypto/engine.go:1843` | G115 | Production | ChunkedPlaintextSize rejects negative sizes |
 | `internal/crypto/engine.go:1909` | G115 | Production | ChunkedPlaintextSize rejects negative sizes |
@@ -164,10 +167,10 @@ drive fault timing/probability, never cryptographic keys or authorization.
 | `internal/s3/client_bench_test.go:54` | G404 | Test fixture | deterministic benchmark fault timing only; never keys, tokens, or authorization |
 | `internal/s3/retry.go:46` | G115 | Production | n>0; modulo result is less than n<=MaxInt64; jitter only, not key material |
 | `test/conformance/passthrough_headers_test.go:245` | G401 | Test fixture | S3 Content-MD5 compatibility header |
-| `test/conformance/s3_compat_test.go:73` | G401 | Test fixture | required S3 compatibility header |
+| `test/conformance/s3_compat_test.go:78` | G401 | Test fixture | required S3 compatibility header |
 | `test/harness/faulty_s3.go:75` | G404 | Test fixture | deterministic test fault timing/probability only; never cryptographic material |
-| `test/harness/gateway.go:364` | G402 | Test fixture | the test-only TLS certificate is self-signed |
-| `test/harness/gateway.go:482` | G402 | Test fixture | test-only self-signed certificate |
+| `test/harness/gateway.go:395` | G402 | Test fixture | the test-only TLS certificate is self-signed |
+| `test/harness/gateway.go:532` | G402 | Test fixture | test-only self-signed certificate |
 | `test/provider/aws.go:20` | G101 | Test fixture | provider registration contains environment variable names, not embedded credentials |
 | `test/provider/garage.go:86` | G101 | Test fixture | public disposable RPC secret for an isolated test container, never production credentials |
 | `test/provider/hetzner.go:19` | G101 | Test fixture | provider registration contains environment variable names and public endpoints, not embedded credentials |

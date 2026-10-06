@@ -58,6 +58,7 @@ func TestConformance(t *testing.T) {
 				{"Passthrough_ProxyHeaders_Tagging", provider.CapObjectTagging, testPassthroughProxyHeadersTagging},
 				{"Passthrough_ProxyHeaders_CORS", provider.CapBucketCors, testPassthroughProxyHeadersCORS},
 				{"Passthrough_ProxyHeaders_CORSForwarding", 0, testPassthroughProxyHeadersCORSForwarding},
+				{"S3Compat_GatewayCORSWithoutBackend", provider.CapEncryptedMPU, testS3Compat_GatewayCORSWithoutBackend},
 				{"Passthrough_RedirectNotFollowed", 0, testPassthroughRedirectNotFollowed},
 				{"Passthrough_TLSVerification", 0, testPassthroughTLSVerification},
 				{"BackendTLS_CustomCARoundTrip", provider.CapBackendTLSFixture, testBackendTLSCustomCARoundTrip},

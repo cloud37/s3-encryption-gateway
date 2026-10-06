@@ -534,7 +534,8 @@
     { "$ref": "#/$defs/invariantIngressMutex" },
     { "$ref": "#/$defs/invariantWeightedRequiresTraefik" },
     { "$ref": "#/$defs/invariantKeyManagerProviderRequired" },
-    { "$ref": "#/$defs/invariantTLSCertRequired" }
+    { "$ref": "#/$defs/invariantTLSCertRequired" },
+    { "$ref": "#/$defs/invariantGatewayCORSRequiresValkey" }
   ],
 
   "$defs": {
@@ -641,8 +642,16 @@
       "description": "A gateway config leaf that can be provided as a direct value string or via a Kubernetes valueFrom reference.",
       "additionalProperties": false,
       "properties": {
-        "value":     { "type": ["string", "null"], "description": "Direct string value. Takes precedence over valueFrom when both are present." },
-        "valueFrom": { "$ref": "#/$defs/valueFromRef", "description": "Kubernetes secret/configmap reference. Use instead of value for sensitive data." }
+        "value":     { "type": ["string", "null"], "description": "Direct string value. Used only when valueFrom is unset; valueFrom takes precedence when populated." },
+        "valueFrom": { "$ref": "#/$defs/valueFromRef", "description": "Kubernetes secret/configmap reference. When populated, this takes precedence over value." }
+      }
+    },
+
+    "corsArrayValue": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "value": { "type": "array", "items": { "type": "string" } },
+        "valueFrom": { "$ref": "#/$defs/valueFromRef" }
       }
     },
 
@@ -847,6 +856,26 @@
         "allowBucketCreation": {
           "allOf": [{ "$ref": "#/$defs/configValue" }],
           "description": "Global gate for explicitly authorized bucket creation; defaults to false."
+        },
+
+        "cors": {
+          "type": "object",
+          "description": "Gateway-managed bucket CORS. Gateway mode requires shared Valkey and persistent storage with tested backups.",
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "CORS mode. valueFrom takes precedence over value; because Helm cannot resolve indirect values, a valueFrom mode conservatively requires Valkey.", "properties": { "value": { "type": ["string", "null"], "enum": ["passthrough", "gateway", null] } }, "default": { "value": "passthrough", "valueFrom": {} } },
+            "allowCredentials": { "allOf": [{ "$ref": "#/$defs/configValue" }], "properties": { "value": { "type": ["string", "null"], "pattern": "^(true|false|1|0)?$" } } },
+            "fallback": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "allowedOrigins": { "allOf": [{ "$ref": "#/$defs/corsArrayValue" }], "default": { "value": [] } },
+                "allowedMethods": { "allOf": [{ "$ref": "#/$defs/corsArrayValue" }], "default": { "value": [] } },
+                "allowedHeaders": { "allOf": [{ "$ref": "#/$defs/corsArrayValue" }], "default": { "value": [] } },
+                "exposeHeaders": { "allOf": [{ "$ref": "#/$defs/corsArrayValue" }], "default": { "value": [] } },
+                "maxAgeSeconds": { "allOf": [{ "$ref": "#/$defs/configValue" }], "properties": { "value": { "type": ["string", "null"], "pattern": "^[0-9]+$" } } }
+              }
+            }
+          }
         },
 
         "policies": {
@@ -1374,6 +1403,37 @@
             }
           }
         }
+      }
+    },
+
+    "invariantGatewayCORSRequiresValkey": {
+      "description": "Gateway-managed CORS requires shared Valkey. A valueFrom mode cannot be resolved by Helm, so it conservatively requires Valkey regardless of the direct value.",
+      "if": {
+        "properties": {
+          "config": {
+            "properties": {
+              "cors": {
+                "properties": {
+                  "mode": {
+                    "anyOf": [
+                      { "properties": { "value": { "const": "gateway" } }, "required": ["value"] },
+                      { "properties": { "valueFrom": { "type": "object", "minProperties": 1 } }, "required": ["valueFrom"] }
+                    ]
+                  }
+                },
+                "required": ["mode"]
+              }
+            },
+            "required": ["cors"]
+          }
+        },
+        "required": ["config"]
+      },
+      "then": {
+        "anyOf": [
+          { "properties": { "valkey": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } }, "required": ["valkey"] },
+          { "properties": { "config": { "properties": { "multipartState": { "properties": { "valkey": { "properties": { "addr": { "anyOf": [ { "properties": { "value": { "type": "string", "minLength": 1 } }, "required": ["value"] }, { "properties": { "valueFrom": { "type": "object", "minProperties": 1 } }, "required": ["valueFrom"] } ] } }, "required": ["addr"] } }, "required": ["valkey"] } }, "required": ["multipartState"] } }, "required": ["config"] }
+        ]
       }
     },
 

@@ -13,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	miniredisserver "github.com/alicebob/miniredis/v2/server"
 	"github.com/cloud37/s3-encryption-gateway/internal/api"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
+	mpupkg "github.com/cloud37/s3-encryption-gateway/internal/mpu"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,6 +58,241 @@ func TestConfigApplier_AllowBucketCreationUpdatesLiveHandler(t *testing.T) {
 	if !h.AllowBucketCreation() {
 		t.Fatal("live management gate did not update")
 	}
+}
+
+func TestConfigChangeApplier_RejectsCORSHotReloadBeforeMutation(t *testing.T) {
+	oldCfg := &config.Config{LogLevel: "info"}
+	newCfg := &config.Config{LogLevel: "debug", CORS: config.CORSConfig{Mode: "gateway"}}
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	a := NewConfigChangeApplier(logger, nil, nil, nil, nil, oldCfg, nil, nil)
+	require.ErrorContains(t, a.ApplyConfigChanges(oldCfg, newCfg), "cors settings cannot be changed")
+	require.Equal(t, logrus.InfoLevel, logger.GetLevel(), "CORS reload rejection must precede unrelated mutations")
+}
+
+func TestGatewayCORS_PersistenceWarningIsAdvisory(t *testing.T) {
+	logger := logrus.New()
+	var output strings.Builder
+	logger.SetOutput(&output)
+	logger.SetLevel(logrus.DebugLevel)
+	client := newPersistenceProbeClient(false, false, false)
+	logCORSValkeyPersistence(client, logger)
+	require.Equal(t, int64(1), client.pings.Load(), "healthy Valkey protocol client is probed before advisory persistence query")
+	require.Contains(t, output.String(), "DURABILITY WARNING")
+	require.Equal(t, int64(1), client.infoCalls.Load())
+	require.Equal(t, int64(1), client.configCalls.Load())
+}
+
+func TestGatewayCORS_PersistenceCheckUsesHealthyPingAndRunsAdvisoryQuery(t *testing.T) {
+	client := newPersistenceProbeClient(false, false, true)
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _, known, infoErr, configErr := corsValkeyPersistenceStateForClient(ctx, client)
+	require.False(t, known)
+	require.NoError(t, infoErr)
+	require.NoError(t, configErr)
+	require.Equal(t, int64(1), client.infoCalls.Load())
+	require.Equal(t, int64(1), client.configCalls.Load())
+	logCORSValkeyPersistence(client, logger)
+	require.Equal(t, int64(1), client.pings.Load())
+	require.Equal(t, int64(2), client.infoCalls.Load())
+	require.Equal(t, int64(2), client.configCalls.Load())
+}
+
+func TestGatewayCORS_PersistenceUnknownIsAdvisoryOnReachableValkey(t *testing.T) {
+	logger := logrus.New()
+	var output strings.Builder
+	logger.SetOutput(&output)
+	logger.SetLevel(logrus.DebugLevel)
+	client := newPersistenceProbeClient(false, false, true)
+	logCORSValkeyPersistence(client, logger)
+	require.Equal(t, int64(1), client.pings.Load())
+	require.Equal(t, int64(1), client.infoCalls.Load())
+	require.Equal(t, int64(1), client.configCalls.Load())
+	require.Contains(t, output.String(), "DURABILITY WARNING")
+	require.NotContains(t, output.String(), "recoverable backup verified")
+}
+
+func TestGatewayCORS_PersistenceDisabledWarnsButContinues(t *testing.T) {
+	logger := logrus.New()
+	var output strings.Builder
+	logger.SetOutput(&output)
+	client := newPersistenceProbeClient(false, false, true)
+	logCORSValkeyPersistence(client, logger)
+	require.Contains(t, output.String(), "DURABILITY WARNING")
+	require.Equal(t, int64(1), client.pings.Load(), "the live Valkey connection remains usable")
+}
+
+func TestGatewayCORS_PersistenceEnabledValkeyIsAdvisoryAndNoBackupClaim(t *testing.T) {
+	logger := logrus.New()
+	var output strings.Builder
+	logger.SetOutput(&output)
+	client := newPersistenceProbeClient(true, false, false)
+	logCORSValkeyPersistence(client, logger)
+	require.Equal(t, int64(1), client.pings.Load())
+	require.Contains(t, output.String(), "persistence is enabled")
+	require.NotContains(t, output.String(), "backup verified")
+	rdbClient := newPersistenceProbeClient(false, true, false)
+	rdbLogger := logrus.New()
+	var rdbOutput strings.Builder
+	rdbLogger.SetOutput(&rdbOutput)
+	logCORSValkeyPersistence(rdbClient, rdbLogger)
+	require.Contains(t, rdbOutput.String(), "persistence is enabled")
+	require.Equal(t, int64(1), rdbClient.pings.Load())
+}
+
+func TestGatewayCORS_PersistenceWarningAgainstReachableValkeyProtocol(t *testing.T) {
+	t.Run("known disabled", func(t *testing.T) {
+		addr := startPersistenceProtocolFixture(t, "")
+		assertPersistenceStartupAndWarning(t, addr, true)
+	})
+	t.Run("enabled control", func(t *testing.T) {
+		addr := startPersistenceProtocolFixture(t, "900 1")
+		assertPersistenceStartupAndWarning(t, addr, false)
+	})
+}
+
+func startPersistenceProtocolFixture(t *testing.T, save string) string {
+	t.Helper()
+	server, err := miniredisserver.NewServer("127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(server.Close)
+	require.NoError(t, server.Register("PING", func(peer *miniredisserver.Peer, _ string, _ []string) { peer.WriteInline("PONG") }))
+	require.NoError(t, server.Register("INFO", func(peer *miniredisserver.Peer, _ string, args []string) {
+		if len(args) == 1 && args[0] == "persistence" {
+			peer.WriteBulk("# Persistence\r\naof_enabled:0\r\n")
+			return
+		}
+		peer.WriteError("ERR unsupported INFO request")
+	}))
+	require.NoError(t, server.Register("CONFIG", func(peer *miniredisserver.Peer, _ string, args []string) {
+		if len(args) == 2 && strings.EqualFold(args[0], "GET") && args[1] == "save" {
+			peer.WriteLen(2)
+			peer.WriteBulk("save")
+			peer.WriteBulk(save)
+			return
+		}
+		peer.WriteError("ERR unsupported CONFIG request")
+	}))
+	return server.Addr().String()
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func assertPersistenceStartupAndWarning(t *testing.T, addr string, warning bool) {
+	t.Helper()
+	store, err := mpupkg.NewValkeyStateStoreWithLease(context.Background(), config.ValkeyConfig{
+		Addr: addr, InsecureAllowPlaintext: true, EncryptState: boolPointer(false),
+		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
+	}, nil, "", 0)
+	require.NoError(t, err, "production Valkey state store startup must succeed against reachable Redis protocol")
+	defer store.Close()
+	client := store.Client()
+	require.NoError(t, api.NewValkeyCORSStore(client).HealthCheck(context.Background()), "shared live Valkey remains usable")
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+	var output strings.Builder
+	logger.SetOutput(&output)
+	logCORSValkeyPersistence(client, logger)
+	if warning {
+		require.Contains(t, output.String(), "DURABILITY WARNING")
+		require.NotContains(t, output.String(), "persistence is enabled")
+	} else {
+		require.NotContains(t, output.String(), "DURABILITY WARNING")
+		require.Contains(t, output.String(), "persistence is enabled")
+	}
+	require.NotContains(t, output.String(), "recoverable backup verified")
+}
+
+type persistenceProbeClient struct {
+	redis.UniversalClient
+	aofEnabled  bool
+	rdbEnabled  bool
+	unknown     bool
+	pings       atomic.Int64
+	infoCalls   atomic.Int64
+	configCalls atomic.Int64
+}
+
+func newPersistenceProbeClient(aofEnabled, rdbEnabled, unknown bool) *persistenceProbeClient {
+	return &persistenceProbeClient{aofEnabled: aofEnabled, rdbEnabled: rdbEnabled, unknown: unknown}
+}
+
+func (c *persistenceProbeClient) Ping(context.Context) *redis.StatusCmd {
+	c.pings.Add(1)
+	return redis.NewStatusResult("PONG", nil)
+}
+
+func (c *persistenceProbeClient) infoPersistence(ctx context.Context) *redis.StringCmd {
+	return c.Info(ctx, "persistence")
+}
+
+func (c *persistenceProbeClient) configSave(ctx context.Context) *redis.MapStringStringCmd {
+	return c.ConfigGet(ctx, "save")
+}
+
+func (c *persistenceProbeClient) Close() error       { return nil }
+func (c *persistenceProbeClient) AddHook(redis.Hook) {}
+func (c *persistenceProbeClient) Watch(context.Context, func(*redis.Tx) error, ...string) error {
+	return nil
+}
+func (c *persistenceProbeClient) Do(context.Context, ...interface{}) *redis.Cmd {
+	return redis.NewCmd(context.Background())
+}
+func (c *persistenceProbeClient) Process(context.Context, redis.Cmder) error { return nil }
+func (c *persistenceProbeClient) AutoPipeline() (*redis.AutoPipeliner, error) {
+	return nil, errors.New("unsupported in test fake")
+}
+func (c *persistenceProbeClient) AutoPipelineWithOptions(*redis.AutoPipelineOptions) (*redis.AutoPipeliner, error) {
+	return nil, errors.New("unsupported in test fake")
+}
+func (c *persistenceProbeClient) AsyncAutoPipeline() (*redis.AutoPipeliner, error) {
+	return nil, errors.New("unsupported in test fake")
+}
+func (c *persistenceProbeClient) AsyncAutoPipelineWithOptions(*redis.AutoPipelineOptions) (*redis.AutoPipeliner, error) {
+	return nil, errors.New("unsupported in test fake")
+}
+func (c *persistenceProbeClient) Subscribe(context.Context, ...string) *redis.PubSub  { return nil }
+func (c *persistenceProbeClient) PSubscribe(context.Context, ...string) *redis.PubSub { return nil }
+func (c *persistenceProbeClient) SSubscribe(context.Context, ...string) *redis.PubSub { return nil }
+func (c *persistenceProbeClient) PoolStats() *redis.PoolStats                         { return &redis.PoolStats{} }
+
+func (c *persistenceProbeClient) Info(context.Context, ...string) *redis.StringCmd {
+	c.infoCalls.Add(1)
+	if c.unknown {
+		return redis.NewStringResult("", nil)
+	}
+	if c.aofEnabled {
+		return redis.NewStringResult("# Persistence\naof_enabled:1\n", nil)
+	}
+	return redis.NewStringResult("# Persistence\naof_enabled:0\n", nil)
+}
+
+func (c *persistenceProbeClient) ConfigGet(context.Context, string) *redis.MapStringStringCmd {
+	c.configCalls.Add(1)
+	save := ""
+	if c.unknown {
+		return redis.NewMapStringStringResult(map[string]string{}, nil)
+	}
+	if c.rdbEnabled {
+		save = "900 1"
+	}
+	return redis.NewMapStringStringResult(map[string]string{"save": save}, nil)
+}
+
+func TestGatewayCORS_PersistenceStateParsing(t *testing.T) {
+	aof, rdb, known := corsValkeyPersistenceState("aof_enabled:0\n", "900 1", nil, nil)
+	require.True(t, known)
+	require.False(t, aof)
+	require.True(t, rdb)
+	aof, rdb, known = corsValkeyPersistenceState("aof_enabled:1\n", "", nil, nil)
+	require.True(t, known)
+	require.True(t, aof)
+	require.False(t, rdb)
+	_, _, known = corsValkeyPersistenceState("", "", errors.New("unavailable"), nil)
+	require.False(t, known)
 }
 
 func TestConfigApplier_SEC49ReconfiguresLiveManager(t *testing.T) {

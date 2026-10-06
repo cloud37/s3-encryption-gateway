@@ -28,6 +28,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
 	"github.com/cloud37/s3-encryption-gateway/internal/util"
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
 	"go.opentelemetry.io/otel"
@@ -106,6 +107,9 @@ func stringSlicesEqual(a, b []string) bool {
 // ApplyConfigChanges applies non-crypto configuration changes to running components
 func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Config) error {
 	changes := []string{}
+	if oldConfig != nil && newConfig != nil && !sameCORSConfig(oldConfig.CORS, newConfig.CORS) {
+		return fmt.Errorf("cors settings cannot be changed during hot reload")
+	}
 	if oldConfig.Server.SpoolDirectory != newConfig.Server.SpoolDirectory {
 		return fmt.Errorf("server.spool_directory cannot be changed during hot reload")
 	}
@@ -313,6 +317,16 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 	}
 
 	return nil
+}
+
+func sameCORSConfig(a, b config.CORSConfig) bool {
+	return config.EffectiveCORSMode(a.Mode) == config.EffectiveCORSMode(b.Mode) &&
+		a.AllowCredentials == b.AllowCredentials &&
+		stringSlicesEqual(a.Fallback.AllowedOrigins, b.Fallback.AllowedOrigins) &&
+		stringSlicesEqual(a.Fallback.AllowedMethods, b.Fallback.AllowedMethods) &&
+		stringSlicesEqual(a.Fallback.AllowedHeaders, b.Fallback.AllowedHeaders) &&
+		stringSlicesEqual(a.Fallback.ExposeHeaders, b.Fallback.ExposeHeaders) &&
+		a.Fallback.MaxAgeSeconds == b.Fallback.MaxAgeSeconds
 }
 
 // InitTracing initializes OpenTelemetry tracing based on configuration
@@ -824,6 +838,7 @@ func main() {
 	// bucket policy enables EncryptMultipartUploads. Fail-closed: if Valkey is
 	// unreachable at startup and encrypted MPU is required, refuse to start.
 	var mpuStore mpupkg.StateStore
+	var corsStore api.CORSStore
 	if cfg.MultipartState.Valkey.Addr != "" {
 		var err error
 		mpuStore, err = mpupkg.NewValkeyStateStoreWithLease(
@@ -846,6 +861,15 @@ func main() {
 		stopValkeyHC := mpupkg.StartHealthCheck(context.Background(), mpuStore, cfg.MultipartState.Valkey.HealthCheckInterval, m.SetMPUValkeyUp)
 		defer stopValkeyHC()
 		logger.WithField("addr", cfg.MultipartState.Valkey.Addr).Info("MPU Valkey state store initialised")
+	}
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" {
+		valkeyStore, ok := mpuStore.(*mpupkg.ValkeyStateStore)
+		if !ok || valkeyStore == nil {
+			logger.Fatal("Gateway CORS mode requires the shared Valkey state store")
+		}
+		corsStore = api.NewValkeyCORSStore(valkeyStore.Client())
+		handler.WithCORSStore(corsStore)
+		logCORSValkeyPersistence(valkeyStore.Client(), logger)
 	}
 
 	// Initialize ListObjects size cache.
@@ -981,6 +1005,9 @@ func main() {
 	// middleware so unauthenticated requests are rejected early.
 	httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, auditLogger)(httpHandler)
 	httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, auditLogger, cfg.Auth.AllowLegacySignatureV2, spoolManager, spoolLimits)(httpHandler)
+	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" {
+		httpHandler = api.CORSMiddleware(cfg.CORS, corsStore, logger)(httpHandler)
+	}
 
 	// RecoveryMiddleware wraps the ENTIRE chain so panics in any layer are caught.
 	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)
@@ -1175,4 +1202,66 @@ func main() {
 	} else {
 		logger.Info("Server stopped gracefully")
 	}
+}
+
+func logCORSValkeyPersistence(client redis.UniversalClient, logger *logrus.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		logger.WithError(err).Error("GATEWAY CORS DURABILITY WARNING: Valkey persistence could not be inspected; retained storage and tested backups are essential. Persistence settings do not prove backup recoverability")
+		return
+	}
+	aofEnabled, rdbEnabled, known, infoErr, configErr := corsValkeyPersistenceStateForClient(ctx, client)
+	if !known || (!aofEnabled && !rdbEnabled) {
+		logFields := logrus.Fields{"aof_enabled": aofEnabled, "rdb_enabled": rdbEnabled}
+		if infoErr != nil {
+			logFields["info_error"] = infoErr.Error()
+		}
+		if configErr != nil {
+			logFields["config_error"] = configErr.Error()
+		}
+		logger.WithFields(logFields).Error("GATEWAY CORS DURABILITY WARNING: Valkey AOF/RDB persistence is disabled or unverifiable; retained storage and tested backups are essential. Persistence settings do not prove backup recoverability")
+		return
+	}
+	logger.WithFields(logrus.Fields{"aof_enabled": aofEnabled, "rdb_enabled": rdbEnabled}).Info("Gateway CORS Valkey persistence is enabled; independent tested backups remain essential and are not verified by this check")
+}
+
+func corsValkeyPersistenceStateForClient(ctx context.Context, client redis.UniversalClient) (aofEnabled, rdbEnabled, known bool, infoErr, configErr error) {
+	info, err := client.Info(ctx, "persistence").Result()
+	saveConfig, configErr := client.ConfigGet(ctx, "save").Result()
+	aofEnabled, rdbEnabled, known = corsValkeyPersistenceState(info, saveConfig["save"], err, configErr)
+	return aofEnabled, rdbEnabled, known, err, configErr
+}
+
+func corsValkeyPersistenceState(info, saveConfig string, infoErr, configErr error) (aofEnabled, rdbEnabled, known bool) {
+	if infoErr != nil || configErr != nil {
+		return false, false, false
+	}
+	fields := make(map[string]string)
+	for _, line := range strings.Split(info, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok {
+			fields[key] = value
+		}
+	}
+	aofValue, exists := fields["aof_enabled"]
+	if !exists || (aofValue != "0" && aofValue != "1") {
+		return false, false, false
+	}
+	return aofValue == "1", hasRDBSaveSchedule(saveConfig), true
+}
+
+func hasRDBSaveSchedule(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) == 0 || len(fields)%2 != 0 {
+		return false
+	}
+	for _, field := range fields {
+		for _, c := range field {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }

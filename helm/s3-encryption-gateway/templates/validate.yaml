@@ -18,6 +18,30 @@ See docs/OPS_DEPLOYMENT.md §2 — Stateful Invariants, ADR 0009.
   .Values.track) -}}
 {{- end -}}
 
+{{/* Gateway-managed CORS requires a shared Valkey backend for durable policy. */}}
+{{- $corsMode := default "passthrough" .Values.config.cors.mode.value -}}
+{{- if .Values.config.cors.mode.valueFrom -}}
+  {{- $corsMode = "gateway" -}}
+{{- end -}}
+{{- if eq $corsMode "gateway" -}}
+{{- $corsAddrSet := false -}}
+{{- if .Values.valkey.enabled -}}
+  {{- $corsAddrSet = true -}}
+{{- end -}}
+{{- if or .Values.config.multipartState.valkey.addr.value .Values.config.multipartState.valkey.addr.valueFrom -}}
+  {{- $corsAddrSet = true -}}
+{{- end -}}
+{{- if not $corsAddrSet -}}
+{{- fail "config.cors.mode=gateway requires valkey.enabled=true or config.multipartState.valkey.addr.value/valueFrom. Production requires shared persistent Valkey and tested backups." -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has $corsMode (list "" "passthrough" "gateway")) -}}
+{{- fail "config.cors.mode must be passthrough or gateway" -}}
+{{- end -}}
+{{- if and (eq $corsMode "passthrough") (or (and .Values.config.cors.allowCredentials.value (ne .Values.config.cors.allowCredentials.value "false") (ne .Values.config.cors.allowCredentials.value "0")) (gt (len .Values.config.cors.fallback.allowedOrigins.value) 0) (gt (len .Values.config.cors.fallback.allowedMethods.value) 0) (gt (len .Values.config.cors.fallback.allowedHeaders.value) 0) (gt (len .Values.config.cors.fallback.exposeHeaders.value) 0)) -}}
+{{- fail "config.cors fallback and allowCredentials require config.cors.mode=gateway" -}}
+{{- end -}}
+
 {{/*
 Guard 2 — track without a shared external Valkey address.
 When a track is set, either an external Valkey addr.value or addr.valueFrom
