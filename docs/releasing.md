@@ -69,29 +69,69 @@ version entry is missing, empty, or duplicated.
 ### 5. Verify Chart Version
 
 Confirm the `version` field in `helm/s3-encryption-gateway/Chart.yaml` has
-been incremented according to semver. The CI pipeline will skip the release
-if the version has already been published.
+been incremented according to semver and that `appVersion` and image references
+match the intended release. The workflow derives the tag as
+`s3-encryption-gateway-<version>` and skips the release work if that GitHub
+release tag already exists.
+
+### 6. Pass the Documentation Release Gate (Manual)
+
+Before release, review the documentation as a maintained reader and agent
+interface; this is a maintainer check, not a CI job. Start at
+[`docs/README.md`](README.md), which is the task-oriented index for the 18
+top-level reader guides. Each topic should have one authoritative guide, and
+the index should route readers to it. Supporting artifacts and historical
+records live in their dedicated directories, including `adr/`, `diagrams/`,
+`integrations/`, `issues/`, `perf/`, `plans/`, and `security/`; these are
+intentional and are not obsolete reader guides merely because they are not in
+the top-level guide count.
+
+For this release, verify that:
+
+- The release checklist and reader index reflect the current repository
+  structure and released behavior; planned or unreleased work is clearly
+  distinguished from what ships.
+- Local links and anchors resolve, moved material has live references, and no
+  superseded guide, empty redirect stub, or other orphaned reader-facing file
+  remains. Update links to the authoritative guide instead of restoring a
+  retired filename.
+- The documentation does not duplicate a topic owner's instructions or
+  contradict the chart, workflow, changelog, or current source. Preserve
+  intentional historical/reference records unless they are explicitly being
+  retired.
+- `git diff --check` passes. See
+  [documentation validation](TESTING.md#documentation-validation) for the
+  documentation-only review expectations.
+
+Do not add a documentation CI requirement for this gate: it is a deliberate
+manual freshness and dead-file review before rendering/publishing the release.
 
 ## CI Pipeline
 
 After a push to `main` or `master` with a new chart version, the `helm.yml`
 release workflow:
 
-1. Runs `chart-releaser-action` to publish the Helm chart to the `gh-pages`
-   branch (skipped if version already published).
-2. Cross-compiles gateway and migrate binaries (linux/amd64, linux/arm64,
-   darwin/arm64) and uploads them to the GitHub release.
+1. If the release tag is new, packages and publishes the Helm chart to GHCR as
+   an OCI artifact, then uses `chart-releaser-action` to publish the chart index
+   and package to the `gh-pages` branch.
+2. Cross-compiles gateway, CLI, and deprecated migration-shim binaries
+   (linux/amd64, linux/arm64, darwin/arm64) and uploads them to the GitHub
+   release.
 3. Builds and pushes a multi-arch (linux/amd64, linux/arm64) Docker image
    to Docker Hub.
 4. Builds and pushes a FIPS image (linux/amd64 only) to Docker Hub with
    `-fips` tag suffix.
-5. Runs Trivy container vulnerability scan (HIGH/CRITICAL severity gate).
+5. Runs a Trivy HIGH/CRITICAL severity scan of the standard Docker image.
 6. Generates an SPDX-JSON SBOM via syft and uploads it to the GitHub release.
-7. Signs the Docker Hub image digest and attaches the SBOM attestation using
-   cosign keyless OIDC signing (Sigstore transparency log).
+7. Signs and verifies the OCI Helm chart, and signs the Docker Hub image digest
+   and attaches its SBOM attestation using cosign keyless OIDC signing.
 8. Syncs the chart README to the `gh-pages` branch.
 9. Updates the GitHub Release notes from the matching `CHANGELOG.md` section
-   and links back to the full changelog.
+   and links back to the full changelog. A version containing `-` is marked as
+   a prerelease on GitHub.
+
+If the tag already exists, the workflow skips the release work rather than
+re-running these publishing steps.
 
 ### Required Secrets
 
