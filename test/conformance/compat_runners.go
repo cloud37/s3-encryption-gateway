@@ -9,7 +9,7 @@ import (
 const awsCLIImage = "amazon/aws-cli:2.37.12"
 
 // renovate: datasource=docker depName=python versioning=docker
-const pythonImage = "python:3.14-slim"
+const pythonImage = "python:3.15-slim"
 
 // renovate: datasource=docker depName=peakcom/s5cmd versioning=docker
 const s5cmdImage = "peakcom/s5cmd:v2.3.0"
