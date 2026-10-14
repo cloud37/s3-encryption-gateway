@@ -19,7 +19,7 @@ guide; current instructions take precedence over historical plans and examples.
 | Understand the design | [Architecture](ARCHITECTURE.md) and [encryption design](ENCRYPTION_DESIGN.md) | Component/security boundaries, formats, metadata, FIPS build profile |
 | Contribute code or docs | [Contributor guide](DEVELOPMENT_GUIDE.md) | Local setup, ownership, explanatory commits, review and documentation conventions |
 | Run tests or understand quality gates | [Testing](TESTING.md) | Unit/FIPS/conformance commands, regression recipes, coverage/exclusion/mutation policy |
-| Publish a release | [Release checklist](releasing.md) | Chart/image/changelog/SBOM preparation and release automation |
+| Publish a release | [Release checklist](releasing.md) | Manual documentation freshness/obsolete-file gate, topic owners, chart/image/changelog/SBOM preparation, and publication boundaries |
 | Follow accepted future work | [Roadmap](ROADMAP.md) | Issue-linked unreleased work; no speculative delivery dates |
 
 ## Supporting References
