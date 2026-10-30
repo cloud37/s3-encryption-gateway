@@ -25,7 +25,7 @@ func init() {
 type garageProvider struct{}
 
 // renovate: datasource=docker depName=dxflrs/garage versioning=docker
-const garageImage = "dxflrs/garage:v2.4.1"
+const garageImage = "dxflrs/garage:v2.5.0"
 
 func (p *garageProvider) Name() string { return "garage" }
 
