@@ -46,6 +46,13 @@ func TestConformance(t *testing.T) {
 				cap  provider.Capabilities
 				fn   func(*testing.T, provider.Instance)
 			}{
+				{"GH380_PlaintextReads", 0, gh380PlaintextReads},
+				{"GH380_EncryptedReads", 0, gh380EncryptedReads},
+				{"GH380_CachePolicyReload", 0, gh380CachePolicyReload},
+				{"GH380_CopyObjectSources", 0, gh380CopyObjectSources},
+				{"GH380_VersionedReads", provider.CapVersioning, gh380VersionedReads},
+				{"GH380_UploadPartCopySources", provider.CapMultipartCopy, gh380UploadPartCopySources},
+				{"GH380_EncryptedMPUCopySources", provider.CapEncryptedMPU | provider.CapMultipartCopy, gh380EncryptedMPUCopySources},
 				// Core object operations — run on every provider.
 				{"CompatibleHealthAliases", 0, testCompatibleHealthAliases},
 				{"CompatibleHealthAliasNearMatchesRequireAuth", 0, testCompatibleHealthAliasNearMatchesRequireAuth},
