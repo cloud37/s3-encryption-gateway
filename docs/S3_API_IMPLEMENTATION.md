@@ -1,5 +1,16 @@
 # S3 Compatibility Reference
 
+## Strict source reads (GH-380)
+
+For a source bucket with `require_encryption: true`, plaintext GET and HEAD,
+CopyObject and UploadPartCopy return 403 `AccessDenied`, including ranges and
+explicit versions. HEAD errors have no body or successful object headers.
+Source policy is independent of destination policy: importing plaintext from an
+unprotected source into an encrypted destination remains supported where the
+existing destination path encrypts it. The existing destination-only
+UploadPartCopy plaintext mismatch still returns 500 when the destination MPU
+is not encrypted.
+
 **Release baseline: v0.12.3. Merge review: October 6, 2026.**
 
 The inventory and released-behavior tables describe v0.12.3. **Unreleased `main`**

@@ -1,5 +1,17 @@
 # Deployment and Configuration
 
+## Strict read migration (GH-380)
+
+`require_encryption: true` denies plaintext reads and copy sources in matching
+buckets. This changes behavior even for policies enabled before GH-380. Inventory
+and migrate plaintext through separately authorized backend tooling before
+enabling the flag; same-key gateway CopyObject cannot migrate a protected
+plaintext source. Native backend SSE does not satisfy gateway encryption.
+After a successful policy reload, new reads and cache hits use the new policy;
+a failed reload retains the previous policy. Temporarily disabling the flag can
+restore plaintext access but also removes this protection, so evaluate that
+rollback risk and re-enable only after migration.
+
 This guide owns installation, runtime configuration, backend selection, credentials,
 and bucket policy. Exact fields/defaults live in [config.yaml.example](../config.yaml.example),
 [configuration source](../internal/config/config.go), and the

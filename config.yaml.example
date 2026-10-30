@@ -82,6 +82,11 @@ auth:
 # Set via POLICIES env var (comma-separated)
 #
 # Per-policy field (in a policy YAML file):
+# Strict read example (migrate existing plaintext before enabling):
+# id: migrated
+# buckets: ["secure-*"]
+# require_encryption: true # denies plaintext GET/HEAD and copy sources; native SSE is insufficient
+# The existing GW_POLICY_N_REQUIRE_ENCRYPTION environment variable sets this field.
 #   id: "restic-bypass"
 #   buckets: ["restic-*"]
 #   disable_encryption: true   # store objects as plain bytes; no AEAD applied

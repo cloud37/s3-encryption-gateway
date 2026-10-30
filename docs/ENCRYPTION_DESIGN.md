@@ -1,5 +1,16 @@
 # Encryption Formats, Metadata, and FIPS
 
+## Strict object reads (GH-380)
+
+When `require_encryption` is enabled for a source bucket, GET, HEAD and copy
+sources must classify as a supported gateway-encrypted format. Backend-native
+SSE alone does not satisfy this policy. Stripping gateway encryption metadata
+can make an object unreadable, rather than exposing ciphertext as plaintext.
+The current policy and backend metadata are checked on cache hits and fetched
+parent objects. Classification is not authentication: existing AEAD checks
+remain necessary and this policy does not prevent replay or guarantee atomic
+identity across HEAD and GET.
+
 This guide owns the encryption/metadata contract and FIPS build profile. For
 operator key setup use [key management](KMS_COMPATIBILITY.md); for API options
 use [S3 compatibility](S3_API_IMPLEMENTATION.md); for upgrades/recovery use

@@ -1,5 +1,10 @@
 # S3 Encryption Gateway
 
+**Unreleased — GH-380:** `require_encryption: true` now denies plaintext reads
+and copy sources, including objects already present in protected buckets. Migrate
+before enabling it; see [migration guidance](docs/DEPLOYMENT.md#strict-read-migration-gh-380)
+and the [encryption design](docs/ENCRYPTION_DESIGN.md#strict-object-reads-gh-380).
+
 ![GitHub Release](https://img.shields.io/github/v/release/cloud37/s3-encryption-gateway)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)](https://artifacthub.io/packages/helm/s3-encryption-gateway/s3-encryption-gateway)

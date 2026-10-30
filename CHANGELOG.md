@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Strict source reads (GH-380):** Existing `require_encryption: true` policies
+  now reject plaintext GET, HEAD, CopyObject and UploadPartCopy sources, including
+  ranges and versions. Migrate plaintext before enabling the policy; already
+  enabled policies also change behavior. See [deployment guidance](docs/DEPLOYMENT.md#strict-read-migration-gh-380).
+
 - **Signed Content-Length behind reverse proxies (GH-356):** SigV4 requests
   whose `SignedHeaders` includes `content-length` can authenticate when a Go-based
   frontend proxy omits `Content-Length: 0` on a bodiless request such as DELETE.

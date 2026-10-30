@@ -1560,7 +1560,7 @@
         },
         "require_encryption": {
           "type": "boolean",
-          "description": "Reject unencrypted PutObject / UploadPartCopy requests into matching buckets. Default false."
+          "description": "Reject plaintext GET, HEAD, CopyObject and UploadPartCopy sources in matching buckets. Native backend SSE is not gateway encryption. Default false."
         },
         "disallow_lock_bypass": {
           "type": "boolean",

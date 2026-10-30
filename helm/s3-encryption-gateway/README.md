@@ -918,6 +918,10 @@ fields are supported: `encrypt_multipart_uploads`, `require_encryption`,
 `disallow_lock_bypass`, and per-bucket `encryption` /
 `rate_limit` overrides.
 
+`require_encryption` also rejects plaintext GET/HEAD and copy sources in matching
+buckets, including objects stored before the policy was enabled. Native SSE is
+not gateway encryption. [Migrate plaintext first](../../docs/DEPLOYMENT.md#strict-read-migration-gh-380).
+
 #### Production (external Valkey, TLS)
 
 Gateway-managed CORS is opt-in with `config.cors.mode.value: gateway`; the default is

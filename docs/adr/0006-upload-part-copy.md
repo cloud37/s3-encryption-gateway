@@ -51,7 +51,7 @@ Implement a dedicated `handleUploadPartCopy` handler that:
 
 5. **Respects cross-key-space correctness**: Source and destination may resolve to different encryption engines (different KEKs). Reuse the engine resolution pattern from `handleCopyObject`.
 
-6. **Detects config mismatches**: If destination bucket config mandates encryption but the classified source is plaintext, return `500 InternalError` and emit an audit event (trust-on-first-read hazard mitigation per *Real-World Cryptography* Ch. 16).
+6. **Detects config mismatches**: If destination bucket config mandates encryption, the destination MPU is not encrypted, and the classified source is plaintext, return `500 InternalError` and emit an audit event (trust-on-first-read hazard mitigation per *Real-World Cryptography* Ch. 16).
 
 7. **Maintains bounded memory**: Chunked path buffers only one chunk (~64 KiB default, 1 MiB max) plus a transfer buffer. Legacy path buffers the full object with a configurable cap (default 256 MiB, opt-out safety posture).
 
@@ -118,10 +118,10 @@ This path is necessary for single-AEAD sources but is documented as slow. A warn
 
 ### Config Mismatch Detection
 
-If the destination bucket policy mandates encryption (`PolicyConfig.RequireEncryption=true`) but the classified source is plaintext, the handler returns `500 InternalError` and emits an audit event. The check is implemented in `handleUploadPartCopy` (see `internal/api/upload_part_copy.go`):
+If the destination bucket policy mandates encryption (`PolicyConfig.RequireEncryption=true`), the destination MPU is not encrypted, and the classified source is plaintext, the handler returns `500 InternalError` and emits an audit event. The check is implemented in `handleUploadPartCopy` (see `internal/api/upload_part_copy.go`):
 
 ```go
-if sourceClass.Class == SourceClassPlaintext &&
+if !destinationEncrypted && sourceClass.Class == SourceClassPlaintext &&
     h.policyManager != nil &&
     h.policyManager.BucketRequiresEncryption(bucket) {
     // Hard refusal: 500 InternalError + audit event with reason=destination_requires_encryption
@@ -138,6 +138,14 @@ require_encryption: true
 ```
 
 This prevents silent security degradation caused by configuration drift. Verified by integration test `TestUploadPartCopy_PlaintextSource_EncryptedDestBucket_Refused`.
+
+### Amendment 2026-10-30 — GH-380 source policy
+
+Independently of the destination rule above, a plaintext source in a bucket
+requiring gateway encryption is refused with 403 `AccessDenied`. Source HEAD
+and actual fetched parent-object GET metadata are checked before consuming the
+body or reserving/writing a destination part. The historical destination-only
+500 remains separate and unchanged.
 
 ### Source-Bucket Read Authorisation
 
@@ -162,7 +170,8 @@ Per AWS S3 spec and `docs/S3_API_IMPLEMENTATION.md`:
 | Source range start ≥ object size | 416 | `InvalidRange` |
 | Multipart uploads disabled | 501 | `NotImplemented` |
 | Proxy mode, mediation not supported | 501 | `NotImplemented` |
-| Destination requires encryption, source is plaintext | 500 | `InternalError` |
+| Destination requires encryption, destination MPU is not encrypted, source is plaintext | 500 | `InternalError` |
+| Source requires encryption, source is plaintext | 403 | `AccessDenied` |
 
 ## Rationale
 

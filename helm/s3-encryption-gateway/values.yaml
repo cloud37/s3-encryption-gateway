@@ -725,7 +725,9 @@ config:
 #   disable_encryption        – store objects as plain bytes; no AEAD applied
 #                               mutually exclusive with require_encryption: true
 #   encrypt_multipart_uploads – opt-in encrypted MPU per ADR-0009 (requires Valkey)
-#   require_encryption        – hard-reject unencrypted PutObject for these buckets
+#   require_encryption        – reject plaintext GET/HEAD and copy sources in these
+#                               buckets; native SSE does not count. Migrate existing
+#                               plaintext before enabling (default false).
 #   disallow_lock_bypass      – reject requests that try to bypass object lock
 #   encryption / rate_limit  – per-bucket overrides (optional)
 #
