@@ -29,6 +29,9 @@ func backendObjectError(bucket, key string, err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, errPlaintextReadForbidden) {
+		return err
+	}
 	return &objectBackendError{bucket: bucket, key: key, err: err}
 }
 
@@ -85,6 +88,25 @@ func (h *Handler) writeObjectErrorForBucket(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+func (h *Handler) writeObjectReadPolicyError(w http.ResponseWriter, r *http.Request, op, bucket, key string, err error, start time.Time) bool {
+	if !errors.Is(err, errPlaintextReadForbidden) {
+		return false
+	}
+	if op == http.MethodGet {
+		op = "GetObject"
+	} else if op == http.MethodHead {
+		op = "HeadObject"
+	}
+	if h.logger != nil {
+		h.logger.WithFields(map[string]any{"bucket": bucket, "key": key, "operation": op}).Warn("plaintext read refused by bucket policy")
+	}
+	if h.auditLogger != nil {
+		h.auditLogger.LogAccessWithMetadata("plaintext_read_refused", bucket, key, getClientIP(r), r.UserAgent(), getRequestID(r), false, err, time.Since(start), map[string]interface{}{"reason": "source_requires_encryption", "operation": op, "source_bucket": bucket, "source_key": key})
+	}
+	h.writeObjectErrorForBucket(w, r, op, bucket, decryptFailure(err, r.URL.Path), start)
+	return true
+}
+
 func requestBucket(r *http.Request) string {
 	if vars := mux.Vars(r); vars != nil {
 		return vars["bucket"]
@@ -107,6 +129,9 @@ func (h *Handler) writeObjectIntegrityError(w http.ResponseWriter, r *http.Reque
 // failures use the same tamper metric/audit owner as post-header stream failures.
 func (h *Handler) writeObjectDecryptError(w http.ResponseWriter, r *http.Request, op, bucket, key string, err error, start time.Time) {
 	if h.writeObjectBackendError(w, r, op, err, start) {
+		return
+	}
+	if h.writeObjectReadPolicyError(w, r, op, bucket, key, err, start) {
 		return
 	}
 	if isIntegrityFailure(err) || errors.Is(err, crypto.ErrChunkedObjectIncomplete) || errors.Is(err, crypto.ErrUnsupportedChunkedVersion) {
@@ -157,6 +182,8 @@ func decryptFailure(err error, resource string) *S3Error {
 	var invalidKDF *crypto.ErrInvalidKDFParams
 	var costlyKDF *crypto.ErrKDFCostTooHigh
 	switch {
+	case errors.Is(err, errPlaintextReadForbidden):
+		code, msg = "AccessDenied", "Bucket policy requires gateway-encrypted objects; plaintext reads are forbidden."
 	case errors.As(err, &invalidKDF), errors.As(err, &costlyKDF):
 		msg = "We encountered an internal error. Please try again."
 	case errors.Is(err, crypto.ErrEncryptedObjectInBypassBucket):
@@ -171,6 +198,8 @@ func decryptFailure(err error, resource string) *S3Error {
 	status := http.StatusInternalServerError
 	if code == "EncryptionConfigurationMismatch" {
 		status = http.StatusConflict
+	} else if code == "AccessDenied" {
+		status = http.StatusForbidden
 	}
 	return &S3Error{Code: code, Message: msg, Resource: resource, HTTPStatus: status}
 }

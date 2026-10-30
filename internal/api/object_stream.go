@@ -79,8 +79,9 @@ func (h *Handler) planObjectRead(ctx context.Context, client s3.Client, bucket, 
 	if bucket == "" || key == "" {
 		return objectReadPlan{}, fmt.Errorf("object read plan requires bucket and key")
 	}
+	client = readableParentClient{Client: client, h: h, bucket: bucket, key: key}
 	plan := objectReadPlan{Bucket: bucket, Key: key, RangeTotal: -1, ResponseStatus: http.StatusOK}
-	view, err := h.loadObjectView(bucket, key, versionID, rawMetadata)
+	view, err := h.loadReadableObjectView(bucket, key, versionID, rawMetadata)
 	if err != nil {
 		return objectReadPlan{}, err
 	}
@@ -96,7 +97,7 @@ func (h *Handler) planObjectRead(ctx context.Context, client s3.Client, bucket, 
 			if headErr != nil {
 				return objectReadPlan{}, backendObjectError(bucket, key, headErr)
 			}
-			headView, viewErr := h.loadObjectView(bucket, key, versionID, headMetadata)
+			headView, viewErr := h.loadReadableObjectView(bucket, key, versionID, headMetadata)
 			if viewErr != nil {
 				return objectReadPlan{}, viewErr
 			}
@@ -787,6 +788,10 @@ func (h *Handler) servePlannedGetObject(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer func() { _ = reader.Close() }()
+	if _, err := h.loadReadableObjectView(bucket, key, versionID, metadata); err != nil {
+		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
+		return
+	}
 
 	// Authenticate the v2 terminal before any success headers or plaintext are
 	// exposed. Ranged GETs already performed this check during HEAD planning.

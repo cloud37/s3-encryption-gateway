@@ -246,6 +246,9 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	// the correct strategy.
 	sourceClass, err := h.classifyCopySource(ctx, s3Client, srcBucket, srcKey, srcVersionID)
 	if err != nil {
+		if h.writeObjectReadPolicyError(w, r, "UploadPartCopy", srcBucket, srcKey, err, start) {
+			return
+		}
 		if h.writeObjectBackendError(w, r, "UploadPartCopy", err, start) {
 			return
 		}
@@ -368,6 +371,9 @@ func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strategyErr != nil {
+		if h.writeObjectReadPolicyError(w, r, "UploadPartCopy", srcBucket, srcKey, strategyErr, start) {
+			return
+		}
 		if h.writeObjectBackendError(w, r, "UploadPartCopy", strategyErr, start) {
 			return
 		}
@@ -493,6 +499,7 @@ func copyPartClaimError(err error) (code string, status int, message string, res
 // using a single HeadObject call. The caller's scope for the source bucket is
 // enforced by authorizeCopyOperation before this handler reaches here.
 func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bucket, key string, versionID *string) (*CopySourceMetadata, error) {
+	s3Client = readableParentClient{Client: s3Client, h: h, bucket: bucket, key: key}
 	metadata, err := s3Client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, backendObjectError(bucket, key, err)
@@ -502,7 +509,7 @@ func (h *Handler) classifyCopySource(ctx context.Context, s3Client s3.Client, bu
 		Class: SourceClassPlaintext,
 	}
 
-	view, viewErr := h.loadObjectView(bucket, key, versionID, metadata)
+	view, viewErr := h.loadReadableObjectView(bucket, key, versionID, metadata)
 	if viewErr != nil {
 		return nil, viewErr
 	}
@@ -565,7 +572,7 @@ func (h *Handler) uploadPartCopyChunked(ctx context.Context, s3Client s3.Client,
 
 	// Determine plaintext range. When no source range is specified, copy
 	// the full object (bounded by plaintext size from metadata).
-	view, viewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, srcMetadata)
+	view, viewErr := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, srcMetadata)
 	if viewErr != nil {
 		return nil, 0, viewErr
 	}
@@ -613,11 +620,14 @@ func (h *Handler) uploadPartCopyChunked(ctx context.Context, s3Client s3.Client,
 	// object, not a pre-ranged slice. The memory cost is bounded by the
 	// server's MaxLegacyCopySourceBytes cap; chunked streaming keeps peak
 	// heap well below the full ciphertext size.
-	srcReader, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
+	srcReader, fetchedMetadata, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get source object: %w", err)
 	}
 	defer srcReader.Close()
+	if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, fetchedMetadata); err != nil {
+		return nil, 0, err
+	}
 
 	// DecryptRange uses the manifest in metadata to seek within the encrypted
 	// stream and emits plaintext for the requested absolute range.
@@ -678,6 +688,9 @@ func (h *Handler) uploadPartCopyLegacy(ctx context.Context, s3Client s3.Client,
 		return nil, 0, err
 	}
 	defer srcReader.Close()
+	if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, srcMetadata); err != nil {
+		return nil, 0, err
+	}
 
 	decryptedReader, _, err := srcEngine.Decrypt(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, srcReader, srcMetadata)
 	if err != nil {
@@ -828,11 +841,14 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			rh := fmt.Sprintf("bytes=%d-%d", srcRange.First, srcRange.Last)
 			rangeHdr = &rh
 		}
-		r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, rangeHdr)
+		r, fetchedMetadata, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, rangeHdr)
 		if err != nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get plaintext source: %w", err)
 		}
 		defer r.Close()
+		if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, fetchedMetadata); err != nil {
+			return nil, 0, err
+		}
 		// V1.0-SEC-29: LimitReader caps at maxLegacyCap+1 so we can detect over-limit
 		// objects and return errLegacySourceTooLarge rather than exhausting heap.
 		plaintextData, err = io.ReadAll(io.LimitReader(r, maxLegacyCap+1))
@@ -852,7 +868,7 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		if err != nil {
 			return nil, 0, err
 		}
-		view, viewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, srcMeta)
+		view, viewErr := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, srcMeta)
 		if viewErr != nil {
 			return nil, 0, viewErr
 		}
@@ -888,11 +904,14 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 		}
 		// DecryptRange expects the source reader to contain the FULL encrypted
 		// object — see uploadPartCopyChunked for rationale.
-		r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
+		r, fetchedMetadata, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
 		if err != nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: get chunked source: %w", err)
 		}
 		defer r.Close()
+		if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, fetchedMetadata); err != nil {
+			return nil, 0, err
+		}
 		if plaintextSize <= 0 && srcRange == nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: cannot determine plaintext size")
 		}
@@ -932,6 +951,9 @@ func (h *Handler) uploadPartCopyReencryptMPU(
 			return nil, 0, err
 		}
 		defer r.Close()
+		if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, srcMeta); err != nil {
+			return nil, 0, err
+		}
 		decR, _, err := srcEngine.Decrypt(ctx, crypto.ObjectContext{Bucket: srcBucket, Key: srcKey}, r, srcMeta)
 		if err != nil {
 			return nil, 0, fmt.Errorf("uploadPartCopyReencryptMPU: decrypt legacy source: %w", err)
@@ -1088,7 +1110,7 @@ func (h *Handler) readMPUPlaintextRange(
 	if err != nil {
 		return nil, fmt.Errorf("head source: %w", err)
 	}
-	view, err := h.loadObjectView(bucket, key, versionID, meta)
+	view, err := h.loadReadableObjectView(bucket, key, versionID, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -1115,11 +1137,14 @@ func (h *Handler) readMPUPlaintextRange(
 		return nil, err
 	}
 	backendRange := fmt.Sprintf("bytes=%d-%d", encRange.EncStart, encRange.EncEnd)
-	r, _, err := s3Client.GetObject(ctx, bucket, key, versionID, &backendRange)
+	r, fetchedMetadata, err := s3Client.GetObject(ctx, bucket, key, versionID, &backendRange)
 	if err != nil {
 		return nil, fmt.Errorf("get ciphertext range: %w", err)
 	}
 	defer r.Close()
+	if _, err := h.loadReadableObjectView(bucket, key, versionID, fetchedMetadata); err != nil {
+		return nil, err
+	}
 	ciphertext, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -1257,11 +1282,17 @@ func (h *Handler) uploadPartCopyFromMPUSource(
 	if err != nil {
 		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: head: %w", err)
 	}
-	r, _, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
+	if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, srcMeta); err != nil {
+		return nil, 0, err
+	}
+	r, fetchedMetadata, err := s3Client.GetObject(ctx, srcBucket, srcKey, srcVersionID, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("uploadPartCopyFromMPUSource: get: %w", err)
 	}
 	defer r.Close()
+	if _, err := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, fetchedMetadata); err != nil {
+		return nil, 0, err
+	}
 
 	decR, err := h.decryptMPUObject(ctx, srcBucket, srcKey, srcMeta, r, s3Client)
 	if err != nil {

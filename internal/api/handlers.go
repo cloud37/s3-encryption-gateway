@@ -1438,14 +1438,20 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rawMetadata := metadata
-	view, viewErr := h.loadObjectView(bucket, key, versionID, rawMetadata)
+	view, viewErr := h.loadReadableObjectView(bucket, key, versionID, rawMetadata)
 	if viewErr != nil {
+		if h.writeObjectReadPolicyError(w, r, "HeadObject", bucket, key, viewErr, start) {
+			return
+		}
 		h.writeObjectError(w, r, "HEAD", decryptFailure(viewErr, r.URL.Path), start)
 		return
 	}
 	metadata = view.Expanded
-	resolved, resolveErr := h.resolvePlaintextSize(ctx, s3Client, view)
+	resolved, resolveErr := h.resolvePlaintextSize(ctx, readableParentClient{Client: s3Client, h: h, bucket: bucket, key: key}, view)
 	if resolveErr != nil {
+		if h.writeObjectReadPolicyError(w, r, "HeadObject", bucket, key, resolveErr, start) {
+			return
+		}
 		if h.writeObjectBackendError(w, r, "HeadObject", resolveErr, start) {
 			return
 		}
@@ -3453,13 +3459,17 @@ func (h *Handler) serveMPURangedGetPlanned(
 	rangeResult := *readPlan.MPURange
 
 	// ── 4. Fetch only the needed ciphertext bytes ────────────────────────────
-	objReader, _, err := s3Client.GetObject(ctx, bucket, key, versionID, readPlan.BackendRange)
+	objReader, fetchedMetadata, err := s3Client.GetObject(ctx, bucket, key, versionID, readPlan.BackendRange)
 	if err != nil {
 		s3Err := TranslateError(err, bucket, key)
 		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		return
 	}
 	defer objReader.Close()
+	if _, err := h.loadReadableObjectView(bucket, key, versionID, fetchedMetadata); err != nil {
+		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
+		return
+	}
 
 	// ── 5. Unwrap DEK ────────────────────────────────────────────────────────
 	dek, err := h.unwrapMPUDEKFromManifest(ctx, manifest, bucket, key)
@@ -4006,12 +4016,19 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		h.writeObjectError(w, r, "CopyObject", s3Err, start)
 		return
 	}
-	sourceView, sourceViewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, sourceHead)
+	sourceView, sourceViewErr := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, sourceHead)
 	if sourceViewErr != nil {
+		if h.writeObjectReadPolicyError(w, r, "CopyObject", srcBucket, srcKey, sourceViewErr, start) {
+			return
+		}
 		h.writeObjectError(w, r, "CopyObject", decryptFailure(sourceViewErr, r.URL.Path), start)
 		return
 	}
-	sourceSize, sourceSizeErr := h.resolvePlaintextSize(ctx, s3Client, sourceView)
+	readableClient := readableParentClient{Client: s3Client, h: h, bucket: srcBucket, key: srcKey}
+	sourceSize, sourceSizeErr := h.resolvePlaintextSize(ctx, readableClient, sourceView)
+	if h.writeObjectReadPolicyError(w, r, "CopyObject", srcBucket, srcKey, sourceSizeErr, start) {
+		return
+	}
 	if h.writeObjectBackendError(w, r, "CopyObject", sourceSizeErr, start) {
 		return
 	}
@@ -4024,7 +4041,10 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		return
 	}
 	if sourceView.Class.Format == crypto.FormatChunkedV1 || sourceView.Class.Format == crypto.FormatChunkedV2 {
-		if _, preflightErr := h.preflightChunkedCompleteness(ctx, s3Client, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
+		if _, preflightErr := h.preflightChunkedCompleteness(ctx, readableClient, srcBucket, srcKey, srcVersionID, sourceHead); preflightErr != nil {
+			if h.writeObjectReadPolicyError(w, r, "CopyObject", srcBucket, srcKey, preflightErr, start) {
+				return
+			}
 			if h.writeObjectBackendError(w, r, "CopyObject", preflightErr, start) {
 				return
 			}
@@ -4047,6 +4067,14 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		return
 	}
 	defer srcReader.Close()
+	fetchedView, viewErr := h.loadReadableObjectView(srcBucket, srcKey, srcVersionID, srcMetadata)
+	if viewErr != nil {
+		if h.writeObjectReadPolicyError(w, r, "CopyObject", srcBucket, srcKey, viewErr, start) {
+			return
+		}
+		h.writeObjectError(w, r, "CopyObject", decryptFailure(viewErr, r.URL.Path), start)
+		return
+	}
 
 	// Get source encryption engine
 	srcEngine, err := h.getEncryptionEngine(srcBucket)
@@ -4096,7 +4124,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 		sourceMetadata[key] = value
 	}
 	var decryptedSourceMetadata map[string]string
-	if sourceView, viewErr := h.loadObjectView(srcBucket, srcKey, srcVersionID, srcMetadata); viewErr == nil && (sourceView.Class.Format == crypto.FormatMPUV1 || sourceView.Class.Format == crypto.FormatMPUV2) {
+	if fetchedView.Class.Format == crypto.FormatMPUV1 || fetchedView.Class.Format == crypto.FormatMPUV2 {
 		decryptedReader, err = h.decryptMPUObject(ctx, srcBucket, srcKey, srcMetadata, srcReader, s3Client)
 		if err != nil {
 			h.logger.WithError(err).WithFields(logrus.Fields{
@@ -4112,7 +4140,7 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBu
 			h.writeObjectError(w, r, "CopyObject", s3Err, start)
 			return
 		}
-		decryptedSourceMetadata = crypto.PlaintextMetadataView(sourceView.Expanded, -1, "")
+		decryptedSourceMetadata = crypto.PlaintextMetadataView(fetchedView.Expanded, -1, "")
 	} else {
 		// V0.6-PERF-1 Phase C: pass srcReader directly to Decrypt — the engine
 		// already handles buffering for legacy AEAD and streams for chunked.
@@ -4324,6 +4352,11 @@ func (h *Handler) preflightChunkedTerminal(ctx context.Context, s3Client s3.Clie
 	}
 	first := ciphertextSize - crypto.ChunkedTerminalSize
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", first, ciphertextSize-1)
+	// This is exclusively the authenticated trailer preflight, not a data
+	// read. Its response metadata may omit parent-object encryption headers.
+	if readable, ok := s3Client.(readableParentClient); ok {
+		s3Client = readable.Client
+	}
 	trailer, _, err := s3Client.GetObject(ctx, bucket, key, versionID, &rangeHeader)
 	if err != nil {
 		return crypto.ChunkedObjectInfo{}, backendObjectError(bucket, key, err)

@@ -19,11 +19,10 @@ type PolicyConfig struct {
 	Buckets    []string          `yaml:"buckets"` // Glob patterns for bucket names
 	Encryption *EncryptionConfig `yaml:"encryption,omitempty"`
 	RateLimit  *RateLimitConfig  `yaml:"rate_limit,omitempty"`
-	// RequireEncryption, when true, mandates that every object stored in
-	// matching buckets must be encrypted. It enables hard-refusal semantics
-	// at policy-relevant points (e.g. UploadPartCopy from a plaintext source
-	// into a bucket with this flag set). Default is false, preserving
-	// backward compatibility; set explicitly per-bucket to enforce.
+	// RequireEncryption rejects plaintext GET, HEAD, CopyObject and UploadPartCopy
+	// sources in matching buckets. Native backend SSE is not gateway encryption.
+	// Default is false. The existing destination-only UploadPartCopy mismatch
+	// applies to plaintext sources when the destination MPU is not encrypted.
 	RequireEncryption bool `yaml:"require_encryption,omitempty"`
 	// DisableEncryption, when true, causes the gateway to store and serve
 	// objects in matching buckets as plain bytes without AEAD encryption.

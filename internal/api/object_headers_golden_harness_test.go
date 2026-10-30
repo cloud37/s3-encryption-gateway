@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -460,7 +461,7 @@ func generateGoldenMPU(format string, f goldenBackendFixture, plain []byte, meta
 
 func mustMarshalManifest(m *crypto.MultipartManifest) []byte { b, _ := m.Marshal(); return b }
 
-func runAuthenticObjectFormatGolden(t *testing.T, fixture goldenBackendFixture) error {
+func runAuthenticObjectFormatGolden(t *testing.T, fixture goldenBackendFixture, strict ...bool) error {
 	t.Helper()
 	body, err := base64.StdEncoding.DecodeString(fixture.Body)
 	if err != nil {
@@ -518,6 +519,17 @@ func runAuthenticObjectFormatGolden(t *testing.T, fixture goldenBackendFixture) 
 		}
 	}
 	h := NewHandlerWithFeatures(client, engine, logrus.New(), getTestMetrics(), km, nil, nil, &config.Config{}, nil)
+	if len(strict) > 0 && strict[0] {
+		h.policyManager = gh380Policy(t, "id: strict\nbuckets: [golden-bucket]\nrequire_encryption: true\n")
+		h.encryptionEngineLoader = func(string) (crypto.EncryptionEngine, error) { return engine, nil }
+		before := cloneStringMap(fixture.Metadata)
+		if _, viewErr := h.loadReadableObjectView(goldenBucket, goldenObject, nil, fixture.Metadata); viewErr != nil {
+			return fmt.Errorf("strict classification: %w", viewErr)
+		}
+		if !maps.Equal(before, fixture.Metadata) {
+			return fmt.Errorf("classification mutated fixture metadata")
+		}
+	}
 	router := mux.NewRouter()
 	h.RegisterRoutes(router)
 	for _, tc := range []struct {
