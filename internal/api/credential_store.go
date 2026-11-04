@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 )
@@ -24,10 +25,12 @@ type bucketMatcher struct {
 
 // Credential is the authenticated gateway principal.
 type Credential struct {
-	AccessKey string
-	SecretKey string
-	Label     string
-	Policy    AuthorizationPolicy
+	AccessKey    string
+	SecretKey    string
+	Label        string
+	Policy       AuthorizationPolicy
+	SessionToken string
+	ExpiresAt    *time.Time
 }
 
 // AllowsBucket reports whether the bucket is in scope. A nil scope is unrestricted;
@@ -95,6 +98,17 @@ func compileCredentialSnapshot(creds []config.GatewayCredential) (*credentialSna
 	if err := config.ValidateGatewayCredentials(creds, true); err != nil {
 		return nil, err
 	}
+	creds = (&config.Config{Auth: config.AuthConfig{Credentials: creds}}).ResolvedCredentials()
+	defer func() {
+		// Release transient references, not immutable string storage.
+		for i := range creds {
+			creds[i].SecretKey = ""
+			creds[i].SessionToken = ""
+		}
+	}()
+	if err := config.ValidateGatewayCredentials(creds, true); err != nil {
+		return nil, err
+	}
 	m := make(map[string]Credential, len(creds))
 	for _, source := range creds {
 		if source.AccessKey == "" || source.SecretKey == "" {
@@ -110,7 +124,7 @@ func compileCredentialSnapshot(creds []config.GatewayCredential) (*credentialSna
 		if source.Permissions != nil {
 			permission = *source.Permissions
 		}
-		m[source.AccessKey] = Credential{AccessKey: source.AccessKey, SecretKey: source.SecretKey, Label: source.Label, Policy: AuthorizationPolicy{Buckets: buckets, Permissions: permission, BucketPermissions: grants, matchers: matchers}}
+		m[source.AccessKey] = Credential{AccessKey: source.AccessKey, SecretKey: source.SecretKey, SessionToken: source.SessionToken, ExpiresAt: cloneCredentialDeadline(source.ExpiresAt), Label: source.Label, Policy: AuthorizationPolicy{Buckets: buckets, Permissions: permission, BucketPermissions: grants, matchers: matchers}}
 	}
 	return &credentialSnapshot{credentials: m}, nil
 }
@@ -135,9 +149,18 @@ func (s *StaticCredentialStore) Lookup(accessKey string) (Credential, error) {
 		return Credential{}, ErrUnknownAccessKey
 	}
 	credential.Policy.Buckets = cloneStringSlice(credential.Policy.Buckets)
+	credential.ExpiresAt = cloneCredentialDeadline(credential.ExpiresAt)
 	credential.Policy.BucketPermissions = cloneBucketPermissionSlice(credential.Policy.BucketPermissions)
 	credential.Policy.matchers = append([]bucketMatcher(nil), credential.Policy.matchers...)
 	return credential, nil
+}
+
+func cloneCredentialDeadline(deadline *time.Time) *time.Time {
+	if deadline == nil {
+		return nil
+	}
+	copy := *deadline
+	return &copy
 }
 
 func compileBucketMatchers(patterns []string) []bucketMatcher {

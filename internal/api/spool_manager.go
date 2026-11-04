@@ -205,6 +205,11 @@ func spoolLimitForRequest(r *http.Request, global, part int64) int64 {
 			return global
 		}
 	}
+	if isPostObjectRequest(r) {
+		// Only the exact, bounded bucket-level form request receives the global
+		// payload budget. Every other POST stays on the control-route cap.
+		return global
+	}
 	return minSpoolLimit(global, 1<<20)
 }
 

@@ -92,9 +92,22 @@ Handles both direct values and valueFrom (secrets/configmaps)
 {{- end }}
 
 {{/*
+Render optional session-token values while preserving an explicitly supplied
+empty string. The generic envVar helper intentionally retains its historical
+truthy-value behavior for unrelated configuration.
+*/}}
+{{- define "s3-encryption-gateway.optionalTokenEnvVar" -}}
+{{- if and .valueFrom (or .valueFrom.secretKeyRef .valueFrom.configMapKeyRef) -}}
+{{- include "s3-encryption-gateway.envVar" . -}}
+{{- else if .hasValue -}}
+- name: {{ .name }}
+  value: {{ .value | quote }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Get value with default
 */}}
 {{- define "s3-encryption-gateway.getValue" -}}
 {{- if . }}{{ . }}{{ else }}{{ default "" }}{{ end }}
 {{- end }}
-

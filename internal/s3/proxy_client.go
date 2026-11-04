@@ -23,6 +23,22 @@ type ProxyClient struct {
 	config     *config.BackendConfig
 }
 
+func (p *ProxyClient) PutObjectWithOptions(ctx context.Context, bucket, key string, body io.Reader, metadata map[string]string, length *int64, tags string, lock *ObjectLockInput, acl, grantFullControl, grantRead, grantReadACP, grantWriteACP string, options ObjectPutOptions) (PutObjectResult, error) {
+	return PutObjectResult{}, fmt.Errorf("proxy advanced object put: %w", ErrNotImplemented)
+}
+
+func (p *ProxyClient) GetObjectWithOptions(ctx context.Context, bucket, key string, versionID, rangeHeader *string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	return nil, nil, fmt.Errorf("proxy advanced object get: %w", ErrNotImplemented)
+}
+
+func (p *ProxyClient) GetObjectIfMatch(ctx context.Context, bucket, key string, versionID, rangeHeader *string, ifMatch string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	return nil, nil, fmt.Errorf("proxy conditional object get: %w", ErrNotImplemented)
+}
+
+func (p *ProxyClient) HeadObjectWithOptions(ctx context.Context, bucket, key string, versionID *string, options ObjectReadOptions) (map[string]string, error) {
+	return nil, fmt.Errorf("proxy advanced object head: %w", ErrNotImplemented)
+}
+
 // NewProxyClient creates a new proxy client that forwards requests to the backend.
 func NewProxyClient(cfg *config.BackendConfig) (*ProxyClient, error) {
 	backendURL, err := ResolveEndpoint(cfg.Endpoint, cfg.UseSSL)

@@ -32,9 +32,9 @@ func newChunkedFallbackEngine(t *testing.T) (*engine, *ProviderProfile) {
 
 	profile := &ProviderProfile{
 		Name:                "test-chunked-fallback",
-		UserMetadataLimit:   50,
+		UserMetadataLimit:   2048,
 		SystemMetadataLimit: 0,
-		TotalHeaderLimit:    80, // small enough to force fallback for any encryption metadata
+		TotalHeaderLimit:    8192,
 		SupportsLongKeys:    true,
 		CompactionStrategy:  "base64url",
 	}
@@ -64,7 +64,7 @@ func largeMetadataMap() map[string]string {
 	return map[string]string{
 		"Content-Type":       "application/octet-stream",
 		"x-amz-meta-project": "s3-encryption-gateway",
-		"x-amz-meta-very-long-key-that-forces-overflow": strings.Repeat("v", 80),
+		"x-amz-meta-very-long-key-that-forces-overflow": strings.Repeat("v", 7900),
 	}
 }
 
@@ -83,6 +83,10 @@ func TestSEC27_ChunkedFallbackV2_Format(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 
+	encMeta, err = ExpandMetadataForAPI(encMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if encMeta[MetaFallbackMode] != "true" {
 		t.Errorf("MetaFallbackMode = %q, want \"true\"", encMeta[MetaFallbackMode])
 	}
@@ -112,8 +116,12 @@ func TestSEC27_ChunkedFallbackV2_RoundTrip(t *testing.T) {
 				t.Fatalf("ReadAll encrypted: %v", err)
 			}
 
-			if encMeta[MetaFallbackVersion] != "2" {
-				t.Fatalf("unexpected fallback version %q, want \"2\"", encMeta[MetaFallbackVersion])
+			expanded, err := ExpandMetadataForAPI(encMeta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if expanded[MetaFallbackVersion] != "2" {
+				t.Fatalf("unexpected fallback version %q, want \"2\"", expanded[MetaFallbackVersion])
 			}
 
 			decReader, decMeta, err := e.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encData), encMeta)
@@ -173,11 +181,11 @@ func TestSEC27_BufferedFallbackUsesBoundFormat(t *testing.T) {
 	// Use a non-chunked engine to produce the current bound fallback format.
 	profile := &ProviderProfile{
 		Name:                "test-legacy-fallback",
-		UserMetadataLimit:   50,
+		UserMetadataLimit:   2048,
 		SystemMetadataLimit: 0,
 		// The mandatory bound fallback headers must fit; user metadata still
 		// exceeds the compacted limit and forces the fallback body format.
-		TotalHeaderLimit:   500,
+		TotalHeaderLimit:   8192,
 		SupportsLongKeys:   true,
 		CompactionStrategy: "base64url",
 	}

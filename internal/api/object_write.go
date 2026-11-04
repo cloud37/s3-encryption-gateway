@@ -36,6 +36,7 @@ type objectResponseSource struct {
 	Meta, Decrypted map[string]string
 	PlainSize       int64
 	BackendETag     string
+	SSECustomer     bool
 	Method          string
 	VersionID       string
 	Overrides       url.Values

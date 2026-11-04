@@ -1,6 +1,9 @@
 package crypto
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -37,7 +40,6 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 		"Content-Type":        "application/json",
 		"x-amz-meta-user-key": "user-value",
 		MetaEncrypted:         "true",                 // clear encryption marker
-		"x-amz-meta-e":        "true",                 // compact encrypted marker
 		"x-amz-meta-a":        "AES256-GCM",           // algorithm
 		"x-amz-meta-s":        "dGVzdC1zYWx0",         // salt
 		"x-amz-meta-i":        "dGVzdC1pdg==",         // iv
@@ -50,6 +52,64 @@ func TestMetadataCompactor_CompactMetadata(t *testing.T) {
 
 	if !reflect.DeepEqual(compacted, expectedCompacted) {
 		t.Errorf("CompactMetadata() = %v, want %v", compacted, expectedCompacted)
+	}
+}
+
+func TestMetadataCompactor_DefaultReaderUnderstandsCompactWriter(t *testing.T) {
+	writer, err := NewEngineWithOpts([]byte("test-encryption-password-123456"), WithProvider("aws"), WithChunking(true), WithPBKDF2Iterations(MinPBKDF2Iterations))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.(io.Closer).Close() })
+	reader, err := NewEngineWithOpts([]byte("test-encryption-password-123456"), WithChunking(true), WithPBKDF2Iterations(MinPBKDF2Iterations))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.(io.Closer).Close() })
+	object := ObjectContext{Bucket: "bucket", Key: "key"}
+	body, metadata, err := writer.Encrypt(context.Background(), object, bytes.NewReader([]byte("payload")), map[string]string{"Content-Length": "7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, _, err := reader.Decrypt(context.Background(), object, body, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := io.ReadAll(decrypted)
+	if err != nil || string(plain) != "payload" {
+		t.Fatalf("decrypt compact writer: %q, %v", plain, err)
+	}
+
+	key := bytes.Repeat([]byte{0x42}, 32)
+	SetMetadataKey(writer, key)
+	SetMetadataKey(reader, key)
+	t.Cleanup(func() {
+		clear(key)
+		clear(writer.(*engine).metadataKey)
+		clear(reader.(*engine).metadataKey)
+	})
+	body, metadata, err = writer.Encrypt(context.Background(), object, bytes.NewReader([]byte("payload")), map[string]string{"Content-Length": "7", "Content-Type": "application/test", "x-amz-meta-user": "value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata[MetaEncryptedMetadataCompact] == "" || metadata[MetaEncryptedMetadata] != "" {
+		t.Fatal("compact writer did not retain exactly the compact blob")
+	}
+	before := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		before[k] = v
+	}
+	view, err := reader.(*engine).APIExpandedMetadata(metadata)
+	if err != nil || view[MetaContentType] != "application/test" || view[MetaEncryptedMetadata] != "" || !reflect.DeepEqual(metadata, before) {
+		t.Fatalf("protected API expansion or input ownership: %v", err)
+	}
+	decrypted, projected, err := reader.Decrypt(context.Background(), object, body, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err = io.ReadAll(decrypted)
+	if err != nil || string(plain) != "payload" || projected["Content-Type"] != "application/test" || projected["x-amz-meta-user"] != "value" {
+		t.Fatalf("protected cross-profile decrypt failed: %v", err)
 	}
 }
 
@@ -136,6 +196,42 @@ func TestMetadataCompactor_RoundTrip(t *testing.T) {
 	// Should be identical to original
 	if !reflect.DeepEqual(expanded, originalMetadata) {
 		t.Errorf("Round-trip failed: got %v, want %v", expanded, originalMetadata)
+	}
+}
+
+func TestMetadataCompactor_RegisteredFieldsSerializedOnce(t *testing.T) {
+	c := NewMetadataCompactor(ProviderAWS)
+	input := map[string]string{
+		MetaEncrypted: "true", MetaEncryptedMetadata: "blob",
+		MetaContentEncoding: "identity", MetaContentLanguage: "en",
+		MetaExpires: "tomorrow", "x-amz-meta-user": "value",
+	}
+	compacted, err := c.CompactMetadata(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{MetaEncryptedMetadata, MetaContentEncoding, MetaContentLanguage, MetaExpires, "x-amz-meta-e"} {
+		if _, exists := compacted[name]; exists {
+			t.Errorf("duplicate canonical/alias %q", name)
+		}
+	}
+	for _, name := range []string{MetaEncrypted, MetaEncryptedMetadataCompact, "x-amz-meta-cenc", "x-amz-meta-clang", "x-amz-meta-cexp", "x-amz-meta-user"} {
+		if compacted[name] == "" {
+			t.Errorf("missing serialized field %q", name)
+		}
+	}
+	again, err := c.CompactMetadata(compacted)
+	if err != nil || !reflect.DeepEqual(compacted, again) {
+		t.Fatalf("compaction not idempotent: %v", err)
+	}
+	expanded, err := ExpandMetadataForAPI(compacted)
+	if err != nil || !reflect.DeepEqual(expanded, input) {
+		t.Fatalf("expansion failed: %v; got %v", err, expanded)
+	}
+	legacy := map[string]string{MetaEncrypted: "true", "x-amz-meta-e": "false", MetaEncryptedMetadata: "canonical", MetaEncryptedMetadataCompact: "compact"}
+	expanded, err = ExpandMetadataForAPI(legacy)
+	if err != nil || expanded[MetaEncrypted] != "true" || expanded[MetaEncryptedMetadata] != "canonical" {
+		t.Fatalf("canonical precedence lost: %v; got %v", err, expanded)
 	}
 }
 

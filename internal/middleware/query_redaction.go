@@ -6,8 +6,11 @@ import (
 )
 
 var sensitiveQueryParams = []string{
-	"awssecretaccesskey", "x-amz-security-token", "x-amz-signature",
-	"x-amz-tagging", "signature",
+	"awssecretaccesskey", "awsaccesskeyid", "x-amz-security-token", "x-amz-signature",
+	"x-amz-credential", "x-amz-tagging", "signature", "policy",
+	"x-amz-server-side-encryption-customer-algorithm",
+	"x-amz-server-side-encryption-customer-key",
+	"x-amz-server-side-encryption-customer-key-md5",
 }
 
 // RedactSensitiveQuery returns a telemetry-safe encoding of rawQuery.

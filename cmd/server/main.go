@@ -106,6 +106,9 @@ func stringSlicesEqual(a, b []string) bool {
 
 // ApplyConfigChanges applies non-crypto configuration changes to running components
 func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Config) error {
+	if err := config.ValidateConstructionTimeReload(oldConfig, newConfig); err != nil {
+		return err
+	}
 	changes := []string{}
 	if oldConfig != nil && newConfig != nil && !sameCORSConfig(oldConfig.CORS, newConfig.CORS) {
 		return fmt.Errorf("cors settings cannot be changed during hot reload")
@@ -118,6 +121,26 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 	policySnapshot, err := config.LoadPolicySnapshot(newConfig.PolicyFiles)
 	if err != nil {
 		return fmt.Errorf("prepare policy reload: %w", err)
+	}
+	// Validate the complete replacement before changing spool capacity or gates.
+	// The store still validates its own atomic publication independently.
+	var credentials []config.GatewayCredential
+	if a.credentialStore != nil {
+		if err := config.ValidateGatewayCredentials(newConfig.Auth.Credentials, false); err != nil {
+			return fmt.Errorf("prepare credential reload: %w", err)
+		}
+		credentials = newConfig.ResolvedCredentials()
+		defer func() {
+			// Drop temporary references; immutable Go strings cannot be
+			// reliably zeroized by wiping a newly allocated byte copy.
+			for i := range credentials {
+				credentials[i].SecretKey = ""
+				credentials[i].SessionToken = ""
+			}
+		}()
+		if err := config.ValidateGatewayCredentials(credentials, true); err != nil {
+			return fmt.Errorf("prepare credential reload: %w", err)
+		}
 	}
 	if oldConfig.Server.MaxAggregateSpoolBytes != newConfig.Server.MaxAggregateSpoolBytes && a.spoolManager != nil {
 		if err := a.spoolManager.ReconfigureCapacity(newConfig.Server.MaxAggregateSpoolBytes); err != nil {
@@ -138,16 +161,6 @@ func (a *ConfigChangeApplier) ApplyConfigChanges(oldConfig, newConfig *config.Co
 		changes = append(changes, fmt.Sprintf("multipart_state.allow_untracked_plaintext_uploads: %v -> %v", oldConfig.MultipartState.AllowUntrackedPlaintextUploads, newConfig.MultipartState.AllowUntrackedPlaintextUploads))
 	}
 	if a.credentialStore != nil {
-		credentials := newConfig.ResolvedCredentials()
-		defer func() {
-			for i := range credentials {
-				b := []byte(credentials[i].SecretKey)
-				for j := range b {
-					b[j] = 0
-				}
-				credentials[i].SecretKey = ""
-			}
-		}()
 		if err := a.credentialStore.Replace(credentials); err != nil {
 			return fmt.Errorf("replace credential store: %w", err)
 		}
@@ -654,7 +667,7 @@ func main() {
 		crypto.WithSupportedAlgorithms(cfg.Encryption.SupportedAlgorithms),
 		crypto.WithChunking(chunkedMode),
 		crypto.WithChunkSize(chunkSize),
-		crypto.WithProvider("default"),
+		backendProviderOption(cfg),
 		crypto.WithPBKDF2Iterations(cfg.Encryption.KDF.PBKDF2.Iterations),
 		crypto.WithKDFAlgorithm(cfg.Encryption.KDF.Algorithm),
 		crypto.WithKDFLimits(kdfLimits),
@@ -818,13 +831,11 @@ func main() {
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to create credential store")
 	}
-	// Zero plaintext secrets from the transient slice; the store holds its own copy.
+	// Drop transient secret/token references; immutable string storage is not
+	// reliably zeroized. The store owns its snapshot references.
 	for i := range resolvedCreds {
-		b := []byte(resolvedCreds[i].SecretKey)
-		for j := range b {
-			b[j] = 0
-		}
 		resolvedCreds[i].SecretKey = ""
+		resolvedCreds[i].SessionToken = ""
 	}
 	logger.WithField("count", len(cfg.Auth.Credentials)).Info("Gateway credential store initialized")
 
@@ -929,7 +940,8 @@ func main() {
 	}
 
 	// Setup router
-	router := mux.NewRouter()
+	// S3 object keys are literal; redirecting cleaned dot segments changes them.
+	router := mux.NewRouter().SkipClean(true)
 
 	// Register health check endpoint
 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

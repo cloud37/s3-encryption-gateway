@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +34,7 @@ func TestRouteClassificationParity(t *testing.T) {
 		"PutBucketInventory": {"inventory&id=abc", "inventory"}, "DeleteBucketInventory": {"inventory&id=abc", "inventory"},
 		"GetBucketAnalytics": {"analytics&id=abc", "analytics"}, "PutBucketIntelligentTiering": {"intelligent-tiering&id=abc", "intelligent-tiering"},
 		"DeleteObjects": {"delete"},
+		"PostObject":    {""},
 	}
 	queries["CORSPreflight"] = []string{""}
 	methods := map[string]string{
@@ -63,6 +66,7 @@ func TestRouteClassificationParity(t *testing.T) {
 		"DeleteBucketInventory": http.MethodDelete, "GetBucketAnalytics": http.MethodGet,
 		"PutBucketIntelligentTiering": http.MethodPut,
 		"CORSPreflight":               http.MethodOptions,
+		"PostObject":                  http.MethodPost,
 	}
 	router := mux.NewRouter()
 	handler := &Handler{}
@@ -98,6 +102,13 @@ func TestRouteClassificationParity(t *testing.T) {
 			if query != "" {
 				target += "?" + query
 			}
+			if route == "PostObject" && query != "" {
+				continue
+			}
+			if route == "PostObject" {
+				target = "/bucket"
+				cases = append(cases, candidate{method: method, target: "/bucket/", expected: route})
+			}
 			cases = append(cases, candidate{method: method, target: target, expected: route})
 		}
 	}
@@ -107,8 +118,27 @@ func TestRouteClassificationParity(t *testing.T) {
 		{http.MethodGet, "/bucket/key?response-content-type=text%2Fplain&versionId=v1", "GetObject"},
 		{http.MethodGet, "/bucket/key/?tagging", "GetObjectTagging"},
 		{http.MethodPost, "/bucket/key?select-type=2", "SelectObjectContent"},
+		{http.MethodPost, "/bucket?delete", "DeleteObjects"},
 	} {
 		cases = append(cases, route)
+	}
+	for _, target := range []string{"/bucket?x=1", "/bucket?uploads", "/bucket?uploadId=u", "/bucket?delete", "/bucket?x=%zz", "/bucket?x=1&", "/bucket/key"} {
+		r := httptest.NewRequest(http.MethodPost, target, nil)
+		if target != "/bucket" {
+			r.Header.Set("Content-Type", "multipart/form-data; boundary=route-parity")
+		}
+		var match mux.RouteMatch
+		if router.Match(r, &match) && match.Route != nil && match.Route.GetName() == "PostObject" {
+			t.Errorf("POST %s unexpectedly matched PostObject", target)
+		}
+	}
+	for _, contentType := range []string{"application/octet-stream", "multipart/form-data", "multipart/form-data; boundary=", "multipart/form-data; boundary=bad\nboundary"} {
+		r := httptest.NewRequest(http.MethodPost, "/bucket", nil)
+		r.Header.Set("Content-Type", contentType)
+		var match mux.RouteMatch
+		if router.Match(r, &match) && match.Route != nil && match.Route.GetName() == "PostObject" {
+			t.Errorf("POST with Content-Type %q unexpectedly matched PostObject", contentType)
+		}
 	}
 	for _, target := range []string{
 		"/bucket/key?versionId=v1", "/bucket/key?versionId=v2", "/bucket/key?response-content-type=text%2Fplain",
@@ -138,6 +168,9 @@ func TestRouteClassificationParity(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(fmt.Sprintf("%02d_%s_%s", i, tc.method, strings.ReplaceAll(tc.target, "/", "_")), func(t *testing.T) {
 			r := httptest.NewRequest(tc.method, tc.target, nil)
+			if tc.expected == "PostObject" {
+				r.Header.Set("Content-Type", "multipart/form-data; boundary=route-parity")
+			}
 			if tc.expected == "CopyObject" || tc.expected == "UploadPartCopy" {
 				r.Header.Set("x-amz-copy-source", "/source/object")
 			}
@@ -163,8 +196,18 @@ func TestRouteClassificationParity(t *testing.T) {
 			if got := s3OperationName(r); got != tc.expected {
 				t.Fatalf("instrumentation=%q want=%q", got, tc.expected)
 			}
-			got, _ := classifyAuthorizationOperation(r)
-			wantPermission, ok := independentRoutePermissions()[routerWant]
+			classifyRequest := r
+			if tc.expected == "PostObject" {
+				upload := &postUpload{bucket: "bucket", key: "key", fields: map[string]string{"key": "key", "x-amz-credential": "post-principal/20300101/us-east-1/s3/aws4_request"}, file: &multipart.Part{}, fileRead: strings.NewReader(""), fileCounter: &postFileReader{}, authenticatedAccessKey: "post-principal"}
+				ctx := context.WithValue(classifyRequest.Context(), credentialKey, Credential{AccessKey: "post-principal"})
+				ctx = context.WithValue(ctx, postUploadContextKey{}, upload)
+				classifyRequest = classifyRequest.WithContext(ctx)
+			} else {
+				classifyRequest = mux.SetURLVars(classifyRequest, match.Vars)
+			}
+			got, _ := classifyAuthorizationOperation(classifyRequest)
+			permissionRoute := routerWant
+			wantPermission, ok := independentRoutePermissions()[permissionRoute]
 			if !ok || got != wantPermission {
 				t.Fatalf("authorization=%v want=%v for %s", got, wantPermission, tc.expected)
 			}
@@ -201,6 +244,12 @@ func TestRouteClassificationParity_CopyNamingContract(t *testing.T) {
 }
 
 func TestRouteClassificationParity_RouteTablePermissionOracle(t *testing.T) {
+	if got, ok := operationPermission["PostObject"]; !ok || got != authorizationWrite {
+		t.Fatalf("PostObject permission=%v present=%t want independent write permission", got, ok)
+	}
+	if got, ok := independentRoutePermissions()["PostObject"]; !ok || got != authorizationWrite {
+		t.Fatalf("independent PostObject permission=%v present=%t want write", got, ok)
+	}
 	for route, want := range independentRoutePermissions() {
 		if got, ok := operationPermission[route]; !ok || got != want {
 			t.Errorf("production operationPermission[%q]=%v present=%t want independent oracle %v", route, got, ok, want)
@@ -217,7 +266,7 @@ func independentRoutePermissions() map[string]authorizationOperation {
 	return map[string]authorizationOperation{
 		"ListBuckets": authorizationListBuckets, "CreateBucket": authorizationCreateBucket,
 		"DeleteBucket": authorizationDeleteBucket, "HeadBucket": authorizationRead, "ListObjects": authorizationRead,
-		"GetObject": authorizationRead, "HeadObject": authorizationRead, "PutObject": authorizationWrite,
+		"GetObject": authorizationRead, "HeadObject": authorizationRead, "PutObject": authorizationWrite, "PostObject": authorizationWrite,
 		"DeleteObject": authorizationWrite, "DeleteObjects": authorizationWrite,
 		"CreateMultipartUpload": authorizationWrite, "CompleteMultipartUpload": authorizationWrite,
 		"AbortMultipartUpload": authorizationWrite, "ListParts": authorizationRead, "UploadPart": authorizationWrite,

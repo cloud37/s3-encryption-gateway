@@ -32,6 +32,7 @@ import (
 	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/sizecache"
+	"github.com/cloud37/s3-encryption-gateway/internal/util"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -44,6 +45,7 @@ type Handler struct {
 	// getS3Client. It is a test seam for observing that authorization
 	// precedes backend client acquisition.
 	clientAcquirer                 func(*http.Request) (s3.Client, error)
+	clientAcquisitionObserver      func()
 	proxyTransport                 http.RoundTripper
 	encryptionEngine               crypto.EncryptionEngine
 	logger                         *logrus.Logger
@@ -52,6 +54,7 @@ type Handler struct {
 	cache                          cache.Cache
 	auditLogger                    audit.Logger
 	config                         *config.Config
+	proxiedBucket                  string
 	allowBucketCreation            atomic.Bool
 	allowUntrackedPlaintextUploads atomic.Bool
 	policyManager                  *config.PolicyManager
@@ -68,6 +71,11 @@ type Handler struct {
 	destinationEncryptionReader      func(io.Reader, int64) (io.Reader, int64, error)
 	spoolManager                     SpoolManager
 	spoolLimits                      *SpoolLimitSource
+	trustedIPExtractor               *util.IPExtractor
+	trustedIPExtractorInvalid        bool
+	backendEndpointScheme            string
+	backendEndpointError             error
+	backendTLS                       config.BackendTLSConfig
 }
 
 // NewHandler creates a new API handler (backward compatibility).
@@ -87,6 +95,10 @@ func NewHandlerWithFeatures(
 	config *config.Config,
 	policyManager *config.PolicyManager,
 ) *Handler {
+	proxiedBucket := ""
+	if config != nil {
+		proxiedBucket = config.ProxiedBucket
+	}
 	h := &Handler{
 		s3Client:         s3Client,
 		encryptionEngine: encryptionEngine,
@@ -96,7 +108,13 @@ func NewHandlerWithFeatures(
 		cache:            cache,
 		auditLogger:      auditLogger,
 		config:           config,
+		proxiedBucket:    proxiedBucket,
 		policyManager:    policyManager,
+	}
+	h.trustedIPExtractor, h.trustedIPExtractorInvalid = newTrustedIPExtractor(config)
+	if config != nil {
+		h.backendTLS = config.Backend.TLS
+		h.backendEndpointScheme, h.backendEndpointError = validateBackendSSETransport(config.Backend.Endpoint, config.Backend.UseSSL, h.backendTLS)
 	}
 	if config != nil {
 		h.allowBucketCreation.Store(config.AllowBucketCreation)
@@ -183,6 +201,13 @@ func (h *Handler) WithSizeCache(c sizecache.SizeCache) {
 // by the conformance harness to exercise the production cache path.
 func (h *Handler) WithCache(c cache.Cache) *Handler {
 	h.cache = c
+	return h
+}
+
+// WithClientAcquisitionObserver observes backend resolution attempts, without
+// exposing request data. It is intended for in-process conformance fixtures.
+func (h *Handler) WithClientAcquisitionObserver(observer func()) *Handler {
+	h.clientAcquisitionObserver = observer
 	return h
 }
 
@@ -459,6 +484,14 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 
 	// Batch operations
 	s3Router.HandleFunc("/{bucket}", h.handleDeleteObjects).Methods("POST").Queries("delete", "").Name("DeleteObjects")
+	// A browser form POST is deliberately predicate-routed: query selectors and
+	// malformed/non-form bucket POSTs must not fall through to this handler.
+	s3Router.HandleFunc("/{bucket}", h.handlePostObject).Methods(http.MethodPost).MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
+		return isPostObjectRequest(r)
+	}).Name("PostObject")
+	s3Router.HandleFunc("/{bucket}/", h.handlePostObject).Methods(http.MethodPost).MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
+		return isPostObjectRequest(r)
+	}).Name("PostObject")
 }
 
 // writeS3ClientError writes an appropriate S3 error response for client
@@ -499,6 +532,10 @@ func (h *Handler) writeS3ClientError(w http.ResponseWriter, r *http.Request, err
 // TestWriteS3ClientError_NoLeakRegression in auth_error_test.go.
 func classifyAuthError(err error, resource string) *S3Error {
 	switch {
+	case errors.Is(err, ErrInvalidToken):
+		return &S3Error{Code: "InvalidToken", Message: "The provided token is invalid.", Resource: resource, HTTPStatus: http.StatusForbidden}
+	case errors.Is(err, ErrExpiredToken):
+		return &S3Error{Code: "ExpiredToken", Message: "The provided token has expired.", Resource: resource, HTTPStatus: http.StatusForbidden}
 	case errors.Is(err, ErrSpoolRequestLimit):
 		return &S3Error{Code: "EntityTooLarge", Message: "The request exceeds the permitted payload size.", Resource: resource, HTTPStatus: http.StatusRequestEntityTooLarge}
 	case errors.Is(err, ErrSpoolCapacity):
@@ -545,6 +582,9 @@ func classifyAuthError(err error, resource string) *S3Error {
 // Authentication has already been validated by AuthMiddleware before this
 // point; this function only needs to return the pre-configured client.
 func (h *Handler) getS3Client(r *http.Request) (s3.Client, error) {
+	if h.clientAcquisitionObserver != nil {
+		h.clientAcquisitionObserver()
+	}
 	if h.clientAcquirer != nil {
 		return h.clientAcquirer(r)
 	}
@@ -610,12 +650,15 @@ func (h *Handler) getEncryptionEngine(bucket string) (crypto.EncryptionEngine, e
 		chunkSize = crypto.DefaultChunkSize
 	}
 
-	engine, err := crypto.NewEngineWithChunking(
+	engine, err := crypto.NewEngineWithChunkingAndMetadataProfile(
 		[]byte(password),
 		effectiveConfig.Encryption.PreferredAlgorithm,
 		effectiveConfig.Encryption.SupportedAlgorithms,
 		chunkedMode,
 		chunkSize,
+		effectiveConfig.Backend.Provider,
+		effectiveConfig.Backend.MetadataProfile,
+		crypto.DefaultPBKDF2Iterations,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create policy engine: %w", err)
@@ -732,8 +775,25 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		return
 	}
+	if isCopyOrMPURequest(r) {
+		if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+			h.writeSSEOptionError(w, r, "GetObject", err, start)
+			return
+		}
+	}
 
 	ctx := r.Context()
+	baseClient, clientErr := h.getS3Client(r)
+	if clientErr != nil {
+		h.writeS3ClientError(w, r, clientErr, "GET", start)
+		return
+	}
+	s3Client, closeCustomer, readClientErr := h.objectReadClient(r, baseClient, bucket, key)
+	if readClientErr != nil {
+		h.writeSSEOptionError(w, r, "GetObject", readClientErr, start)
+		return
+	}
+	defer closeCustomer()
 
 	// Extract version ID if provided
 	var versionID *string
@@ -762,50 +822,62 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check cache first if enabled and no range request
-	if h.cache != nil && objectCacheRequestEligible(rangeHeader, versionID) {
+	if h.cache != nil && !requestHasSSECustomerInput(r) && objectCacheRequestEligible(rangeHeader, versionID) {
+		// Acquire and authenticate the current backend object before consulting
+		// plaintext cache state. SSE-C denial must never probe/replay cached data.
+		metadata, headErr := s3Client.HeadObject(ctx, bucket, key, nil)
+		if headErr != nil {
+			_ = h.cache.Delete(ctx, bucket, key)
+			h.writeObjectError(w, r, "GetObject", translateSSECustomerReadError(headErr, bucket, key, http.MethodHead, backendReadStatus(headErr)), start)
+			if h.logger != nil {
+				h.logger.WithError(headErr).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Error("Failed to preflight cached object read")
+			}
+			return
+		}
 		if cachedEntry, ok := h.cache.Get(ctx, bucket, key); ok {
 			// Cached plaintext is only reusable after the current backend object
 			// has passed v2 completeness preflight. Do not let stale cache state
 			// bypass the integrity boundary.
-			s3Client, clientErr := h.getS3Client(r)
-			if clientErr != nil {
-				h.writeChunkedCompletenessError(w, r, bucket, clientErr, start)
-				return
-			}
-			cachePlan, planErr := h.planCachedObjectRead(ctx, s3Client, bucket, key)
+			cachePlan, planErr := h.planCachedObjectReadMetadata(ctx, s3Client, bucket, key, metadata)
 			if planErr != nil {
+				if h.writeObjectBackendError(w, r, "GetObject", planErr, start) {
+					return
+				}
+				if errors.Is(planErr, ErrSSEInsecureTransport) || errors.Is(planErr, ErrPostInvalidOption) {
+					h.writeSSEOptionError(w, r, "GetObject", planErr, start)
+					return
+				}
 				h.writeObjectDecryptError(w, r, "GET", bucket, key, planErr, start)
 				return
 			}
 			meta := cachePlan.View.Raw
-			// A cache entry is valid only when both its source and freshness token
-			// were stored atomically with the complete plaintext body.
-			if cachedEntry.BackendETag != "" && len(cachedEntry.Source) > 0 && meta["ETag"] != "" && cachedEntry.BackendETag == meta["ETag"] {
-				var cachedSource objectResponseSource
-				if err := json.Unmarshal(cachedEntry.Source, &cachedSource); err == nil && int64(len(cachedEntry.Data)) == cachedSource.PlainSize {
-					cachedSource.BackendETag = cachedEntry.BackendETag
-					readPlan := h.cachedObjectResponsePlan(cachePlan, cachedSource, cachedEntry.Data, r)
-					readPlan.Started = start
-					_, streamErr := h.serveObjectBody(w, r, readPlan)
-					if streamErr != nil {
-						h.logger.WithError(streamErr).Warn("Failed to write cached object response")
+			if requestHasSSECustomerInput(r) || isSSECustomerBackendObject(meta) {
+				_ = h.cache.Delete(ctx, bucket, key)
+			} else {
+				// A cache entry is valid only when both its source and freshness token
+				// were stored atomically with the complete plaintext body.
+				if cachedEntry.BackendETag != "" && len(cachedEntry.Source) > 0 && meta["ETag"] != "" && cachedEntry.BackendETag == meta["ETag"] {
+					var cachedSource objectResponseSource
+					if err := json.Unmarshal(cachedEntry.Source, &cachedSource); err == nil && int64(len(cachedEntry.Data)) == cachedSource.PlainSize {
+						cachedSource.BackendETag = cachedEntry.BackendETag
+						readPlan := h.cachedObjectResponsePlan(cachePlan, cachedSource, cachedEntry.Data, r)
+						readPlan.Started = start
+						_, streamErr := h.serveObjectBody(w, r, readPlan)
+						if streamErr != nil {
+							h.logger.WithError(streamErr).Warn("Failed to write cached object response")
+						}
+						return
 					}
-					return
 				}
+				_ = h.cache.Delete(ctx, bucket, key)
 			}
-			_ = h.cache.Delete(ctx, bucket, key)
 		}
 	}
 
 	// Fetch decisions are centralized in the object read planner.
 	// Get S3 client (may use client credentials if enabled)
 	// For Signature V4 requests, s3Client may be nil - we'll forward the request directly
-	s3Client, err := h.getS3Client(r)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to get S3 client")
-		h.writeS3ClientError(w, r, err, "GET", start)
-		return
-	}
+	err = nil
 
 	// If s3Client is nil, this indicates Signature V4 was detected and can't be handled
 	if s3Client == nil && err == nil {
@@ -825,6 +897,10 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if planErr != nil {
 		h.writeObjectDecryptError(w, r, "GET", bucket, key, planErr, start)
 		return
+	}
+	objectRead.Source.SSECustomer = requestHasSSECustomerInput(r)
+	if objectRead.Source.SSECustomer {
+		objectRead.CacheEligible = false
 	}
 	h.servePlannedGetObject(w, r, s3Client, engine, versionID, objectRead, start)
 }
@@ -849,6 +925,16 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	if r.Header.Get("x-amz-copy-source") != "" {
+		if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+			h.writeSSEOptionError(w, r, "CopyObject", err, start)
+			return
+		}
+		if hasSSECustomerHeaders(r.Header) {
+			h.writeSSEOptionError(w, r, "CopyObject", ErrPostUnsupported, start)
+			return
+		}
+	}
 
 	// Check if this is a copy operation
 	copySource := r.Header.Get("x-amz-copy-source")
@@ -882,12 +968,32 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get S3 client after authorization and copy classification.
+	// Validate options before acquiring the backend or consuming the request body.
+	putOptions, optionErr := parsePutObjectOptions(r)
+	if optionErr != nil {
+		h.writeSSEOptionError(w, r, "PutObject", optionErr, start)
+		return
+	}
+	if putOptions.SSE != nil && putOptions.SSE.Customer != nil {
+		if transportErr := h.validateSSECustomerTransport(r); transportErr != nil {
+			putOptions.SSE.Customer.Close()
+			h.writeSSEOptionError(w, r, "PutObject", transportErr, start)
+			return
+		}
+		defer putOptions.SSE.Customer.Close()
+	}
+	// Get S3 client only after authorization, copy classification, and options.
 	s3Client, err := h.getS3Client(r)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to get S3 client")
 		h.writeS3ClientError(w, r, err, "PUT", start)
 		return
+	}
+	if objectPutOptionsNonzero(putOptions) {
+		if advanced, ok := s3Client.(s3.AdvancedObjectClient); !ok || nilWriteDependency(advanced) {
+			h.writeSSEOptionError(w, r, "PutObject", ErrPostUnsupported, start)
+			return
+		}
 	}
 	// Extract tagging header
 	tagging := r.Header.Get("x-amz-tagging")
@@ -902,15 +1008,15 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		h.writeObjectError(w, r, "PutObject", s3Err, start)
 		return
 	}
-	// Parse request metadata once so all standard fields and user keys flow
-	// through the shared write model.
 	writeMeta, writeMetaErr := parseWriteMetadata(r.Header)
 	if writeMetaErr != nil {
 		writeMetaErr.Resource = r.URL.Path
 		h.writeObjectError(w, r, "PutObject", writeMetaErr, start)
 		return
 	}
-	metadata := writeMeta.engineInput(0, false)
+	if writeMeta.Standard.ContentType == "" {
+		writeMeta.Standard.ContentType = "application/octet-stream" // Match the backend default.
+	}
 	// Extract canned ACL header (x-amz-acl) and fine-grained grant headers.
 	// Forward verbatim to the backend; the gateway does not validate ACL values
 	// because it is a transparent proxy and different backends support different
@@ -921,38 +1027,21 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	grantReadACP := r.Header.Get("x-amz-grant-read-acp")
 	grantWriteACP := r.Header.Get("x-amz-grant-write-acp")
 
-	// Pass all six standard headers and normalized user metadata to the engine.
-	// Content-Length is added separately for size derivation and removed by the
-	// persistence plan before backend metadata is sent.
-	// haveContentLength distinguishes a declared length from an absent one:
-	// originalBytes is 0 for both "Content-Length: 0" and no header at all, but
-	// only the latter is an unknown-length stream.
 	var originalBytes int64
 	var haveContentLength bool
 	decodedLen := r.Header.Get("x-amz-decoded-content-length")
 	if decodedLen != "" {
-		metadata["Content-Length"] = decodedLen
 		if v, err := strconv.ParseInt(decodedLen, 10, 64); err == nil && v >= 0 {
 			originalBytes = v
 			haveContentLength = true
 		}
 	} else if contentLength := r.Header.Get("Content-Length"); contentLength != "" {
-		metadata["Content-Length"] = contentLength
 		if v, err := strconv.ParseInt(contentLength, 10, 64); err == nil && v >= 0 {
 			originalBytes = v
 			haveContentLength = true
 		}
 	}
 
-	contentType := writeMeta.Standard.ContentType
-	if contentType == "" {
-		contentType = "application/octet-stream" // Default to match MinIO's behavior
-	}
-	standard := writeMeta.Standard
-	if standard.ContentType == "" {
-		standard.ContentType = contentType
-	}
-	standard.ApplyTo(metadata)
 	var inputReader io.Reader = r.Body
 	if mode, modeErr := classifyStreamingPayloadMode(r.Header.Get("x-amz-content-sha256")); modeErr != nil {
 		writeStreamingPayloadError(w, r.URL.Path, modeErr)
@@ -966,179 +1055,7 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		defer spool.Close()
 		inputReader = spool
 		originalBytes, haveContentLength = spool.DecodedLength(), true
-		metadata["Content-Length"] = strconv.FormatInt(originalBytes, 10)
 	}
-
-	// Verify and spool streaming bodies before touching backend or encryption state.
-	s3Client, err = h.getS3Client(r)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to get S3 client")
-		h.writeS3ClientError(w, r, err, "PUT", start)
-		return
-	}
-
-	// Get encryption engine for this bucket
-	engine, err := h.getEncryptionEngine(bucket)
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to get encryption engine")
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to load encryption configuration",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
-		}
-		h.writeObjectError(w, r, "PutObject", s3Err, start)
-		return
-	}
-
-	// Encrypt the object
-	encryptStart := time.Now()
-	encryptedReader, encMetadata, err := engine.Encrypt(r.Context(), crypto.ObjectContext{Bucket: bucket, Key: key}, inputReader, metadata)
-	encryptDuration := time.Since(encryptStart)
-
-	// Get algorithm and key version for audit logging
-	algorithm := encMetadata[crypto.MetaAlgorithm]
-	if algorithm == "" {
-		algorithm = crypto.AlgorithmAES256GCM
-	}
-	keyVersion := 0
-	if h.keyManager != nil {
-		keyVersion = h.currentKeyVersion(r.Context())
-	}
-
-	if err != nil {
-		h.logger.WithError(err).WithFields(logrus.Fields{
-			"bucket": bucket,
-			"key":    key,
-		}).Error("Failed to encrypt object")
-		h.metrics.RecordEncryptionError(r.Context(), "encrypt", "encryption_failed")
-
-		// Audit logging for failed encryption
-		if h.auditLogger != nil {
-			h.auditLogger.LogEncrypt(bucket, key, algorithm, keyVersion, false, err, encryptDuration, nil)
-		}
-
-		s3Err := &S3Error{
-			Code:       "InternalError",
-			Message:    "Failed to encrypt object",
-			Resource:   r.URL.Path,
-			HTTPStatus: http.StatusInternalServerError,
-		}
-		h.writeObjectError(w, r, "PutObject", s3Err, start)
-		return
-	}
-	class, classErr := crypto.ClassifyObject(key, encMetadata)
-	if classErr != nil {
-		h.writeObjectError(w, r, "PutObject", decryptFailure(classErr, r.URL.Path), start)
-		return
-	}
-
-	// Audit logging for successful encryption
-	if h.auditLogger != nil {
-		h.auditLogger.LogEncrypt(bucket, key, algorithm, keyVersion, true, nil, encryptDuration, nil)
-	}
-	if class.Format == crypto.FormatPlaintext {
-		standard.ApplyTo(encMetadata)
-	}
-
-	// Invalidate cache for this object if cache is enabled
-	if h.cache != nil {
-		h.cache.Delete(ctx, bucket, key)
-	}
-
-	// Record encryption metrics using original bytes
-	h.metrics.RecordEncryptionOperation(r.Context(), "encrypt", encryptDuration, originalBytes)
-
-	// Debug logging for metadata before upload
-	h.logger.WithFields(logrus.Fields{
-		"bucket":        bucket,
-		"key":           key,
-		"metadata_keys": len(encMetadata),
-	}).Debug("Uploading encrypted object with metadata")
-
-	// Log all metadata keys for debugging (don't log values for security)
-	metadataKeys := make([]string, 0, len(encMetadata))
-	for k := range encMetadata {
-		metadataKeys = append(metadataKeys, k)
-		// Check for potentially problematic values
-		if v, ok := encMetadata[k]; ok && v == "0" {
-			h.logger.WithFields(logrus.Fields{
-				"metadata_key": k,
-				"value":        v,
-			}).Warn("Metadata contains zero value - may cause S3 rejection")
-		}
-	}
-	h.logger.WithFields(logrus.Fields{
-		"bucket":        bucket,
-		"key":           key,
-		"metadata_keys": metadataKeys,
-	}).Debug("Metadata keys before filtering")
-	// Filter out standard HTTP headers from metadata before sending to S3
-	// S3 metadata should only contain x-amz-meta-* headers, not standard headers like Content-Length
-	var filterKeys []string
-	if h.config != nil {
-		filterKeys = h.config.Backend.FilterMetadataKeys
-	}
-	persist := buildPersistPlan(encMetadata, class, filterKeys)
-	s3Metadata := persist.Metadata
-	persist.Native.ApplyTo(s3Metadata)
-
-	h.logger.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"key":    key,
-	}).Debug("PUT object encrypted successfully")
-	// Log filtered metadata keys and value sizes for debugging
-	filteredKeys := make([]string, 0, len(s3Metadata))
-	metadataSizes := make(map[string]int)
-	for k, v := range s3Metadata {
-		filteredKeys = append(filteredKeys, k)
-		metadataSizes[k] = len(v)
-		// S3 metadata values are limited to 2KB per AWS docs, but some providers may be stricter
-		if len(v) > 2048 {
-			h.logger.WithFields(logrus.Fields{
-				"bucket":       bucket,
-				"key":          key,
-				"metadata_key": k,
-				"value_size":   len(v),
-			}).Warn("Metadata value exceeds 2KB - may cause S3 rejection")
-		}
-	}
-	h.logger.WithFields(logrus.Fields{
-		"bucket":         bucket,
-		"key":            key,
-		"metadata_keys":  filteredKeys,
-		"metadata_sizes": metadataSizes,
-	}).Debug("Metadata keys after filtering (being sent to S3)")
-
-	// Compute stored content length for backend PutObject.
-	// For chunked encryption: plaintext + AEAD tag overhead per chunk.
-	// For passthrough / bypass (disable_encryption): stored bytes = original bytes.
-	// For legacy (non-chunked) encryption: the encrypted reader is a *bytes.Reader
-	// which reports its own length; contentLengthPtr stays nil so the S3 client
-	// derives it from the reader.
-	// Keyed on haveContentLength, not originalBytes > 0: a declared zero is a
-	// known length and must not be mistaken for an unknown-length stream.
-	var contentLengthPtr *int64
-	if haveContentLength && class.Format == crypto.FormatPlaintext {
-		// Bypass / passthrough mode: plaintext is stored as-is.
-		contentLengthPtr = &originalBytes
-	} else if (class.Format == crypto.FormatChunkedV1 || class.Format == crypto.FormatChunkedV2) && haveContentLength {
-		encLen, sizeErr := crypto.CiphertextSizeForPlaintext(encMetadata, originalBytes)
-		if sizeErr == nil {
-			contentLengthPtr = &encLen
-		}
-	}
-	if seeker, ok := encryptedReader.(io.Seeker); ok {
-		if current, seekErr := seeker.Seek(0, io.SeekCurrent); seekErr == nil {
-			if end, endErr := seeker.Seek(0, io.SeekEnd); endErr == nil {
-				if _, restoreErr := seeker.Seek(current, io.SeekStart); restoreErr == nil && end >= current {
-					length := end - current
-					contentLengthPtr = &length
-				}
-			}
-		}
-	}
-
 	// Extract lock headers
 	lockInput, s3Err := extractObjectLockInput(r)
 	if s3Err != nil {
@@ -1146,117 +1063,27 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// When the plaintext size is unknown (e.g. chunked transfer encoding from a
-	// client with no Content-Length), wrap the encrypted reader to count
-	// ciphertext bytes. After PutObject, back-calculate the plaintext size and
-	// persist it via a metadata-only copy-to-self. This ensures HeadObject returns
-	// the correct Content-Length so clients can issue correct range requests
-	// without the gateway needing to fetch and decrypt the full object on every
-	// range GET. A declared length needs none of this, zero included.
-	var ciphertextCounter *countingReader
-	if !haveContentLength && encMetadata[crypto.MetaChunkedFormat] == "true" {
-		ciphertextCounter = newCountingReader(encryptedReader)
-		encryptedReader = ciphertextCounter
-	}
-
-	// The SDK rewinds the body to retry, so a non-seekable reader makes every
-	// retryable failure fatal ("failed to rewind transport stream for retry") and
-	// leaves ADR 0010's retry policy inert on this path. Buffer into the bounded
-	// wrapper handleUploadPart uses; see docs/plans/V0.6-PERF-1-plan.md §4.4.
-	//
-	// Gated on a known length that fits. NewSeekableBody has to drain maxBuf+1
-	// bytes before it can report ErrPartTooLarge, and a partially drained source
-	// cannot go back to streaming — so without a length up front, buffering is a
-	// one-way bet on a body that may not fit. Checking the length first makes the
-	// oversize branch unreachable instead of recoverable, which is why there is no
-	// 413 here as there is in handleUploadPart: reaching it would mean our own
-	// ciphertext length estimate was wrong, i.e. a server fault, not a too-large
-	// request. Unknown-length bodies keep streaming and stay single-attempt.
-	if maxBuf := effectiveMaxPartBuffer(h.config); contentLengthPtr != nil && *contentLengthPtr <= maxBuf {
-		if _, seekable := encryptedReader.(io.Seeker); !seekable {
-			sb, sbErr := s3.NewSeekableBody(encryptedReader, maxBuf)
-			if sbErr != nil {
-				h.logger.WithError(sbErr).WithFields(logrus.Fields{
-					"bucket": bucket,
-					"key":    key,
-				}).Error("Failed to buffer encrypted object for upload")
-				s3Err := &S3Error{
-					Code:       "InternalError",
-					Message:    "Failed to prepare object for upload",
-					Resource:   r.URL.Path,
-					HTTPStatus: http.StatusInternalServerError,
-				}
-				h.writeObjectError(w, r, "PutObject", s3Err, start)
-				return
-			}
-			// sb.Len is the exact ciphertext size, so prefer it over the value derived
-			// from plaintext size and per-chunk tag overhead.
-			encryptedReader = sb
-			encLen := sb.Len
-			contentLengthPtr = &encLen
-		}
-	}
-
-	// Upload encrypted object with filtered metadata (streaming)
-	etag, err := s3Client.PutObject(ctx, bucket, key, encryptedReader, s3Metadata, contentLengthPtr, tagging, lockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)
-	if err != nil {
-		s3Err := TranslateError(err, bucket, key)
+	result, writeErr := h.putObjectData(ctx, s3Client, objectWriteInput{
+		Bucket: bucket, Key: key, Operation: "PutObject", Body: inputReader,
+		PlainLength: originalBytes, HaveLength: haveContentLength, Metadata: writeMeta,
+		Tags: tagging, ACL: cannedACL, GrantFullControl: grantFullControl,
+		GrantRead: grantRead, GrantReadACP: grantReadACP, GrantWriteACP: grantWriteACP,
+		Lock: lockInput, Options: putOptions,
+	})
+	if writeErr != nil {
+		s3Err := putObjectWriteS3Error(writeErr, r.URL.Path, bucket, key)
 		h.writeObjectError(w, r, "PutObject", s3Err, start)
-		h.logger.WithError(err).WithFields(logrus.Fields{
-			"bucket":        bucket,
-			"key":           key,
-			"metadata_keys": metadataKeys,
-		}).Error("Failed to put object")
+		if failure := new(objectWriteError); errors.As(writeErr, &failure) && failure.stage == objectWriteBackend && h.logger != nil {
+			h.logger.WithError(failure.err).WithFields(logrus.Fields{"bucket": bucket, "key": key}).Error("Failed to put object")
+		}
 		return
 	}
 
-	// After a successful streaming PUT where the plaintext size was unknown,
-	// back-calculate the plaintext size from ciphertext length and update the
-	// stored object's metadata. Chunked AES-GCM overhead: 16 bytes per chunk.
-	// ciphertext = plaintext + ceil(plaintext/chunkSize)*16
-	// This metadata-only update uses a server-side copy-to-self (zero data
-	// movement on Ceph) so subsequent HEAD/range-GET calls return the correct
-	// Content-Length, enabling the range-optimization path.
-	if ciphertextCounter != nil && ciphertextCounter.n > 0 {
-		ct := ciphertextCounter.n
-		plainSize, _, sizeErr := crypto.PlaintextSizeForCiphertext(encMetadata, ct)
-		if sizeErr != nil || plainSize <= 0 {
-			return
-		}
-		if plainSize > 0 {
-			updatedMetaInput := make(map[string]string, len(encMetadata)+1)
-			for k, v := range encMetadata {
-				updatedMetaInput[k] = v
-			}
-			updatedMetaInput[crypto.MetaOriginalSize] = fmt.Sprintf("%d", plainSize)
-			backfillPlan := buildPersistPlan(updatedMetaInput, class, filterKeys)
-			updatedMeta := backfillPlan.Metadata
-			backfillPlan.Native.ApplyTo(updatedMeta)
-			if _, _, copyErr := s3Client.CopyObject(ctx, bucket, key, bucket, key, nil, updatedMeta, nil); copyErr != nil {
-				h.logger.WithError(copyErr).WithFields(logrus.Fields{
-					"bucket":     bucket,
-					"key":        key,
-					"plain_size": plainSize,
-				}).Warn("handlePutObject: failed to update MetaOriginalSize after streaming PUT; range optimisation unavailable for this object")
-			} else {
-				h.logger.WithFields(logrus.Fields{
-					"bucket":     bucket,
-					"key":        key,
-					"plain_size": plainSize,
-				}).Debug("handlePutObject: updated MetaOriginalSize after streaming PUT")
-			}
-		}
-	}
-
-	if n, err := strconv.ParseInt(encMetadata[crypto.MetaOriginalSize], 10, 64); err == nil {
-		h.recordPlaintextSize(r.Context(), bucket, key, plaintextSize{Size: n, Exact: true, Source: "original-size"})
-	}
-
-	if etag != "" {
-		writeObjectHeaders(w, http.Header{"Etag": []string{etag}})
-	}
+	writeObjectHeaders(w, projectObjectWriteHeaders(result, nil))
 	w.WriteHeader(http.StatusOK)
-	h.metrics.RecordS3Operation(r.Context(), "PutObject", bucket, time.Since(start))
+	if h.metrics != nil {
+		h.metrics.RecordS3Operation(r.Context(), "PutObject", bucket, time.Since(start))
+	}
 }
 
 // quoteETag serializes an opaque stored ETag as an HTTP entity-tag. Older
@@ -1411,6 +1238,12 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		h.writeObjectError(w, r, "HeadObject", s3Err, start)
 		return
 	}
+	if isCopyOrMPURequest(r) {
+		if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+			h.writeSSEOptionError(w, r, "HeadObject", err, start)
+			return
+		}
+	}
 
 	ctx := r.Context()
 
@@ -1421,6 +1254,12 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		h.writeS3ClientError(w, r, err, "HEAD", start)
 		return
 	}
+	s3Client, closeCustomer, readClientErr := h.objectReadClient(r, s3Client, bucket, key)
+	if readClientErr != nil {
+		h.writeSSEOptionError(w, r, "HeadObject", readClientErr, start)
+		return
+	}
+	defer closeCustomer()
 	// Extract version ID if provided
 	var versionID *string
 	if vid := r.URL.Query().Get("versionId"); vid != "" {
@@ -1429,7 +1268,7 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 
 	metadata, err := s3Client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {
-		s3Err := TranslateError(err, bucket, key)
+		s3Err := translateSSECustomerReadError(err, bucket, key, http.MethodHead, backendReadStatus(err))
 		h.writeObjectError(w, r, "HeadObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
@@ -1437,7 +1276,7 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		}).Error("Failed to head object")
 		return
 	}
-	rawMetadata := metadata
+	rawMetadata := cloneSSEMetadata(metadata)
 	view, viewErr := h.loadReadableObjectView(bucket, key, versionID, rawMetadata)
 	if viewErr != nil {
 		if h.writeObjectReadPolicyError(w, r, "HeadObject", bucket, key, viewErr, start) {
@@ -1447,6 +1286,16 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metadata = view.Expanded
+	if view.Class.Format == crypto.FormatBufferedFallback && metadata[crypto.MetaFallbackVersion] == "2" {
+		metadata, err = restoreFallbackHead(ctx, s3Client, view)
+		if err != nil {
+			if !h.writeObjectBackendError(w, r, "HeadObject", err, start) {
+				h.writeObjectError(w, r, "HeadObject", decryptFailure(err, r.URL.Path), start)
+			}
+			return
+		}
+		view.Expanded = metadata
+	}
 	resolved, resolveErr := h.resolvePlaintextSize(ctx, readableParentClient{Client: s3Client, h: h, bucket: bucket, key: key}, view)
 	if resolveErr != nil {
 		if h.writeObjectReadPolicyError(w, r, "HeadObject", bucket, key, resolveErr, start) {
@@ -1465,7 +1314,7 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	} else if resolved.Exact {
 		metadata["Content-Length"] = strconv.FormatInt(resolved.Size, 10)
 	}
-	if originalETag := metadata[crypto.MetaOriginalETag]; originalETag != "" {
+	if originalETag := metadata[crypto.MetaOriginalETag]; originalETag != "" && !requestHasSSECustomerInput(r) && !isSSECustomerBackendObject(rawMetadata) {
 		metadata["ETag"] = quoteETag(originalETag)
 	}
 	filteredMetadata := crypto.PlaintextMetadataView(metadata, -1, "")
@@ -1486,12 +1335,15 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	if versionID != nil {
 		versionValue = *versionID
 	}
-	projected, projectErr := projectObjectHeaders(objectResponseSource{Class: view.Class, Meta: metadata, Decrypted: filteredMetadata, PlainSize: plainSize, BackendETag: rawMetadata["ETag"]}, responseShape{Method: http.MethodHead, VersionID: versionValue})
+	projected, projectErr := projectObjectHeaders(objectResponseSource{Class: view.Class, Meta: metadata, Decrypted: filteredMetadata, PlainSize: plainSize, BackendETag: rawMetadata["ETag"], SSECustomer: requestHasSSECustomerInput(r)}, responseShape{Method: http.MethodHead, VersionID: versionValue})
 	if projectErr != nil {
 		h.writeObjectError(w, r, "HEAD", decryptFailure(projectErr, r.URL.Path), start)
 		return
 	}
 	writeObjectHeaders(w, projected)
+	if requestHasSSECustomerInput(r) || isSSECustomerBackendObject(rawMetadata) {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 
 	w.WriteHeader(http.StatusOK)
 	h.metrics.RecordS3Operation(r.Context(), "HeadObject", bucket, time.Since(start))
@@ -2132,6 +1984,10 @@ func generateListObjectsXML(bucket, prefix, delimiter string, objects []s3.Objec
 func (h *Handler) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Request) {
 	// Multipart uploads are now supported with chunked encryption
 	start := time.Now()
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "CreateMultipartUpload", err, start)
+		return
+	}
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
@@ -2696,6 +2552,10 @@ func (h *Handler) beginEncryptedMPUComplete(ctx context.Context, uploadID string
 // handleUploadPart handles uploading a part in a multipart upload.
 func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "UploadPart", err, start)
+		return
+	}
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
@@ -3013,6 +2873,10 @@ func (h *Handler) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request) {
 	// Multipart uploads are now supported with chunked encryption
 	start := time.Now()
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "CompleteMultipartUpload", err, start)
+		return
+	}
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
@@ -3242,6 +3106,10 @@ func (h *Handler) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 // handleAbortMultipartUpload handles aborting a multipart upload.
 func (h *Handler) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "AbortMultipartUpload", err, start)
+		return
+	}
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
@@ -3848,6 +3716,10 @@ func sortedPartRecords(parts []mpu.PartRecord) []mpu.PartRecord {
 func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 	// Multipart uploads are now supported
 	start := time.Now()
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "ListParts", err, start)
+		return
+	}
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]
@@ -3967,6 +3839,10 @@ func (h *Handler) handleListParts(w http.ResponseWriter, r *http.Request) {
 
 // handleCopyObject handles PUT Object Copy requests.
 func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request, dstBucket, dstKey, copySource string, start time.Time, s3Client s3.Client) {
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "CopyObject", err, start)
+		return
+	}
 	if directive := strings.TrimSpace(r.Header.Get("x-amz-metadata-directive")); directive != "" && !strings.EqualFold(directive, "COPY") && !strings.EqualFold(directive, "REPLACE") {
 		s3Err := &S3Error{Code: "InvalidArgument", Message: "Unknown metadata directive.", Resource: r.URL.Path, HTTPStatus: http.StatusBadRequest}
 		h.writeObjectError(w, r, "CopyObject", s3Err, start)
@@ -4393,7 +4269,7 @@ func (h *Handler) preflightChunkedCompleteness(ctx context.Context, s3Client s3.
 	if err != nil {
 		return crypto.ChunkedObjectInfo{}, err
 	}
-	// Fallback-v2 objects carry chunk metadata inside the authenticated body
+	// Fallback-v2 objects carry chunk metadata inside the unauthenticated body
 	// prefix, while the visible chunked marker is only a format discriminator.
 	// Their full-body decrypt path authenticates the terminal and chunks.
 	if expandedMetadata[crypto.MetaFallbackVersion] == "2" || expandedMetadata[crypto.MetaFallbackMode] == "true" {

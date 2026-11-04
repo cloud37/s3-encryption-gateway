@@ -102,6 +102,10 @@ const (
 //     (default 256 MiB, opt-out safety posture).
 func (h *Handler) handleUploadPartCopy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if err := rejectSSECustomerCopyOrMPU(r); err != nil {
+		h.writeSSEOptionError(w, r, "UploadPartCopy", err, start)
+		return
+	}
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	key := vars["key"]

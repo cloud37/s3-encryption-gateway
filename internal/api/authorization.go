@@ -29,7 +29,7 @@ const (
 var operationPermission = map[string]authorizationOperation{
 	"ListBuckets": authorizationListBuckets, "CreateBucket": authorizationCreateBucket,
 	"DeleteBucket": authorizationDeleteBucket, "HeadBucket": authorizationRead, "ListObjects": authorizationRead,
-	"GetObject": authorizationRead, "HeadObject": authorizationRead, "PutObject": authorizationWrite,
+	"GetObject": authorizationRead, "HeadObject": authorizationRead, "PutObject": authorizationWrite, "PostObject": authorizationWrite,
 	"CopyObject": authorizationWrite, "DeleteObject": authorizationWrite, "DeleteObjects": authorizationWrite,
 	"CreateMultipartUpload": authorizationWrite, "UploadPart": authorizationWrite, "UploadPartCopy": authorizationWrite,
 	"CompleteMultipartUpload": authorizationWrite, "AbortMultipartUpload": authorizationWrite,
@@ -245,6 +245,9 @@ func queryValueNonEmpty(query map[string][]string, key string) bool {
 func classifyAuthorizationOperation(r *http.Request) (authorizationOperation, string) {
 	if route := mux.CurrentRoute(r); route != nil {
 		name := route.GetName()
+		if name == "PostObject" {
+			return authorizationPostObjectOperation(r)
+		}
 		if expected, ok := operationPermission[name]; ok {
 			return expected, name
 		}
@@ -259,6 +262,9 @@ func classifyAuthorizationOperation(r *http.Request) (authorizationOperation, st
 	}
 	bucket := parts[0]
 	object := len(parts) > 1 && strings.Join(parts[1:], "/") != ""
+	if r.Method == http.MethodPost && isPostObjectRequest(r) {
+		return authorizationPostObjectOperation(r)
+	}
 	if object {
 		return classifyObjectAuthorizationOperation(r, bucket)
 	}
@@ -309,6 +315,23 @@ func classifyAuthorizationOperation(r *http.Request) (authorizationOperation, st
 		return authorizationWrite, bucket
 	}
 	return authorizationUnknown, bucket
+}
+
+func authorizationPostObjectOperation(r *http.Request) (authorizationOperation, string) {
+	upload, ok := postUploadFromContext(r)
+	credential, hasPrincipal := CredentialFromContext(r)
+	if !isPostObjectRequest(r) || !ok || !hasPrincipal || upload.authenticatedAccessKey == "" || upload.authenticatedAccessKey != credential.AccessKey || upload.bucket == "" || upload.bucket != strings.Trim(r.URL.Path, "/") || upload.fields == nil || upload.file == nil || upload.fileRead == nil {
+		return authorizationUnknown, ""
+	}
+	formKey, hasKey := postFormField(upload.fields, "key", "")
+	formCredential, hasCredential := postFormField(upload.fields, "x-amz-credential", "")
+	if !hasKey || formKey != upload.key || !hasCredential || !strings.HasPrefix(formCredential, credential.AccessKey+"/") {
+		return authorizationUnknown, ""
+	}
+	if submittedBucket, present := postFormField(upload.fields, "bucket", ""); present && submittedBucket != upload.bucket {
+		return authorizationUnknown, ""
+	}
+	return authorizationWrite, upload.bucket
 }
 
 func classifyObjectAuthorizationOperation(r *http.Request, bucket string) (authorizationOperation, string) {

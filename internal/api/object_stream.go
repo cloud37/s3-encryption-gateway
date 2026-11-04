@@ -95,7 +95,7 @@ func (h *Handler) planObjectRead(ctx context.Context, client s3.Client, bucket, 
 			plan.Mode = objectReadMPUFull
 			headMetadata, headErr := client.HeadObject(ctx, bucket, key, versionID)
 			if headErr != nil {
-				return objectReadPlan{}, backendObjectError(bucket, key, headErr)
+				return objectReadPlan{}, backendHeadObjectError(bucket, key, headErr)
 			}
 			headView, viewErr := h.loadReadableObjectView(bucket, key, versionID, headMetadata)
 			if viewErr != nil {
@@ -248,12 +248,20 @@ func (h *Handler) planGetObjectRead(ctx context.Context, client s3.Client, bucke
 		plan.Source.Method = r.Method
 		plan.Source.Overrides = parseResponseOverrides(r)
 		plan.Source.VersionID = r.URL.Query().Get("versionId")
+		plan.Source.SSECustomer = requestHasSSECustomerInput(r)
+		if plan.Source.SSECustomer {
+			plan.CacheEligible = false
+		}
 		return plan, nil
 	}
 	plan, err := h.planGetObjectRange(ctx, client, bucket, key, versionID, rangeHeader, optimizedDecryptAvailable)
 	plan.Source.Method = r.Method
 	plan.Source.Overrides = parseResponseOverrides(r)
 	plan.Source.VersionID = r.URL.Query().Get("versionId")
+	plan.Source.SSECustomer = requestHasSSECustomerInput(r)
+	if plan.Source.SSECustomer {
+		plan.CacheEligible = false
+	}
 	return plan, err
 }
 
@@ -265,9 +273,10 @@ func cryptoRangeHeader(r crypto.MPURangeResult) *string {
 func (h *Handler) planGetObjectRange(ctx context.Context, client s3.Client, bucket, key string, versionID, rangeHeader *string, optimizedDecryptAvailable bool) (objectReadPlan, error) {
 	metadata, err := client.HeadObject(ctx, bucket, key, versionID)
 	if err != nil {
-		return objectReadPlan{}, backendObjectError(bucket, key, err)
+		return objectReadPlan{}, backendHeadObjectError(bucket, key, err)
 	}
 	plan, err := h.planObjectRead(ctx, client, bucket, key, versionID, metadata, rangeHeader)
+	plan.Source.SSECustomer = isSSECustomerBackendObject(metadata)
 	plan.Source.VersionID = requestVersionID(versionID)
 	if err == nil && plan.usesOptimizedRange() && !optimizedDecryptAvailable {
 		plan.Mode = objectReadBufferedRange
@@ -282,6 +291,7 @@ func (h *Handler) completeGetObjectRead(ctx context.Context, client s3.Client, b
 	}
 	completed, err := h.planObjectRead(ctx, client, bucket, key, versionID, metadata, nil)
 	completed.CacheEligible = plan.CacheEligible
+	completed.Source.SSECustomer = plan.Source.SSECustomer
 	completed.Source.Method = plan.Source.Method
 	completed.Source.VersionID = plan.Source.VersionID
 	completed.Source.Overrides = plan.Source.Overrides
@@ -299,10 +309,14 @@ func requestVersionID(versionID *string) string {
 func (h *Handler) planCachedObjectRead(ctx context.Context, client s3.Client, bucket, key string) (objectReadPlan, error) {
 	metadata, err := client.HeadObject(ctx, bucket, key, nil)
 	if err != nil {
-		return objectReadPlan{}, backendObjectError(bucket, key, err)
+		return objectReadPlan{}, backendHeadObjectError(bucket, key, err)
 	}
+	return h.planCachedObjectReadMetadata(ctx, client, bucket, key, metadata)
+}
+
+func (h *Handler) planCachedObjectReadMetadata(ctx context.Context, client s3.Client, bucket, key string, metadata map[string]string) (objectReadPlan, error) {
 	plan, err := h.planObjectRead(ctx, client, bucket, key, nil, metadata, nil)
-	plan.CacheEligible = true
+	plan.CacheEligible = !isSSECustomerBackendObject(metadata)
 	return plan, err
 }
 
@@ -312,6 +326,10 @@ func (h *Handler) prepareGetObjectRead(ctx context.Context, client s3.Client, bu
 
 func objectCacheRequestEligible(rangeHeader, versionID *string) bool {
 	return rangeHeader == nil && versionID == nil
+}
+
+func isSSECustomerBackendObject(metadata map[string]string) bool {
+	return strings.TrimSpace(metadataValue(metadata, "x-amz-server-side-encryption-customer-algorithm")) != ""
 }
 
 func (h *Handler) decryptPlannedObject(ctx context.Context, engine crypto.EncryptionEngine, optimizedDecryptor interface {
@@ -390,6 +408,7 @@ func (plan objectReadPlan) withExecutionResponse(r *http.Request, decrypted map[
 	if plan.View != nil {
 		plan.Source.Meta = plan.View.Expanded
 	}
+	plan.Source.SSECustomer = plan.Source.SSECustomer || isSSECustomerBackendObject(plan.Source.Meta) || requestHasSSECustomerInput(r)
 	plan.Source.Decrypted = decrypted
 	plan.Source.PlainSize = plainSize
 	plan.Source.BackendETag = backendETag
@@ -779,7 +798,7 @@ func (h *Handler) servePlannedGetObject(w http.ResponseWriter, r *http.Request, 
 	}
 	reader, metadata, err := s3Client.GetObject(ctx, bucket, key, versionID, objectRead.BackendRange)
 	if err != nil {
-		s3Err := TranslateError(err, bucket, key)
+		s3Err := translateSSECustomerReadError(err, bucket, key, http.MethodGet, backendReadStatus(err))
 		h.writeObjectError(w, r, "GetObject", s3Err, start)
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"bucket": bucket,
@@ -920,7 +939,8 @@ func (h *Handler) servePlannedGetObject(w http.ResponseWriter, r *http.Request, 
 
 	// Get active key version and check for rotated read
 	activeKeyVersion := 0
-	if h.keyManager != nil {
+	isCustomerEncrypted := objectRead.Source.SSECustomer || isSSECustomerBackendObject(metadata)
+	if h.keyManager != nil && !isCustomerEncrypted {
 		activeKeyVersion = h.currentKeyVersion(r.Context())
 	}
 
@@ -933,13 +953,13 @@ func (h *Handler) servePlannedGetObject(w http.ResponseWriter, r *http.Request, 
 
 	// Audit logging with metadata indicating rotated read if applicable
 	auditMetadata := make(map[string]interface{})
-	if keyVersionUsed > 0 && activeKeyVersion > 0 && keyVersionUsed != activeKeyVersion {
+	if !isCustomerEncrypted && keyVersionUsed > 0 && activeKeyVersion > 0 && keyVersionUsed != activeKeyVersion {
 		auditMetadata["rotated_read"] = true
 		auditMetadata["key_version_used"] = keyVersionUsed
 		auditMetadata["active_key_version"] = activeKeyVersion
 	}
 	decryptSuccess := &objectDecryptSuccess{Algorithm: algorithm, KeyVersion: keyVersion, Duration: decryptDuration, PlainSize: decryptedSize, AuditMetadata: auditMetadata}
-	if keyVersionUsed > 0 && activeKeyVersion > 0 && keyVersionUsed != activeKeyVersion {
+	if !isCustomerEncrypted && keyVersionUsed > 0 && activeKeyVersion > 0 && keyVersionUsed != activeKeyVersion {
 		decryptSuccess.RotatedFrom, decryptSuccess.RotatedTo = keyVersionUsed, activeKeyVersion
 	}
 
@@ -1007,7 +1027,7 @@ func (h *Handler) servePlannedGetObject(w http.ResponseWriter, r *http.Request, 
 		if fullGetSize.Exact {
 			plainSize = fullGetSize.Size
 		}
-		canCapture := h.cache != nil && objectRead.CacheEligible && h.config != nil && cacheCaptureEligibility(plainSize, h.config.Cache.MaxSize)
+		canCapture := h.config != nil && objectReadCacheCaptureAllowed(h.cache != nil, objectRead.CacheEligible, metadata, plainSize, h.config.Cache.MaxSize) && !objectRead.Source.SSECustomer
 		var capture *boundedCacheCapture
 		body := decryptedReader
 		if canCapture {

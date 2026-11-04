@@ -151,6 +151,32 @@ func TestSpoolLimitForRequest_OperationMatrix(t *testing.T) {
 	}
 }
 
+func TestGH353PostSpoolLimit_ExactPredicateGlobalBudget(t *testing.T) {
+	cases := []struct {
+		name, target, contentType string
+		want                      int64
+	}{
+		{"valid form", "/bucket", "multipart/form-data; boundary=abc", 8 << 20},
+		{"valid form trailing slash", "/bucket/", "multipart/form-data; boundary=abc", 8 << 20},
+		{"query operation", "/bucket?uploads", "multipart/form-data; boundary=abc", 1 << 20},
+		{"delete selector", "/bucket?delete", "multipart/form-data; boundary=abc", 1 << 20},
+		{"arbitrary query", "/bucket?x=1", "multipart/form-data; boundary=abc", 1 << 20},
+		{"object path", "/bucket/key", "multipart/form-data; boundary=abc", 1 << 20},
+		{"wrong media", "/bucket", "application/octet-stream", 1 << 20},
+		{"missing boundary", "/bucket", "multipart/form-data", 1 << 20},
+		{"malformed boundary", "/bucket", "multipart/form-data; boundary=bad boundary", 1 << 20},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, tc.target, nil)
+			r.Header.Set("Content-Type", tc.contentType)
+			if got := spoolLimitForRequest(r, 8<<20, 2<<20); got != tc.want {
+				t.Fatalf("limit=%d want=%d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAuthMiddleware_ControlXMLPutRejectedBeforeReadOrSpool(t *testing.T) {
 	routes := []string{"/bucket?policy", "/bucket?lifecycle", "/bucket/key?acl", "/bucket/key?tagging", "/bucket/key?retention", "/bucket/key?legal-hold"}
 	for _, target := range routes {

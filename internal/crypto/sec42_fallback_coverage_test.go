@@ -15,13 +15,14 @@ func TestSEC42_FallbackCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := e0.(*engine)
-	p := &ProviderProfile{Name: "coverage-overflow", UserMetadataLimit: 40, TotalHeaderLimit: 500, SupportsLongKeys: true, CompactionStrategy: "base64url"}
+	p := &ProviderProfile{Name: "coverage-overflow", UserMetadataLimit: 1024, TotalHeaderLimit: 8192, SupportsLongKeys: true, CompactionStrategy: "base64url"}
 	e.providerProfile, e.compactor = p, NewMetadataCompactor(p)
 	object := ObjectContext{Bucket: "coverage", Key: "source"}
-	r, metadata, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("coverage")), map[string]string{"Content-Type": "text/plain", "x-amz-meta-large": string(bytes.Repeat([]byte("z"), 100))})
+	r, metadata, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("coverage")), map[string]string{"Content-Type": "text/plain", "x-amz-meta-large": string(bytes.Repeat([]byte("z"), 2000))})
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertFallbackEnvelope(t, p, metadata, "3", "buffered-fallback-v2")
 	body, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
@@ -108,13 +109,14 @@ func TestSEC42_BoundFallbackValidationBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := e0.(*engine)
-	e.providerProfile = &ProviderProfile{Name: "bound", UserMetadataLimit: 40, TotalHeaderLimit: 1000, SupportsLongKeys: true, CompactionStrategy: "base64url"}
+	e.providerProfile = &ProviderProfile{Name: "bound", UserMetadataLimit: 1024, TotalHeaderLimit: 8192, SupportsLongKeys: true, CompactionStrategy: "base64url"}
 	e.compactor = NewMetadataCompactor(e.providerProfile)
 	object := ObjectContext{Bucket: "coverage", Key: "bound"}
-	r, metadata, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("body")), map[string]string{"x-amz-meta-large": string(bytes.Repeat([]byte("x"), 100))})
+	r, metadata, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("body")), map[string]string{"x-amz-meta-large": string(bytes.Repeat([]byte("x"), 2000))})
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertFallbackEnvelope(t, e.providerProfile, metadata, "3", "buffered-fallback-v2")
 	body, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)

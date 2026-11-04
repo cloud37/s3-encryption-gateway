@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -247,12 +248,18 @@ func NewClientFactory(cfg *config.BackendConfig, opts ...ClientFactoryOption) *C
 
 // GetClient returns a client using the base configured credentials.
 func (f *ClientFactory) GetClient() (Client, error) {
-	return f.GetClientWithCredentials(f.baseConfig.AccessKey, f.baseConfig.SecretKey)
+	return f.GetClientWithSessionCredentials(f.baseConfig.AccessKey, f.baseConfig.SecretKey, f.baseConfig.SessionToken)
 }
 
 // GetClientWithCredentials creates a new S3 client with specific credentials.
 // Both accessKey and secretKey are required and must not be empty.
 func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (Client, error) {
+	return f.GetClientWithSessionCredentials(accessKey, secretKey, "")
+}
+
+// GetClientWithSessionCredentials uses only the explicitly supplied backend
+// identity. No inbound gateway principal is consulted or forwarded.
+func (f *ClientFactory) GetClientWithSessionCredentials(accessKey, secretKey, token string) (Client, error) {
 	// Both credentials are required
 	if accessKey == "" {
 		return nil, fmt.Errorf("access key is required")
@@ -283,7 +290,7 @@ func (f *ClientFactory) GetClientWithCredentials(accessKey, secretKey string) (C
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			accessKey,
 			secretKey,
-			"",
+			token,
 		)),
 		// Disable automatic payload checksum computation. The gateway forwards
 		// unseekable encrypted streams; aws-sdk-go-v2 >= v1.32 defaults to
@@ -469,6 +476,22 @@ func ResolveEndpoint(endpoint string, useSSL bool) (*url.URL, error) {
 
 // PutObject uploads an object to S3.
 func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
+	result, err := c.PutObjectWithOptions(ctx, bucket, key, reader, metadata, contentLength, tags, lock, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP, ObjectPutOptions{})
+	return result.ETag, err
+}
+
+func (c *s3Client) PutObjectWithOptions(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string, options ObjectPutOptions) (PutObjectResult, error) {
+	if c == nil || c.client == nil || nilObjectInput(ctx) || nilObjectInput(reader) {
+		return PutObjectResult{}, fmt.Errorf("object put requires client, context and body")
+	}
+	var customerKey, customerMD5 string
+	if options.SSE != nil {
+		var err error
+		customerKey, customerMD5, err = customerWireKey(options.SSE.Customer)
+		if err != nil {
+			return PutObjectResult{}, err
+		}
+	}
 	ctx, span := c.tracer.Start(ctx, "S3.PutObject",
 		trace.WithAttributes(
 			attribute.String("s3.bucket", bucket),
@@ -508,6 +531,25 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 		Key:      aws.String(key),
 		Body:     reader,
 		Metadata: convertedMeta,
+	}
+	input.StorageClass = types.StorageClass(options.StorageClass)
+	if options.WebsiteRedirectLocation != "" {
+		input.WebsiteRedirectLocation = aws.String(options.WebsiteRedirectLocation)
+	}
+	if sse := options.SSE; sse != nil {
+		input.ServerSideEncryption = types.ServerSideEncryption(sse.Algorithm)
+		if sse.KMSKeyID != "" {
+			input.SSEKMSKeyId = aws.String(sse.KMSKeyID)
+		}
+		if sse.KMSContext != "" {
+			input.SSEKMSEncryptionContext = aws.String(sse.KMSContext)
+		}
+		input.BucketKeyEnabled = sse.BucketKeyEnabled
+		if sse.Customer != nil {
+			input.SSECustomerAlgorithm = aws.String("AES256")
+			input.SSECustomerKey = aws.String(customerKey)
+			input.SSECustomerKeyMD5 = aws.String(customerMD5)
+		}
 	}
 	if native.ContentType != "" {
 		input.ContentType = aws.String(native.ContentType)
@@ -561,7 +603,7 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 	md5Str, body, seekableLength, md5Err := computeContentMD5AndLength(reader)
 	if md5Err != nil {
 		span.SetStatus(codes.Error, md5Err.Error())
-		return "", fmt.Errorf("failed to compute Content-MD5 for %s/%s: %w", bucket, key, md5Err)
+		return PutObjectResult{}, fmt.Errorf("failed to compute Content-MD5 for %s/%s: %w", bucket, key, md5Err)
 	}
 	if seekableLength != nil {
 		input.ContentLength = seekableLength
@@ -588,15 +630,47 @@ func (c *s3Client) PutObject(ctx context.Context, bucket, key string, reader io.
 	resp, err := c.client.PutObject(ctx, input, putOpts...)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return "", fmt.Errorf("failed to put object %s/%s: %w", bucket, key, err)
+		return PutObjectResult{}, fmt.Errorf("failed to put object %s/%s: %w", bucket, key, err)
 	}
 
 	span.SetStatus(codes.Ok, "")
-	return aws.ToString(resp.ETag), nil
+	headers := make(map[string]string)
+	addObjectOptionHeaders(headers, string(resp.ServerSideEncryption), aws.ToString(resp.SSEKMSKeyId), resp.BucketKeyEnabled, aws.ToString(resp.SSECustomerAlgorithm), aws.ToString(resp.SSECustomerKeyMD5), aws.ToString(resp.Expiration), "", "")
+	// PutObject's SDK model omits StorageClass even when a backend returns it.
+	// Read exactly that non-secret field, never copy arbitrary raw headers.
+	if raw, ok := awsmiddleware.GetRawResponse(resp.ResultMetadata).(*smithyhttp.Response); ok && raw != nil && raw.Response != nil {
+		if storage := raw.Header.Get("X-Amz-Storage-Class"); storage != "" {
+			headers["x-amz-storage-class"] = storage
+		}
+	}
+	return PutObjectResult{ETag: aws.ToString(resp.ETag), VersionID: aws.ToString(resp.VersionId), Headers: headers}, nil
 }
 
 // GetObject retrieves an object from S3.
 func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string) (io.ReadCloser, map[string]string, error) {
+	return c.GetObjectWithOptions(ctx, bucket, key, versionID, rangeHeader, ObjectReadOptions{})
+}
+
+func (c *s3Client) GetObjectWithOptions(ctx context.Context, bucket, key string, versionID *string, rangeHeader *string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	return c.getObjectWithCondition(ctx, bucket, key, versionID, rangeHeader, "", options)
+}
+
+// GetObjectIfMatch requires a backend ciphertext ETag, not a projected ETag.
+func (c *s3Client) GetObjectIfMatch(ctx context.Context, bucket, key string, versionID, rangeHeader *string, ifMatch string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	if ifMatch == "" {
+		return nil, nil, fmt.Errorf("conditional object read requires an ETag")
+	}
+	return c.getObjectWithCondition(ctx, bucket, key, versionID, rangeHeader, ifMatch, options)
+}
+
+func (c *s3Client) getObjectWithCondition(ctx context.Context, bucket, key string, versionID, rangeHeader *string, ifMatch string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	if c == nil || c.client == nil || nilObjectInput(ctx) {
+		return nil, nil, fmt.Errorf("object read requires client and context")
+	}
+	customerKey, customerMD5, err := customerWireKey(options.Customer)
+	if err != nil {
+		return nil, nil, err
+	}
 	ctx, span := c.tracer.Start(ctx, "S3.GetObject",
 		trace.WithAttributes(
 			attribute.String("s3.bucket", bucket),
@@ -608,6 +682,14 @@ func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID 
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
+	}
+	if ifMatch != "" {
+		input.IfMatch = aws.String(ifMatch)
+	}
+	if options.Customer != nil {
+		input.SSECustomerAlgorithm = aws.String("AES256")
+		input.SSECustomerKey = aws.String(customerKey)
+		input.SSECustomerKeyMD5 = aws.String(customerMD5)
 	}
 
 	if versionID != nil && *versionID != "" {
@@ -625,6 +707,7 @@ func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID 
 	}
 
 	metadata := extractMetadata(result.Metadata)
+	addObjectOptionHeaders(metadata, string(result.ServerSideEncryption), aws.ToString(result.SSEKMSKeyId), result.BucketKeyEnabled, aws.ToString(result.SSECustomerAlgorithm), aws.ToString(result.SSECustomerKeyMD5), aws.ToString(result.Expiration), string(result.StorageClass), aws.ToString(result.WebsiteRedirectLocation))
 
 	// Debug: log critical encryption metadata values for troubleshooting
 	// Check both full keys and compacted keys (after expansion)
@@ -653,6 +736,9 @@ func (c *s3Client) GetObject(ctx context.Context, bucket, key string, versionID 
 	// Extract standard S3 response headers (same as HeadObject)
 	if result.ContentLength != nil {
 		metadata["Content-Length"] = fmt.Sprintf("%d", *result.ContentLength)
+	}
+	if result.ContentRange != nil {
+		metadata["Content-Range"] = *result.ContentRange
 	}
 	if result.ContentType != nil {
 		metadata["Content-Type"] = *result.ContentType
@@ -733,9 +819,25 @@ func (c *s3Client) DeleteObject(ctx context.Context, bucket, key string, version
 
 // HeadObject retrieves object metadata without the body.
 func (c *s3Client) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
+	return c.HeadObjectWithOptions(ctx, bucket, key, versionID, ObjectReadOptions{})
+}
+
+func (c *s3Client) HeadObjectWithOptions(ctx context.Context, bucket, key string, versionID *string, options ObjectReadOptions) (map[string]string, error) {
+	if c == nil || c.client == nil || nilObjectInput(ctx) {
+		return nil, fmt.Errorf("object read requires client and context")
+	}
+	customerKey, customerMD5, err := customerWireKey(options.Customer)
+	if err != nil {
+		return nil, err
+	}
 	input := &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
+	}
+	if options.Customer != nil {
+		input.SSECustomerAlgorithm = aws.String("AES256")
+		input.SSECustomerKey = aws.String(customerKey)
+		input.SSECustomerKeyMD5 = aws.String(customerMD5)
 	}
 
 	if versionID != nil && *versionID != "" {
@@ -748,6 +850,7 @@ func (c *s3Client) HeadObject(ctx context.Context, bucket, key string, versionID
 	}
 
 	metadata := extractMetadata(result.Metadata)
+	addObjectOptionHeaders(metadata, string(result.ServerSideEncryption), aws.ToString(result.SSEKMSKeyId), result.BucketKeyEnabled, aws.ToString(result.SSECustomerAlgorithm), aws.ToString(result.SSECustomerKeyMD5), aws.ToString(result.Expiration), string(result.StorageClass), aws.ToString(result.WebsiteRedirectLocation))
 	if result.VersionId != nil {
 		metadata["x-amz-version-id"] = *result.VersionId
 	}

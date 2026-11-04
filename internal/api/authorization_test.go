@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -266,6 +267,169 @@ func TestAuthorizationMiddleware_BucketSubresourcesAndCreateClassification(t *te
 			op, _ := classifyAuthorizationOperation(httptest.NewRequest(tt.method, tt.target, nil))
 			if op != tt.want {
 				t.Fatalf("operation=%v want=%v", op, tt.want)
+			}
+		})
+	}
+}
+
+func TestGH353PostAuthorization_RequiresAuthenticatedParsedContextAndScopes(t *testing.T) {
+	body, contentType := postMultipart(map[string]string{"key": "literal/../test.jpg"}, `Content-Disposition: form-data; name="file"; filename="test.jpg"`, strings.Repeat("x", 64*1024))
+	newRequest := func(target string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		r.Header.Set("Content-Type", contentType)
+		return r
+	}
+	credential := Credential{AccessKey: "post-principal", Policy: AuthorizationPolicy{Buckets: []string{"tenant-*"}, Permissions: config.ObjectPermissionReadWrite}}
+	upload := &postUpload{bucket: "tenant-a", key: "literal/../test.jpg", fields: map[string]string{"key": "literal/../test.jpg", "x-amz-credential": "post-principal/20300101/us-east-1/s3/aws4_request"}, file: &multipart.Part{}, fileRead: strings.NewReader(""), fileCounter: &postFileReader{}, authenticatedAccessKey: "post-principal"}
+	credential.AccessKey = "post-principal"
+	attach := func(r *http.Request, u *postUpload) *http.Request {
+		ctx := context.WithValue(withCredential(r, credential), postUploadContextKey{}, u)
+		return r.WithContext(ctx)
+	}
+	for _, tc := range []struct {
+		name      string
+		target    string
+		principal bool
+		upload    bool
+		proxied   string
+		wantAllow bool
+	}{
+		{"no principal", "/tenant-a", false, true, "", false},
+		{"no parsed form", "/tenant-a", true, false, "", false},
+		{"valid prefix rw", "/tenant-a", true, true, "", true},
+		{"read only", "/tenant-a", true, true, "", false},
+		{"out of scope", "/outside", true, true, "", false},
+		{"global bucket mismatch", "/tenant-a", true, true, "tenant-b", false},
+		{"bucket bound mismatch", "/tenant-a", true, true, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRequest(tc.target)
+			principal := credential
+			if tc.name == "read only" {
+				principal.Policy.Permissions = config.ObjectPermissionReadOnly
+			}
+			if tc.principal {
+				r = r.WithContext(context.WithValue(r.Context(), credentialKey, principal))
+			}
+			if tc.upload {
+				u := *upload
+				u.fields = map[string]string{"key": "literal/../test.jpg", "x-amz-credential": "post-principal/20300101/us-east-1/s3/aws4_request"}
+				if tc.name == "valid prefix rw" {
+					u.bucket = "tenant-a"
+				}
+				if tc.name == "out of scope" {
+					u.bucket = "outside"
+				}
+				if tc.name == "bucket bound mismatch" {
+					u.bucket = "tenant-b"
+				}
+				ctx := context.WithValue(r.Context(), postUploadContextKey{}, &u)
+				r = r.WithContext(ctx)
+			}
+			called := false
+			rec := httptest.NewRecorder()
+			AuthorizationMiddleware(tc.proxied, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, r)
+			if called != tc.wantAllow || (rec.Code == http.StatusForbidden) == tc.wantAllow {
+				t.Fatalf("called=%v status=%d wantAllow=%v", called, rec.Code, tc.wantAllow)
+			}
+		})
+	}
+	for _, target := range []string{"/tenant-a?uploads", "/tenant-a?uploadId=u", "/tenant-a?x=1", "/tenant-a/key"} {
+		r := newRequest(target)
+		r = attach(r, upload)
+		if op, _ := classifyAuthorizationOperation(r); op != authorizationUnknown {
+			t.Errorf("shape %s classified %v", target, op)
+		}
+	}
+	for _, malformed := range []struct{ target, contentType string }{
+		{"/tenant-a", ""}, {"/tenant-a", "multipart/form-data"}, {"/tenant-a", "multipart/form-data; boundary=bad boundary"},
+	} {
+		r := httptest.NewRequest(http.MethodPost, malformed.target, strings.NewReader(body))
+		if malformed.contentType != "" {
+			r.Header.Set("Content-Type", malformed.contentType)
+		}
+		r = attach(r, upload)
+		if op, _ := classifyAuthorizationOperation(r); op != authorizationUnknown {
+			t.Errorf("malformed candidate %q classified %v", malformed.contentType, op)
+		}
+	}
+}
+
+func TestGH353PostAuthorization_NamedRouteRequiresParsedContext(t *testing.T) {
+	router := mux.NewRouter()
+	routeReached := false
+	called := false
+	router.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if route := mux.CurrentRoute(r); route != nil && route.GetName() == "PostObject" {
+				routeReached = true
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	router.Use(AuthorizationMiddleware("", nil))
+	router.Methods(http.MethodPost).Path("/{bucket}").Name("PostObject").Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	credential := Credential{AccessKey: "post-principal", Policy: AuthorizationPolicy{Buckets: []string{"bucket"}, Permissions: config.ObjectPermissionReadWrite}}
+	upload := &postUpload{bucket: "bucket", key: "literal/../object", fields: map[string]string{"key": "literal/../object"}, file: &multipart.Part{}, fileRead: strings.NewReader(""), fileCounter: &postFileReader{}, authenticatedAccessKey: "post-principal"}
+	upload.fields["x-amz-credential"] = "post-principal/20300101/us-east-1/s3/aws4_request"
+	for _, tc := range []struct {
+		name     string
+		context  bool
+		mutate   func(*postUpload, *http.Request)
+		wantCall bool
+	}{
+		{"absent context", false, nil, false},
+		{"absent principal", true, func(u *postUpload, r *http.Request) { _ = u; _ = r }, false},
+		{"valid authenticated route", true, nil, true},
+		{"identity mismatch", true, func(u *postUpload, r *http.Request) { u.authenticatedAccessKey = "different-principal" }, false},
+		{"effective bucket mismatch", true, func(u *postUpload, r *http.Request) { u.bucket = "other" }, false},
+		{"literal key mismatch", true, func(u *postUpload, r *http.Request) { u.key = "another-key" }, false},
+		{"form principal mismatch", true, func(u *postUpload, r *http.Request) {
+			u.fields["x-amz-credential"] = "other-principal/20300101/us-east-1/s3/aws4_request"
+		}, false},
+		{"bucket field mismatch", true, func(u *postUpload, r *http.Request) { u.fields["bucket"] = "other" }, false},
+		{"incomplete file context", true, func(u *postUpload, r *http.Request) { u.fileRead = nil }, false},
+		{"malformed content type", true, func(u *postUpload, r *http.Request) { r.Header.Set("Content-Type", "multipart/form-data") }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/bucket", nil)
+			req.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+			principal := credential
+			cloneFields := func(fields map[string]string) map[string]string {
+				cloned := make(map[string]string, len(fields))
+				for key, value := range fields {
+					cloned[key] = value
+				}
+				return cloned
+			}
+			if tc.name == "absent principal" {
+				u := *upload
+				u.fields = cloneFields(upload.fields)
+				req = req.WithContext(context.WithValue(req.Context(), postUploadContextKey{}, &u))
+			} else if tc.context {
+				u := *upload
+				u.fields = cloneFields(upload.fields)
+				ctx := context.WithValue(withCredential(req, principal), postUploadContextKey{}, &u)
+				req = req.WithContext(ctx)
+				if tc.mutate != nil {
+					tc.mutate(&u, req)
+				}
+			}
+			called = false
+			routeReached = false
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if !routeReached {
+				t.Fatalf("named PostObject route was not reached in middleware: status=%d", rec.Code)
+			}
+			if called != tc.wantCall {
+				t.Fatalf("called=%v want=%v status=%d body=%s", called, tc.wantCall, rec.Code, rec.Body.String())
+			}
+			if tc.wantCall && rec.Code != http.StatusOK {
+				t.Fatalf("valid test PostObject route status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if !tc.wantCall && (rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "<Code>AccessDenied</Code>")) {
+				t.Fatalf("denied PostObject route status=%d body=%s", rec.Code, rec.Body.String())
 			}
 		})
 	}

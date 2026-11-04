@@ -83,18 +83,18 @@ func projectObjectHeaders(src objectResponseSource, shape responseShape) (http.H
 			}
 			set(lk, v)
 		}
-		if strings.HasPrefix(lk, "x-amz-object-lock-") || lk == "last-modified" || lk == "x-amz-storage-class" || lk == "x-amz-mp-parts-count" {
+		if strings.HasPrefix(lk, "x-amz-object-lock-") || lk == "last-modified" || lk == "x-amz-storage-class" || lk == "x-amz-mp-parts-count" || isProjectedSSEHeader(lk) || lk == "x-amz-expiration" || lk == "x-amz-website-redirect-location" {
 			set(k, v)
 		}
 	}
 	etag := src.BackendETag
 	original := metadataValue(meta, crypto.MetaOriginalETag)
 	if original == "" && src.Class.Encrypted {
-		// Fallback formats carry their authenticated plaintext metadata inside
+		// Fallback formats can carry plaintext metadata inside
 		// the body, so the original ETag may exist only in Decrypted.
 		original = metadataValue(src.Decrypted, "ETag")
 	}
-	if original != "" {
+	if original != "" && !responseUsesSSECustomer(src) {
 		etag = quoteETag(original)
 	}
 	if etag != "" {
@@ -135,8 +135,79 @@ func projectObjectHeaders(src objectResponseSource, shape responseShape) (http.H
 			}
 		}
 	}
+	if responseUsesSSECustomer(src) {
+		set("Cache-Control", "no-store")
+	}
 	set("Accept-Ranges", "bytes")
 	return h, nil
+}
+
+// projectObjectWriteHeaders is the closed response owner for successful object
+// writes. Write responses expose backend option/version headers and the
+// operation-selected ETag, but never synthesize an object Content-Length.
+func projectObjectWriteHeaders(result objectWriteResult, checksums map[string]string) http.Header {
+	projected := make(http.Header)
+	if result.ClientETag != "" {
+		projected.Set("ETag", result.ClientETag)
+	}
+	for key, value := range result.Backend.Headers {
+		lower := strings.ToLower(key)
+		if isProjectedSSEHeader(lower) || lower == "x-amz-expiration" || lower == "x-amz-storage-class" || lower == "x-amz-website-redirect-location" {
+			projected.Set(key, value)
+		}
+	}
+	if result.Backend.VersionID != "" {
+		projected.Set("x-amz-version-id", result.Backend.VersionID)
+	}
+	for key, value := range checksums {
+		switch strings.ToLower(key) {
+		case "x-amz-checksum-crc32", "x-amz-checksum-crc32c", "x-amz-checksum-sha1", "x-amz-checksum-sha256":
+			projected.Set(key, value)
+		}
+	}
+	if isSSECustomerBackendObject(result.Backend.Headers) {
+		if result.Backend.ETag != "" {
+			projected.Set("ETag", result.Backend.ETag)
+		}
+	}
+	if result.CustomerSSE || isSSECustomerBackendObject(result.Backend.Headers) {
+		projected.Set("Cache-Control", "no-store")
+	}
+	return projected
+}
+
+func effectiveObjectWriteETag(result objectWriteResult) string {
+	if isSSECustomerBackendObject(result.Backend.Headers) && result.Backend.ETag != "" {
+		return result.Backend.ETag
+	}
+	return result.ClientETag
+}
+
+// projectPostResponseHeaders extends the common write projection only with
+// POST's response-owned Location or XML content type. Keeping these writes
+// here preserves the AST-enforced owner boundary.
+func projectPostResponseHeaders(result objectWriteResult, checksums map[string]string, contentType, location string) http.Header {
+	projected := projectObjectWriteHeaders(result, checksums)
+	if contentType != "" {
+		projected.Set("Content-Type", contentType)
+	}
+	if location != "" {
+		projected.Set("Location", location)
+	}
+	return projected
+}
+
+func responseUsesSSECustomer(src objectResponseSource) bool {
+	return src.SSECustomer || isSSECustomerBackendObject(src.Meta)
+}
+
+func isProjectedSSEHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "x-amz-server-side-encryption", "x-amz-server-side-encryption-aws-kms-key-id", "x-amz-server-side-encryption-bucket-key-enabled", "x-amz-server-side-encryption-customer-algorithm", "x-amz-server-side-encryption-customer-key-md5":
+		return true
+	default:
+		return false
+	}
 }
 
 func setProjectedHeader(h http.Header, key, value string, values []string, valueCount *int) {

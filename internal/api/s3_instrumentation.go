@@ -113,7 +113,20 @@ func (h *Handler) s3InstrumentationMiddleware(next http.Handler) http.Handler {
 		bucket := mux.Vars(r)["bucket"]
 		op := s3OperationName(r)
 		recorder := &s3ResponseRecorder{ResponseWriter: w}
-		if r.Body != nil && !strings.HasPrefix(r.Header.Get("x-amz-content-sha256"), "STREAMING-") {
+		postUpload, postRequest := postUploadFromContext(r)
+		if op == "PostObject" {
+			if postRequest {
+				bucket = postUpload.bucket
+				if h.metrics != nil && postUpload.fileCounter != nil {
+					postUpload.fileCounter.onRead = func(n int64) {
+						h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
+					}
+				}
+			} else if parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/"); len(parts) == 1 {
+				bucket = parts[0]
+			}
+		}
+		if r.Body != nil && !postRequest && !strings.HasPrefix(r.Header.Get("x-amz-content-sha256"), "STREAMING-") {
 			r.Body = &countingReadCloser{ReadCloser: r.Body, onRead: func(n int64) {
 				if h.metrics != nil {
 					h.metrics.RecordS3ClientBytes(r.Context(), bucket, "in", n)
@@ -172,6 +185,9 @@ func (r *countingReadCloser) Read(p []byte) (int, error) {
 }
 
 func s3OperationName(r *http.Request) string {
+	if isPostObjectRequest(r) {
+		return "PostObject"
+	}
 	q := r.URL.Query()
 	key := mux.Vars(r)["key"] != "" && strings.Contains(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	if r.URL.Path == "/" {

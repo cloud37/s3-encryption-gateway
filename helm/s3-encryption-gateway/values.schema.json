@@ -647,6 +647,35 @@
       }
     },
 
+    "sessionTokenValue": {
+      "allOf": [
+        { "$ref": "#/$defs/configValue" },
+        {
+          "properties": {
+            "value": {
+              "type": ["string", "null"],
+              "maxLength": 16384,
+              "pattern": "^[^\\x00\\r\\n]*$",
+              "description": "Optional session token. Empty is an explicit clear; valueFrom takes precedence over this value."
+            },
+            "valueFrom": {
+              "oneOf": [
+                { "maxProperties": 0 },
+                { "required": ["secretKeyRef"], "additionalProperties": false, "properties": { "secretKeyRef": { "$ref": "#/$defs/keyRef" } } },
+                { "required": ["configMapKeyRef"], "additionalProperties": false, "properties": { "configMapKeyRef": { "$ref": "#/$defs/keyRef" } } }
+              ]
+            }
+          }
+        }
+      ]
+    },
+
+    "sessionDeadline": {
+      "type": "string",
+      "description": "GMT RFC3339/RFC3339Nano deadline ending in Z. Empty is only an explicit clear for static credentials. Calendar validity is checked by the runtime parser.",
+      "pattern": "^(|([0-9]{3}[1-9]|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z)$"
+    },
+
     "corsArrayValue": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -922,11 +951,32 @@
                 "properties": {
                   "accessKey": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "S3 access key ID for a gateway credential." },
                   "secretKey": { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "S3 secret access key for a gateway credential." },
+                  "sessionToken": { "$ref": "#/$defs/sessionTokenValue", "description": "Optional gateway session token; omit this property entirely for static credentials. A populated valueFrom reference wins over value." },
+                  "expiresAt": { "$ref": "#/$defs/sessionDeadline" },
                   "label": { "type": "string", "description": "Optional human-readable label for audit logs." },
                   "buckets": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^(\\*|[^*\\s][^*\\s]*(\\*)?)$" }, "description": "Omit or use [\"*\"] for unrestricted access; use [] to deny all buckets. A bare * is broad authority." },
                   "permissions": { "type": "string", "enum": ["ro", "rw"], "description": "Object access permission; defaults to rw." },
                   "bucketPermissions": { "type": "array", "items": { "type": "string", "enum": ["create", "delete", "manage"] }, "uniqueItems": true, "description": "Explicit independent bucket grants: create, delete, or manage configuration." }
-                }
+                },
+                "allOf": [
+                  {
+                    "if": { "properties": { "sessionToken": { "properties": { "value": { "type": "string", "minLength": 1 } }, "required": ["value"] } }, "required": ["sessionToken"] },
+                    "then": { "required": ["expiresAt"], "properties": { "expiresAt": { "pattern": "^[0-9]" } } }
+                  },
+                  {
+                    "if": { "properties": { "sessionToken": { "properties": { "valueFrom": { "type": "object", "anyOf": [{ "required": ["secretKeyRef"] }, { "required": ["configMapKeyRef"] }] } }, "required": ["valueFrom"] } }, "required": ["sessionToken"] },
+                    "then": { "required": ["expiresAt"], "properties": { "expiresAt": { "pattern": "^[0-9]" } } }
+                  },
+                  {
+                    "if": { "properties": { "expiresAt": { "pattern": "^[0-9]" } }, "required": ["expiresAt"] },
+                    "then": {
+                      "anyOf": [
+                        { "properties": { "sessionToken": { "properties": { "value": { "type": "string", "minLength": 1 } }, "required": ["value"] } }, "required": ["sessionToken"] },
+                        { "properties": { "sessionToken": { "properties": { "valueFrom": { "type": "object", "anyOf": [{ "required": ["secretKeyRef"] }, { "required": ["configMapKeyRef"] }] } }, "required": ["valueFrom"] } }, "required": ["sessionToken"] }
+                      ]
+                    }
+                  }
+                ]
               }
             }
           }
@@ -940,7 +990,10 @@
             "region":               { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "AWS/S3 region (e.g. us-east-1)." },
             "accessKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend access key ID (required)." },
             "secretKey":            { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend secret access key (required)." },
+            "sessionToken":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Independent optional backend session token; empty by default and never sourced from a gateway credential." },
             "provider":             { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Backend provider identifier (e.g. aws, minio)." },
+            "metadataProfile":      { "allOf": [{ "$ref": "#/$defs/configValue" }, { "properties": { "value": { "enum": ["", "auto", "compact"] } } }], "description": "Metadata compaction profile; restart required." },
+            "postInlineTagging":    { "allOf": [{ "$ref": "#/$defs/configValue" }, { "properties": { "value": { "enum": ["", "supported", "unsupported"] } } }], "description": "POST inline tagging support declaration; restart required." },
             "useSSL":               { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Use TLS for backend connections (\\\"true\\\"/\\\"false\\\")." },
             "usePathStyle":         { "allOf": [{ "$ref": "#/$defs/configValue" }], "description": "Force path-style S3 URLs (required for MinIO, Ceph, etc.)." },
             "tls": {

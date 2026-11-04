@@ -26,6 +26,7 @@ import (
 // CopyObjectResult body; the shim substitutes time.Now() when it is zero.
 // Compile-time assertion: *gcsClient implements Client.
 var _ Client = (*gcsClient)(nil)
+var _ AdvancedObjectClient = (*gcsClient)(nil)
 
 type gcsClient struct {
 	inner Client
@@ -53,6 +54,81 @@ func newGCSClient(cfg *config.BackendConfig, opts ...ClientFactoryOption) (Clien
 }
 
 // ---- overrides ----
+
+func (c *gcsClient) PutObjectWithOptions(ctx context.Context, bucket, key string, body io.Reader, metadata map[string]string, length *int64, tags string, lock *ObjectLockInput, acl, grantFullControl, grantRead, grantReadACP, grantWriteACP string, options ObjectPutOptions) (PutObjectResult, error) {
+	if c == nil {
+		return PutObjectResult{}, fmt.Errorf("gcs: nil client")
+	}
+	advanced, err := advancedAdapterClient(c.inner, options)
+	if err != nil {
+		return PutObjectResult{}, fmt.Errorf("gcs: %w", err)
+	}
+	if nilObjectInput(ctx) || nilObjectInput(body) {
+		return PutObjectResult{}, fmt.Errorf("gcs: object put requires context and body")
+	}
+	options.StorageClass = ""
+	return advanced.PutObjectWithOptions(ctx, bucket, key, body, lowercaseKeys(metadata), length, tags, lock, acl, grantFullControl, grantRead, grantReadACP, grantWriteACP, options)
+}
+
+func (c *gcsClient) GetObjectWithOptions(ctx context.Context, bucket, key string, versionID, rangeHeader *string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	if c == nil {
+		return nil, nil, fmt.Errorf("gcs: nil client")
+	}
+	if options.Customer != nil {
+		return nil, nil, fmt.Errorf("gcs: customer encryption: %w", ErrNotImplemented)
+	}
+	advanced, err := advancedAdapterClient(c.inner, ObjectPutOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("gcs: %w", err)
+	}
+	if nilObjectInput(ctx) {
+		return nil, nil, fmt.Errorf("gcs: object read requires context")
+	}
+	body, meta, err := advanced.GetObjectWithOptions(ctx, bucket, key, versionID, rangeHeader, options)
+	if err != nil {
+		return body, meta, err
+	}
+	return body, objectmeta.NormalizeBackendKeys(meta), nil
+}
+
+func (c *gcsClient) GetObjectIfMatch(ctx context.Context, bucket, key string, versionID, rangeHeader *string, ifMatch string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	if c == nil || nilObjectInput(ctx) || ifMatch == "" {
+		return nil, nil, fmt.Errorf("gcs: conditional read requires client, context and ETag")
+	}
+	if options.Customer != nil {
+		return nil, nil, fmt.Errorf("gcs: customer encryption: %w", ErrNotImplemented)
+	}
+	inner, ok := c.inner.(ConditionalObjectReader)
+	if !ok || nilObjectInput(inner) {
+		return nil, nil, fmt.Errorf("gcs: conditional read: %w", ErrNotImplemented)
+	}
+	body, meta, err := inner.GetObjectIfMatch(ctx, bucket, key, versionID, rangeHeader, ifMatch, options)
+	if err != nil {
+		return body, meta, err
+	}
+	return body, objectmeta.NormalizeBackendKeys(meta), nil
+}
+
+func (c *gcsClient) HeadObjectWithOptions(ctx context.Context, bucket, key string, versionID *string, options ObjectReadOptions) (map[string]string, error) {
+	if c == nil {
+		return nil, fmt.Errorf("gcs: nil client")
+	}
+	if options.Customer != nil {
+		return nil, fmt.Errorf("gcs: customer encryption: %w", ErrNotImplemented)
+	}
+	advanced, err := advancedAdapterClient(c.inner, ObjectPutOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("gcs: %w", err)
+	}
+	if nilObjectInput(ctx) {
+		return nil, fmt.Errorf("gcs: object read requires context")
+	}
+	meta, err := advanced.HeadObjectWithOptions(ctx, bucket, key, versionID, options)
+	if err != nil {
+		return meta, err
+	}
+	return objectmeta.NormalizeBackendKeys(meta), nil
+}
 
 func (c *gcsClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	return c.inner.PutObject(ctx, bucket, key, reader, lowercaseKeys(metadata), contentLength, tags, lock, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP)

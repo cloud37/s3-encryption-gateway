@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/gorilla/mux"
@@ -17,6 +18,7 @@ import (
 // from an SDK error interface: key managers can return SDK errors too.
 type objectBackendError struct {
 	bucket, key string
+	method      string
 	err         error
 }
 
@@ -35,6 +37,21 @@ func backendObjectError(bucket, key string, err error) error {
 	return &objectBackendError{bucket: bucket, key: key, err: err}
 }
 
+func backendHeadObjectError(bucket, key string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &objectBackendError{bucket: bucket, key: key, method: http.MethodHead, err: err}
+}
+
+func backendReadStatus(err error) int {
+	var responseErr *smithyhttp.ResponseError
+	if errors.As(err, &responseErr) && responseErr.Response != nil && responseErr.Response.Response != nil {
+		return responseErr.HTTPStatusCode()
+	}
+	return 0
+}
+
 // writeObjectBackendError handles only explicitly marked storage failures. It
 // returns false for crypto/metadata errors so their existing policy is retained.
 func (h *Handler) writeObjectBackendError(w http.ResponseWriter, r *http.Request, op string, err error, start time.Time) bool {
@@ -50,7 +67,18 @@ func (h *Handler) writeObjectBackendError(w http.ResponseWriter, r *http.Request
 	if op == http.MethodHead {
 		op = "HeadObject"
 	}
-	h.writeObjectErrorForBucket(w, r, op, backendErr.bucket, TranslateError(backendErr.err, backendErr.bucket, backendErr.key), start)
+	translated := TranslateError(backendErr.err, backendErr.bucket, backendErr.key)
+	if op == http.MethodGet || op == http.MethodHead || op == "GetObject" || op == "HeadObject" {
+		backendMethod := backendErr.method
+		if backendMethod == "" {
+			backendMethod = http.MethodGet
+			if op == http.MethodHead || op == "HeadObject" {
+				backendMethod = http.MethodHead
+			}
+		}
+		translated = translateSSECustomerReadError(backendErr.err, backendErr.bucket, backendErr.key, backendMethod, backendReadStatus(backendErr.err))
+	}
+	h.writeObjectErrorForBucket(w, r, op, backendErr.bucket, translated, start)
 	if h.logger != nil {
 		h.logger.WithError(err).WithFields(map[string]any{"bucket": backendErr.bucket, "key": backendErr.key, "operation": op}).Error("Failed to read backend object")
 	}
@@ -81,10 +109,14 @@ func (h *Handler) writeObjectErrorForBucket(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(s3Err.HTTPStatus)
 	}
 	if h.metrics != nil {
+		requestPath := ""
+		if r.URL != nil {
+			requestPath = r.URL.Path
+		}
 		if s3Err.Code != "" {
 			h.metrics.RecordS3Error(r.Context(), op, bucket, s3Err.Code)
 		}
-		h.metrics.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, s3Err.HTTPStatus, time.Since(start), 0)
+		h.metrics.RecordHTTPRequest(r.Context(), r.Method, requestPath, s3Err.HTTPStatus, time.Since(start), 0)
 	}
 }
 

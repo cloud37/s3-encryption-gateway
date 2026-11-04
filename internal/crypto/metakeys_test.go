@@ -61,8 +61,8 @@ func TestCompactExpand_GoldenUnchanged(t *testing.T) {
 		MetaMPUManifestVersion: "2", MetaMPUEncrypted: "true", MetaEncryptedMetadata: "blob",
 	}
 	wantCompact := map[string]string{
-		MetaEncrypted: "true", MetaEncryptedMetadata: "blob", MetaMPUEncrypted: "true",
-		"x-amz-meta-e": "true", "x-amz-meta-a": "AES256-GCM", "x-amz-meta-s": "salt", "x-amz-meta-i": "iv",
+		MetaEncrypted: "true", MetaMPUEncrypted: "true",
+		"x-amz-meta-a": "AES256-GCM", "x-amz-meta-s": "salt", "x-amz-meta-i": "iv",
 		"x-amz-meta-os": "17", "x-amz-meta-oe": "etag", "x-amz-meta-ct": "text/plain", "x-amz-meta-ccache": "no-cache",
 		"x-amz-meta-cdisp": "attachment", "x-amz-meta-c": "true", "x-amz-meta-cs": "65536", "x-amz-meta-cc": "1",
 		"x-amz-meta-m": "manifest", "x-amz-meta-kv": "2", "x-amz-meta-wk": "wrapped", "x-amz-meta-kid": "kms-id",
@@ -119,7 +119,14 @@ func TestMetaKeyRegistry_PredicatesAndSnapshotsCoverEveryKey(t *testing.T) {
 		if err != nil {
 			t.Fatalf("compact %q: %v", spec.Canonical, err)
 		}
-		if got := compacted[spec.Compact]; got != "snapshot-value" {
+		compactKey := spec.Compact
+		if spec.Canonical == MetaEncrypted {
+			compactKey = MetaEncrypted
+			if compacted[spec.Compact] != "" {
+				t.Error("canonical marker duplicated as compact alias")
+			}
+		}
+		if got := compacted[compactKey]; got != "snapshot-value" {
 			t.Errorf("compact snapshot %q=%q", spec.Compact, got)
 		}
 		expanded, err := compactor.ExpandMetadata(map[string]string{spec.Compact: "snapshot-value"})

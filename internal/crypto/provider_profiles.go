@@ -1,9 +1,13 @@
 package crypto
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrMetadataTooLarge identifies a final metadata envelope that cannot be stored.
+var ErrMetadataTooLarge = errors.New("metadata exceeds provider limits")
 
 // ProviderProfile defines metadata limits and compaction strategies for S3 providers
 type ProviderProfile struct {
@@ -91,7 +95,23 @@ func GetProviderProfile(provider string) *ProviderProfile {
 	}
 }
 
-// ValidateMetadataSize checks if the metadata fits within provider limits
+// ResolveMetadataProfile returns an independent copy of the selected provider
+// budget, with only the compaction strategy overridden when requested.
+func ResolveMetadataProfile(provider, mode string) (*ProviderProfile, error) {
+	profile := *GetProviderProfile(provider)
+	switch mode {
+	case "", "auto":
+	case "compact":
+		profile.CompactionStrategy = "base64url"
+	default:
+		return nil, fmt.Errorf("invalid backend.metadata_profile")
+	}
+	return &profile, nil
+}
+
+// ValidateMetadataSize counts conservative metadata header framing only. It
+// does not guarantee a complete request fits: SDK authentication, host, SSE,
+// and other native request headers add variable wire overhead.
 func (p *ProviderProfile) ValidateMetadataSize(metadata map[string]string) error {
 	totalSize := 0
 
@@ -102,21 +122,21 @@ func (p *ProviderProfile) ValidateMetadataSize(metadata map[string]string) error
 	}
 
 	if p.TotalHeaderLimit > 0 && totalSize > p.TotalHeaderLimit {
-		return fmt.Errorf("metadata size %d bytes exceeds provider %s total header limit of %d bytes",
-			totalSize, p.Name, p.TotalHeaderLimit)
+		return fmt.Errorf("%w: metadata size %d bytes exceeds provider %s total header limit of %d bytes",
+			ErrMetadataTooLarge, totalSize, p.Name, p.TotalHeaderLimit)
 	}
 
 	// Calculate user metadata size (x-amz-meta-* keys)
 	userMetaSize := 0
 	for key, value := range metadata {
-		if strings.HasPrefix(key, "x-amz-meta-") {
+		if strings.HasPrefix(strings.ToLower(key), "x-amz-meta-") {
 			userMetaSize += len(key) + 2 + len(value) + 2
 		}
 	}
 
 	if p.UserMetadataLimit > 0 && userMetaSize > p.UserMetadataLimit {
-		return fmt.Errorf("user metadata size %d bytes exceeds provider %s user metadata limit of %d bytes",
-			userMetaSize, p.Name, p.UserMetadataLimit)
+		return fmt.Errorf("%w: user metadata size %d bytes exceeds provider %s user metadata limit of %d bytes",
+			ErrMetadataTooLarge, userMetaSize, p.Name, p.UserMetadataLimit)
 	}
 
 	return nil

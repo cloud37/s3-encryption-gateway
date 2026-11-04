@@ -55,6 +55,12 @@ auth:
   # Production deployments MUST use secret_key_env. Inline secret_key
   # is provided for local development only and will trigger a startup
   # warning in future releases.
+  # Session credentials are optional. Omit session_token/session_token_env and
+  # expires_at for static credentials. Use exactly one token source; a named
+  # environment source that is missing or empty is an error (it never falls
+  # back to an inline token). The deadline must be a GMT RFC3339 timestamp
+  # ending in Z. A syntactically valid expired credential may be configured
+  # during rotation, but runtime authentication rejects it after expiry.
   #
   # The backend.access_key / backend.secret_key configure the gateway's
   # own connection to the S3 backend and are independent of this list.
@@ -62,6 +68,12 @@ auth:
     - access_key: "my-gateway-access-key"
       # secret_key: ""           # Dev only — avoid in production
       secret_key_env: "GW_SECRET_KEY_1"  # Set via environment variable or Kubernetes secretKeyRef
+      # Static credentials: leave these session fields omitted.
+      # Session example (set both; store token outside this file):
+      # session_token_env: "GW_SESSION_TOKEN_1"
+      # expires_at: "2027-01-15T12:00:00Z"
+      # Or use session_token: "<development-only-token>" instead of
+      # session_token_env. Do not specify both token sources.
       label: "primary-client"   # Optional — appears in audit logs
       # Omit buckets for unrestricted access; [] intentionally denies all.
       buckets: ["my-application", "shared-*"]
@@ -72,6 +84,16 @@ auth:
   #   - access_key: "service-account-key"
   #     secret_key_env: "GW_SECRET_KEY_2"
   #     label: "etl-pipeline"
+
+# Example runtime environment for the named session-token source above:
+#   GW_SESSION_TOKEN_1=<provided-by-secret-manager>
+# A concrete inline session_token and session_token_env are mutually exclusive.
+# For the named session_token_env source above, both a missing and an empty
+# value are configuration errors. To return to static credentials, remove
+# session_token_env (and expires_at); do not rely on an empty value.
+# The indexed GW_CRED_<i>_SESSION_TOKEN environment override is different:
+# when explicitly present but empty it clears that indexed token. Clear or
+# replace GW_CRED_<i>_EXPIRES_AT consistently, or validation rejects the entry.
 
 # NOTE: backend.use_client_credentials has been removed in V1.0.
 # NOTE: proxied_bucket remains supported as an optional bucket filter.
@@ -115,7 +137,12 @@ backend:
   region: "us-east-1"
   access_key: ""  # Set via BACKEND_ACCESS_KEY env var
   secret_key: ""   # Set via BACKEND_SECRET_KEY env var
+  # Optional backend identity token. Independent of every gateway credential;
+  # it is sent only to the backend. Leave unset for static backend credentials.
+  # session_token: ""  # or provide BACKEND_SESSION_TOKEN in the environment
   provider: ""  # Optional: provider name for reference (any S3-compatible API endpoint works)
+  metadata_profile: "auto"  # auto or compact; retains the provider's metadata budgets
+  post_inline_tagging: "supported"  # unsupported rejects signed POST tagging before writes
   # Selects the scheme only when endpoint omits one; explicit http:// or
   # https:// endpoints always take precedence.
   use_ssl: true

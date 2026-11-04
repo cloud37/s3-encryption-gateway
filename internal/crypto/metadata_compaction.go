@@ -37,16 +37,25 @@ func (c *MetadataCompactor) CompactMetadata(metadata map[string]string) (map[str
 
 	compacted := make(map[string]string)
 
-	// Copy non-encryption metadata as-is
+	// The frozen legacy encryption predicate is not a serialization
+	// predicate: it excludes the blob and several protected headers.
 	for key, value := range metadata {
-		if !IsEncryptionMetadata(key) && !strings.EqualFold(key, MetaEncrypted) {
+		if spec, ok := LookupMetaKey(key); ok && spec.Compact != "" {
+			continue
+		}
+		if !IsEncryptionMetadata(key) {
 			compacted[key] = value
 		}
 	}
 	// The clear encryption marker is intentionally not part of the metadata
 	// blob, but it must survive provider compaction so API reads classify the
 	// payload as encrypted before decrypting that blob.
-	if marker, ok := metadataValue(metadata, MetaEncrypted); ok {
+	marker, ok := metadataValue(metadata, MetaEncrypted)
+	if !ok {
+		spec, _ := LookupMetaKey(MetaEncrypted)
+		marker, ok = metadataValue(metadata, spec.Compact)
+	}
+	if ok {
 		compacted[MetaEncrypted] = marker
 	}
 
@@ -103,7 +112,7 @@ func (c *MetadataCompactor) compactEncryptionMetadata(metadata map[string]string
 		// LegacyEncryptionPredicate controls the historical public predicate;
 		// it must not decide which gateway-owned fields are serialized.
 		for _, spec := range MetaKeys() {
-			if spec.Compact == "" {
+			if spec.Compact == "" || spec.Canonical == MetaEncrypted {
 				continue
 			}
 			v, ok := metadataValue(metadata, spec.Canonical)
@@ -137,6 +146,9 @@ func (c *MetadataCompactor) expandEncryptionMetadata(metadata map[string]string)
 	if c.profile.CompactionStrategy == "base64url" {
 		for _, spec := range MetaKeys() {
 			if spec.Compact == "" {
+				continue
+			}
+			if _, exists := metadataValue(metadata, spec.Canonical); exists {
 				continue
 			}
 			if v, ok := metadataValue(metadata, spec.Compact); ok && v != "" {

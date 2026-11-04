@@ -33,6 +33,603 @@ func testCredentialStore() CredentialStore {
 	return store
 }
 
+func signedPostPolicyRequest(t *testing.T, policyText string, fields map[string]string, filePayload string, boundary string) *http.Request {
+	return signedPostPolicyRequestWithCredentials(t, policyText, fields, filePayload, boundary, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1")
+}
+
+func signedPostPolicyRequestWithCredentials(t *testing.T, policyText string, fields map[string]string, filePayload string, boundary, secret, region string) *http.Request {
+	t.Helper()
+	if boundary == "" {
+		boundary = "auth-post-boundary"
+	}
+	date := fields["x-amz-date"]
+	if len(date) < 8 {
+		t.Fatal("signed POST fixture requires a valid x-amz-date")
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(policyText))
+	fields["policy"] = encoded
+	fields["x-amz-signature"] = signPostPolicy(secret, date[:8], region, encoded)
+	var body strings.Builder
+	for name, value := range fields {
+		fmt.Fprintf(&body, "--%s\r\nContent-Disposition: form-data; name=%q\r\n\r\n%s\r\n", boundary, name, value)
+	}
+	fmt.Fprintf(&body, "--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.jpg\"\r\n\r\n%s\r\n--%s--\r\n", boundary, filePayload, boundary)
+	r := httptest.NewRequest(http.MethodPost, "/bucket", strings.NewReader(body.String()))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	r.ContentLength = int64(body.Len())
+	return r
+}
+
+func validSignedPostPolicyRequest(t *testing.T, expiration string) *http.Request {
+	return validSignedPostPolicyRequestFor(t, expiration, "/bucket", "bucket", "test.jpg", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1", "")
+}
+
+func validSignedPostPolicyRequestFor(t *testing.T, expiration, target, bucket, key, accessKey, secret, region, filename string) *http.Request {
+	t.Helper()
+	date := time.Now().UTC().Format("20060102T150405Z")
+	dateDay := date[:8]
+	scope := accessKey + "/" + dateDay + "/" + region + "/s3/aws4_request"
+	policyText := fmt.Sprintf(`{"expiration":%q,"conditions":[{"bucket":%q,"key":%q,"x-amz-algorithm":"AWS4-HMAC-SHA256","x-amz-credential":%q,"x-amz-date":%q}]}`, expiration, bucket, key, scope, date)
+	fields := map[string]string{"bucket": bucket, "key": key, "x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": scope, "x-amz-date": date}
+	return buildSignedPostForm(t, target, policyText, fields, strings.Repeat("x", 64*1024), "auth-post-boundary", secret, region, filename)
+}
+
+func buildSignedPostForm(t *testing.T, target, policyText string, fields map[string]string, filePayload, boundary, secret, region, filename string) *http.Request {
+	t.Helper()
+	r := signedPostPolicyRequestWithCredentials(t, policyText, fields, filePayload, boundary, secret, region)
+	r.URL.Path = target
+	if filename != "" {
+		body, _ := io.ReadAll(r.Body)
+		text := strings.Replace(string(body), `filename="test.jpg"`, fmt.Sprintf("filename=%q", filename), 1)
+		r.Body = io.NopCloser(strings.NewReader(text))
+		r.ContentLength = int64(len(text))
+	}
+	return r
+}
+
+func validSignedSessionPostRequest(t *testing.T, expiration time.Time, token string) *http.Request {
+	t.Helper()
+	date := time.Now().UTC().Format("20060102T150405Z")
+	day := date[:8]
+	policyText := fmt.Sprintf(`{"expiration":%q,"conditions":[{"bucket":"bucket","key":"test.jpg","x-amz-algorithm":"AWS4-HMAC-SHA256","x-amz-credential":"AKIAIOSFODNN7EXAMPLE/%s/us-east-1/s3/aws4_request","x-amz-date":%q,"x-amz-security-token":%q}]}`, expiration.Format(time.RFC3339), day, date, token)
+	fields := map[string]string{"bucket": "bucket", "key": "test.jpg", "x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": "AKIAIOSFODNN7EXAMPLE/" + day + "/us-east-1/s3/aws4_request", "x-amz-date": date, "x-amz-security-token": token}
+	return buildSignedPostForm(t, "/bucket", policyText, fields, strings.Repeat("s", 64*1024), "auth-session-boundary", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1", "")
+}
+
+func validSignedSessionPostRequestWithTimes(t *testing.T, policyExpiration, signedAt time.Time, token string) *http.Request {
+	t.Helper()
+	date := signedAt.UTC().Format("20060102T150405Z")
+	day := date[:8]
+	scope := "AKIAIOSFODNN7EXAMPLE/" + day + "/us-east-1/s3/aws4_request"
+	policyText := fmt.Sprintf(`{"expiration":%q,"conditions":[{"bucket":"bucket","key":"test.jpg","x-amz-algorithm":"AWS4-HMAC-SHA256","x-amz-credential":%q,"x-amz-date":%q`, policyExpiration.UTC().Format(time.RFC3339Nano), scope, date)
+	fields := map[string]string{"bucket": "bucket", "key": "test.jpg", "x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": scope, "x-amz-date": date}
+	if token != "" {
+		policyText += fmt.Sprintf(`,"x-amz-security-token":%q`, token)
+		fields["x-amz-security-token"] = token
+	}
+	policyText += `}]}`
+	return buildSignedPostForm(t, "/bucket", policyText, fields, strings.Repeat("s", 64*1024), "auth-session-boundary", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1", "")
+}
+
+func validSignedStaticTokenPostRequest(t *testing.T, token string) *http.Request {
+	t.Helper()
+	date := time.Now().UTC().Format("20060102T150405Z")
+	day := date[:8]
+	scope := "AKIAIOSFODNN7EXAMPLE/" + day + "/us-east-1/s3/aws4_request"
+	policyText := fmt.Sprintf(`{"expiration":%q,"conditions":[{"bucket":"bucket","key":"test.jpg","x-amz-algorithm":"AWS4-HMAC-SHA256","x-amz-credential":%q,"x-amz-date":%q,"x-amz-security-token":%q}]}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), scope, date, token)
+	fields := map[string]string{"bucket": "bucket", "key": "test.jpg", "x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": scope, "x-amz-date": date, "x-amz-security-token": token}
+	return buildSignedPostForm(t, "/bucket", policyText, fields, strings.Repeat("x", 64*1024), "auth-static-token-boundary", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1", "")
+}
+
+func buildSignedPostRequest(t *testing.T, target, bucket, formKey, policyKey, filename, accessKey, secret, region, token string, policyExpiration, signedAt time.Time) *http.Request {
+	t.Helper()
+	date := signedAt.UTC().Format("20060102T150405Z")
+	day := date[:8]
+	scope := accessKey + "/" + day + "/" + region + "/s3/aws4_request"
+	policyText := fmt.Sprintf(`{"expiration":%q,"conditions":[{"bucket":%q},{"key":%q},{"x-amz-algorithm":"AWS4-HMAC-SHA256"},{"x-amz-credential":%q},{"x-amz-date":%q}`, policyExpiration.UTC().Format(time.RFC3339Nano), bucket, policyKey, scope, date)
+	fields := map[string]string{"bucket": bucket, "key": formKey, "x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": scope, "x-amz-date": date}
+	if token != "" {
+		policyText += fmt.Sprintf(`,{"x-amz-security-token":%q}`, token)
+		fields["x-amz-security-token"] = token
+	}
+	policyText += `]}`
+	r := signedPostPolicyRequestWithCredentials(t, policyText, fields, strings.Repeat("p", 64*1024), "auth-post-boundary", secret, region)
+	if filename != "" {
+		data, _ := io.ReadAll(r.Body)
+		text := strings.Replace(string(data), `filename="test.jpg"`, fmt.Sprintf("filename=%q", filename), 1)
+		r.Body = io.NopCloser(strings.NewReader(text))
+		r.ContentLength = int64(len(text))
+	}
+	r.URL.Path = target
+	return r
+}
+
+func replaceRequestBody(t *testing.T, target *http.Request, source *http.Request) {
+	t.Helper()
+	target.Body = source.Body
+	target.ContentLength = source.ContentLength
+}
+
+type observedRequestBody struct {
+	io.Reader
+	read int64
+}
+
+type chunkedBody struct {
+	reader io.Reader
+	max    int
+}
+
+func (r *chunkedBody) Read(p []byte) (int, error) {
+	if len(p) > r.max {
+		p = p[:r.max]
+	}
+	return r.reader.Read(p)
+}
+
+func (r *observedRequestBody) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.read += int64(n)
+	return n, err
+}
+
+func (r *observedRequestBody) Close() error { return nil }
+
+type postSpoolSpy struct{ acquired int }
+
+func (s *postSpoolSpy) Acquire(context.Context, int64, int64) (SpoolReservation, error) {
+	s.acquired++
+	return nil, errors.New("unexpected spool reservation")
+}
+
+func TestGH353PostAuth_DeniedBeforeFileSpool(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	store, err := NewStaticCredentialStore([]config.GatewayCredential{{
+		AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Label: "post-test",
+		Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := NewSpoolLimitSource(SpoolLimits{Global: 256 * 1024, Part: 32 * 1024})
+	tests := []struct {
+		name       string
+		mutate     func(*http.Request)
+		wantCode   string
+		wantStatus int
+	}{
+		{"bad signature", func(r *http.Request) { r.Body = tamperPostSignatureBody(r) }, "SignatureDoesNotMatch", http.StatusForbidden},
+		{"malformed policy", func(r *http.Request) {
+			r.Body = mutatePostScalarBody(r, "policy", base64.StdEncoding.EncodeToString([]byte("{")))
+		}, "InvalidArgument", http.StatusBadRequest},
+		{"missing form credential", func(r *http.Request) { r.Body = removePostScalarBody(r, "x-amz-credential") }, "AccessDenied", http.StatusForbidden},
+		{"missing required signing date", func(r *http.Request) { r.Body = removePostScalarBody(r, "x-amz-date") }, "AccessDenied", http.StatusForbidden},
+		{"duplicate credential", func(r *http.Request) { r.Body = duplicatePostScalarBody(r, "x-amz-date", "20300101T000000Z") }, "InvalidRequest", http.StatusBadRequest},
+		{"mixed auth", func(r *http.Request) { r.Header.Set("Authorization", "AWS4-HMAC-SHA256 invalid") }, "InvalidRequest", http.StatusBadRequest},
+		{"duplicate authorization", func(r *http.Request) { r.Header.Add("Authorization", "AWS4-HMAC-SHA256 second") }, "InvalidRequest", http.StatusBadRequest},
+		{"lowercase authorization map alias", func(r *http.Request) { r.Header["authorization"] = []string{"AWS4-HMAC-SHA256 conflict"} }, "InvalidRequest", http.StatusBadRequest},
+		{"mixed-case authorization map alias", func(r *http.Request) { r.Header["aUtHoRiZaTiOn"] = []string{"AWS4-HMAC-SHA256 conflict"} }, "InvalidRequest", http.StatusBadRequest},
+		{"explicit empty authorization header", func(r *http.Request) { r.Header["Authorization"] = []string{""} }, "InvalidRequest", http.StatusBadRequest},
+		{"unknown form access key", func(r *http.Request) {
+			replaceRequestBody(t, r, buildSignedPostRequest(t, "/bucket", "bucket", "test.jpg", "test.jpg", "", "ASIAUNKNOWNKEY", "unknown-key-secret", "us-east-1", "", time.Now().UTC().Add(time.Hour), time.Now().UTC()))
+		}, "InvalidAccessKeyId", http.StatusForbidden},
+		{"future signing date", func(r *http.Request) {
+			replaceRequestBody(t, r, buildSignedPostRequest(t, "/bucket", "bucket", "test.jpg", "test.jpg", "", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1", "", time.Now().UTC().Add(time.Hour), time.Now().UTC().Add(2*time.Hour)))
+		}, "RequestTimeTooSkewed", http.StatusForbidden},
+		{"uncovered signed field", func(r *http.Request) {
+			r.Body = mutatePostScalarBody(r, "key", "test.jpg\r\n--auth-post-boundary\r\nContent-Disposition: form-data; name=\"acl\"\r\n\r\npublic-read")
+		}, "AccessDenied", http.StatusForbidden},
+		{"mismatched URL bucket", func(r *http.Request) { r.URL.Path = "/different" }, "AccessDenied", http.StatusForbidden},
+		{"malformed multipart form", func(r *http.Request) { r.Body = io.NopCloser(strings.NewReader("--auth-post-boundary\r\nbroken")) }, "InvalidRequest", http.StatusBadRequest},
+		{"partial query auth stays ordinary auth", func(r *http.Request) { r.URL.RawQuery = "X-Amz-Signature=partial" }, "AccessDenied", http.StatusForbidden},
+		{"raw query", func(r *http.Request) { r.URL.RawQuery = "x=1" }, "AccessDenied", http.StatusForbidden},
+		{"missing content type", func(r *http.Request) { r.Header.Del("Content-Type") }, "AccessDenied", http.StatusForbidden},
+		{"object selector", func(r *http.Request) { r.URL.Path = "/bucket/key" }, "AccessDenied", http.StatusForbidden},
+		{"missing key maps to missing credentials", func(r *http.Request) {
+			r.Body = removePostScalarBody(r, "key")
+		}, "AccessDenied", http.StatusForbidden},
+	}
+	spoolSpy := &postSpoolSpy{}
+	postAudit := audit.NewLogger(100, nil)
+	staticStore, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, extraToken := range []string{"unexpected", ""} {
+		staticTokenReq := validSignedStaticTokenPostRequest(t, extraToken)
+		staticTokenReq.Header.Set("X-Test-Secret-Sentinel", "policy-secret-sentinel")
+		observed := &observedRequestBody{Reader: &chunkedBody{reader: staticTokenReq.Body, max: 7}}
+		staticTokenReq.Body = observed
+		staticTokenCalled := false
+		staticTokenRecorder := httptest.NewRecorder()
+		AuthMiddleware(staticStore, time.Minute, logger, postAudit, true, limits, spoolSpy)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { staticTokenCalled = true })).ServeHTTP(staticTokenRecorder, staticTokenReq)
+		if staticTokenCalled || staticTokenRecorder.Code != http.StatusForbidden || !strings.Contains(staticTokenRecorder.Body.String(), "<Code>InvalidToken</Code>") || observed.read > postBeforeFileLimit+1 || spoolSpy.acquired != 0 {
+			t.Fatalf("static extra token=%q called=%v status=%d bytes=%d quota=%d body=%s", extraToken, staticTokenCalled, staticTokenRecorder.Code, observed.read, spoolSpy.acquired, staticTokenRecorder.Body.String())
+		}
+	}
+	sessionExpiry := time.Now().UTC().Add(time.Minute)
+	sessionStore, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", SessionToken: "session-token", ExpiresAt: &sessionExpiry, Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionRequest := validSignedSessionPostRequest(t, time.Now().UTC().Add(time.Hour), "session-token")
+	sessionCalled := false
+	sessionRecorder := httptest.NewRecorder()
+	AuthMiddleware(sessionStore, time.Minute, logger, nil, true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upload, _ := postUploadFromContext(r)
+		sessionCalled = upload != nil && upload.deadline.Equal(sessionExpiry)
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(sessionRecorder, sessionRequest)
+	if !sessionCalled || sessionRecorder.Code != http.StatusNoContent {
+		t.Fatalf("valid session POST called=%v status=%d body=%s", sessionCalled, sessionRecorder.Code, sessionRecorder.Body.String())
+	}
+	exclusiveExpiry := time.Now().UTC().Add(-time.Second)
+	exclusiveStore, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", SessionToken: "session-token", ExpiresAt: &exclusiveExpiry, Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exclusiveRequest := validSignedSessionPostRequestWithTimes(t, time.Now().UTC().Add(time.Hour), time.Now().UTC(), "session-token")
+	exclusiveCalled := false
+	exclusiveRecorder := httptest.NewRecorder()
+	AuthMiddleware(exclusiveStore, time.Minute, logger, nil, true)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { exclusiveCalled = true })).ServeHTTP(exclusiveRecorder, exclusiveRequest)
+	if exclusiveCalled || exclusiveRecorder.Code != http.StatusForbidden || !strings.Contains(exclusiveRecorder.Body.String(), "<Code>ExpiredToken</Code>") {
+		t.Fatalf("exclusive session deadline called=%v status=%d body=%s", exclusiveCalled, exclusiveRecorder.Code, exclusiveRecorder.Body.String())
+	}
+	expiredPolicyStore, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredPolicyRequest := buildSignedPostRequest(t, "/bucket", "bucket", "test.jpg", "test.jpg", "", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1", "", time.Now().UTC().Add(-time.Second), time.Now().UTC())
+	expiredPolicyObserved := &observedRequestBody{Reader: &chunkedBody{reader: expiredPolicyRequest.Body, max: 1}}
+	expiredPolicyRequest.Body = expiredPolicyObserved
+	expiredPolicyCalled := false
+	expiredPolicyRecorder := httptest.NewRecorder()
+	AuthMiddleware(expiredPolicyStore, time.Minute, logger, postAudit, true, limits, spoolSpy)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { expiredPolicyCalled = true })).ServeHTTP(expiredPolicyRecorder, expiredPolicyRequest)
+	if expiredPolicyCalled || expiredPolicyRecorder.Code != http.StatusForbidden || !strings.Contains(expiredPolicyRecorder.Body.String(), "Request has expired.") || expiredPolicyObserved.read > postBeforeFileLimit+1 || spoolSpy.acquired != 0 {
+		t.Fatalf("expired policy called=%v status=%d bytes=%d quota=%d body=%s", expiredPolicyCalled, expiredPolicyRecorder.Code, expiredPolicyObserved.read, spoolSpy.acquired, expiredPolicyRecorder.Body.String())
+	}
+	expiredAt := time.Now().UTC().Add(-time.Second)
+	expiredStore, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", SessionToken: "session-token", ExpiresAt: &expiredAt, Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredRequest := validSignedSessionPostRequestWithTimes(t, time.Now().UTC().Add(time.Hour), time.Now().UTC(), "session-token")
+	expiredObserved := &observedRequestBody{Reader: &chunkedBody{reader: expiredRequest.Body, max: 1}}
+	expiredRequest.Body = expiredObserved
+	expiredCalled := false
+	expiredRecorder := httptest.NewRecorder()
+	AuthMiddleware(expiredStore, time.Minute, logger, nil, true)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { expiredCalled = true })).ServeHTTP(expiredRecorder, expiredRequest)
+	if expiredCalled || expiredRecorder.Code != http.StatusForbidden || !strings.Contains(expiredRecorder.Body.String(), "<Code>ExpiredToken</Code>") || expiredObserved.read > postBeforeFileLimit+1 || spoolSpy.acquired != 0 {
+		t.Fatalf("expired session POST called=%v status=%d bytes=%d quota=%d body=%s", expiredCalled, expiredRecorder.Code, expiredObserved.read, spoolSpy.acquired, expiredRecorder.Body.String())
+	}
+	for _, denied := range []struct {
+		name  string
+		token string
+	}{
+		{"missing session token", ""}, {"wrong session token", "other-token"},
+	} {
+		t.Run(denied.name, func(t *testing.T) {
+			req := validSignedSessionPostRequestWithTimes(t, time.Now().UTC().Add(time.Hour), time.Now().UTC(), denied.token)
+			observed := &observedRequestBody{Reader: &chunkedBody{reader: req.Body, max: 7}}
+			req.Body = observed
+			called := false
+			rec := httptest.NewRecorder()
+			AuthMiddleware(sessionStore, time.Minute, logger, nil, true, limits, spoolSpy)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, req)
+			if called || rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "<Code>InvalidToken</Code>") || observed.read > postBeforeFileLimit+1 || spoolSpy.acquired != 0 {
+				t.Fatalf("called=%v status=%d bytes=%d quota=%d body=%s", called, rec.Code, observed.read, spoolSpy.acquired, rec.Body.String())
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name     string
+		token    string
+		wantCode string
+	}{
+		{"missing required session token", "", "InvalidToken"},
+		{"wrong session token", "wrong-token", "InvalidToken"},
+	} {
+		t.Run("session-case/"+tc.name, func(t *testing.T) {
+			req := validSignedSessionPostRequestWithTimes(t, time.Now().UTC().Add(time.Hour), time.Now().UTC(), tc.token)
+			observed := &observedRequestBody{Reader: &chunkedBody{reader: req.Body, max: 7}}
+			req.Body = observed
+			called := false
+			rec := httptest.NewRecorder()
+			AuthMiddleware(sessionStore, time.Minute, logger, postAudit, true, limits, spoolSpy)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, req)
+			if called || rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "<Code>"+tc.wantCode+"</Code>") || observed.read > postBeforeFileLimit+1 || spoolSpy.acquired != 0 {
+				t.Fatalf("called=%v status=%d bytes=%d quota=%d body=%s", called, rec.Code, observed.read, spoolSpy.acquired, rec.Body.String())
+			}
+		})
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validSignedPostPolicyRequest(t, time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+			if tc.mutate != nil {
+				tc.mutate(req)
+			}
+			observed := &observedRequestBody{Reader: req.Body}
+			if tc.name == "bad signature" || strings.Contains(tc.name, "auth") || tc.name == "future signing date" || tc.name == "unknown form access key" {
+				observed.Reader = &chunkedBody{reader: observed.Reader, max: 7}
+			}
+			req.Body = observed
+			nextCalled := false
+			h := AuthMiddleware(store, time.Minute, logger, postAudit, true, limits, spoolSpy)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true }))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if nextCalled || rec.Code != tc.wantStatus || !strings.Contains(rec.Body.String(), "<Code>"+tc.wantCode+"</Code>") {
+				t.Fatalf("next=%v status=%d want=%d body=%s", nextCalled, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if (tc.name == "bad signature" || strings.Contains(tc.name, "auth") || tc.name == "future signing date" || tc.name == "unknown form access key") && observed.read > postBeforeFileLimit+1 {
+				t.Fatalf("rejected auth consumed %d bytes before authorization", observed.read)
+			}
+			if spoolSpy.acquired != 0 {
+				t.Fatalf("auth failure acquired %d spool reservations", spoolSpy.acquired)
+			}
+			if strings.Contains(rec.Body.String(), "unknown-key-secret") || strings.Contains(rec.Body.String(), "test-secret") {
+				t.Fatal("auth response leaked signing material")
+			}
+			for _, event := range postAudit.GetEvents() {
+				encoded := fmt.Sprintf("%+v", event)
+				for _, secret := range []string{"unknown-key-secret", "session-token", "policy-secret-sentinel", "x-amz-signature", "eyJleHBpcmF0aW9u"} {
+					if strings.Contains(encoded, secret) {
+						t.Fatalf("POST auth audit leaked sensitive value %q", secret)
+					}
+				}
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name       string
+		credential config.GatewayCredential
+		proxied    string
+	}{
+		{"read only", config.GatewayCredential{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadOnly)}, ""},
+		{"scope", config.GatewayCredential{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Buckets: []string{"other"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}, ""},
+		{"global bucket", config.GatewayCredential{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}, "other"},
+	} {
+		t.Run("authorization/"+tc.name, func(t *testing.T) {
+			denialStore, err := NewStaticCredentialStore([]config.GatewayCredential{tc.credential})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := validSignedPostPolicyRequest(t, time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+			observed := &observedRequestBody{Reader: req.Body}
+			observed.Reader = &chunkedBody{reader: observed.Reader, max: 7}
+			req.Body = observed
+			nextCalled := false
+			chain := AuthMiddleware(denialStore, time.Minute, logger, postAudit, true, limits, spoolSpy)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upload, ok := postUploadFromContext(r)
+				if !ok || upload.fileCounter == nil || upload.fileCounter.wire == nil || upload.fileCounter.wire.fileBytes != 0 {
+					t.Errorf("authorization began after file consumption: upload=%+v", upload)
+				}
+				AuthorizationMiddleware(tc.proxied, postAudit)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })).ServeHTTP(w, r)
+			}))
+			rec := httptest.NewRecorder()
+			chain.ServeHTTP(rec, req)
+			if nextCalled || rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "<Code>AccessDenied</Code>") {
+				t.Fatalf("authorization next=%v status=%d body=%s", nextCalled, rec.Code, rec.Body.String())
+			}
+			if observed.read > postBeforeFileLimit+1 {
+				t.Fatalf("authorization denied after reading %d bytes", observed.read)
+			}
+			if spoolSpy.acquired != 0 {
+				t.Fatalf("authorization denial acquired %d spool reservations", spoolSpy.acquired)
+			}
+			for _, event := range postAudit.GetEvents() {
+				encoded := fmt.Sprintf("%+v", event)
+				for _, secret := range []string{"session-token", "test-secret", "x-amz-signature", "eyJleHBpcmF0aW9u"} {
+					if strings.Contains(encoded, secret) {
+						t.Fatalf("POST authorization audit leaked sensitive value %q", secret)
+					}
+				}
+			}
+		})
+	}
+
+	req := validSignedPostPolicyRequest(t, time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+	observed := &observedRequestBody{Reader: &chunkedBody{reader: req.Body, max: 1}}
+	req.Body = observed
+	var called bool
+	var capturedUpload *postUpload
+	var capturedCredential Credential
+	auth := AuthMiddleware(store, time.Minute, logger, postAudit, true, limits, spoolSpy)
+	h := auth(AuthorizationMiddleware("", postAudit)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if CredentialLabelFromContext(r) != "post-test" {
+			t.Errorf("credential label missing")
+		}
+		credential, ok := CredentialFromContext(r)
+		capturedCredential = credential
+		if !ok || credential.AccessKey != "AKIAIOSFODNN7EXAMPLE" {
+			t.Errorf("principal missing: %+v %t", credential, ok)
+		}
+		if credential.SecretKey != "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" || credential.Label != "post-test" {
+			t.Errorf("authorization received wrong principal snapshot: %+v", credential)
+		}
+		upload, ok := postUploadFromContext(r)
+		capturedUpload = upload
+		if !ok || upload.bucket != "bucket" || upload.key != "test.jpg" || upload.limitSnapshot != (SpoolLimits{Global: 256 * 1024, Part: 32 * 1024}) {
+			t.Errorf("POST context=%+v ok=%t", upload, ok)
+		}
+		if upload.fileCounter == nil || upload.fileCounter.wire == nil || upload.fileCounter.wire.fileBytes != 0 {
+			t.Errorf("positive request consumed file bytes before downstream entry: %+v", upload.fileCounter)
+		}
+		limits.Set(SpoolLimits{Global: 128 * 1024, Part: 16 * 1024})
+		if err := store.Replace([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "rotated-secret", Label: "rotated", Buckets: []string{"new-bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadOnly)}}); err != nil {
+			t.Errorf("rotate credentials during request: %v", err)
+		}
+		if credential.SecretKey != "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" || credential.Label != "post-test" || credential.Policy.Permissions != config.ObjectPermissionReadWrite || !credential.AllowsBucket("bucket") {
+			t.Errorf("captured authenticated snapshot changed during replacement: %+v", credential)
+		}
+		if upload.limitSnapshot.Global != 256*1024 || upload.limitSnapshot.Part != 32*1024 {
+			t.Errorf("request limits changed under request: %+v", upload.limitSnapshot)
+		}
+		read, err := io.Copy(io.Discard, upload.fileRead)
+		if err != nil || read != 64*1024 {
+			t.Errorf("file read=%d err=%v", read, err)
+		}
+		if err := upload.Finish(); err != nil {
+			t.Errorf("Finish: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusNoContent || observed.read < 64*1024 {
+		t.Fatalf("called=%v status=%d body-read=%d", called, rec.Code, observed.read)
+	}
+	if capturedUpload == nil || capturedUpload.file != nil || capturedUpload.fields != nil || capturedUpload.fileRead != nil {
+		t.Fatalf("request cleanup did not clear upload: %+v", capturedUpload)
+	}
+	if spoolSpy.acquired != 0 {
+		t.Fatalf("auth chain unexpectedly acquired %d spool reservations", spoolSpy.acquired)
+	}
+	if capturedCredential.SecretKey != "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" || capturedCredential.Label != "post-test" || !capturedCredential.AllowsBucket("bucket") {
+		t.Fatalf("in-flight credential snapshot mutated after next returned: %+v", capturedCredential)
+	}
+	nextRequest := validSignedPostPolicyRequest(t, time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+	nextSawLimits := false
+	nextLabel := ""
+	nextHandler := auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upload, _ := postUploadFromContext(r)
+		nextSawLimits = upload != nil && upload.limitSnapshot == (SpoolLimits{Global: 128 * 1024, Part: 16 * 1024})
+		credential, _ := CredentialFromContext(r)
+		nextLabel = CredentialLabelFromContext(r)
+		if credential.SecretKey != "rotated-secret" || credential.Policy.Permissions != config.ObjectPermissionReadOnly || !credential.AllowsBucket("new-bucket") {
+			t.Errorf("next request did not observe new snapshot: %+v", credential)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	nextRequest = buildSignedPostRequest(t, "/new-bucket", "new-bucket", "test.jpg", "test.jpg", "", "AKIAIOSFODNN7EXAMPLE", "rotated-secret", "us-east-1", "", time.Now().UTC().Add(time.Hour), time.Now().UTC())
+	nextRecorder := httptest.NewRecorder()
+	nextHandler.ServeHTTP(nextRecorder, nextRequest)
+	if !nextSawLimits || nextRecorder.Code != http.StatusNoContent || nextLabel != "rotated" {
+		t.Fatalf("next request snapshot: limitsSeen=%v label=%q status=%d body=%s", nextSawLimits, nextLabel, nextRecorder.Code, nextRecorder.Body.String())
+	}
+	oldSecretRequest := validSignedPostPolicyRequest(t, time.Now().UTC().Add(time.Hour).Format(time.RFC3339))
+	oldBodyCounter := &observedRequestBody{Reader: &chunkedBody{reader: oldSecretRequest.Body, max: 1}}
+	oldSecretRequest.Body = oldBodyCounter
+	oldSecretCalled := false
+	oldSecretRecorder := httptest.NewRecorder()
+	AuthMiddleware(store, time.Minute, logger, postAudit, true, limits, spoolSpy)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { oldSecretCalled = true })).ServeHTTP(oldSecretRecorder, oldSecretRequest)
+	if oldSecretCalled || oldSecretRecorder.Code != http.StatusForbidden || !strings.Contains(oldSecretRecorder.Body.String(), "<Code>SignatureDoesNotMatch</Code>") || oldBodyCounter.read > postBeforeFileLimit+1 || spoolSpy.acquired != 0 {
+		t.Fatalf("old secret request called=%v status=%d bytes=%d quota=%d", oldSecretCalled, oldSecretRecorder.Code, oldBodyCounter.read, spoolSpy.acquired)
+	}
+	for _, filename := range []string{"plain + plus.txt", "dir/sub.dot/../literal.txt", "雪だるま.txt"} {
+		key := "prefix/${filename}/tail/"
+		base := filename
+		if slash := strings.LastIndexAny(base, "/\\"); slash >= 0 {
+			base = base[slash+1:]
+		}
+		effectiveKey := strings.ReplaceAll(key, "${filename}", base)
+		date := time.Now().UTC().Format("20060102T150405Z")
+		scope := "AKIAIOSFODNN7EXAMPLE/" + date[:8] + "/us-east-1/s3/aws4_request"
+		policy := fmt.Sprintf(`{"expiration":%q,"conditions":[{"bucket":"bucket"},{"key":%q},{"x-amz-algorithm":"AWS4-HMAC-SHA256"},{"x-amz-credential":%q},{"x-amz-date":%q}]}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano), effectiveKey, scope, date)
+		fields := map[string]string{"bucket": "bucket", "key": key, "x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": scope, "x-amz-date": date}
+		req := buildSignedPostForm(t, "/bucket", policy, fields, "positive", "auth-post-boundary", "rotated-secret", "us-east-1", filename)
+		rotatedStore, err := NewStaticCredentialStore([]config.GatewayCredential{{AccessKey: "AKIAIOSFODNN7EXAMPLE", SecretKey: "rotated-secret", Label: "rotated", Buckets: []string{"bucket"}, Permissions: permissionPtr(config.ObjectPermissionReadWrite)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		rec := httptest.NewRecorder()
+		AuthMiddleware(rotatedStore, time.Minute, logger, postAudit, true, limits)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upload, ok := postUploadFromContext(r)
+			wantKey := effectiveKey
+			if !ok || upload.key != wantKey || upload.fileCounter.wire.fileBytes != 0 {
+				t.Errorf("filename %q upload=%+v want key=%q", filename, upload, wantKey)
+			}
+			called = true
+			if _, err := io.Copy(io.Discard, upload.fileRead); err != nil {
+				t.Errorf("filename %q read: %v", filename, err)
+			}
+			if err := upload.Finish(); err != nil {
+				t.Errorf("filename %q Finish: %v", filename, err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})).ServeHTTP(rec, req)
+		if !called || rec.Code != http.StatusNoContent {
+			t.Fatalf("filename %q called=%v status=%d body=%s", filename, called, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func permissionPtr(p config.ObjectPermission) *config.ObjectPermission { return &p }
+
+func tamperPostSignatureBody(r *http.Request) io.ReadCloser {
+	data, _ := io.ReadAll(r.Body)
+	text := string(data)
+	const signature = "8afdbf4008c03f22c2cd3cdb72e4afbb1f6a588f3255ac628749a66d7f09699e"
+	if strings.Contains(text, signature) {
+		text = strings.Replace(text, signature, "0"+signature[1:], 1)
+	} else {
+		// The generated signature is dynamic, so alter the value in its named
+		// scalar part while preserving the rest of the multipart wire.
+		if index := strings.Index(text, "name=\"x-amz-signature\""); index >= 0 {
+			if start := strings.Index(text[index:], "\r\n\r\n"); start >= 0 {
+				value := index + start + 4
+				if value < len(text) {
+					replacement := byte('0')
+					if text[value] == replacement {
+						replacement = '1'
+					}
+					text = text[:value] + string(replacement) + text[value+1:]
+				}
+			}
+		}
+	}
+	return io.NopCloser(strings.NewReader(text))
+}
+
+func mutatePostScalarBody(r *http.Request, field, value string) io.ReadCloser {
+	data, _ := io.ReadAll(r.Body)
+	text := string(data)
+	marker := "name=\"" + field + "\""
+	if index := strings.Index(text, marker); index >= 0 {
+		if start := strings.Index(text[index:], "\r\n\r\n"); start >= 0 {
+			valueStart := index + start + 4
+			valueEnd := strings.Index(text[valueStart:], "\r\n")
+			if valueEnd >= 0 {
+				text = text[:valueStart] + value + text[valueStart+valueEnd:]
+			}
+		}
+	}
+	return io.NopCloser(strings.NewReader(text))
+}
+
+func removePostScalarBody(r *http.Request, field string) io.ReadCloser {
+	data, _ := io.ReadAll(r.Body)
+	text := string(data)
+	name := "name=\"" + field + "\""
+	if index := strings.Index(text, name); index >= 0 {
+		start := strings.LastIndex(text[:index], "--")
+		end := strings.Index(text[index:], "\r\n--")
+		if start >= 0 && end >= 0 {
+			text = text[:start] + text[index+end+2:]
+		}
+	}
+	return io.NopCloser(strings.NewReader(text))
+}
+
+func duplicatePostScalarBody(r *http.Request, field, value string) io.ReadCloser {
+	data, _ := io.ReadAll(r.Body)
+	text := string(data)
+	marker := "name=\"" + field + "\""
+	if index := strings.Index(text, marker); index >= 0 {
+		end := strings.Index(text[index:], "\r\n")
+		if end >= 0 {
+			partStart := strings.LastIndex(text[:index], "--")
+			partEnd := strings.Index(text[index+end:], "\r\n--")
+			if partStart >= 0 && partEnd >= 0 {
+				partEnd = index + end + partEnd
+				part := text[partStart:partEnd]
+				text = text[:partEnd] + part + "\r\n" + value + text[partEnd:]
+			}
+		}
+	}
+	return io.NopCloser(strings.NewReader(text))
+}
+
 func TestAuthMiddleware_NoCredentials(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)

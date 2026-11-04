@@ -2249,7 +2249,7 @@ func TestValidateReloadSafety_Coverage(t *testing.T) {
 			name:    "backend.provider changed",
 			mutate:  func(c *Config) { c.Backend.Provider = "garage" },
 			wantErr: true,
-			wantMsg: "backend.provider",
+			wantMsg: "backend transport cannot be changed during hot reload",
 		},
 		{
 			name:    "key_manager.enabled changed",

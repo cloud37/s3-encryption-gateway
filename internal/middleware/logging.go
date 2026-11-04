@@ -111,11 +111,12 @@ func createLogEntry(r *http.Request, rw *responseWriter, duration time.Duration,
 		entry.Headers = make(map[string]string)
 		for name, values := range r.Header {
 			lowerName := strings.ToLower(name)
-			if shouldRedactHeader(lowerName, cfg.RedactHeaders) {
-				entry.Headers[lowerName] = "[REDACTED]"
+			key := lowerName
+			if shouldRedactHeader(lowerName, cfg.RedactHeaders) || isMandatorySensitiveHeader(lowerName) {
+				entry.Headers[key] = "[REDACTED]"
 			} else {
 				// Join multiple values with comma
-				entry.Headers[lowerName] = strings.Join(values, ",")
+				entry.Headers[key] = strings.Join(values, ",")
 			}
 		}
 	}
@@ -132,6 +133,22 @@ func shouldRedactHeader(headerName string, redactHeaders []string) bool {
 		}
 	}
 	return false
+}
+
+// isMandatorySensitiveHeader is a non-configurable telemetry floor. Operators
+// may redact additional headers with RedactHeaders, but cannot opt these values
+// back into logs or spans.
+func isMandatorySensitiveHeader(headerName string) bool {
+	switch strings.ToLower(headerName) {
+	case "authorization", "proxy-authorization", "x-amz-security-token",
+		"x-amz-credential", "x-amz-signature", "signature", "policy",
+		"x-amz-server-side-encryption-customer-algorithm",
+		"x-amz-server-side-encryption-customer-key",
+		"x-amz-server-side-encryption-customer-key-md5":
+		return true
+	default:
+		return false
+	}
 }
 
 // logDefault logs in the default structured format (backward compatible).

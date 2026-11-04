@@ -281,7 +281,7 @@ func TestValidateReloadSafety(t *testing.T) {
 				Backend: BackendConfig{Provider: "minio"},
 			},
 			expectError: true,
-			errorMsg:    "backend.provider cannot be changed during hot reload",
+			errorMsg:    "backend transport cannot be changed during hot reload",
 		},
 		{
 			name: "backend type change rejected",
@@ -292,7 +292,7 @@ func TestValidateReloadSafety(t *testing.T) {
 				Backend: BackendConfig{Type: BackendTypeGCS},
 			},
 			expectError: true,
-			errorMsg:    "backend.type cannot be changed during hot reload",
+			errorMsg:    "backend transport cannot be changed during hot reload",
 		},
 	}
 

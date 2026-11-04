@@ -23,6 +23,7 @@ import (
 //
 // Compile-time assertion: *azureClient implements Client.
 var _ Client = (*azureClient)(nil)
+var _ AdvancedObjectClient = (*azureClient)(nil)
 
 type azureClient struct {
 	inner Client
@@ -55,6 +56,85 @@ func newAzureClient(cfg *config.BackendConfig, opts ...ClientFactoryOption) (Cli
 }
 
 // ---- overrides ----
+
+func (c *azureClient) PutObjectWithOptions(ctx context.Context, bucket, key string, body io.Reader, metadata map[string]string, length *int64, tags string, lock *ObjectLockInput, acl, grantFullControl, grantRead, grantReadACP, grantWriteACP string, options ObjectPutOptions) (PutObjectResult, error) {
+	if c == nil {
+		return PutObjectResult{}, fmt.Errorf("azure: nil client")
+	}
+	advanced, err := advancedAdapterClient(c.inner, options)
+	if err != nil {
+		return PutObjectResult{}, fmt.Errorf("azure: %w", err)
+	}
+	if nilObjectInput(ctx) || nilObjectInput(body) {
+		return PutObjectResult{}, fmt.Errorf("azure: object put requires context and body")
+	}
+	if err := validateAzureMetadata(metadata); err != nil {
+		return PutObjectResult{}, err
+	}
+	options.StorageClass = ""
+	result, err := advanced.PutObjectWithOptions(ctx, bucket, key, body, metadata, length, tags, lock, acl, grantFullControl, grantRead, grantReadACP, grantWriteACP, options)
+	return result, mapAzureError(err)
+}
+
+func (c *azureClient) GetObjectWithOptions(ctx context.Context, bucket, key string, versionID, rangeHeader *string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	if c == nil {
+		return nil, nil, fmt.Errorf("azure: nil client")
+	}
+	if options.Customer != nil {
+		return nil, nil, fmt.Errorf("azure: customer encryption: %w", ErrNotImplemented)
+	}
+	advanced, err := advancedAdapterClient(c.inner, ObjectPutOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("azure: %w", err)
+	}
+	if nilObjectInput(ctx) {
+		return nil, nil, fmt.Errorf("azure: object read requires context")
+	}
+	body, meta, err := advanced.GetObjectWithOptions(ctx, bucket, key, versionID, rangeHeader, options)
+	if err != nil {
+		return body, meta, mapAzureError(err)
+	}
+	return body, objectmeta.NormalizeBackendKeys(meta), nil
+}
+
+func (c *azureClient) GetObjectIfMatch(ctx context.Context, bucket, key string, versionID, rangeHeader *string, ifMatch string, options ObjectReadOptions) (io.ReadCloser, map[string]string, error) {
+	if c == nil || nilObjectInput(ctx) || ifMatch == "" {
+		return nil, nil, fmt.Errorf("azure: conditional read requires client, context and ETag")
+	}
+	if options.Customer != nil {
+		return nil, nil, fmt.Errorf("azure: customer encryption: %w", ErrNotImplemented)
+	}
+	inner, ok := c.inner.(ConditionalObjectReader)
+	if !ok || nilObjectInput(inner) {
+		return nil, nil, fmt.Errorf("azure: conditional read: %w", ErrNotImplemented)
+	}
+	body, meta, err := inner.GetObjectIfMatch(ctx, bucket, key, versionID, rangeHeader, ifMatch, options)
+	if err != nil {
+		return body, meta, mapAzureError(err)
+	}
+	return body, objectmeta.NormalizeBackendKeys(meta), nil
+}
+
+func (c *azureClient) HeadObjectWithOptions(ctx context.Context, bucket, key string, versionID *string, options ObjectReadOptions) (map[string]string, error) {
+	if c == nil {
+		return nil, fmt.Errorf("azure: nil client")
+	}
+	if options.Customer != nil {
+		return nil, fmt.Errorf("azure: customer encryption: %w", ErrNotImplemented)
+	}
+	advanced, err := advancedAdapterClient(c.inner, ObjectPutOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("azure: %w", err)
+	}
+	if nilObjectInput(ctx) {
+		return nil, fmt.Errorf("azure: object read requires context")
+	}
+	meta, err := advanced.HeadObjectWithOptions(ctx, bucket, key, versionID, options)
+	if err != nil {
+		return meta, mapAzureError(err)
+	}
+	return objectmeta.NormalizeBackendKeys(meta), nil
+}
 
 func (c *azureClient) PutObject(ctx context.Context, bucket, key string, reader io.Reader, metadata map[string]string, contentLength *int64, tags string, lock *ObjectLockInput, cannedACL, grantFullControl, grantRead, grantReadACP, grantWriteACP string) (string, error) {
 	if err := validateAzureMetadata(metadata); err != nil {

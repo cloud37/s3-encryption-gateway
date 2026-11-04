@@ -17,6 +17,7 @@ import (
 
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
+	"github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -352,6 +353,7 @@ func TestProjectObjectHeaders_ETagAndResponseOverridePrecedence(t *testing.T) {
 		{name: "plaintext backend", backend: `"plain-backend"`, want: `"plain-backend"`},
 		{name: "mpu backend", class: crypto.ObjectClass{Encrypted: true, Format: crypto.FormatMPUV2}, backend: `"multipart-etag"`, want: `"multipart-etag"`},
 		{name: "encrypted original takes precedence", class: crypto.ObjectClass{Encrypted: true}, meta: map[string]string{crypto.MetaOriginalETag: "original"}, backend: `"ciphertext"`, want: `"original"`},
+		{name: "SSE-C backend ETag remains opaque", class: crypto.ObjectClass{Encrypted: true}, meta: map[string]string{crypto.MetaOriginalETag: "original", "x-amz-server-side-encryption-customer-algorithm": "AES256", "Cache-Control": "stored"}, backend: `"opaque"`, want: `"opaque"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projected, err := projectObjectHeaders(objectResponseSource{Class: tc.class, Meta: tc.meta, BackendETag: tc.backend}, responseShape{Method: http.MethodGet})
@@ -361,6 +363,9 @@ func TestProjectObjectHeaders_ETagAndResponseOverridePrecedence(t *testing.T) {
 			if got := projected.Get("ETag"); got != tc.want {
 				t.Fatalf("ETag=%q want=%q", got, tc.want)
 			}
+			if tc.name == "SSE-C backend ETag remains opaque" && projected.Get("Cache-Control") != "no-store" {
+				t.Fatalf("Cache-Control=%q want no-store", projected.Get("Cache-Control"))
+			}
 		})
 	}
 	head, err := projectObjectHeaders(objectResponseSource{Meta: map[string]string{"Content-Type": "stored"}, PlainSize: 0}, responseShape{Method: http.MethodHead, Overrides: url.Values{"response-content-type": {"override"}}})
@@ -369,6 +374,62 @@ func TestProjectObjectHeaders_ETagAndResponseOverridePrecedence(t *testing.T) {
 	}
 	if got := head.Get("Content-Type"); got != "stored" {
 		t.Fatalf("HEAD applied GET override: got %q", got)
+	}
+	sseHeaders, err := projectObjectHeaders(objectResponseSource{Class: crypto.ObjectClass{Encrypted: true}, Meta: map[string]string{"x-amz-server-side-encryption": "aws:kms", "x-amz-server-side-encryption-aws-kms-key-id": "kms-id", "x-amz-server-side-encryption-bucket-key-enabled": "true", "x-amz-expiration": "expiry", "x-amz-storage-class": "STANDARD_IA", "x-amz-website-redirect-location": "/new"}}, responseShape{Method: http.MethodGet, Overrides: url.Values{"response-cache-control": {"public"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"X-Amz-Server-Side-Encryption": "aws:kms", "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id": "kms-id", "X-Amz-Server-Side-Encryption-Bucket-Key-Enabled": "true", "X-Amz-Expiration": "expiry", "X-Amz-Storage-Class": "STANDARD_IA", "X-Amz-Website-Redirect-Location": "/new", "Cache-Control": "public"} {
+		if got := sseHeaders.Get(key); got != want {
+			t.Errorf("%s=%q want %q", key, got, want)
+		}
+	}
+	if _, exists := sseHeaders["X-Amz-Server-Side-Encryption-Context"]; exists {
+		t.Fatal("KMS context must not be projected")
+	}
+	sseHeaders, err = projectObjectHeaders(objectResponseSource{Meta: map[string]string{"x-amz-server-side-encryption-customer-algorithm": "AES256", "Cache-Control": "stored", crypto.MetaOriginalETag: "inside"}, BackendETag: "opaque"}, responseShape{Method: http.MethodGet, Overrides: url.Values{"response-cache-control": {"public"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sseHeaders.Get("ETag") != "opaque" || sseHeaders.Get("Cache-Control") != "no-store" {
+		t.Fatalf("SSE-C projection ETag=%q Cache-Control=%q", sseHeaders.Get("ETag"), sseHeaders.Get("Cache-Control"))
+	}
+}
+
+func TestProjectObjectWriteHeaders_ClosedChecksumAndCustomerSSEPolicy(t *testing.T) {
+	result := objectWriteResult{
+		Backend: s3.PutObjectResult{ETag: `"opaque-backend"`, Headers: map[string]string{
+			sseCustomerAlg: "AES256", sseCustomerMD5: "opaque-md5",
+			sseCustomerKey: "must-not-escape", sseKMSContextHeader: "must-not-escape",
+		}},
+		ClientETag: `"plaintext-selected"`,
+	}
+	checksums := map[string]string{
+		"ETag":                         `"attacker-etag"`,
+		"x-amz-checksum-crc32":         "crc32",
+		"X-Amz-Checksum-CRC32C":        "crc32c",
+		"x-amz-checksum-sha1":          "sha1",
+		"x-amz-checksum-sha256":        "sha256",
+		"x-amz-checksum-crc64nvme":     "unsupported",
+		"x-amz-checksum-arbitrary":     "unknown",
+		"x-amz-server-side-encryption": "attacker-sse",
+	}
+	got := projectObjectWriteHeaders(result, checksums)
+	if got.Get("ETag") != `"opaque-backend"` {
+		t.Fatalf("backend SSE-C must supersede plaintext ETag, got %q", got.Get("ETag"))
+	}
+	if got.Get("Cache-Control") != "no-store" {
+		t.Fatalf("backend-declared SSE-C cache policy=%q", got.Get("Cache-Control"))
+	}
+	for _, key := range []string{"x-amz-checksum-crc32", "x-amz-checksum-crc32c", "x-amz-checksum-sha1", "x-amz-checksum-sha256"} {
+		if got.Get(key) == "" {
+			t.Errorf("allowlisted checksum %s missing", key)
+		}
+	}
+	for _, key := range []string{"x-amz-checksum-crc64nvme", "x-amz-checksum-arbitrary", "x-amz-server-side-encryption-context", sseCustomerKey, "Content-Length"} {
+		if _, exists := got[http.CanonicalHeaderKey(key)]; exists {
+			t.Errorf("disallowed response header %s leaked: %v", key, got)
+		}
 	}
 }
 

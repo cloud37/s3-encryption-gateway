@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -519,9 +520,9 @@ func TestChunkedEncrypt_DoesNotPreRead(t *testing.T) {
 func TestChunkedEncryptFallback_NoDoubleBuffer(t *testing.T) {
 	profile := &ProviderProfile{
 		Name:                "test-tiny-headers",
-		UserMetadataLimit:   50,
+		UserMetadataLimit:   1024,
 		SystemMetadataLimit: 0,
-		TotalHeaderLimit:    80,
+		TotalHeaderLimit:    8192,
 		SupportsLongKeys:    true,
 		CompactionStrategy:  "base64url",
 	}
@@ -538,27 +539,40 @@ func TestChunkedEncryptFallback_NoDoubleBuffer(t *testing.T) {
 
 	data := []byte("Hello, fallback world! This is test data for V1.0-SEC-14.")
 
-	encReader, meta, err := encEngine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(data), map[string]string{
-		"Content-Length": fmt.Sprintf("%d", len(data)),
-		"Content-Type":   "text/plain",
+	tracker := &profileObservedReader{reader: bytes.NewReader(data)}
+	encReader, meta, err := encEngine.Encrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, tracker, map[string]string{
+		"Content-Length":      fmt.Sprintf("%d", len(data)),
+		"Content-Type":        "text/plain",
+		"x-amz-meta-overflow": strings.Repeat("v", 2000),
 	})
 	if err != nil {
 		t.Fatalf("Encrypt failed: %v", err)
 	}
 
-	if meta[MetaFallbackMode] != "true" {
-		t.Fatalf("Expected fallback mode, got MetaFallbackMode=%q", meta[MetaFallbackMode])
+	assertFallbackEnvelope(t, profile, meta, "2", "chunked-v2")
+	expanded, err := concreteEngine.compactor.ExpandMetadata(meta)
+	if err != nil || expanded[MetaFallbackMode] != "true" || expanded[MetaFallbackVersion] != "2" {
+		t.Fatal("expected chunked fallback")
+	}
+	if tracker.bytesRead != 0 {
+		t.Fatal("fallback selection pre-read source")
 	}
 
-	// The fallback path inherently consumes the source inside Encrypt because
-	// aead.Seal requires the full ciphertext buffer.  The fix for V1.0-SEC-14
-	// here is that plaintext is NOT held simultaneously — only ciphertext is.
+	// The fallback reader consumes the source only as the ciphertext is read.
 	encryptedData, err := io.ReadAll(encReader)
 	if err != nil {
 		t.Fatalf("Failed to read encrypted data: %v", err)
 	}
 	if len(encryptedData) == 0 {
 		t.Fatal("Encrypted data is empty")
+	}
+	decoded, _, err := encEngine.Decrypt(context.Background(), ObjectContext{Bucket: "test-bucket", Key: "test-key"}, bytes.NewReader(encryptedData), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := io.ReadAll(decoded)
+	if err != nil || !bytes.Equal(plain, data) {
+		t.Fatal("chunked fallback roundtrip failed")
 	}
 }
 

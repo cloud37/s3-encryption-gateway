@@ -74,6 +74,28 @@ func TestTracingMiddleware_NoRedaction(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestTracingMiddleware_MandatoryHeadersRedactedWhenBroadRedactionDisabled(t *testing.T) {
+	_, sr := setupTestTracer(t)
+	req := httptest.NewRequest(http.MethodPost, "/bucket?versionId=benign", nil)
+	req.Header["authorization"] = []string{"auth-first-canary", "auth-second-canary"}
+	req.Header["X-AUTHORIZATION"] = []string{"auth-case-canary"}
+	req.Header.Set("X-Amz-Security-Token", "session-token-canary")
+	req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Key", "customer-key-canary")
+	req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Key-MD5", "customer-md5-canary")
+	req.Header.Set("X-Amz-Server-Side-Encryption-Customer-Algorithm", "customer-algorithm-canary")
+	req.Header.Set("Content-Type", "application/xml")
+	TracingMiddleware(false, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(httptest.NewRecorder(), req)
+	ended := sr.Ended()
+	for _, header := range []string{"authorization", "x-amz-security-token", "x-amz-server-side-encryption-customer-key", "x-amz-server-side-encryption-customer-key-md5", "x-amz-server-side-encryption-customer-algorithm"} {
+		if got := findSpanAttribute(ended, "http.request.header."+header); got != "[REDACTED]" {
+			t.Fatalf("mandatory %s attribute=%q want redacted", header, got)
+		}
+	}
+	if got := findSpanAttribute(ended, "http.request.header.content-type"); got != "application/xml" {
+		t.Fatalf("benign Content-Type=%q", got)
+	}
+}
+
 func TestTracingMiddleware_HTTPURL_NoQueryString(t *testing.T) {
 	_, sr := setupTestTracer(t)
 

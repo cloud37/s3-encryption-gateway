@@ -224,6 +224,12 @@ config:
             secretKeyRef:
               name: s3-encryption-gateway-secrets
               key: gateway-secret-key
+        # Optional session credentials. Omit sessionToken entirely for static
+        # credentials; expiresAt is required for a non-empty token.
+        # sessionToken:
+        #   value: "<development-only-token>"
+        #   valueFrom: {}
+        # expiresAt: "2027-01-15T12:00:00Z"
         label: "default"
         # Omit buckets for unrestricted access; use [] for deny-all.
         # buckets: ["tenant-a", "shared-*"]
@@ -264,6 +270,10 @@ config:
         secretKeyRef:
           name: s3-encryption-gateway-secrets
           key: backend-secret-key
+    # Independent backend identity token; empty by default for static identity.
+    sessionToken:
+      value: ""
+      valueFrom: {}
     provider:
       value: ""
       valueFrom: {}
@@ -271,6 +281,12 @@ config:
       #   configMapKeyRef:
       #     name: s3-encryption-gateway-config
       #     key: backend-provider
+    metadataProfile:
+      value: ""
+      valueFrom: {}
+    postInlineTagging:
+      value: ""
+      valueFrom: {}
     useSSL:
       value: "true"
     usePathStyle:

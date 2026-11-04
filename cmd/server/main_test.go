@@ -567,7 +567,8 @@ func TestApplyConfigChanges_InvalidCredentialReloadRetainsOldCredentials(t *test
 	applier := NewConfigChangeApplier(logger, nil, nil, nil, nil, oldCfg, nil, store)
 	err = applier.ApplyConfigChanges(oldCfg, newCfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "replace credential store")
+	assert.Contains(t, err.Error(), "prepare credential reload: auth.credentials[1]: duplicate access_key")
+	assert.NotContains(t, err.Error(), "secret2")
 
 	// Old credential should still be available after failed reload.
 	cred, err := store.Lookup("key1")

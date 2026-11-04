@@ -9,13 +9,24 @@ import (
 	"testing"
 )
 
+func assertFallbackEnvelope(t *testing.T, profile *ProviderProfile, metadata map[string]string, version, format string) {
+	t.Helper()
+	if err := profile.ValidateMetadataSize(persistedMetadataEnvelope(metadata)); err != nil {
+		t.Fatalf("final fallback envelope exceeds profile: %v", err)
+	}
+	expanded, err := NewMetadataCompactor(profile).ExpandMetadata(metadata)
+	if err != nil || expanded[MetaEncrypted] != "true" || expanded[MetaFallbackMode] != "true" || expanded[MetaFallbackVersion] != version || expanded[MetaObjectFormatVersion] != format {
+		t.Fatalf("unexpected fallback envelope version=%q format=%q err=%v", expanded[MetaFallbackVersion], expanded[MetaObjectFormatVersion], err)
+	}
+}
+
 func TestEngine_MetadataFallback(t *testing.T) {
-	// Create a provider profile with very small limits to force fallback
+	// The ordinary metadata exceeds this profile while its mandatory envelope fits.
 	profile := &ProviderProfile{
 		Name:                "test-small-limits",
-		UserMetadataLimit:   50, // Very small limit to force fallback
+		UserMetadataLimit:   1024,
 		SystemMetadataLimit: 0,
-		TotalHeaderLimit:    500, // Small enough to require fallback, large enough for required headers
+		TotalHeaderLimit:    8192,
 		SupportsLongKeys:    true,
 		CompactionStrategy:  "base64url",
 	}
@@ -38,7 +49,7 @@ func TestEngine_MetadataFallback(t *testing.T) {
 	// Create metadata that will exceed limits even when compacted
 	largeMetadata := map[string]string{
 		"Content-Type": "application/json",
-		"x-amz-meta-very-long-user-metadata-key-that-exceeds-limits": "very-long-user-metadata-value-that-will-cause-header-overflow",
+		"x-amz-meta-very-long-user-metadata-key-that-exceeds-limits": string(bytes.Repeat([]byte("v"), 2000)),
 		"x-amz-meta-another-key": "another-value",
 		"x-amz-meta-third-key":   "third-value",
 	}
@@ -52,6 +63,7 @@ func TestEngine_MetadataFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encrypt() failed: %v", err)
 	}
+	assertFallbackEnvelope(t, profile, encMetadata, "3", "buffered-fallback-v2")
 
 	// Verify fallback mode was used
 	expanded, err := concreteEngine.compactor.ExpandMetadata(encMetadata)
@@ -114,7 +126,7 @@ func TestEngine_MetadataFallback(t *testing.T) {
 	if decMetadata["Content-Type"] != "application/json" {
 		t.Errorf("Content-Type not restored: got %q", decMetadata["Content-Type"])
 	}
-	if decMetadata["x-amz-meta-very-long-user-metadata-key-that-exceeds-limits"] != "very-long-user-metadata-value-that-will-cause-header-overflow" {
+	if decMetadata["x-amz-meta-very-long-user-metadata-key-that-exceeds-limits"] != string(bytes.Repeat([]byte("v"), 2000)) {
 		t.Errorf("User metadata not restored")
 	}
 }
@@ -153,13 +165,14 @@ func TestBufferedFallback_RecordingKeyManagerAndMissingEnvelope(t *testing.T) {
 	}
 	SetKeyManager(enc, km)
 	e := enc.(*engine)
-	p := &ProviderProfile{Name: "kms-compact", UserMetadataLimit: 40, TotalHeaderLimit: 1000, SupportsLongKeys: true, CompactionStrategy: "base64url"}
+	p := &ProviderProfile{Name: "kms-compact", UserMetadataLimit: 1024, TotalHeaderLimit: 8192, SupportsLongKeys: true, CompactionStrategy: "base64url"}
 	e.providerProfile, e.compactor = p, NewMetadataCompactor(p)
 	obj := ObjectContext{Bucket: "bucket", Key: "key"}
-	r, meta, err := e.Encrypt(context.Background(), obj, bytes.NewReader([]byte("kms body")), map[string]string{"x-amz-meta-overflow": string(bytes.Repeat([]byte("q"), 150))})
+	r, meta, err := e.Encrypt(context.Background(), obj, bytes.NewReader([]byte("kms body")), map[string]string{"x-amz-meta-overflow": string(bytes.Repeat([]byte("q"), 2000))})
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertFallbackEnvelope(t, p, meta, "3", "buffered-fallback-v2")
 	if km.wraps != 1 {
 		t.Fatalf("WrapKey calls=%d", km.wraps)
 	}
@@ -264,14 +277,15 @@ func TestBufferedFallback_BindsRelocationAndFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := encEngine.(*engine)
-	profile := &ProviderProfile{Name: "overflow", UserMetadataLimit: 50, TotalHeaderLimit: 500, SupportsLongKeys: true, CompactionStrategy: "base64url"}
+	profile := &ProviderProfile{Name: "overflow", UserMetadataLimit: 1024, TotalHeaderLimit: 8192, SupportsLongKeys: true, CompactionStrategy: "base64url"}
 	e.providerProfile, e.compactor = profile, NewMetadataCompactor(profile)
 	object := ObjectContext{Bucket: "source-bucket", Key: "source-key"}
-	meta := map[string]string{"x-amz-meta-overflow": string(bytes.Repeat([]byte("x"), 200))}
+	meta := map[string]string{"x-amz-meta-overflow": string(bytes.Repeat([]byte("x"), 2000))}
 	r, storedMeta, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("secret")), meta)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertFallbackEnvelope(t, profile, storedMeta, "3", "buffered-fallback-v2")
 	body, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
@@ -326,13 +340,14 @@ func TestBufferedFallback_KeyManagerRoundTrip(t *testing.T) {
 	}
 	SetKeyManager(decrypted, manager)
 	e := decrypted.(*engine)
-	p := &ProviderProfile{Name: "kms-overflow", UserMetadataLimit: 40, TotalHeaderLimit: 1000, SupportsLongKeys: true, CompactionStrategy: "base64url"}
+	p := &ProviderProfile{Name: "kms-overflow", UserMetadataLimit: 1024, TotalHeaderLimit: 8192, SupportsLongKeys: true, CompactionStrategy: "base64url"}
 	e.providerProfile, e.compactor = p, NewMetadataCompactor(p)
 	object := ObjectContext{Bucket: "kms-bucket", Key: "kms-key"}
-	r, metadata, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("kms secret")), map[string]string{"x-amz-meta-large": string(bytes.Repeat([]byte("x"), 100))})
+	r, metadata, err := e.Encrypt(context.Background(), object, bytes.NewReader([]byte("kms secret")), map[string]string{"x-amz-meta-large": string(bytes.Repeat([]byte("x"), 2000))})
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertFallbackEnvelope(t, p, metadata, "3", "buffered-fallback-v2")
 	if metadata["x-amz-meta-wk"] == "" || metadata["x-amz-meta-kid"] == "" || metadata["x-amz-meta-kp"] == "" {
 		t.Fatalf("missing envelope metadata: %#v", metadata)
 	}

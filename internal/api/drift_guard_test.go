@@ -50,6 +50,240 @@ func TestProductionDriftGuards(t *testing.T) {
 	}
 }
 
+func TestGH353DriftGuard_SharedWriteAndSecretOwnership(t *testing.T) {
+	files := make(map[string]*ast.File)
+	for _, path := range productionGoFiles(t) {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[filepath.Base(path)] = file
+	}
+	function := func(file string, name string) *ast.FuncDecl {
+		if files[file] == nil {
+			return nil
+		}
+		for _, declaration := range files[file].Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == name {
+				return fn
+			}
+		}
+		return nil
+	}
+	put, post := function("handlers.go", "handlePutObject"), function("post_object.go", "handlePostObject")
+	if put == nil || post == nil {
+		t.Fatal("ordinary PUT or POST handler is missing")
+	}
+	countCalls := func(node ast.Node, name string) int {
+		count := 0
+		ast.Inspect(node, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				switch function := call.Fun.(type) {
+				case *ast.Ident:
+					if function.Name == name {
+						count++
+					}
+				case *ast.SelectorExpr:
+					if function.Sel.Name == name {
+						count++
+					}
+				}
+			}
+			return true
+		})
+		return count
+	}
+	if countCalls(put.Body, "putObjectData") != 1 || countCalls(post.Body, "putObjectData") != 1 {
+		t.Fatalf("ordinary PUT and POST must each call shared putObjectData exactly once (PUT=%d POST=%d)", countCalls(put.Body, "putObjectData"), countCalls(post.Body, "putObjectData"))
+	}
+	postSuccess := function("post_response.go", "writePostSuccess")
+	postProjector := function("object_response.go", "projectPostResponseHeaders")
+	writeProjector := function("object_response.go", "projectObjectWriteHeaders")
+	if countCalls(post.Body, "writePostSuccess") != 1 || postSuccess == nil || postProjector == nil || writeProjector == nil {
+		t.Fatal("POST response headers/version projection must flow through the closed response owners")
+	}
+	if !postResponseOwnershipIntact(postSuccess, postProjector, writeProjector, countCalls) {
+		t.Fatal("POST response owner chain must be writePostSuccess -> projectPostResponseHeaders -> projectObjectWriteHeaders")
+	}
+	if countCalls(put.Body, "writeObjectHeaders") != 1 || countCalls(put.Body, "projectObjectWriteHeaders") != 1 || countCalls(postSuccess.Body, "writeObjectHeaders") == 0 {
+		t.Fatal("ordinary PUT and POST response paths must use the closed object-header writer")
+	}
+	for name, file := range map[string]*ast.File{"handlers.go": files["handlers.go"], "post_object.go": files["post_object.go"], "object_put.go": files["object_put.go"]} {
+		if writes := rawCustomerKeyPersistenceWrites(file); writes != 0 {
+			t.Errorf("%s contains %d raw customer-key persistence writes", name, writes)
+		}
+	}
+	if hasDirectResponseWriteBypass(put.Body) || hasDirectResponseWriteBypass(post.Body) {
+		t.Fatal("production PUT or POST handler contains a direct response-header/customer-key ownership bypass")
+	}
+
+	for _, fixture := range []string{
+		`package fixture
+func bad(h http.ResponseWriter) { headers := h.Header(); alias := headers; alias.Set("x-amz-version-id", "v") }`,
+		`package fixture
+func bad(metadata map[string]string, key []byte) { metadata["x-amz-server-side-encryption-customer-key"] = string(key) }`,
+		`package fixture
+func bad(h http.ResponseWriter) { headers := h.Header(); headers["ETag"] = []string{"x"} }`,
+	} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), "fixture.go", fixture, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !driftGuardFixtureRejectsSharedOwnershipBypass(parsed) {
+			t.Errorf("drift guard missed synthetic ownership bypass: %s", fixture)
+		}
+	}
+	for _, fixture := range []struct {
+		name, source string
+	}{
+		{"good pipeline", `package fixture
+func writePostSuccess(h http.ResponseWriter) { headers := projectPostResponseHeaders(); writeObjectHeaders(h, headers) }
+func projectPostResponseHeaders() http.Header { return projectObjectWriteHeaders() }
+func projectObjectWriteHeaders() http.Header { return nil }
+func writeObjectHeaders(http.ResponseWriter, http.Header) {}`},
+		{"missing common writer", `package fixture
+func writePostSuccess(h http.ResponseWriter) { h.Header().Set("ETag", "unsafe") }
+func projectPostResponseHeaders() http.Header { return nil }
+func projectObjectWriteHeaders() http.Header { return nil }
+func writeObjectHeaders(http.ResponseWriter, http.Header) {}`},
+		{"missing shared projection", `package fixture
+func writePostSuccess(h http.ResponseWriter) { writeObjectHeaders(h, http.Header{}) }
+func projectPostResponseHeaders() http.Header { return nil }
+func projectObjectWriteHeaders() http.Header { return nil }
+func writeObjectHeaders(http.ResponseWriter, http.Header) {}`},
+	} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), fixture.name+".go", fixture.source, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		functions := make(map[string]*ast.FuncDecl)
+		for _, declaration := range parsed.Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok {
+				functions[fn.Name.Name] = fn
+			}
+		}
+		got := postResponseOwnershipIntact(functions["writePostSuccess"], functions["projectPostResponseHeaders"], functions["projectObjectWriteHeaders"], countASTCalls) && !driftGuardFixtureRejectsSharedOwnershipBypass(parsed)
+		if got != (fixture.name == "good pipeline") {
+			t.Errorf("same production guard for %s = %t", fixture.name, got)
+		}
+	}
+}
+
+func hasDirectResponseWriteBypass(node ast.Node) bool {
+	bad := false
+	ast.Inspect(node, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if callMethod(call, "Set") && len(call.Args) > 0 {
+			if key, known := headerWriteKey(call.Args[0]); known && (strings.EqualFold(key, "ETag") || strings.EqualFold(key, "x-amz-version-id") || strings.EqualFold(key, "x-amz-server-side-encryption-customer-key")) {
+				bad = true
+			}
+		}
+		return true
+	})
+	return bad
+}
+
+func countASTCalls(node ast.Node, name string) int {
+	count := 0
+	ast.Inspect(node, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			switch function := call.Fun.(type) {
+			case *ast.Ident:
+				if function.Name == name {
+					count++
+				}
+			case *ast.SelectorExpr:
+				if function.Sel.Name == name {
+					count++
+				}
+			}
+		}
+		return true
+	})
+	return count
+}
+
+func postResponseOwnershipIntact(success, postProjector, writeProjector *ast.FuncDecl, countCalls func(ast.Node, string) int) bool {
+	return success != nil && postProjector != nil && writeProjector != nil &&
+		countCalls(success.Body, "projectPostResponseHeaders") > 0 &&
+		countCalls(success.Body, "writeObjectHeaders") > 0 &&
+		countCalls(postProjector.Body, "projectObjectWriteHeaders") > 0
+}
+
+func driftGuardFixtureRejectsSharedOwnershipBypass(file *ast.File) bool {
+	aliases := responseHeaderAliases(file)
+	bad := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if index, ok := lhs.(*ast.IndexExpr); ok {
+					key, known := headerWriteKey(index.Index)
+					if isResponseHeaderMapIndex(index, aliases) && (!known || key == "ETag" || key == "x-amz-version-id") {
+						bad = true
+					}
+					if known && strings.EqualFold(key, "x-amz-server-side-encryption-customer-key") {
+						bad = true
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if callMethod(n, "Set") && len(n.Args) > 0 {
+				key, known := headerWriteKey(n.Args[0])
+				if isResponseHeaderReceiverOrAlias(callReceiver(n), aliases) && (!known || key == "ETag" || key == "x-amz-version-id") {
+					bad = true
+				}
+				if known && strings.EqualFold(key, "x-amz-server-side-encryption-customer-key") {
+					bad = true
+				}
+			}
+		}
+		return true
+	})
+	return bad
+}
+
+func callMethod(call *ast.CallExpr, name string) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && selector.Sel.Name == name
+}
+
+func callReceiver(call *ast.CallExpr) ast.Expr {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	return selector.X
+}
+
+func rawCustomerKeyPersistenceWrites(file *ast.File) int {
+	if file == nil {
+		return 0
+	}
+	writes := 0
+	ast.Inspect(file, func(node ast.Node) bool {
+		if assignment, ok := node.(*ast.AssignStmt); ok {
+			for _, target := range assignment.Lhs {
+				if index, ok := target.(*ast.IndexExpr); ok {
+					if key, known := headerWriteKey(index.Index); known && strings.EqualFold(key, "x-amz-server-side-encryption-customer-key") {
+						writes++
+					}
+				}
+			}
+		}
+		if call, ok := node.(*ast.CallExpr); ok && callMethod(call, "Set") && len(call.Args) > 0 {
+			if key, known := headerWriteKey(call.Args[0]); known && strings.EqualFold(key, "x-amz-server-side-encryption-customer-key") {
+				writes++
+			}
+		}
+		return true
+	})
+	return writes
+}
+
 func TestDriftGuard_OwnershipFixtureDetectsS3ErrorAndRequestMetric(t *testing.T) {
 	source := `package fixture
 type Metrics struct{}
@@ -95,6 +329,7 @@ func TestDriftGuard_ProductionObjectErrorsHaveSingleOwner(t *testing.T) {
 		"handleUploadPart": true, "handleCompleteMultipartUpload": true, "handleAbortMultipartUpload": true,
 		"handleUploadPartCopy": true, "serveMPURangedGet": true, "serveMPURangedGetPlanned": true,
 		"handleListParts": true, "writeS3ClientError": true, "writeMissingMPUState": true, "writeChunkedCompletenessError": true,
+		"handlePostObject": true,
 	}
 	for _, path := range productionGoFiles(t) {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -395,6 +630,63 @@ func bad() {
 	}
 }
 
+func TestDriftGuard_LocalRequestMetadataIsNotResponseHeaders(t *testing.T) {
+	source := `package fixture
+import "net/http"
+func good(r *http.Request, key string) {
+	metadataHeader := make(http.Header)
+	metadataHeader.Set(key, "request metadata only")
+	metadataHeader["ETag"] = []string{"request metadata only"}
+	r.Header().Set(key, "request header")
+	r.Header()[key] = []string{"request header"}
+}`
+	file, err := parser.ParseFile(token.NewFileSet(), "post_object.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases := responseHeaderAliases(file)
+	if aliases["metadataHeader"] || driftGuardFixtureRejectsSharedOwnershipBypass(file) {
+		t.Fatal("local metadata assembly was classified as a ResponseWriter header write")
+	}
+}
+
+func TestDriftGuard_ArbitraryResponseWriterHeaderOriginsRemainOwned(t *testing.T) {
+	for _, fixture := range []struct {
+		name, source string
+	}{
+		{"renamed writer dynamic Set", `package fixture
+import "net/http"
+	func bad(writer http.ResponseWriter, key string) { writer.Header().Set(key, "unsafe") }`},
+		{"header map-index after chained writer aliases", `package fixture
+import "net/http"
+func bad(writer http.ResponseWriter, key string) {
+	writerAlias := writer
+	first := writerAlias.Header()
+	second := first
+	third := second
+	third[key] = []string{"unsafe"}
+}`},
+		{"dynamic Set after chained header aliases", `package fixture
+import "net/http"
+func bad(writer http.ResponseWriter, key string) {
+	writerAlias := writer
+	first := writerAlias.Header()
+	second := first
+	second.Set(key, "unsafe")
+}`},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), "post_object.go", fixture.source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !driftGuardFixtureRejectsSharedOwnershipBypass(file) {
+				t.Fatal("intentional ResponseWriter header violation was not detected")
+			}
+		})
+	}
+}
+
 func isResponseHeaderReceiver(expr ast.Expr) bool {
 	if call, ok := expr.(*ast.CallExpr); ok {
 		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Header" {
@@ -406,21 +698,29 @@ func isResponseHeaderReceiver(expr ast.Expr) bool {
 		if strings.Contains(name, "responseheader") || strings.Contains(name, "writerheader") {
 			return true
 		}
-		if selector.Sel.Name == "Header" {
-			if receiver, ok := selector.X.(*ast.Ident); ok {
-				return receiver.Name == "w" || receiver.Name == "response" || receiver.Name == "resp"
-			}
-			if call, ok := selector.X.(*ast.CallExpr); ok {
-				if typ, ok := call.Fun.(*ast.SelectorExpr); ok && typ.Sel.Name == "Response" {
-					return true
-				}
-			}
+		if selector.Sel.Name == "Header" && headerReceiverIsResponse(selector.X) {
+			return true
 		}
 	}
 	return false
 }
 
+func headerReceiverIsResponse(expr ast.Expr) bool {
+	// Request metadata is reconstructed as make(http.Header), while the paths
+	// covered here obtain response headers from a ResponseWriter or a response
+	// object's Header method. Keep arbitrary receiver names supported without
+	// treating local Header maps as response-writer aliases.
+	if call, ok := expr.(*ast.CallExpr); ok {
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		return ok && selector.Sel.Name == "Response"
+	}
+	return true
+}
+
 func isResponseHeaderReceiverOrAlias(expr ast.Expr, aliases map[string]bool) bool {
+	if isRequestHeaderField(expr, aliases) {
+		return false
+	}
 	if isResponseHeaderReceiver(expr) {
 		return true
 	}
@@ -428,6 +728,29 @@ func isResponseHeaderReceiverOrAlias(expr ast.Expr, aliases map[string]bool) boo
 		return aliases[id.Name]
 	}
 	return false
+}
+
+const requestHeaderVariablePrefix = "\x00request-header-variable:"
+
+func isRequestHeaderField(expr ast.Expr, aliases map[string]bool) bool {
+	var receiver ast.Expr
+	switch header := expr.(type) {
+	case *ast.CallExpr:
+		selector, ok := header.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Header" {
+			return false
+		}
+		receiver = selector.X
+	case *ast.SelectorExpr:
+		if header.Sel.Name != "Header" {
+			return false
+		}
+		receiver = header.X
+	default:
+		return false
+	}
+	request, ok := receiver.(*ast.Ident)
+	return ok && aliases[requestHeaderVariablePrefix+request.Name]
 }
 
 func headerWriteKey(expr ast.Expr) (string, bool) {
@@ -1232,6 +1555,20 @@ func responseHeaderAliases(file *ast.File) map[string]bool {
 	aliases := map[string]bool{}
 	mapTypes := map[string]bool{}
 	ast.Inspect(file, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if !ok || function.Type.Params == nil {
+			return true
+		}
+		for _, field := range function.Type.Params.List {
+			if isHTTPRequestType(field.Type) {
+				for _, name := range field.Names {
+					aliases[requestHeaderVariablePrefix+name.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	ast.Inspect(file, func(node ast.Node) bool {
 		declaration, ok := node.(*ast.TypeSpec)
 		if !ok {
 			return true
@@ -1308,21 +1645,7 @@ func responseHeaderAliases(file *ast.File) map[string]bool {
 				return true
 			}
 			for i, rhs := range right {
-				makeHeaderMap := false
-				if id, ok := rhs.(*ast.Ident); ok && mapTypes[id.Name] {
-					makeHeaderMap = true
-				}
-				if call, ok := rhs.(*ast.CallExpr); ok {
-					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "make" && len(call.Args) > 0 {
-						switch typ := call.Args[0].(type) {
-						case *ast.SelectorExpr:
-							makeHeaderMap = typ.Sel.Name == "Header"
-						case *ast.Ident:
-							makeHeaderMap = mapTypes[typ.Name]
-						}
-					}
-				}
-				if i < len(left) && (isResponseHeaderReceiverOrAlias(rhs, aliases) || makeHeaderMap) {
+				if i < len(left) && isResponseHeaderReceiverOrAlias(rhs, aliases) {
 					if id, ok := left[i].(*ast.Ident); ok && !aliases[id.Name] {
 						aliases[id.Name] = true
 						changed = true
@@ -1335,8 +1658,21 @@ func responseHeaderAliases(file *ast.File) map[string]bool {
 	return aliases
 }
 
+func isHTTPRequestType(expr ast.Expr) bool {
+	pointer, ok := expr.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := pointer.X.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Request" {
+		return false
+	}
+	packageName, ok := selector.X.(*ast.Ident)
+	return ok && packageName.Name == "http"
+}
+
 func isResponseHeaderMapIndex(index *ast.IndexExpr, aliases map[string]bool) bool {
-	if isResponseHeaderReceiver(index.X) {
+	if isResponseHeaderReceiverOrAlias(index.X, aliases) {
 		return true
 	}
 	if id, ok := index.X.(*ast.Ident); ok {

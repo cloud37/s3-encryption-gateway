@@ -170,7 +170,15 @@ func addHeadersToSpan(span trace.Span, headers http.Header, redactSensitive bool
 	// Headers to redact
 	sensitiveHeaders := []string{
 		"authorization",
+		"proxy-authorization",
 		"x-amz-security-token",
+		"x-amz-credential",
+		"x-amz-signature",
+		"signature",
+		"policy",
+		"x-amz-server-side-encryption-customer-algorithm",
+		"x-amz-server-side-encryption-customer-key",
+		"x-amz-server-side-encryption-customer-key-md5",
 		"x-amz-server-side-encryption-aws-kms-key-id",
 		"x-amz-server-side-encryption-context",
 		"x-amz-tagging", // May contain PII, credentials, or business-sensitive metadata
@@ -180,25 +188,31 @@ func addHeadersToSpan(span trace.Span, headers http.Header, redactSensitive bool
 	}
 
 	for _, header := range safeHeaders {
-		if value := headers.Get(header); value != "" {
-			span.SetAttributes(attribute.String("http.request.header."+header, value))
+		if values := headerValuesFold(headers, header); len(values) != 0 {
+			span.SetAttributes(attribute.String("http.request.header."+header, strings.Join(values, ",")))
 		}
 	}
 
 	// Add redacted sensitive headers
-	if redactSensitive {
-		for _, header := range sensitiveHeaders {
-			if value := headers.Get(header); value != "" {
+	for _, header := range sensitiveHeaders {
+		if values := headerValuesFold(headers, header); len(values) != 0 {
+			if redactSensitive || isMandatorySensitiveHeader(header) {
 				span.SetAttributes(attribute.String("http.request.header."+header, "[REDACTED]"))
-			}
-		}
-	} else {
-		for _, header := range sensitiveHeaders {
-			if value := headers.Get(header); value != "" {
-				span.SetAttributes(attribute.String("http.request.header."+header, value))
+			} else {
+				span.SetAttributes(attribute.String("http.request.header."+header, strings.Join(values, ",")))
 			}
 		}
 	}
+}
+
+func headerValuesFold(headers http.Header, name string) []string {
+	var values []string
+	for candidate, candidateValues := range headers {
+		if strings.EqualFold(candidate, name) {
+			values = append(values, candidateValues...)
+		}
+	}
+	return values
 }
 
 // tracingResponseWriter wraps http.ResponseWriter to capture status code for tracing

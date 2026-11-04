@@ -78,6 +78,12 @@ func (c *Config) ResolvedCredentials() []GatewayCredential {
 		resolved[i].Buckets = cloneStrings(cred.Buckets)
 		resolved[i].BucketPermissions = cloneBucketPermissions(cred.BucketPermissions)
 		resolved[i].Permissions = cloneObjectPermission(cred.Permissions)
+		resolved[i].ExpiresAt = cloneTime(cred.ExpiresAt)
+		if cred.SessionTokenEnv != "" {
+			// A specified environment source never falls back to inline material.
+			resolved[i].SessionToken = os.Getenv(cred.SessionTokenEnv)
+			resolved[i].SessionTokenEnv = ""
+		}
 		if cred.SecretKeyEnv != "" {
 			if v := os.Getenv(cred.SecretKeyEnv); v != "" {
 				resolved[i].SecretKey = v
@@ -92,6 +98,14 @@ func cloneStrings(values []string) []string {
 		return nil
 	}
 	return append([]string{}, values...)
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func cloneObjectPermission(p *ObjectPermission) *ObjectPermission {
@@ -134,14 +148,17 @@ type AzureConfig struct {
 }
 
 type BackendConfig struct {
-	Endpoint     string           `yaml:"endpoint" env:"BACKEND_ENDPOINT"`
-	Region       string           `yaml:"region" env:"BACKEND_REGION"`
-	AccessKey    string           `yaml:"access_key" env:"BACKEND_ACCESS_KEY"`
-	SecretKey    string           `yaml:"secret_key" env:"BACKEND_SECRET_KEY"`
-	Provider     string           `yaml:"provider" env:"BACKEND_PROVIDER"` // aws, wasabi, hetzner, minio, digitalocean, backblaze, cloudflare, linode, scaleway, oracle, idrive
-	UseSSL       bool             `yaml:"use_ssl" env:"BACKEND_USE_SSL"`
-	UsePathStyle bool             `yaml:"use_path_style" env:"BACKEND_USE_PATH_STYLE"`
-	TLS          BackendTLSConfig `yaml:"tls"`
+	Endpoint          string           `yaml:"endpoint" env:"BACKEND_ENDPOINT"`
+	Region            string           `yaml:"region" env:"BACKEND_REGION"`
+	AccessKey         string           `yaml:"access_key" env:"BACKEND_ACCESS_KEY"`
+	SecretKey         string           `yaml:"secret_key" env:"BACKEND_SECRET_KEY"`
+	SessionToken      string           `yaml:"session_token" env:"BACKEND_SESSION_TOKEN"`
+	Provider          string           `yaml:"provider" env:"BACKEND_PROVIDER"` // aws, wasabi, hetzner, minio, digitalocean, backblaze, cloudflare, linode, scaleway, oracle, idrive
+	MetadataProfile   string           `yaml:"metadata_profile" env:"BACKEND_METADATA_PROFILE"`
+	PostInlineTagging string           `yaml:"post_inline_tagging" env:"BACKEND_POST_INLINE_TAGGING"`
+	UseSSL            bool             `yaml:"use_ssl" env:"BACKEND_USE_SSL"`
+	UsePathStyle      bool             `yaml:"use_path_style" env:"BACKEND_USE_PATH_STYLE"`
+	TLS               BackendTLSConfig `yaml:"tls"`
 	// Compatibility options for backends with metadata restrictions
 	FilterMetadataKeys []string `yaml:"filter_metadata_keys" env:"BACKEND_FILTER_METADATA_KEYS"` // Comma-separated list of metadata keys to filter out
 	// Type selects the backend transport: "s3" (default), "gcs", or "azure".
@@ -153,6 +170,21 @@ type BackendConfig struct {
 	// Retry governs the S3 backend retry policy (V0.6-PERF-2).
 	// All fields are optional; zero values fall back to the DefaultBackendRetry* constants.
 	Retry BackendRetryConfig `yaml:"retry"`
+}
+
+// ValidatePostSettings validates construction-time backend write policy.
+func (b BackendConfig) ValidatePostSettings() error {
+	switch b.MetadataProfile {
+	case "", "auto", "compact":
+	default:
+		return fmt.Errorf("invalid backend.metadata_profile")
+	}
+	switch b.PostInlineTagging {
+	case "", "supported", "unsupported":
+	default:
+		return fmt.Errorf("invalid backend.post_inline_tagging")
+	}
+	return nil
 }
 
 // BackendTLSConfig controls server authentication for HTTPS backend requests.
@@ -803,7 +835,10 @@ type GatewayCredential struct {
 	SecretKey string `yaml:"secret_key"`
 	// SecretKeyEnv is the name of the environment variable that holds the
 	// plaintext secret key.  Takes precedence over SecretKey.
-	SecretKeyEnv string `yaml:"secret_key_env"`
+	SecretKeyEnv    string     `yaml:"secret_key_env"`
+	SessionToken    string     `yaml:"session_token"`
+	SessionTokenEnv string     `yaml:"session_token_env"`
+	ExpiresAt       *time.Time `yaml:"expires_at"`
 	// Label is an optional human-readable name used in audit log entries.
 	Label string `yaml:"label"`
 	// Buckets is nil for unrestricted access and empty for an intentional deny-all.
@@ -811,6 +846,35 @@ type GatewayCredential struct {
 	// Permissions defaults to rw when omitted.
 	Permissions       *ObjectPermission  `yaml:"permissions"`
 	BucketPermissions []BucketPermission `yaml:"bucket_permissions"`
+}
+
+// UnmarshalYAML keeps deadlines on the strict GMT RFC3339 wire contract, while
+// retaining unknown-field rejection for credential files and configuration.
+func (c *GatewayCredential) UnmarshalYAML(node *yaml.Node) error {
+	type plain GatewayCredential
+	allowed := map[string]bool{"access_key": true, "secret_key": true, "secret_key_env": true,
+		"session_token": true, "session_token_env": true, "expires_at": true,
+		"label": true, "buckets": true, "permissions": true, "bucket_permissions": true}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		name, value := node.Content[i].Value, node.Content[i+1]
+		if !allowed[name] {
+			return fmt.Errorf("unknown gateway credential field %q", name)
+		}
+		if name == "expires_at" {
+			if _, err := parseSessionDeadline(value.Value); err != nil {
+				return err
+			}
+		}
+	}
+	return node.Decode((*plain)(c))
+}
+
+func parseSessionDeadline(value string) (time.Time, error) {
+	deadline, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || !strings.HasSuffix(value, "Z") || strings.Contains(value, ",") || deadline.IsZero() || deadline.Year() < 1 {
+		return time.Time{}, fmt.Errorf("session expires_at must be a valid GMT RFC3339 timestamp")
+	}
+	return deadline, nil
 }
 
 // AuthConfig holds authentication-related configuration for the S3 API.
@@ -849,6 +913,31 @@ func ValidateGatewayCredentials(credentials []GatewayCredential, requireSecret b
 		}
 		if credential.SecretKey == "" && (requireSecret || credential.SecretKeyEnv == "") {
 			return fmt.Errorf("auth.credentials[%d]: either secret_key or secret_key_env is required", i)
+		}
+		if credential.SessionToken != "" && credential.SessionTokenEnv != "" {
+			return fmt.Errorf("auth.credentials[%d]: session token sources are mutually exclusive", i)
+		}
+		token := credential.SessionToken
+		if credential.SessionTokenEnv != "" {
+			token = os.Getenv(credential.SessionTokenEnv)
+			if token == "" {
+				return fmt.Errorf("auth.credentials[%d]: session token environment source is empty", i)
+			}
+		}
+		if token == "" {
+			if credential.ExpiresAt != nil {
+				return fmt.Errorf("auth.credentials[%d]: static credentials cannot have expires_at", i)
+			}
+		} else {
+			if len(token) > 16*1024 || strings.ContainsAny(token, "\x00\r\n") {
+				return fmt.Errorf("auth.credentials[%d]: invalid session token", i)
+			}
+			if credential.ExpiresAt == nil || credential.ExpiresAt.IsZero() || credential.ExpiresAt.Year() < 1 || credential.ExpiresAt.Year() > 9999 {
+				return fmt.Errorf("auth.credentials[%d]: session credentials require a valid expires_at", i)
+			}
+			if _, offset := credential.ExpiresAt.Zone(); offset != 0 {
+				return fmt.Errorf("auth.credentials[%d]: expires_at must be GMT", i)
+			}
 		}
 		if _, exists := accessKeys[credential.AccessKey]; exists {
 			return fmt.Errorf("auth.credentials[%d]: duplicate access_key %q", i, credential.AccessKey)
@@ -1236,8 +1325,17 @@ func loadFromEnv(config *Config) error {
 	if v := os.Getenv("BACKEND_SECRET_KEY"); v != "" {
 		config.Backend.SecretKey = v
 	}
+	if v, ok := os.LookupEnv("BACKEND_SESSION_TOKEN"); ok {
+		config.Backend.SessionToken = v
+	}
 	if v := os.Getenv("BACKEND_PROVIDER"); v != "" {
 		config.Backend.Provider = v
+	}
+	if v, ok := os.LookupEnv("BACKEND_METADATA_PROFILE"); ok {
+		config.Backend.MetadataProfile = v
+	}
+	if v, ok := os.LookupEnv("BACKEND_POST_INLINE_TAGGING"); ok {
+		config.Backend.PostInlineTagging = v
 	}
 	if v, ok := os.LookupEnv("BACKEND_USE_SSL"); ok {
 		useSSL, err := strconv.ParseBool(v)
@@ -1842,83 +1940,8 @@ func loadFromEnv(config *Config) error {
 		}
 		config.Auth.AllowLegacySignatureV2 = allow
 	}
-	// Resolve credential secrets from environment variables (V1.0-AUTH-1)
-	for i := range config.Auth.Credentials {
-		if config.Auth.Credentials[i].SecretKeyEnv != "" {
-			if v := os.Getenv(config.Auth.Credentials[i].SecretKeyEnv); v != "" {
-				config.Auth.Credentials[i].SecretKey = v
-			}
-		}
-	}
-	// Read indexed gateway credentials from Helm-injected env vars.
-	// Helm sets GW_CRED_0_ACCESS_KEY, GW_CRED_0_SECRET_KEY, etc.
-	for i := 0; ; i++ {
-		ak := os.Getenv(fmt.Sprintf("GW_CRED_%d_ACCESS_KEY", i))
-		sk := os.Getenv(fmt.Sprintf("GW_CRED_%d_SECRET_KEY", i))
-		if ak == "" && sk == "" {
-			break
-		}
-		buckets, bucketsSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_BUCKETS", i))
-		permStr, permSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_PERMISSIONS", i))
-		var permissions *ObjectPermission
-		if permSet {
-			p := ObjectPermission(permStr)
-			permissions = &p
-		}
-		bucketPermissions := os.Getenv(fmt.Sprintf("GW_CRED_%d_BUCKET_PERMISSIONS", i))
-		label := os.Getenv(fmt.Sprintf("GW_CRED_%d_LABEL", i))
-		var bucketList []string
-		if bucketsSet {
-			if buckets == "" {
-				bucketList = []string{}
-			} else {
-				bucketList = strings.Split(buckets, ",")
-				for j := range bucketList {
-					bucketList[j] = strings.TrimSpace(bucketList[j])
-				}
-			}
-		}
-		var grantList []BucketPermission
-		if bucketPermissions != "" {
-			for _, grant := range strings.Split(bucketPermissions, ",") {
-				grantList = append(grantList, BucketPermission(strings.TrimSpace(grant)))
-			}
-		}
-		found := false
-		for j := range config.Auth.Credentials {
-			if config.Auth.Credentials[j].AccessKey == ak {
-				if sk != "" {
-					config.Auth.Credentials[j].SecretKey = sk
-				}
-				if bucketsSet {
-					config.Auth.Credentials[j].Buckets = bucketList
-				}
-				if permissions != nil {
-					config.Auth.Credentials[j].Permissions = permissions
-				}
-				if bucketPermissions != "" {
-					config.Auth.Credentials[j].BucketPermissions = grantList
-				}
-				if label != "" {
-					config.Auth.Credentials[j].Label = label
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			config.Auth.Credentials = append(config.Auth.Credentials, GatewayCredential{
-				AccessKey:         ak,
-				SecretKey:         sk,
-				Label:             label,
-				Buckets:           bucketList,
-				Permissions:       permissions,
-				BucketPermissions: grantList,
-			})
-			if label == "" {
-				config.Auth.Credentials[len(config.Auth.Credentials)-1].Label = fmt.Sprintf("helm-cred-%d", i)
-			}
-		}
+	if err := loadGatewayCredentialEnv(config); err != nil {
+		return err
 	}
 	// Admin configuration
 	if v := os.Getenv("ADMIN_ENABLED"); v != "" {
@@ -2130,6 +2153,110 @@ func loadCredentialFile(config *Config) error {
 	return nil
 }
 
+// LoadCredentialSources resolves all gateway credential sources used by
+// LoadConfig into this config. It supports secret-key env references,
+// indexed GW_CRED_* variables, and AUTH_CREDENTIALS_FILE.
+func (c *Config) LoadCredentialSources() error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if err := loadGatewayCredentialEnv(c); err != nil {
+		return err
+	}
+	return loadCredentialFile(c)
+}
+
+func loadGatewayCredentialEnv(config *Config) error {
+	for i := range config.Auth.Credentials {
+		if config.Auth.Credentials[i].SecretKeyEnv != "" {
+			if v := os.Getenv(config.Auth.Credentials[i].SecretKeyEnv); v != "" {
+				config.Auth.Credentials[i].SecretKey = v
+			}
+		}
+	}
+	for i := 0; ; i++ {
+		ak := os.Getenv(fmt.Sprintf("GW_CRED_%d_ACCESS_KEY", i))
+		sk := os.Getenv(fmt.Sprintf("GW_CRED_%d_SECRET_KEY", i))
+		if ak == "" && sk == "" {
+			break
+		}
+		buckets, bucketsSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_BUCKETS", i))
+		permStr, permSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_PERMISSIONS", i))
+		var permissions *ObjectPermission
+		if permSet {
+			p := ObjectPermission(permStr)
+			permissions = &p
+		}
+		bucketPermissions := os.Getenv(fmt.Sprintf("GW_CRED_%d_BUCKET_PERMISSIONS", i))
+		label := os.Getenv(fmt.Sprintf("GW_CRED_%d_LABEL", i))
+		token, tokenSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_SESSION_TOKEN", i))
+		expires, expiresSet := os.LookupEnv(fmt.Sprintf("GW_CRED_%d_EXPIRES_AT", i))
+		var deadline *time.Time
+		if expiresSet && expires != "" {
+			parsed, err := parseSessionDeadline(expires)
+			if err != nil {
+				return fmt.Errorf("GW_CRED_%d_EXPIRES_AT: invalid session deadline", i)
+			}
+			deadline = &parsed
+		}
+		var bucketList []string
+		if bucketsSet {
+			if buckets == "" {
+				bucketList = []string{}
+			} else {
+				bucketList = strings.Split(buckets, ",")
+				for j := range bucketList {
+					bucketList[j] = strings.TrimSpace(bucketList[j])
+				}
+			}
+		}
+		var grantList []BucketPermission
+		if bucketPermissions != "" {
+			for _, grant := range strings.Split(bucketPermissions, ",") {
+				grantList = append(grantList, BucketPermission(strings.TrimSpace(grant)))
+			}
+		}
+		found := false
+		for j := range config.Auth.Credentials {
+			if config.Auth.Credentials[j].AccessKey != ak {
+				continue
+			}
+			credential := &config.Auth.Credentials[j]
+			if tokenSet {
+				credential.SessionToken, credential.SessionTokenEnv = token, ""
+			}
+			if expiresSet {
+				credential.ExpiresAt = deadline
+			}
+			if sk != "" {
+				credential.SecretKey = sk
+			}
+			if bucketsSet {
+				credential.Buckets = bucketList
+			}
+			if permissions != nil {
+				credential.Permissions = permissions
+			}
+			if bucketPermissions != "" {
+				credential.BucketPermissions = grantList
+			}
+			if label != "" {
+				credential.Label = label
+			}
+			found = true
+			break
+		}
+		if !found {
+			credential := GatewayCredential{AccessKey: ak, SecretKey: sk, SessionToken: token, ExpiresAt: deadline, Label: label, Buckets: bucketList, Permissions: permissions, BucketPermissions: grantList}
+			if credential.Label == "" {
+				credential.Label = fmt.Sprintf("helm-cred-%d", i)
+			}
+			config.Auth.Credentials = append(config.Auth.Credentials, credential)
+		}
+	}
+	return nil
+}
+
 func parseCosmianKeyRefs(value string) []CosmianKeyReference {
 	parts := strings.Split(value, ",")
 	refs := make([]CosmianKeyReference, 0, len(parts))
@@ -2195,6 +2322,9 @@ func parseSelfContainedAESKeys(value string) []SelfContainedAESKeyEntry {
 
 // Validate validates the configuration and returns an error if invalid.
 func (c *Config) Validate() error {
+	if err := c.Backend.ValidatePostSettings(); err != nil {
+		return err
+	}
 	if err := c.CORS.Validate(c.MultipartState.Valkey.Addr != ""); err != nil {
 		return err
 	}
@@ -2919,6 +3049,9 @@ func (r *ConfigReloader) reloadConfig() {
 
 // validateReloadSafety ensures that only non-crypto settings have changed.
 func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
+	if err := ValidateConstructionTimeReload(old, new); err != nil {
+		return err
+	}
 	if old.Server.SpoolDirectory != new.Server.SpoolDirectory {
 		return fmt.Errorf("server.spool_directory cannot be changed during hot reload")
 	}
@@ -2984,6 +3117,32 @@ func (r *ConfigReloader) validateReloadSafety(old, new *Config) error {
 		return fmt.Errorf("admin.tls.key_file cannot be changed during hot reload")
 	}
 
+	return nil
+}
+
+// ValidateConstructionTimeReload is shared by the watcher and direct apply
+// paths. Check it before preparing or mutating any live component. Never echo
+// credential values in diagnostics.
+func ValidateConstructionTimeReload(old, next *Config) error {
+	if old == nil || next == nil {
+		return fmt.Errorf("hot reload requires old and new configuration")
+	}
+	a, b := old.Backend, next.Backend
+	if err := b.ValidatePostSettings(); err != nil {
+		return err
+	}
+	if a.MetadataProfile != b.MetadataProfile || a.PostInlineTagging != b.PostInlineTagging {
+		return fmt.Errorf("backend POST settings cannot be changed during hot reload")
+	}
+	if a.AccessKey != b.AccessKey || a.SecretKey != b.SecretKey || a.SessionToken != b.SessionToken {
+		return fmt.Errorf("backend credentials cannot be changed during hot reload")
+	}
+	if a.Endpoint != b.Endpoint || a.Region != b.Region || a.Provider != b.Provider || a.Type != b.Type || a.Azure != b.Azure || a.UseSSL != b.UseSSL || a.UsePathStyle != b.UsePathStyle || a.TLS != b.TLS {
+		return fmt.Errorf("backend transport cannot be changed during hot reload")
+	}
+	if !stringSlicesEqual(old.Server.TrustedProxies, next.Server.TrustedProxies) || old.TLS != next.TLS {
+		return fmt.Errorf("TLS and trusted proxies cannot be changed during hot reload")
+	}
 	return nil
 }
 

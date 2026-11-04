@@ -36,7 +36,7 @@ func (h *Handler) resolvePlaintextSize(ctx context.Context, c s3.Client, view *o
 		return plaintextSize{Size: loaded.Manifest.TotalPlainSize, Exact: true, Source: "mpu-manifest"}, nil
 	}
 	if view.Class.Format == crypto.FormatBufferedFallback {
-		// The fallback-v2 object body embeds its authenticated metadata prefix;
+		// The fallback-v2 object body embeds an unauthenticated metadata prefix;
 		// its header original-size value was emitted by the encryptor and is exact.
 		if value := meta[crypto.MetaOriginalSize]; value != "" {
 			n, err := strconv.ParseInt(value, 10, 64)

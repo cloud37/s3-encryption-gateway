@@ -15,10 +15,12 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/debug"
+	"github.com/cloud37/s3-encryption-gateway/internal/objectmeta"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -212,7 +214,7 @@ func DecryptMPUManifest(ctx context.Context, e EncryptionEngine, object ObjectCo
 // APIExpandedMetadata returns the metadata view needed for API classification.
 // It expands aliases and, when configured, decrypts the protected metadata blob.
 func (e *engine) APIExpandedMetadata(metadata map[string]string) (map[string]string, error) {
-	expanded, err := e.compactor.ExpandMetadata(metadata)
+	expanded, err := e.expandMetadataForCrypto(metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -221,12 +223,20 @@ func (e *engine) APIExpandedMetadata(metadata map[string]string) (map[string]str
 		blobKey = MetaEncryptedMetadataCompact
 	}
 	if blob := expanded[blobKey]; blob != "" && e.metadataKey != nil {
+		fallback := expanded[MetaFallbackVersion] == "3"
+		format, binding := expanded[MetaObjectFormatVersion], expanded[MetaObjectBindingID]
 		protected, err := e.decryptMetadata(blob)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt metadata: %w", err)
 		}
 		for key, value := range protected {
 			expanded[key] = value
+		}
+		if fallback {
+			if format != "buffered-fallback-v2" || protected[MetaObjectFormatVersion] != "buffered-v2" || protected[MetaObjectBindingID] != binding {
+				return nil, fmt.Errorf("fallback-v2: sealed header identity mismatch")
+			}
+			expanded[MetaObjectFormatVersion] = format
 		}
 		delete(expanded, blobKey)
 	}
@@ -293,7 +303,9 @@ func (e *engine) expandMetadataForCrypto(metadata map[string]string) (map[string
 	if e.metadataExpansionOverride != nil {
 		return e.metadataExpansionOverride(metadata)
 	}
-	return e.compactor.ExpandMetadata(metadata)
+	// Read aliases independently of the configured writer profile. Expand
+	// even canonical-only maps so callers retain ownership of their inputs.
+	return NewMetadataCompactor(ProviderAWS).ExpandMetadata(metadata)
 }
 
 // NewEngine creates a new encryption engine with the given password.
@@ -321,6 +333,12 @@ func NewEngineWithChunking(password []byte, preferredAlgorithm string, supported
 
 // NewEngineWithChunkingAndProvider creates a new encryption engine with chunked mode and provider support.
 func NewEngineWithChunkingAndProvider(password []byte, preferredAlgorithm string, supportedAlgorithms []string, chunkedMode bool, chunkSize int, provider string, pbkdf2Iterations int) (EncryptionEngine, error) {
+	return NewEngineWithChunkingAndMetadataProfile(password, preferredAlgorithm, supportedAlgorithms, chunkedMode, chunkSize, provider, "", pbkdf2Iterations)
+}
+
+// NewEngineWithChunkingAndMetadataProfile preserves the legacy constructor's
+// algorithm and chunk validation while selecting the metadata write strategy.
+func NewEngineWithChunkingAndMetadataProfile(password []byte, preferredAlgorithm string, supportedAlgorithms []string, chunkedMode bool, chunkSize int, provider, profileMode string, pbkdf2Iterations int) (EncryptionEngine, error) {
 	if len(password) == 0 {
 		return nil, fmt.Errorf("encryption password cannot be empty")
 	}
@@ -355,7 +373,10 @@ func NewEngineWithChunkingAndProvider(password []byte, preferredAlgorithm string
 	}
 
 	// Get provider profile and create compactor
-	profile := GetProviderProfile(provider)
+	profile, err := ResolveMetadataProfile(provider, profileMode)
+	if err != nil {
+		return nil, err
+	}
 	compactor := NewMetadataCompactor(profile)
 
 	// Log hardware acceleration info
@@ -835,7 +856,7 @@ func (e *engine) DecryptMPUManifest(ctx context.Context, object ObjectContext, b
 	if bindingID == [16]byte{} {
 		return nil, fmt.Errorf("mpu manifest: binding ID is required")
 	}
-	expanded, err := e.compactor.ExpandMetadata(metadata)
+	expanded, err := e.expandMetadataForCrypto(metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -896,11 +917,20 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 	}
 
 	// Expand compacted metadata first
-	expandedMetadata, err := e.compactor.ExpandMetadata(metadata)
+	expandedMetadata, err := e.expandMetadataForCrypto(metadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to expand metadata: %w", err)
 	}
 
+	// Presence restricts legacy prefix controls even if no key can open the blob;
+	// it is not evidence that the blob was authenticated.
+	fallbackFormat := expandedMetadata[MetaObjectFormatVersion]
+	fallbackBinding := expandedMetadata[MetaObjectBindingID]
+	bufferedFallback := expandedMetadata[MetaFallbackVersion] == "3"
+	_, headerBlobPresent := metadataValue(expandedMetadata, MetaEncryptedMetadata)
+	if !headerBlobPresent {
+		_, headerBlobPresent = metadataValue(expandedMetadata, MetaEncryptedMetadataCompact)
+	}
 	// V1.0-CRYPTO-3: decrypt encrypted metadata blob if metadata key is configured.
 	if e.metadataKey != nil {
 		blobKey := MetaEncryptedMetadata
@@ -914,6 +944,12 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 			}
 			for k, v := range decryptedMeta {
 				expandedMetadata[k] = v
+			}
+			if bufferedFallback {
+				if decryptedMeta[MetaObjectFormatVersion] != "buffered-v2" || decryptedMeta[MetaObjectBindingID] != fallbackBinding || fallbackFormat != "buffered-fallback-v2" {
+					return nil, nil, fmt.Errorf("fallback-v2: sealed header identity mismatch")
+				}
+				expandedMetadata[MetaObjectFormatVersion] = fallbackFormat
 			}
 			delete(expandedMetadata, blobKey)
 		}
@@ -934,6 +970,9 @@ func (e *engine) Decrypt(ctx context.Context, object ObjectContext, reader io.Re
 			if _, parseErr := parseObjectBindingID(expandedMetadata[MetaObjectBindingID]); parseErr != nil {
 				return nil, nil, parseErr
 			}
+		}
+		if expandedMetadata[MetaFallbackVersion] == "2" {
+			return e.decryptFallbackV2WithProvenance(ctx, object, reader, expandedMetadata, headerBlobPresent)
 		}
 		return e.decryptWithMetadataFallback(ctx, object, reader, expandedMetadata)
 	}
@@ -1238,11 +1277,6 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 	encMetadata[MetaObjectBindingID] = base64.RawURLEncoding.EncodeToString(bindingID)
 	encMetadata[MetaChunkSize] = fmt.Sprintf("%d", e.chunkSize)
 
-	// Check if we need fallback metadata storage
-	if e.needsMetadataFallback(encMetadata) {
-		return e.encryptChunkedWithMetadataFallback(ctx, object, reader, encMetadata, contentType, originalSize, originalETag, bindingID)
-	}
-
 	// Determine algorithm to use
 	algorithm := e.preferredAlgorithm
 
@@ -1401,8 +1435,78 @@ func (e *engine) encryptChunked(ctx context.Context, object ObjectContext, reade
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to compact metadata: %w", err)
 	}
+	if e.providerProfile.ValidateMetadataSize(persistedMetadataEnvelope(compactedMetadata)) != nil {
+		return e.chunkedFallbackFromFinal(chunkedReader, encMetadata)
+	}
 
 	return chunkedReader, compactedMetadata, nil
+}
+
+// persistedMetadataEnvelope mirrors the encrypted write projection: native
+// standard headers and transport-only fields are not persisted as metadata.
+func persistedMetadataEnvelope(metadata map[string]string) map[string]string {
+	out := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		if objectmeta.IsStandard(k) || strings.EqualFold(k, "content-length") || strings.EqualFold(k, "etag") || strings.EqualFold(k, "last-modified") {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
+			k = "x-amz-meta-" + k
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// The reader has not consumed source bytes yet. Its manifest, encryption
+// controls and sealed blob are final, so fallback can prepend the existing
+// metadata representation without another encryption pass or key wrap.
+func (e *engine) chunkedFallbackFromFinal(reader io.Reader, full map[string]string) (io.Reader, map[string]string, error) {
+	encoded, err := encodeMetadataToJSON(full)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(encoded) > MaxFallbackPrefixBytes-4 {
+		return nil, nil, ErrMetadataTooLarge
+	}
+	framing, err := checkedLengthPrefix(uint64(len(encoded)))
+	if err != nil {
+		return nil, nil, err
+	}
+	headers := make(map[string]string, len(full)+2)
+	for k, v := range full {
+		headers[k] = v
+	}
+	headers[MetaFallbackMode] = "true"
+	headers[MetaFallbackVersion] = "2"
+	// Keep all structural, control, protected and sealed fields. Only ordinary
+	// user metadata is redundant with the prefix and may be removed.
+	var ordinary []string
+	for k := range headers {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") && !IsGatewayReservedKey(k) {
+			ordinary = append(ordinary, k)
+		}
+	}
+	sort.Slice(ordinary, func(i, j int) bool {
+		a, b := ordinary[i], ordinary[j]
+		if len(a)+len(headers[a]) == len(b)+len(headers[b]) {
+			return a < b
+		}
+		return len(a)+len(headers[a]) > len(b)+len(headers[b])
+	})
+	for {
+		compacted, err := e.compactor.CompactMetadata(headers)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err = e.providerProfile.ValidateMetadataSize(persistedMetadataEnvelope(compacted)); err == nil {
+			return io.MultiReader(bytes.NewReader(framing[:]), bytes.NewReader(encoded), reader), compacted, nil
+		} else if len(ordinary) == 0 {
+			return nil, nil, err
+		}
+		delete(headers, ordinary[0])
+		ordinary = ordinary[1:]
+	}
 }
 
 // encryptChunkedWithMetadataFallback encrypts chunked data with metadata stored in object body
@@ -2191,11 +2295,6 @@ func (e *engine) decryptRange(ctx context.Context, object ObjectContext, reader 
 
 // needsMetadataFallback checks if metadata would overflow provider limits
 func (e *engine) needsMetadataFallback(metadata map[string]string) bool {
-	// Skip fallback check if provider has unlimited headers
-	if e.providerProfile.TotalHeaderLimit <= 0 {
-		return false
-	}
-
 	// Try compacting first
 	compacted, err := e.compactor.CompactMetadata(metadata)
 	if err != nil {
@@ -2204,7 +2303,7 @@ func (e *engine) needsMetadataFallback(metadata map[string]string) bool {
 	}
 
 	// Check if compacted metadata fits
-	return EstimateMetadataSize(compacted) > e.providerProfile.TotalHeaderLimit
+	return e.providerProfile.ValidateMetadataSize(persistedMetadataEnvelope(compacted)) != nil
 }
 
 // encryptWithMetadataFallback encrypts data with metadata stored in object body
@@ -2295,13 +2394,16 @@ func (e *engine) encryptWithMetadataFallback(ctx context.Context, object ObjectC
 			minimalMetadata[spec.Canonical] = value
 		}
 	}
+	if blob := fullMetadata[MetaEncryptedMetadata]; blob != "" {
+		minimalMetadata[MetaEncryptedMetadata] = blob
+	}
 
 	compactedMetadata, err := e.compactor.CompactMetadata(minimalMetadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fallback-v2: failed to compact headers: %w", err)
 	}
-	if EstimateMetadataSize(compactedMetadata) > e.providerProfile.TotalHeaderLimit {
-		return nil, nil, fmt.Errorf("fallback-v2: required encryption headers exceed provider limit")
+	if err := e.providerProfile.ValidateMetadataSize(persistedMetadataEnvelope(compactedMetadata)); err != nil {
+		return nil, nil, err
 	}
 	return bytes.NewReader(ciphertext), compactedMetadata, nil
 }
@@ -2437,47 +2539,21 @@ func (e *engine) decryptFallbackBound(ctx context.Context, object ObjectContext,
 // encrypt path. Format: [4-byte BE metadata_length][metadata_json][chunked_stream].
 // No outer AEAD — integrity comes from the per-chunk AEAD in the chunked layer.
 func (e *engine) decryptFallbackV2(ctx context.Context, object ObjectContext, reader io.Reader, headerMetadata map[string]string) (io.Reader, map[string]string, error) {
-	// Read the 4-byte big-endian metadata length prefix.
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(reader, lenBuf[:]); err != nil {
-		return nil, nil, fmt.Errorf("fallback-v2: failed to read metadata length prefix: %w", err)
+	_, present := metadataValue(headerMetadata, MetaEncryptedMetadata)
+	if !present {
+		_, present = metadataValue(headerMetadata, MetaEncryptedMetadataCompact)
 	}
-	metadataLen := uint32(lenBuf[0])<<24 | uint32(lenBuf[1])<<16 | uint32(lenBuf[2])<<8 | uint32(lenBuf[3])
+	return e.decryptFallbackV2WithProvenance(ctx, object, reader, headerMetadata, present)
+}
 
-	// Guard against malformed/truncated objects. The metadata JSON is small
-	// (headers < 8 KiB in practice); cap at 1 MiB to prevent heap abuse.
-	const maxFallbackMetadataBytes = 1 << 20 // 1 MiB
-	if metadataLen > maxFallbackMetadataBytes {
-		return nil, nil, fmt.Errorf("fallback-v2: metadata length %d exceeds sanity limit %d", metadataLen, maxFallbackMetadataBytes)
-	}
-
-	// Read the metadata JSON (bounded by metadataLen).
-	metadataJSON := make([]byte, metadataLen)
-	if _, err := io.ReadFull(reader, metadataJSON); err != nil {
-		return nil, nil, fmt.Errorf("fallback-v2: failed to read metadata JSON (%d bytes): %w", metadataLen, err)
-	}
-
-	// Parse the full metadata that was embedded in the object body.
-	fullMetadata, err := decodeMetadataFromJSON(metadataJSON)
+func (e *engine) decryptFallbackV2WithProvenance(ctx context.Context, object ObjectContext, reader io.Reader, headerMetadata map[string]string, headerBlobPresent bool) (io.Reader, map[string]string, error) {
+	prefix, err := ReadFallbackV2Prefix(ctx, reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("fallback-v2: failed to decode in-body metadata: %w", err)
+		return nil, nil, err
 	}
-	// Legacy fallback-v1 stored protected standard values under their native
-	// header names. Normalize those values into the registry view before the
-	// shared plaintext projector restores client-visible metadata.
-	for _, spec := range ProtectedStandardKeys() {
-		if fullMetadata[spec.Canonical] == "" {
-			if value := fullMetadata[spec.Header]; value != "" {
-				fullMetadata[spec.Canonical] = value
-			} else {
-				for _, legacy := range spec.Legacy {
-					if value := fullMetadata[legacy]; value != "" {
-						fullMetadata[spec.Canonical] = value
-						break
-					}
-				}
-			}
-		}
+	fullMetadata := MergeFallbackV2Metadata(headerMetadata, prefix)
+	if !headerBlobPresent {
+		fullMetadata = mergeLegacyFallbackControls(headerMetadata, prefix)
 	}
 
 	// The remainder of reader is the raw chunked ciphertext stream. Delegate

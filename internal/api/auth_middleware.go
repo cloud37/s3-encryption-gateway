@@ -189,6 +189,83 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 				)
 			}
 
+			// Browser POST policies carry credentials in the bounded multipart
+			// scalar fields, not in SigV4 Authorization/query transports. Only the
+			// exact empty-query bucket-form predicate enters this branch.
+			if isPostObjectRequest(r) {
+				limits := SpoolLimits{Global: requestGlobal, Part: requestPart}
+				if liveLimits != nil {
+					limits = liveLimits.Limits()
+					requestGlobal, requestPart = limits.Global, limits.Part
+				}
+				if limits.Global <= 0 {
+					limits.Global = requestGlobal
+				}
+				if limits.Part <= 0 {
+					limits.Part = requestPart
+				}
+				authorizationValues, authorizationHeaderCount := headerValues(r.Header, "Authorization")
+				if authorizationHeaderCount > 0 || len(authorizationValues) > 0 {
+					err := ErrPostFormMalformed
+					emitAuthFailure("", err)
+					classifyPostError(err, r.URL.Path).WriteXML(w)
+					return
+				}
+				upload, parseErr := parsePostUpload(r, limits.Global)
+				if parseErr != nil {
+					emitAuthFailure("", parseErr)
+					classifyPostError(parseErr, r.URL.Path).WriteXML(w)
+					return
+				}
+				defer upload.Close()
+				bucket := strings.Trim(r.URL.Path, "/")
+				if err := upload.bindDestination(bucket); err != nil {
+					emitAuthFailure("", err)
+					classifyPostError(err, r.URL.Path).WriteXML(w)
+					return
+				}
+				accessKey, present := postFormField(upload.fields, "x-amz-credential", "")
+				if !present {
+					err := ErrMissingCredentials
+					emitAuthFailure("", err)
+					classifyPostError(err, r.URL.Path).WriteXML(w)
+					return
+				}
+				scope := strings.Split(accessKey, "/")
+				if len(scope) != 5 || scope[0] == "" || scope[1] == "" || scope[2] == "" || scope[3] == "" || scope[4] == "" {
+					err := ErrSignatureMismatch
+					emitAuthFailure("", err)
+					classifyPostError(err, r.URL.Path).WriteXML(w)
+					return
+				}
+				credential, lookupErr := store.Lookup(scope[0])
+				if lookupErr != nil {
+					if errors.Is(lookupErr, ErrUnknownAccessKey) {
+						logger.WithField("path", r.URL.Path).Warn("Unknown POST access key")
+						emitAuthFailure("", ErrUnknownAccessKey)
+						classifyPostError(ErrUnknownAccessKey, r.URL.Path).WriteXML(w)
+						return
+					}
+					emitAuthFailure("", ErrUnknownAccessKey)
+					classifyPostError(ErrUnknownAccessKey, r.URL.Path).WriteXML(w)
+					return
+				}
+				if err := validatePostPolicyAt(upload, credential, clockSkew, time.Now()); err != nil {
+					emitAuthFailure(scope[0], err)
+					classifyPostError(err, r.URL.Path).WriteXML(w)
+					return
+				}
+				upload.limitSnapshot = limits
+				upload.authenticatedAccessKey = credential.AccessKey
+				ctx := context.WithValue(r.Context(), credentialKey, credential)
+				if credential.Label != "" {
+					ctx = context.WithValue(ctx, credentialLabelKey, credential.Label)
+				}
+				ctx = context.WithValue(ctx, postUploadContextKey{}, upload)
+				r = r.WithContext(ctx)
+				next.ServeHTTP(w, r)
+				return
+			}
 			// 1. Extract credentials
 			creds, err := ExtractCredentials(r)
 			if err != nil {
@@ -219,6 +296,11 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			if IsSignatureV4Request(r) {
 				signingContext, sigErr = ValidateSignatureV4(r, credential.SecretKey, clockSkew)
 			} else if IsSignatureV2Request(r) {
+				if credential.SessionToken != "" || credential.ExpiresAt != nil {
+					emitAuthFailure(creds.AccessKey, ErrInvalidToken)
+					writeS3ClientError(w, r, ErrInvalidToken, r.Method)
+					return
+				}
 				// Enforce V4-only policy when configured.
 				if !allowSigV2 {
 					logger.WithField("access_key", creds.AccessKey).Warn(
@@ -263,6 +345,19 @@ func AuthMiddleware(store CredentialStore, clockSkew time.Duration, logger *logr
 			}
 			if signingContext != nil {
 				defer signingContext.Close()
+			}
+			if IsSignatureV4Request(r) {
+				token, sessionErr := sessionTokenFromRequest(r)
+				if sessionErr == nil {
+					sessionErr = validateSessionCredentialAt(credential, token, time.Now())
+				}
+				if sessionErr != nil {
+					emitAuthFailure(creds.AccessKey, sessionErr)
+					writeS3ClientError(w, r, sessionErr, r.Method)
+					return
+				}
+			}
+			if signingContext != nil {
 				r = r.WithContext(context.WithValue(r.Context(), v4SigningContextKey{}, signingContext))
 			}
 			if signingContext != nil && signingContext.verifyPayload {

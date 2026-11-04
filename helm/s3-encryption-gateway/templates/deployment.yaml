@@ -98,6 +98,7 @@ spec:
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_REGION" "value" .Values.config.backend.region.value "valueFrom" .Values.config.backend.region.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_ACCESS_KEY" "value" .Values.config.backend.accessKey.value "valueFrom" .Values.config.backend.accessKey.valueFrom) | nindent 8 }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_SECRET_KEY" "value" .Values.config.backend.secretKey.value "valueFrom" .Values.config.backend.secretKey.valueFrom) | nindent 8 }}
+        {{- include "s3-encryption-gateway.optionalTokenEnvVar" (dict "name" "BACKEND_SESSION_TOKEN" "value" .Values.config.backend.sessionToken.value "hasValue" (hasKey .Values.config.backend.sessionToken "value") "valueFrom" .Values.config.backend.sessionToken.valueFrom) | nindent 8 }}
          {{- if or .Values.config.auth.clockSkewTolerance.value .Values.config.auth.clockSkewTolerance.valueFrom }}
          {{- include "s3-encryption-gateway.envVar" (dict "name" "AUTH_CLOCK_SKEW_TOLERANCE" "value" .Values.config.auth.clockSkewTolerance.value "valueFrom" .Values.config.auth.clockSkewTolerance.valueFrom) | nindent 8 }}
          {{- end }}
@@ -107,8 +108,15 @@ spec:
           value: "/etc/s3-gateway/auth-credentials/{{ .Values.config.auth.existingCredentialsSecret.key }}"
         {{- else }}
         {{- range $i, $cred := .Values.config.auth.credentials }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" (printf "GW_CRED_%d_ACCESS_KEY" $i) "value" $cred.accessKey.value "valueFrom" $cred.accessKey.valueFrom) | nindent 8 }}
-        {{- include "s3-encryption-gateway.envVar" (dict "name" (printf "GW_CRED_%d_SECRET_KEY" $i) "value" $cred.secretKey.value "valueFrom" $cred.secretKey.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" (printf "GW_CRED_%d_ACCESS_KEY" $i) "value" $cred.accessKey.value "valueFrom" $cred.accessKey.valueFrom) | nindent 8 }}
+         {{- include "s3-encryption-gateway.envVar" (dict "name" (printf "GW_CRED_%d_SECRET_KEY" $i) "value" $cred.secretKey.value "valueFrom" $cred.secretKey.valueFrom) | nindent 8 }}
+         {{- if hasKey $cred "sessionToken" }}
+         {{- include "s3-encryption-gateway.optionalTokenEnvVar" (dict "name" (printf "GW_CRED_%d_SESSION_TOKEN" $i) "value" $cred.sessionToken.value "hasValue" (hasKey $cred.sessionToken "value") "valueFrom" $cred.sessionToken.valueFrom) | nindent 8 }}
+         {{- end }}
+         {{- if hasKey $cred "expiresAt" }}
+        - name: {{ printf "GW_CRED_%d_EXPIRES_AT" $i }}
+          value: {{ $cred.expiresAt | quote }}
+         {{- end }}
         {{- if hasKey $cred "buckets" }}
         - name: {{ printf "GW_CRED_%d_BUCKETS" $i }}
           value: {{ join "," $cred.buckets | quote }}
@@ -129,6 +137,12 @@ spec:
         {{- end }}
         {{- if or .Values.config.backend.provider.value .Values.config.backend.provider.valueFrom }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_PROVIDER" "value" .Values.config.backend.provider.value "valueFrom" .Values.config.backend.provider.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.backend.metadataProfile.value .Values.config.backend.metadataProfile.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_METADATA_PROFILE" "value" .Values.config.backend.metadataProfile.value "valueFrom" .Values.config.backend.metadataProfile.valueFrom) | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.backend.postInlineTagging.value .Values.config.backend.postInlineTagging.valueFrom }}
+        {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_POST_INLINE_TAGGING" "value" .Values.config.backend.postInlineTagging.value "valueFrom" .Values.config.backend.postInlineTagging.valueFrom) | nindent 8 }}
         {{- end }}
         {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_SSL" "value" .Values.config.backend.useSSL.value "valueFrom" .Values.config.backend.useSSL.valueFrom) | nindent 8 }}
          {{- include "s3-encryption-gateway.envVar" (dict "name" "BACKEND_USE_PATH_STYLE" "value" .Values.config.backend.usePathStyle.value "valueFrom" .Values.config.backend.usePathStyle.valueFrom) | nindent 8 }}

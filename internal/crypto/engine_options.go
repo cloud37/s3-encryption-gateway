@@ -110,6 +110,19 @@ func WithProvider(provider string) Option {
 	}
 }
 
+// WithMetadataProfile resolves an immutable provider budget and strategy.
+func WithMetadataProfile(provider, mode string) Option {
+	return func(e *engine) {
+		profile, err := ResolveMetadataProfile(provider, mode)
+		if err != nil {
+			e.optionErr = err
+			return
+		}
+		e.providerProfile = profile
+		e.compactor = NewMetadataCompactor(profile)
+	}
+}
+
 // WithMetadataKey sets the metadata encryption key for AES-256-GCM encrypted
 // metadata blobs (V1.0-CRYPTO-3). The key must be exactly 32 bytes.
 // The caller should zero the source slice after calling this (the engine

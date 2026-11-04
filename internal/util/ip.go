@@ -34,6 +34,41 @@ func NewIPExtractor(trustedProxyCIDRs []string) (*IPExtractor, error) {
 	return extractor, nil
 }
 
+// IsTrustedPeer considers only the immediate network peer, never XFF/client IP.
+func (e *IPExtractor) IsTrustedPeer(r *http.Request) bool {
+	if e == nil || r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	return e.isIPInNets(host)
+}
+
+// IsHTTPSRequest accepts direct TLS or one exact trusted-peer XFP indication.
+// Forwarded, X-Forwarded-SSL, XFF and ForceHTTPS are not transport authority.
+func (e *IPExtractor) IsHTTPSRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if !e.IsTrustedPeer(r) {
+		return false
+	}
+	var values []string
+	fields := 0
+	for name, v := range r.Header {
+		if strings.EqualFold(name, "X-Forwarded-Proto") {
+			fields++
+			values = append(values, v...)
+		}
+	}
+	return fields == 1 && len(values) == 1 && strings.EqualFold(values[0], "https")
+}
+
 // GetClientIP extracts the client IP address from the request.
 // If the request comes from a trusted proxy, it uses X-Forwarded-For or X-Real-IP headers.
 // Otherwise, it uses RemoteAddr directly (fail-safe default).

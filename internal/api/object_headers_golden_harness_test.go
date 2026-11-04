@@ -61,6 +61,47 @@ type goldenBackendFixture struct {
 	TamperFirstChunk bool              `json:"-"`
 }
 
+// goldenVersionedClient models a version-aware backend, including real range
+// response metadata, without changing the fixture ciphertext or shared mock.
+type goldenVersionedClient struct{ *mockS3Client }
+
+func (c *goldenVersionedClient) HeadObject(ctx context.Context, bucket, key string, version *string) (map[string]string, error) {
+	meta, err := c.mockS3Client.HeadObject(ctx, bucket, key, version)
+	if err != nil {
+		return nil, err
+	}
+	out := cloneStringMap(meta)
+	if version != nil && *version != "" {
+		out["x-amz-version-id"] = *version
+	}
+	return out, nil
+}
+
+func (c *goldenVersionedClient) GetObject(ctx context.Context, bucket, key string, version, interval *string) (io.ReadCloser, map[string]string, error) {
+	body, meta, err := c.mockS3Client.GetObject(ctx, bucket, key, version, interval)
+	if err != nil {
+		return body, meta, err
+	}
+	out := cloneStringMap(meta)
+	if version != nil && *version != "" {
+		out["x-amz-version-id"] = *version
+	}
+	if interval != nil && *interval != "" {
+		var start, end int64
+		total := int64(len(c.objects[bucket+"/"+key]))
+		if _, err := fmt.Sscanf(*interval, "bytes=%d-%d", &start, &end); err != nil || start < 0 || start >= total || end < start {
+			body.Close()
+			return nil, nil, fmt.Errorf("invalid golden range")
+		}
+		if end >= total {
+			end = total - 1
+		}
+		out["Content-Range"] = fmt.Sprintf("bytes %d-%d/%d", start, end, total)
+		out["Content-Length"] = strconv.FormatInt(end-start+1, 10)
+	}
+	return body, out, nil
+}
+
 type repeatReader byte
 
 func (r repeatReader) Read(p []byte) (int, error) {
@@ -518,7 +559,7 @@ func runAuthenticObjectFormatGolden(t *testing.T, fixture goldenBackendFixture, 
 			return err
 		}
 	}
-	h := NewHandlerWithFeatures(client, engine, logrus.New(), getTestMetrics(), km, nil, nil, &config.Config{}, nil)
+	h := NewHandlerWithFeatures(&goldenVersionedClient{client}, engine, logrus.New(), getTestMetrics(), km, nil, nil, &config.Config{}, nil)
 	if len(strict) > 0 && strict[0] {
 		h.policyManager = gh380Policy(t, "id: strict\nbuckets: [golden-bucket]\nrequire_encryption: true\n")
 		h.encryptionEngineLoader = func(string) (crypto.EncryptionEngine, error) { return engine, nil }
