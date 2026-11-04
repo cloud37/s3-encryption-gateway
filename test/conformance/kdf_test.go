@@ -160,6 +160,10 @@ func testKDF_MetadataPresent(t *testing.T, inst provider.Instance) {
 
 	client := newS3Client(t, inst)
 	meta := headMeta(t, client, inst.Bucket, key)
+	meta, err := crypto.ExpandMetadataForAPI(meta)
+	if err != nil {
+		t.Fatal("expand backend KDF metadata")
+	}
 	if meta[crypto.MetaKDFParams] != "pbkdf2-sha256:600000" {
 		t.Errorf("MetaKDFParams = %q, want %q", meta[crypto.MetaKDFParams], "pbkdf2-sha256:600000")
 	}

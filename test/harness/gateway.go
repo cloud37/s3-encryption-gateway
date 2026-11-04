@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,12 +11,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,11 +56,113 @@ type Gateway struct {
 	AdminURL string
 	// AdminToken is the bearer token for the admin listener.
 	// Empty when no admin listener was requested.
-	AdminToken string
+	AdminToken       string
+	postStageCapture *postStageLogCapture
+	postBoundaries   *postBoundaryCapture
 
 	server   *http.Server
 	listener net.Listener
 	tls      bool
+}
+
+type postBoundaryCapture struct {
+	mu                           sync.Mutex
+	outer, authenticated, routed int
+}
+
+// PostObjectBoundaries reports counts only, without request identifiers or data.
+func (g *Gateway) PostObjectBoundaries() [3]int {
+	if g == nil || g.postBoundaries == nil {
+		return [3]int{}
+	}
+	g.postBoundaries.mu.Lock()
+	defer g.postBoundaries.mu.Unlock()
+	return [3]int{g.postBoundaries.outer, g.postBoundaries.authenticated, g.postBoundaries.routed}
+}
+
+func observePostBoundary(next http.Handler, capture *postBoundaryCapture, boundary int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			capture.mu.Lock()
+			switch boundary {
+			case 0:
+				capture.outer++
+			case 1:
+				capture.authenticated++
+			case 2:
+				capture.routed++
+			}
+			capture.mu.Unlock()
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type postStageLogCapture struct {
+	mu        sync.Mutex
+	stages    []string
+	truncated bool
+}
+
+func (*postStageLogCapture) Levels() []logrus.Level { return logrus.AllLevels }
+
+func (c *postStageLogCapture) Fire(entry *logrus.Entry) error {
+	if entry == nil || entry.Data["operation"] != "PostObject" {
+		return nil
+	}
+	stage, ok := entry.Data["stage"].(string)
+	if !ok {
+		return nil
+	}
+	switch stage {
+	case "validation", "encryption", "classification", "preparation", "backend", "backend_acquisition", "unknown":
+	default:
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.stages) < 64 {
+		c.stages = append(c.stages, stage)
+	} else {
+		c.truncated = true
+	}
+	return nil
+}
+
+// PostObjectFailureStages returns only fixed, allowlisted diagnostic stage
+// labels. It never returns the original logger records or arbitrary fields.
+func (g *Gateway) PostObjectFailureStages() []string {
+	if g == nil || g.postStageCapture == nil {
+		return nil
+	}
+	g.postStageCapture.mu.Lock()
+	defer g.postStageCapture.mu.Unlock()
+	return append([]string(nil), g.postStageCapture.stages...)
+}
+
+// PostObjectFailureStagesSince returns only allowlisted stage labels captured
+// after the caller's snapshot index, with a consistency flag when the bounded
+// buffer has not overflowed.
+func (g *Gateway) PostObjectFailureStagesSince(index int) ([]string, bool) {
+	if g == nil || g.postStageCapture == nil {
+		return nil, false
+	}
+	g.postStageCapture.mu.Lock()
+	defer g.postStageCapture.mu.Unlock()
+	if index < 0 || index > len(g.postStageCapture.stages) || g.postStageCapture.truncated {
+		return nil, false
+	}
+	return append([]string(nil), g.postStageCapture.stages[index:]...), true
+}
+
+// PostObjectFailureStageCount returns the current count of retained safe stages.
+func (g *Gateway) PostObjectFailureStageCount() int {
+	if g == nil || g.postStageCapture == nil {
+		return 0
+	}
+	g.postStageCapture.mu.Lock()
+	defer g.postStageCapture.mu.Unlock()
+	return len(g.postStageCapture.stages)
 }
 
 // headObjectOverrideClient wraps an s3.Client and overrides Content-Length in
@@ -65,6 +170,74 @@ type Gateway struct {
 type headObjectOverrideClient struct {
 	s3.Client
 	fn func(bucket, key string) *int64
+}
+
+type observedResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	allowOrigin string
+}
+
+func (w *observedResponseWriter) WriteHeader(status int) {
+	if w.status == 0 || (w.status >= 100 && w.status < 200 && (status >= 200 || status == http.StatusSwitchingProtocols)) {
+		w.status = status
+		w.allowOrigin = w.Header().Get("Access-Control-Allow-Origin")
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *observedResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 || (w.status >= 100 && w.status < 200) {
+		w.status = http.StatusOK
+		w.allowOrigin = w.Header().Get("Access-Control-Allow-Origin")
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *observedResponseWriter) Flush() {
+	if w.status == 0 || (w.status >= 100 && w.status < 200) {
+		w.status = http.StatusOK
+		w.allowOrigin = w.Header().Get("Access-Control-Allow-Origin")
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *observedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
+}
+
+func (w *observedResponseWriter) Push(target string, options *http.PushOptions) error {
+	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, options)
+	}
+	return http.ErrNotSupported
+}
+
+func (w *observedResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func observeRequests(next http.Handler, observer func(RequestObservation)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed := &observedResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(observed, r)
+		status := observed.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		observer(RequestObservation{
+			Method: r.Method, Path: r.URL.Path, Status: status,
+			Origin:                      r.Header.Get("Origin"),
+			AccessControlRequestMethod:  r.Header.Get("Access-Control-Request-Method"),
+			AccessControlRequestHeaders: r.Header.Get("Access-Control-Request-Headers"),
+			AuthorizationPresent:        len(r.Header.Values("Authorization")) > 0,
+			AllowOrigin:                 observed.allowOrigin,
+		})
+	})
 }
 
 func (c *headObjectOverrideClient) HeadObject(ctx context.Context, bucket, key string, versionID *string) (map[string]string, error) {
@@ -128,10 +301,15 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	if len(o.authCredentials) > 0 {
 		cfg.Auth.Credentials = o.authCredentials
 	}
-
 	// Apply optional config mutator last.
 	if o.extraConfig != nil {
 		o.extraConfig(cfg)
+	}
+	if err := cfg.Backend.ValidatePostSettings(); err != nil {
+		t.Fatalf("harness.StartGateway: invalid backend settings: %v", err)
+	}
+	if err := cfg.LoadCredentialSources(); err != nil {
+		t.Fatalf("harness.StartGateway: load credential sources: %v", err)
 	}
 	// Convenience option is applied after the mutator when explicitly set.
 	if o.corsMode != "" {
@@ -169,8 +347,12 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 
 	// Logger.
 	logger := logrus.New()
+	postStageCapture := &postStageLogCapture{}
+	logger.AddHook(postStageCapture)
 	if o.accessLogOutput != nil {
 		logger.SetOutput(o.accessLogOutput)
+	} else {
+		logger.SetOutput(io.Discard)
 	}
 	if lvl, err := logrus.ParseLevel(o.logLevel); err == nil {
 		logger.SetLevel(lvl)
@@ -181,13 +363,11 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	// Initialize IP extractor with trusted proxies (V1.0-SEC-6).
 	// This ensures client IP extraction honors trusted proxy configuration
 	// and prevents X-Forwarded-For header spoofing.
-	ipExtractor, err := util.NewIPExtractor(cfg.Server.TrustedProxies)
+	ipExtractor, err := setGatewayTrustedExtractor(cfg)
 	if err != nil {
 		listener.Close()
 		t.Fatalf("harness.StartGateway: invalid trusted proxies configuration: %v", err)
 	}
-	api.SetIPExtractor(ipExtractor)
-	middleware.SetIPExtractor(ipExtractor)
 
 	// Prometheus registry (isolated per test to avoid cross-test pollution).
 	reg := prometheus.NewRegistry()
@@ -214,6 +394,7 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 		[]byte(o.encryptionPassword),
 		crypto.WithPBKDF2Iterations(o.pbkdf2Iterations),
 		crypto.WithChunking(o.chunkedMode),
+		backendProviderOption(cfg),
 		crypto.WithKDFAlgorithm(o.kdfAlgorithm),
 		crypto.WithArgon2idParams(o.argon2idParams.Time, o.argon2idParams.Memory, o.argon2idParams.Threads),
 		crypto.WithKDFLimits(o.kdfDecryptLimits),
@@ -308,16 +489,21 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 
 	// One manager is shared by authentication and streaming handlers so tests
 	// exercise the same aggregate accounting as production.
-	spoolManager := api.NewSpoolManager(cfg.Server.MaxAggregateSpoolBytes, cfg.Server.SpoolDirectory, m)
+	spoolManager, spoolLimits := newGatewaySpoolAccounting(cfg, m)
 	// API handler.
 	handler := api.NewHandlerWithFeatures(
 		s3Client, encryptionEngine, logger, m,
 		o.keyManager, nil, o.auditLogger, cfg, o.policyManager,
-	).WithSpoolManager(spoolManager)
+	).WithSpoolManager(spoolManager).WithSpoolLimitSource(spoolLimits)
+	if o.clientAcquisitionObserver != nil {
+		handler.WithClientAcquisitionObserver(o.clientAcquisitionObserver)
+	}
 	if o.backendTransport != nil {
 		handler.WithProxyTransport(o.backendTransport)
 	}
-	if cfg.Cache.Enabled {
+	if o.cacheOverride != nil {
+		handler.WithCache(o.cacheOverride)
+	} else if cfg.Cache.Enabled {
 		handler.WithCache(cache.NewMemoryCache(cfg.Cache.MaxSize, cfg.Cache.MaxItems, cfg.Cache.DefaultTTL))
 	}
 	if o.mpuStore != nil {
@@ -339,31 +525,49 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 	}
 
 	// Router.
-	router := mux.NewRouter()
+	// Match the production router's literal S3 object-key handling.
+	router := mux.NewRouter().SkipClean(true)
 	router.Handle("/metrics", m.Handler()).Methods("GET")
 	handler.RegisterRoutes(router)
 
-	// Middleware.
-	// StripBucketTrailingSlash normalises "/<bucket>/" → "/<bucket>"
-	// before gorilla/mux performs route matching. Mirrors the production
-	// middleware chain in cmd/server/main.go. See issue #198.
-	httpHandler := middleware.StripBucketTrailingSlash(router)
+	// Middleware. Wrap in the same order as cmd/server/main.go: the code below
+	// applies each outer wrapper after its inner handler has been constructed.
+	postBoundaries := &postBoundaryCapture{}
+	httpHandler := observePostBoundary(middleware.StripBucketTrailingSlash(router), postBoundaries, 2)
 	httpHandler = middleware.LoggingMiddleware(logger, &cfg.Logging)(httpHandler)
+	httpHandler = middleware.SecurityHeadersMiddleware(cfg.Server.ForceHTTPS)(httpHandler)
+	if cfg.Tracing.Enabled {
+		httpHandler = middleware.TracingMiddleware(cfg.Tracing.RedactSensitive, ipExtractor)(httpHandler)
+	}
+	if cfg.RateLimit.Enabled {
+		rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.Limit, cfg.RateLimit.Window, logger)
+		t.Cleanup(rateLimiter.Stop)
+		httpHandler = middleware.RateLimitMiddleware(rateLimiter)(httpHandler)
+	}
 
 	// Wire auth middleware if credentials are configured (V1.0-AUTH-1).
-	if len(cfg.Auth.Credentials) > 0 {
-		credStore, credErr := api.NewStaticCredentialStore(cfg.Auth.Credentials)
+	if gatewayCredentialsConfigured(cfg) {
+		credStore, credErr := newGatewayCredentialStore(cfg)
 		if credErr != nil {
 			listener.Close()
 			t.Fatalf("harness.StartGateway: create credential store: %v", credErr)
 		}
-		httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, nil)(httpHandler)
-		httpHandler = api.AuthMiddleware(credStore, cfg.Auth.ClockSkewTolerance, logger, nil, cfg.Auth.AllowLegacySignatureV2, spoolManager, api.SpoolLimitsForConfig(cfg))(httpHandler)
+		httpHandler = api.AuthorizationMiddleware(cfg.ProxiedBucket, o.auditLogger)(httpHandler)
+		httpHandler = observePostBoundary(httpHandler, postBoundaries, 1)
+		clockSkew := cfg.Auth.ClockSkewTolerance
+		if clockSkew <= 0 {
+			clockSkew = 5 * time.Minute
+		}
+		httpHandler = api.AuthMiddleware(credStore, clockSkew, logger, o.auditLogger, cfg.Auth.AllowLegacySignatureV2, spoolManager, spoolLimits)(httpHandler)
 	}
 	if config.EffectiveCORSMode(cfg.CORS.Mode) == "gateway" {
 		httpHandler = api.CORSMiddleware(cfg.CORS, corsStore, logger)(httpHandler)
 	}
 	httpHandler = middleware.RecoveryMiddleware(logger)(httpHandler)
+	httpHandler = observePostBoundary(httpHandler, postBoundaries, 0)
+	if o.requestObserver != nil {
+		httpHandler = observeRequests(httpHandler, o.requestObserver)
+	}
 
 	// HTTP server.
 	server := &http.Server{
@@ -406,12 +610,14 @@ func StartGateway(t *testing.T, inst provider.Instance, opts ...Option) *Gateway
 
 ready:
 	gw := &Gateway{
-		URL:      url,
-		Addr:     addr,
-		Metrics:  reg,
-		server:   server,
-		listener: listener,
-		tls:      o.useTLS,
+		URL:              url,
+		Addr:             addr,
+		Metrics:          reg,
+		postStageCapture: postStageCapture,
+		postBoundaries:   postBoundaries,
+		server:           server,
+		listener:         listener,
+		tls:              o.useTLS,
 	}
 
 	// Optional admin listener — wire when WithAdminServer was requested.
@@ -500,6 +706,52 @@ ready:
 	})
 
 	return gw
+}
+
+func newGatewayCredentialStore(cfg *config.Config) (*api.StaticCredentialStore, error) {
+	resolved := cfg.ResolvedCredentials()
+	defer func() {
+		for i := range resolved {
+			resolved[i].SecretKey = ""
+			resolved[i].SessionToken = ""
+		}
+	}()
+	return api.NewStaticCredentialStore(resolved)
+}
+
+func gatewayCredentialsConfigured(cfg *config.Config) bool {
+	return cfg != nil && len(cfg.Auth.Credentials) > 0
+}
+
+func newGatewayIPExtractor(cfg *config.Config) (*util.IPExtractor, error) {
+	if cfg == nil {
+		return util.NewIPExtractor(nil)
+	}
+	return util.NewIPExtractor(append([]string(nil), cfg.Server.TrustedProxies...))
+}
+
+func setGatewayTrustedExtractor(cfg *config.Config) (*util.IPExtractor, error) {
+	extractor, err := newGatewayIPExtractor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	api.SetIPExtractor(extractor)
+	middleware.SetIPExtractor(extractor)
+	return extractor, nil
+}
+
+func newGatewaySpoolAccounting(cfg *config.Config, observer *metrics.Metrics) (api.SpoolManager, *api.SpoolLimitSource) {
+	capacity := int64(config.DefaultMaxAggregateSpoolBytes)
+	directory := ""
+	if cfg != nil {
+		if cfg.Server.MaxAggregateSpoolBytes > 0 {
+			capacity = cfg.Server.MaxAggregateSpoolBytes
+		}
+		directory = cfg.Server.SpoolDirectory
+	}
+	manager := api.NewSpoolManager(capacity, directory, observer)
+	limits := api.NewSpoolLimitSource(api.SpoolLimitsForConfig(cfg))
+	return manager, limits
 }
 
 // ValidateGatewayCORSStateStore is an internal test seam for asserting that

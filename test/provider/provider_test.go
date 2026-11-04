@@ -48,6 +48,64 @@ func TestCapabilities_Stringer(t *testing.T) {
 	}
 }
 
+func TestGH353ObjectSSEFixtureInstanceShape(t *testing.T) {
+	fixture := provider.SSEFixture{Backend: provider.TLSFixture{Endpoint: "https://127.0.0.1:9000", CAFile: "/tmp/ca.pem"}, KMSKeyID: "gh353-test"}
+	inst := provider.Instance{ObjectSSE: &fixture}
+	if inst.ObjectSSE == nil || inst.ObjectSSE.Backend.Endpoint == "" || inst.ObjectSSE.KMSKeyID != "gh353-test" {
+		t.Fatalf("optional ObjectSSE fixture did not retain its planned fields: %+v", inst.ObjectSSE)
+	}
+}
+
+func TestGH353InstancePoliciesStayWithProviders(t *testing.T) {
+	var requiredSSE, credentialIdentity, localFixtures, localStorageClasses int
+	var hasLocalFixture bool
+	for _, candidate := range provider.All() {
+		instance := provider.Instance{ProviderName: candidate.Name()}
+		if provider.RequiresObjectSSEFixture(instance) {
+			requiredSSE++
+			if provider.ValidateMinIOObjectSSEFixture(instance) == nil {
+				t.Fatal("mandatory ObjectSSE policy accepted an unattempted fixture")
+			}
+		}
+		if provider.RequiresBackendCredentialIdentity(instance) {
+			credentialIdentity++
+		}
+		if provider.ShouldCreateDisposableVersionedBucket(instance) != (candidate.CleanupPolicy() == provider.CleanupPolicyDelete) {
+			t.Errorf("versioned-bucket cleanup policy differs for provider %q", candidate.Name())
+		}
+		if provider.IsDisposableLocalFixture(instance) {
+			localFixtures++
+			hasLocalFixture = true
+		}
+		fixture := &provider.SSEFixture{KMSKeyID: "gh353-test"}
+		if got := provider.ObjectSSEStorageClass(instance, fixture); got != "" {
+			if got != "STANDARD" {
+				t.Errorf("local fixture storage class=%q", got)
+			}
+			localStorageClasses++
+		}
+	}
+	if requiredSSE != 1 || credentialIdentity != 1 || !hasLocalFixture || localStorageClasses != 1 {
+		t.Fatalf("provider policy counts mandatorySSE=%d credentialIdentity=%d local=%d localStorage=%d", requiredSSE, credentialIdentity, localFixtures, localStorageClasses)
+	}
+}
+
+func TestGH353UnregisteredInstancePoliciesFailClosed(t *testing.T) {
+	instance := provider.Instance{ProviderName: "not-registered"}
+	if _, ok := provider.CapabilitiesForInstance(instance); ok {
+		t.Fatal("unregistered instance acquired capabilities")
+	}
+	if _, ok := provider.CleanupPolicyForInstance(instance); ok || provider.ShouldCreateDisposableVersionedBucket(instance) {
+		t.Fatal("unregistered instance acquired destructive cleanup permission")
+	}
+	if provider.RequiresObjectSSEFixture(instance) || provider.RequiresBackendCredentialIdentity(instance) || provider.IsDisposableLocalFixture(instance) {
+		t.Fatal("unregistered instance acquired provider fixture policy")
+	}
+	if got := provider.ObjectSSEStorageClass(instance, &provider.SSEFixture{KMSKeyID: "gh353-test"}); got != "" {
+		t.Fatalf("unregistered instance got local storage-class expectation %q", got)
+	}
+}
+
 // TestCleanupPolicy_Values asserts the two policy constants have distinct values.
 
 // TestCapabilities_NewBitsPresent asserts that the six V1.0-COMPAT-1

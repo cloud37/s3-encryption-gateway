@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/cloud37/s3-encryption-gateway/internal/audit"
+	"github.com/cloud37/s3-encryption-gateway/internal/cache"
 	"github.com/cloud37/s3-encryption-gateway/internal/config"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	"github.com/cloud37/s3-encryption-gateway/internal/mpu"
@@ -47,7 +48,10 @@ type options struct {
 	// gateway's S3 backend client.  Use this in chaos / retry tests to inject
 	// faults at the gateway→backend layer without an external proxy.
 	// See WithBackendTransport and FaultyRoundTripper.
-	backendTransport http.RoundTripper
+	backendTransport          http.RoundTripper
+	requestObserver           func(RequestObservation)
+	clientAcquisitionObserver func()
+	cacheOverride             cache.Cache
 	// authCredentials holds credentials configured via WithAuth.
 	authCredentials     []config.GatewayCredential
 	allowBucketCreation bool
@@ -66,6 +70,30 @@ type options struct {
 	// blobs (V1.0-CRYPTO-3). When set, the gateway engine will encrypt
 	// encryption/compression metadata values in S3 object headers.
 	metadataEncryptionKey []byte
+}
+
+// WithBackendAcquisitionObserver counts backend client resolutions in tests.
+func WithBackendAcquisitionObserver(fn func()) Option {
+	return func(o *options) { o.clientAcquisitionObserver = fn }
+}
+
+// WithCacheOverride supplies an instrumented cache to the fixture.
+func WithCacheOverride(c cache.Cache) Option {
+	return func(o *options) { o.cacheOverride = c }
+}
+
+// RequestObservation contains a deliberately small, non-secret view of an
+// inbound gateway request for deterministic test assertions. Query strings
+// and authorization values are never captured.
+type RequestObservation struct {
+	Method                      string
+	Path                        string
+	Status                      int
+	Origin                      string
+	AccessControlRequestMethod  string
+	AccessControlRequestHeaders string
+	AuthorizationPresent        bool
+	AllowOrigin                 string
 }
 
 // WithBucketCreation enables the gateway's global bucket creation gate.
@@ -163,7 +191,17 @@ func WithLogLevel(level string) Option {
 // the config.Config struct after all other options have been applied. Use
 // sparingly; prefer typed options for discoverable configuration.
 func WithConfigMutator(fn func(*config.Config)) Option {
-	return func(o *options) { o.extraConfig = fn }
+	return func(o *options) {
+		previous := o.extraConfig
+		o.extraConfig = func(cfg *config.Config) {
+			if previous != nil {
+				previous(cfg)
+			}
+			if fn != nil {
+				fn(cfg)
+			}
+		}
+	}
 }
 
 // WithBackendTransport replaces the HTTP transport used by the gateway's S3
@@ -178,6 +216,13 @@ func WithConfigMutator(fn func(*config.Config)) Option {
 // Production code must never call this; it is for tests only.
 func WithBackendTransport(rt http.RoundTripper) Option {
 	return func(o *options) { o.backendTransport = rt }
+}
+
+// WithRequestObserver observes actual HTTP arrivals at the in-process gateway.
+// It is intended for tests that must distinguish browser network arrival from
+// renderer-side request events. The callback must be safe for concurrent use.
+func WithRequestObserver(observer func(RequestObservation)) Option {
+	return func(o *options) { o.requestObserver = observer }
 }
 
 // WithPBKDF2Iterations sets the PBKDF2 iteration count for the gateway's

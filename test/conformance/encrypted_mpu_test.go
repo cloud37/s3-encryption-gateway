@@ -449,11 +449,12 @@ func testEncryptedMPU_LargeObject(t *testing.T, inst provider.Instance) {
 	const partCount = 80
 	const partSize = 5 * 1024 * 1024
 	var etags []string
-	var want []byte
+	partData := make([]byte, partSize)
 	for i := 0; i < partCount; i++ {
 		pattern := byte('A' + i%26)
-		partData := bytes.Repeat([]byte{pattern}, partSize)
-		want = append(want, partData...)
+		for j := range partData {
+			partData[j] = pattern
+		}
 		etags = append(etags, uploadPart(t, gw, inst.Bucket, key, uploadID, i+1, partData))
 	}
 
@@ -464,8 +465,45 @@ func testEncryptedMPU_LargeObject(t *testing.T, inst provider.Instance) {
 	completeMultipartUpload(t, gw, inst.Bucket, key, uploadID, parts)
 
 	// Stream the full object back.
-	got := get(t, gw, inst.Bucket, key)
-	if !bytes.Equal(got, want) {
-		t.Fatalf("encrypted MPU large object round-trip mismatch: want %d bytes, got %d bytes", len(want), len(got))
+	resp, err := gw.HTTPClient().Get(objectURL(gw, inst.Bucket, key))
+	if err != nil {
+		t.Fatal("encrypted MPU large object GET transport failed")
 	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("encrypted MPU large object GET status=%d", resp.StatusCode)
+	}
+	verifyErr := verifyMPUPattern(resp.Body, partCount, partSize)
+	closeErr := resp.Body.Close()
+	if verifyErr != nil || closeErr != nil {
+		t.Fatalf("encrypted MPU large object stream invalid verify_ok=%t close_ok=%t", verifyErr == nil, closeErr == nil)
+	}
+}
+
+// verifyMPUPattern checks every byte and EOF using a fixed-size buffer.
+func verifyMPUPattern(r io.Reader, parts, size int) error {
+	if parts <= 0 || size <= 0 {
+		return fmt.Errorf("invalid pattern dimensions")
+	}
+	buf := make([]byte, 32*1024)
+	for part := 0; part < parts; part++ {
+		for remaining := size; remaining > 0; {
+			n := min(remaining, len(buf))
+			if _, err := io.ReadFull(r, buf[:n]); err != nil {
+				return fmt.Errorf("pattern read failed")
+			}
+			for _, b := range buf[:n] {
+				if b != byte('A'+part%26) {
+					return fmt.Errorf("pattern mismatch")
+				}
+			}
+			remaining -= n
+		}
+	}
+	var extra [1]byte
+	n, err := io.ReadFull(r, extra[:])
+	if n != 0 || err != io.EOF {
+		return fmt.Errorf("pattern trailing data or read failure")
+	}
+	return nil
 }

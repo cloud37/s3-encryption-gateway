@@ -1,4 +1,4 @@
-.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-object-metadata benchmark-local benchmark-list benchmark-rclone-ncdu lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
+.PHONY: build build-fips migrate migrate-multiarch test test-fips test-conformance test-conformance-compat test-conformance-local test-conformance-external test-conformance-gh353-external test-conformance-kms test-load test-load-range test-load-multipart test-load-soak test-load-smoke test-load-spike test-load-high-throughput test-load-minio test-load-garage test-load-rustfs test-load-seaweedfs test-load-prometheus test-load-baseline bench-load-capture test-rotation test-fuzz test-comprehensive test-isolation-check bench-lint bench-micro-baseline bench-macro-minio bench-macro-garage bench-macro-rustfs bench-macro-seaweedfs bench-baseline benchmark-object-metadata benchmark-local benchmark-list benchmark-rclone-ncdu lint clean run docker-build docker-push docker-build-fips docker-push-fips docker-buildx sbom profile-image coverage-gate coverage-html coverage-fips mutation-report mutation-report-pkg help
 
 # Variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -94,8 +94,13 @@ test-conformance-local:
 
 test-conformance-external:
 	@echo "Running conformance tests (external providers with credentials)..."
-	@GATEWAY_TEST_SKIP_MINIO=1 GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 \
+	@GATEWAY_TEST_CONFORMANCE_EXTERNAL_ONLY=1 GATEWAY_TEST_SKIP_MINIO=1 GATEWAY_TEST_SKIP_GARAGE=1 GATEWAY_TEST_SKIP_RUSTFS=1 GATEWAY_TEST_SKIP_SEAWEEDFS=1 \
 		go test -count=1 -tags=conformance -race -v -timeout 20m ./test/conformance/...
+
+# Explicit comma-separated selection; no local provider or unrelated full-suite workload.
+test-conformance-gh353-external:
+	@GATEWAY_TEST_GH353_EXTERNAL="$${GATEWAY_TEST_GH353_EXTERNAL-backblaze-b2,wasabi}" \
+		go test -count=1 -tags=conformance -race -v -timeout 4h -run '^TestConformanceGH353External$$' ./test/conformance
 
 # V1.0-COMPAT-1 — SDK/Tool compatibility smoke tests (require Docker).
 # Runs against all local providers (MinIO, Garage, RustFS, SeaweedFS).
@@ -578,6 +583,7 @@ help:
 	@echo "  test-conformance-compat - Run SDK/tool compatibility smoke tests (V1.0-COMPAT-1)"
 	@echo "  test-conformance-local  - Conformance: local providers (MinIO + Garage + RustFS + SeaweedFS)"
 	@echo "  test-conformance-external - Conformance: external providers with credentials"
+	@echo "  test-conformance-gh353-external - Focused GH-353 external provider feedback"
 	@echo "  test-conformance-kms     - Conformance: KMS envelope encryption (MinIO + Cosmian KMS)"
 	@echo "  test-isolation-check    - Check test/ does not reference docker-compose / hard-coded ports"
 	@echo "  test-load          - CI load gate: range + multipart, small scale (5 s, 100 KiB)"

@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ import (
 // capabilities / cleanup bits.
 type externalProvider struct {
 	name      string
-	endpoint  string       // "" = use SDK default for region
+	endpoint  string // "" = use SDK default for region
 	region    string
 	keyEnv    string
 	secretEnv string
@@ -45,8 +46,65 @@ type externalProvider struct {
 	cleanup   CleanupPolicy
 }
 
-func (p *externalProvider) Name() string              { return p.name }
-func (p *externalProvider) Capabilities() Capabilities { return p.caps }
+// GH353ExternalPreflight validates explicit selection without disclosing values.
+func GH353ExternalPreflight(selection string, get func(string) string, registered []Provider) ([]Provider, error) {
+	if get("GATEWAY_TEST_SKIP_EXTERNAL") != "" {
+		return nil, fmt.Errorf("GATEWAY_TEST_SKIP_EXTERNAL disables requested external providers")
+	}
+	if get("GATEWAY_TEST_SKIP_VALKEY") != "" {
+		return nil, fmt.Errorf("GATEWAY_TEST_SKIP_VALKEY disables the required browser fixture")
+	}
+	defs := map[string][]string{
+		"backblaze-b2": {"B2_ACCESS_KEY_ID", "B2_SECRET_ACCESS_KEY", "B2_BUCKET_NAME"},
+		"wasabi":       {"WASABI_ACCESS_KEY_ID", "WASABI_SECRET_ACCESS_KEY", "WASABI_BUCKET_NAME"},
+	}
+	seen := map[string]bool{}
+	var result []Provider
+	for _, name := range strings.Split(selection, ",") {
+		vars, ok := defs[name]
+		if !ok {
+			return nil, fmt.Errorf("invalid external provider selection; choose backblaze-b2 and/or wasabi")
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate external provider selection")
+		}
+		seen[name] = true
+		for _, key := range vars {
+			if get(key) == "" {
+				return nil, fmt.Errorf("%s requires %s", name, key)
+			}
+		}
+		var found Provider
+		for _, p := range registered {
+			if p.Name() == name {
+				if found != nil {
+					return nil, fmt.Errorf("ambiguous registration for %s", name)
+				}
+				found = p
+			}
+		}
+		if found == nil {
+			return nil, fmt.Errorf("requested provider %s is not registered", name)
+		}
+		result = append(result, found)
+	}
+	return result, nil
+}
+
+type ownedKeyCleanupContextKey struct{}
+
+// WithOwnedKeyCleanup disables unused prefix-wide cleanup for callers which
+// register cleanup for each object they create.
+func WithOwnedKeyCleanup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ownedKeyCleanupContextKey{}, true)
+}
+
+func (p *externalProvider) prefixCleanupEnabled(ctx context.Context) bool {
+	return p.cleanup == CleanupPolicyDelete && ctx.Value(ownedKeyCleanupContextKey{}) != true
+}
+
+func (p *externalProvider) Name() string                 { return p.name }
+func (p *externalProvider) Capabilities() Capabilities   { return p.caps }
 func (p *externalProvider) CleanupPolicy() CleanupPolicy { return p.cleanup }
 
 func (p *externalProvider) BackendConfig(inst Instance) internalconfig.BackendConfig {
@@ -86,7 +144,7 @@ func (p *externalProvider) Start(ctx context.Context, t *testing.T) Instance {
 	// regional setup, payment authorisation, or verification). Instead we
 	// clean up the per-run key prefix on teardown if the cleanup policy permits.
 	prefix := fmt.Sprintf("conformance-%d/", time.Now().UnixNano())
-	if p.cleanup == CleanupPolicyDelete {
+	if p.prefixCleanupEnabled(ctx) {
 		t.Cleanup(func() { cleanupKeyPrefix(ctx, t, inst, prefix) })
 	}
 

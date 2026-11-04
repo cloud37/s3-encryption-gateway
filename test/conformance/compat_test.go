@@ -7,7 +7,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,6 +279,267 @@ func testCompatSmoke_Boto3(t *testing.T, inst provider.Instance) {
 		t.Fatalf("boto3: %v", err)
 	}
 	_ = gw // gw is used indirectly via env.Endpoint
+}
+
+func testCompatBoto3PresignedPost(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	testCompatPresignedPostSDK(t, inst, "boto3", false)
+	testCompatPresignedPostSDK(t, inst, "boto3", true)
+}
+
+func testCompatAWSJSPresignedPost(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	testCompatPresignedPostSDK(t, inst, "aws-js", false)
+	testCompatPresignedPostSDK(t, inst, "aws-js", true)
+}
+
+func testCompatBrowserPost(t *testing.T, inst provider.Instance) {
+	t.Helper()
+	testCompatBrowserPostMode(t, inst, false)
+	testCompatBrowserPostMode(t, inst, true)
+}
+
+func testCompatBrowserPostMode(t *testing.T, inst provider.Instance, session bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	defer cancel()
+	vk := provider.StartValkey(ctx, t)
+	if vk.Addr == "" {
+		t.Fatal("browser POST requires the real shared Valkey fixture")
+	}
+	if inst.AccessKey == postGatewayAccess || inst.SecretKey == postGatewaySecret {
+		t.Fatal("browser POST gateway identity must be independent from backend credentials")
+	}
+	var expires *time.Time
+	token := ""
+	if session {
+		deadline := time.Now().UTC().Add(2 * time.Hour)
+		expires = &deadline
+		token = "compat-browser-session-token-fixture"
+	}
+	credential := postCredential(token, expires)
+	manager := config.GatewayCredential{
+		AccessKey: postGatewayAccess + "CORS", SecretKey: postGatewaySecret + "-cors-manager",
+		Buckets: []string{inst.Bucket}, Permissions: compatPermissionPtr(config.ObjectPermissionReadWrite),
+		BucketPermissions: []config.BucketPermission{config.BucketPermissionManage},
+	}
+	if manager.AccessKey == credential.AccessKey || manager.SecretKey == credential.SecretKey ||
+		manager.AccessKey == inst.AccessKey || manager.SecretKey == inst.SecretKey {
+		t.Fatal("browser CORS management identity must be separate from both upload and backend credentials")
+	}
+	var stageMu sync.Mutex
+	var currentStage string
+	var stageLedger []browserLedgerEntry
+	bucketPath := "/" + postEncodePathSegment(inst.Bucket)
+	gw := postGateway(t, inst, credential, harness.WithAuth(manager), harness.WithValkeyAddr(vk.Addr), harness.WithCORSMode("gateway"), harness.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations), harness.WithRequestObserver(func(observation harness.RequestObservation) {
+		if observation.Method == http.MethodOptions || observation.Method == http.MethodPost {
+			stageMu.Lock()
+			if observation.Path == bucketPath {
+				stageLedger = append(stageLedger, browserLedgerEntry{Stage: currentStage, Request: observation})
+			}
+			stageMu.Unlock()
+		}
+	}))
+	prefix := compatUniqueKey(t)
+	keys := []string{prefix + "-browser-default", prefix + "-browser-created", prefix + "-browser-preflight", prefix + "-browser-denied-header", prefix + "-browser-denied-origin"}
+	if token != "" {
+		keys = append(keys, prefix+"-browser-session")
+	}
+	for _, key := range keys {
+		owned := key
+		t.Cleanup(func() { cleanupPostObject(t, inst, owned) })
+	}
+
+	pageOrigin, closePage := startBrowserOrigin(t, "allowed", &stageMu, &currentStage, &stageLedger)
+	t.Cleanup(closePage)
+	deniedOrigin, closeDenied := startBrowserOrigin(t, "denied", nil, nil, nil)
+	t.Cleanup(closeDenied)
+
+	corsXML := browserCORSConfiguration(pageOrigin)
+	corsURL := strings.TrimRight(gw.URL, "/") + "/" + postEncodePathSegment(inst.Bucket) + "?cors"
+	readCORS, err := http.NewRequestWithContext(ctx, http.MethodGet, corsURL, nil)
+	if err != nil {
+		t.Fatal("construct signed gateway CORS snapshot request")
+	}
+	signV4Headers(t, readCORS, manager.AccessKey, manager.SecretKey, nil)
+	oldResponse, err := gw.HTTPClient().Do(readCORS)
+	if err != nil {
+		t.Fatal("gateway CORS snapshot request failed")
+	}
+	oldXML, err := io.ReadAll(oldResponse.Body)
+	oldResponse.Body.Close()
+	if err != nil {
+		t.Fatal("read gateway CORS snapshot")
+	}
+	if oldResponse.StatusCode != http.StatusOK && oldResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("gateway CORS snapshot returned HTTP %d", oldResponse.StatusCode)
+	}
+	previousPolicyExists := oldResponse.StatusCode == http.StatusOK
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		method, body := http.MethodDelete, ""
+		if previousPolicyExists {
+			method, body = http.MethodPut, string(oldXML)
+		}
+		request, requestErr := http.NewRequestWithContext(cleanupCtx, method, corsURL, strings.NewReader(body))
+		if requestErr != nil {
+			t.Errorf("construct gateway CORS cleanup request")
+			return
+		}
+		var signedBody []byte
+		if method == http.MethodPut {
+			signedBody = oldXML
+		}
+		signV4Headers(t, request, manager.AccessKey, manager.SecretKey, signedBody)
+		response, doErr := gw.HTTPClient().Do(request)
+		if doErr != nil {
+			t.Errorf("gateway CORS cleanup failed")
+			return
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		wantStatus := http.StatusNoContent
+		if method == http.MethodPut {
+			wantStatus = http.StatusOK
+		}
+		if response.StatusCode != wantStatus {
+			t.Errorf("gateway CORS cleanup returned HTTP %d", response.StatusCode)
+		}
+	})
+	management, err := http.NewRequestWithContext(ctx, http.MethodPut, corsURL, strings.NewReader(corsXML))
+	if err != nil {
+		t.Fatal("construct signed gateway CORS management request")
+	}
+	signV4Headers(t, management, manager.AccessKey, manager.SecretKey, []byte(corsXML))
+	managedResponse, err := gw.HTTPClient().Do(management)
+	if err != nil {
+		t.Fatal("gateway CORS management request failed")
+	}
+	io.Copy(io.Discard, managedResponse.Body)
+	managedResponse.Body.Close()
+	if managedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("gateway CORS management returned HTTP %d", managedResponse.StatusCode)
+	}
+
+	env := sdkTestEnv{Endpoint: gw.URL, Region: inst.Region, AccessKey: credential.AccessKey, SecretKey: credential.SecretKey, SessionToken: token, Bucket: inst.Bucket, Key: prefix}
+	env.BrowserPageURL = pageOrigin
+	env.BrowserDeniedPageURL = deniedOrigin
+	env.BrowserStageURL = pageOrigin + "/stage"
+	runner := &browserPostRunner{sessionExpected: session}
+	if err := runToolContainer(ctx, t, runner, env); err != nil {
+		t.Fatalf("browser POST conformance failed: %v", err)
+	}
+	payload := make([]byte, 32768)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	encryptedKeys := []string{prefix + "-browser-default", prefix + "-browser-created", prefix + "-browser-preflight", prefix + "-browser-denied-origin"}
+	if token != "" {
+		encryptedKeys = append(encryptedKeys, prefix+"-browser-session")
+	}
+	backend := directPostBackend(t, inst)
+	for _, key := range encryptedKeys {
+		ciphertext, metadata, getErr := backend.GetObject(ctx, inst.Bucket, key, nil, nil)
+		if getErr != nil {
+			t.Fatalf("read gateway-written browser object from backend")
+		}
+		wire, readErr := io.ReadAll(ciphertext)
+		closeErr := ciphertext.Close()
+		if readErr != nil || closeErr != nil || metadata[crypto.MetaEncrypted] != "true" || bytes.Equal(wire, payload) || len(wire) <= len(payload) {
+			clear(wire)
+			t.Fatalf("browser POST backend marker/ciphertext contract mismatch")
+		}
+		clear(wire)
+	}
+	stageMu.Lock()
+	stageSnapshot := append([]browserLedgerEntry(nil), stageLedger...)
+	stageMu.Unlock()
+	assertBrowserLedger(t, stageSnapshot, session, bucketPath, pageOrigin, deniedOrigin)
+}
+
+func testCompatPresignedPostSDK(t *testing.T, inst provider.Instance, sdk string, session bool) {
+	t.Helper()
+	if inst.AccessKey == postGatewayAccess || inst.SecretKey == postGatewaySecret {
+		t.Fatal("SDK POST gateway identity must be independent from backend credentials")
+	}
+	var expires *time.Time
+	token := ""
+	if session {
+		deadline := time.Now().UTC().Add(2 * time.Hour)
+		expires = &deadline
+		token = "compat-post-session-token-fixture"
+	}
+	credential := postCredential(token, expires)
+	if credential.AccessKey == inst.AccessKey || credential.SecretKey == inst.SecretKey {
+		t.Fatal("presigned POST runner requires gateway credentials distinct from backend credentials")
+	}
+	gw := postGateway(t, inst, credential, harness.WithPBKDF2Iterations(crypto.MinPBKDF2Iterations))
+	prefix := compatUniqueKey(t)
+	env := sdkTestEnv{
+		Endpoint: gw.URL, Region: inst.Region, AccessKey: credential.AccessKey,
+		SecretKey: credential.SecretKey, SessionToken: credential.SessionToken,
+		Bucket: inst.Bucket, Key: prefix,
+	}
+	flowName := sdk
+	if flowName == "aws-js" {
+		flowName = "awsjs"
+	}
+	suffixes := []string{"-" + flowName + "-default", "-" + flowName + "-created"}
+	if session {
+		suffixes = append(suffixes, "-"+flowName+"-session")
+	}
+	for _, suffix := range suffixes {
+		key := prefix + suffix
+		ownedKey := key
+		t.Cleanup(func() { cleanupPostObject(t, inst, ownedKey) })
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	defer cancel()
+	if session {
+		if env.SessionToken == "" || credential.ExpiresAt == nil || time.Until(*credential.ExpiresAt) < 15*time.Minute {
+			t.Fatal("SDK session fixture must have a live token and at least fifteen minutes before expiry")
+		}
+	} else if env.SessionToken != "" {
+		t.Fatal("static SDK fixture unexpectedly has a session token")
+	}
+	var runner sdkToolRunner
+	switch sdk {
+	case "boto3":
+		runner = &boto3PresignedPostRunner{sessionExpected: session}
+	case "aws-js":
+		runner = &awsJSPresignedPostRunner{sessionExpected: session}
+	default:
+		t.Fatal("unknown presigned POST SDK selection")
+	}
+	if err := runToolContainer(ctx, t, runner, env); err != nil {
+		t.Fatalf("%s SDK POST: %v", runner.Name(), err)
+	}
+	backend := newS3CompatClient(t, inst)
+	for _, suffix := range suffixes {
+		stored, err := backend.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(inst.Bucket), Key: aws.String(prefix + suffix)})
+		if err != nil || stored == nil {
+			t.Fatalf("direct backend HEAD for SDK-created object failed")
+		}
+		if !sdkBackendEncryptedMarker(stored.Metadata) {
+			t.Fatal("direct backend SDK POST object lacks the gateway encrypted marker")
+		}
+		object, err := backend.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(inst.Bucket), Key: aws.String(prefix + suffix)})
+		if err != nil || object == nil || object.Body == nil {
+			t.Fatal("direct backend GET for SDK-created ciphertext failed")
+		}
+		ciphertext, readErr := io.ReadAll(object.Body)
+		closeErr := object.Body.Close()
+		wantPlaintext := make([]byte, 32*1024)
+		for i := range wantPlaintext {
+			wantPlaintext[i] = byte(i % 251)
+		}
+		if readErr != nil || closeErr != nil || len(ciphertext) == 0 || bytes.Equal(ciphertext, wantPlaintext) {
+			t.Fatal("direct backend ciphertext was empty or unreadable")
+		}
+		clear(ciphertext)
+		clear(wantPlaintext)
+	}
 }
 
 // testCompatSmoke_AWSCLI exercises the smoke-test baseline using awscli.

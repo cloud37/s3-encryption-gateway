@@ -54,6 +54,13 @@ const seaweedfsImage = "chrislusf/seaweedfs:4.48"
 
 func (p *seaweedfsProvider) Name() string { return "seaweedfs" }
 
+// GH353PostUnsupported scopes this exclusion to the gateway's GH-353 POST
+// conformance contract; it does not describe general S3 compatibility.
+func (*seaweedfsProvider) GH353PostUnsupported() bool { return true }
+func (*seaweedfsProvider) LiteralPostRejection() LiteralPostRejection {
+	return LiteralPostRejection{400, "InvalidRequest", 500, "InternalError"}
+}
+
 // Capabilities returns the verified capability bitmap for SeaweedFS based on
 // a full conformance run.  The following capabilities are intentionally absent:
 //
@@ -89,7 +96,8 @@ func (p *seaweedfsProvider) Capabilities() Capabilities {
 		CapCLIRestic
 }
 
-func (p *seaweedfsProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }
+func (p *seaweedfsProvider) CleanupPolicy() CleanupPolicy   { return CleanupPolicyDelete }
+func (p *seaweedfsProvider) IsDisposableLocalFixture() bool { return true }
 
 func (p *seaweedfsProvider) BackendConfig(inst Instance) config.BackendConfig {
 	return config.BackendConfig{

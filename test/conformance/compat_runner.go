@@ -35,17 +35,67 @@ type sdkToolRunner interface {
 // sdkTestEnv carries the gateway endpoint and credentials for injection into
 // the container environment.
 type sdkTestEnv struct {
-	Endpoint  string // e.g. "http://127.0.0.1:8080" (gateway, not backend)
-	Region    string
-	AccessKey string
-	SecretKey string
-	Bucket    string
-	Key       string // unique object key for this test run
+	Endpoint             string // e.g. "http://127.0.0.1:8080" (gateway, not backend)
+	Region               string
+	AccessKey            string
+	SecretKey            string
+	SessionToken         string // optional gateway session token; injected only when non-empty
+	Bucket               string
+	Key                  string // unique object key for this test run
+	BrowserPageURL       string // ephemeral loopback page origin for Chromium CORS tests
+	BrowserDeniedPageURL string // a distinct loopback origin excluded by gateway CORS
+	BrowserStageURL      string // ephemeral loopback control endpoint for safe browser stage markers
 	// BackendEndpoint is the *direct* S3 backend URL (bypassing the gateway).
 	// Empty by default. Runners that exercise a hybrid gateway→backend path
 	// (e.g. backup via gateway, restore directly from S3) populate this and
 	// runToolContainer injects it as BACKEND_ENDPOINT into the container env.
 	BackendEndpoint string
+}
+
+type safeSDKOutputRunner interface {
+	suppressSDKOutput() bool
+}
+
+type sdkModeRunner interface{ testMode() string }
+
+type sdkSessionTokenRunner interface{ requiresSessionToken() bool }
+
+type sdkRunnerTimeout interface {
+	containerTimeout() time.Duration
+}
+
+func sdkContainerEnvironment(env sdkTestEnv, runner sdkToolRunner) map[string]string {
+	out := map[string]string{
+		"AWS_ACCESS_KEY_ID":     env.AccessKey,
+		"AWS_SECRET_ACCESS_KEY": env.SecretKey,
+		"AWS_DEFAULT_REGION":    env.Region,
+		"GATEWAY_ENDPOINT":      env.Endpoint,
+		"GATEWAY_BUCKET":        env.Bucket,
+		"GATEWAY_KEY":           env.Key,
+	}
+	if env.SessionToken != "" {
+		out["AWS_SESSION_TOKEN"] = env.SessionToken
+	}
+	if env.BackendEndpoint != "" {
+		out["BACKEND_ENDPOINT"] = env.BackendEndpoint
+	}
+	if env.BrowserPageURL != "" {
+		out["BROWSER_PAGE_URL"] = env.BrowserPageURL
+	}
+	if env.BrowserDeniedPageURL != "" {
+		out["BROWSER_DENIED_PAGE_URL"] = env.BrowserDeniedPageURL
+	}
+	if env.BrowserStageURL != "" {
+		out["BROWSER_STAGE_URL"] = env.BrowserStageURL
+	}
+	if mode, ok := runner.(sdkModeRunner); ok && mode.testMode() != "" {
+		out["GH353_SESSION_MODE"] = mode.testMode()
+	}
+	if needs, ok := runner.(sdkSessionTokenRunner); ok && needs.requiresSessionToken() && env.SessionToken == "" {
+		delete(out, "AWS_SESSION_TOKEN")
+		out["GH353_SESSION_MODE"] = "session"
+	}
+	return out
 }
 
 // runToolContainer launches a Docker container running the given SDK/CLI tool
@@ -73,24 +123,16 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 		Image:      image,
 		Entrypoint: []string{},
 		Cmd:        []string{"/bin/sh", "-c", script},
-		Env: map[string]string{
-			"AWS_ACCESS_KEY_ID":     env.AccessKey,
-			"AWS_SECRET_ACCESS_KEY": env.SecretKey,
-			"AWS_DEFAULT_REGION":    env.Region,
-			"GATEWAY_ENDPOINT":      env.Endpoint,
-			"GATEWAY_BUCKET":        env.Bucket,
-			"GATEWAY_KEY":           env.Key,
-		},
+		Env:        sdkContainerEnvironment(env, runner),
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.NetworkMode = container.NetworkMode("host")
 		},
-		WaitingFor: wait.ForExit().WithExitTimeout(120 * time.Second),
+		WaitingFor: wait.ForExit().WithExitTimeout(runnerContainerTimeout(runner)),
 	}
 
-	// BACKEND_ENDPOINT injected only when set — empty value would
-	// confuse runners that treat absence as "no direct backend mode".
-	if env.BackendEndpoint != "" {
-		req.Env["BACKEND_ENDPOINT"] = env.BackendEndpoint
+	safeOutput := false
+	if safe, ok := runner.(safeSDKOutputRunner); ok {
+		safeOutput = safe.suppressSDKOutput()
 	}
 
 	c, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
@@ -98,6 +140,9 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 		Started:          true,
 	})
 	if err != nil {
+		if safeOutput {
+			return fmt.Errorf("%s: container execution failed", runner.Name())
+		}
 		return fmt.Errorf("%s: start container: %w", runner.Name(), err)
 	}
 	defer func() {
@@ -106,28 +151,55 @@ func runToolContainer(ctx context.Context, t *testing.T, runner sdkToolRunner, e
 
 	logReader, err := c.Logs(ctx)
 	if err != nil {
+		if safeOutput {
+			return fmt.Errorf("%s: container execution failed", runner.Name())
+		}
 		return fmt.Errorf("%s: read logs: %w", runner.Name(), err)
 	}
+	defer logReader.Close()
 	stdoutBytes, err := io.ReadAll(logReader)
 	if err != nil {
+		if safeOutput {
+			return fmt.Errorf("%s: container execution failed", runner.Name())
+		}
 		return fmt.Errorf("%s: read stdout: %w", runner.Name(), err)
 	}
-	logReader.Close()
 	stdoutStr := string(stdoutBytes)
+	if safeOutput {
+		// Keep captured output private to AssertOutput; diagnostics/logs never include it.
+		defer func() {
+			clear(stdoutBytes)
+			stdoutStr = ""
+		}()
+	}
 
 	var stderrStr string
 
 	exitCode, err := c.State(ctx)
 	if err != nil {
+		if safeOutput {
+			return fmt.Errorf("%s: container execution failed", runner.Name())
+		}
 		return fmt.Errorf("%s: state: %w", runner.Name(), err)
 	}
 
-	t.Logf("%s: exit code %d, stdout:\\n%s", runner.Name(), exitCode.ExitCode, stdoutStr)
-	if stderrStr != "" {
-		t.Logf("%s: stderr:\\n%s", runner.Name(), stderrStr)
+	if safeOutput {
+		t.Logf("%s: container exit code %d; SDK output suppressed", runner.Name(), exitCode.ExitCode)
+	} else {
+		t.Logf("%s: exit code %d, stdout:\\n%s", runner.Name(), exitCode.ExitCode, stdoutStr)
+		if stderrStr != "" {
+			t.Logf("%s: stderr:\\n%s", runner.Name(), stderrStr)
+		}
 	}
 
 	return runner.AssertOutput(exitCode.ExitCode, stdoutStr, stderrStr)
+}
+
+func runnerContainerTimeout(runner sdkToolRunner) time.Duration {
+	if configured, ok := runner.(sdkRunnerTimeout); ok {
+		return configured.containerTimeout()
+	}
+	return 120 * time.Second
 }
 
 var compatKeySeq int64

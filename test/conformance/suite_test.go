@@ -19,6 +19,7 @@ package conformance
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
@@ -31,6 +32,9 @@ import (
 func TestConformance(t *testing.T) {
 	providers := provider.All()
 	if len(providers) == 0 {
+		if externalOnlyMode() {
+			t.Fatal("external conformance requested but no providers are registered")
+		}
 		t.Skip("No providers registered; set provider credentials or ensure Docker is available")
 	}
 
@@ -40,6 +44,13 @@ func TestConformance(t *testing.T) {
 			t.Parallel() // Different providers run concurrently.
 			ctx := context.Background()
 			inst := p.Start(ctx, t)
+			if provider.RequiresObjectSSEFixture(inst) {
+				t.Run("GH353_ObjectSSEFixtureVerified", func(t *testing.T) {
+					if err := provider.ValidateMinIOObjectSSEFixture(inst); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
 
 			cases := []struct {
 				name string
@@ -142,6 +153,14 @@ func TestConformance(t *testing.T) {
 				{"UploadPartCopy_Mixed", provider.CapMultipartCopy, testUPC_Mixed},
 				{"UploadPartCopy_AbortMidway", provider.CapMultipartCopy, testUPC_AbortMidway},
 				{"UploadPartCopy_CrossBucket", provider.CapMultipartCopy, testUPC_CrossBucket},
+
+				// Object tagging.
+				{"PostObject_RoundTrip", 0, testPostObjectRoundTrip},
+				{"PostObject_RejectPreservesExisting", 0, testPostObjectRejectPreservesExisting},
+				{"PostObject_SessionAndExpiry", 0, testPostObjectSessionAndExpiry},
+				{"PostObject_Responses", 0, testPostObjectResponses},
+				{"PostObject_TaggingACLVersion", 0, testPostObjectTaggingACLVersion},
+				{"PostObject_SSE", 0, testPostObjectSSE},
 
 				// Object tagging.
 				// Tagging_Passthrough tests the x-amz-tagging header on PutObject
@@ -388,6 +407,9 @@ func TestConformance(t *testing.T) {
 				// V1.0-COMPAT-1 SDK/Tool compatibility smoke tests
 				{"Compat_AWSGoV2", provider.CapSDKAWSGoV2, testCompatSmoke_AWSGoV2},
 				{"Compat_Boto3", provider.CapSDKBoto3, testCompatSmoke_Boto3},
+				{"Compat_Boto3PresignedPost", 0, testCompatBoto3PresignedPost},
+				{"Compat_AWSJSPresignedPost", 0, testCompatAWSJSPresignedPost},
+				{"Compat_BrowserPost", 0, testCompatBrowserPost},
 				{"Compat_AWSCLI", provider.CapCLIAWSCLI, testCompatSmoke_AWSCLI},
 				{"Compat_HTTPSUnsignedTrailer", provider.CapCLIAWSCLI | provider.CapSDKBoto3 | provider.CapMultipartUpload, testCompat_HTTPSUnsignedTrailer},
 				{"Compat_AWSCLI_ListBucketsPermissions", provider.CapCLIAWSCLI, testCompatAWSCLIListBucketsPermissions},
@@ -426,6 +448,9 @@ func TestConformance(t *testing.T) {
 			for _, tc := range cases {
 				tc := tc
 				t.Run(tc.name, func(t *testing.T) {
+					if !gh353CaseApplicable(p, tc.name) {
+						t.Skip("GH-353 POST is unsupported on this provider")
+					}
 					if tc.cap != 0 && p.Capabilities()&tc.cap != tc.cap {
 						t.Skipf("%s does not advertise capability %s",
 							p.Name(), tc.cap)
@@ -435,4 +460,23 @@ func TestConformance(t *testing.T) {
 			}
 		})
 	}
+	if externalOnlyMode() {
+		fullExternalCompleted = true
+	}
+}
+
+func gh353PostCase(name string) bool {
+	if strings.HasPrefix(name, "PostObject_") {
+		return true
+	}
+	switch name {
+	case "Compat_Boto3PresignedPost", "Compat_AWSJSPresignedPost", "Compat_BrowserPost":
+		return true
+	default:
+		return false
+	}
+}
+
+func gh353CaseApplicable(p provider.Provider, name string) bool {
+	return !gh353PostCase(name) || provider.SupportsGH353Post(p)
 }

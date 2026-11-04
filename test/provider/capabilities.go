@@ -103,7 +103,7 @@ const (
 	// container for size cache state storage.
 	CapSizeTranslation Capabilities = 1 << 27
 
-	// Next available: 1 << 28
+	// Next available: 1 << 30; bits 28 and 29 are assigned below.
 	// CapOpenBaoKMS indicates that the OpenBao / Vault Transit KMS integration
 	// works with this provider. Like CapKMSIntegration, requires Docker so the
 	// in-process gateway and the OpenBao container share the same network.

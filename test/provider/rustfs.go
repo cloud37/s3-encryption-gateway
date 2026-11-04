@@ -43,6 +43,14 @@ type rustfsProvider struct{}
 const rustfsImage = "rustfs/rustfs:v1.0.0-rc.5"
 
 func (p *rustfsProvider) Name() string { return "rustfs" }
+func (*rustfsProvider) LiteralPostRejection() LiteralPostRejection {
+	return LiteralPostRejection{400, "InvalidArgument", 400, "InvalidArgument"}
+}
+
+// The whole POST contract is unsupported; the independent native-negative
+// proof remains mandatory and does not imply complete POST compatibility.
+func (*rustfsProvider) GH353PostUnsupported() bool               { return true }
+func (*rustfsProvider) RequiresGH353LiteralRejectionProof() bool { return true }
 
 // Capabilities returns the verified capability bitmap for RustFS based on
 // a full conformance run.  The following capabilities are intentionally absent:
@@ -80,7 +88,8 @@ func (p *rustfsProvider) Capabilities() Capabilities {
 		CapCLIRestic
 }
 
-func (p *rustfsProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }
+func (p *rustfsProvider) CleanupPolicy() CleanupPolicy   { return CleanupPolicyDelete }
+func (p *rustfsProvider) IsDisposableLocalFixture() bool { return true }
 
 func (p *rustfsProvider) BackendConfig(inst Instance) config.BackendConfig {
 	return config.BackendConfig{

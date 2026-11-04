@@ -27,7 +27,8 @@ type garageProvider struct{}
 // renovate: datasource=docker depName=dxflrs/garage versioning=docker
 const garageImage = "dxflrs/garage:v2.4.1"
 
-func (p *garageProvider) Name() string { return "garage" }
+func (p *garageProvider) Name() string                 { return "garage" }
+func (*garageProvider) GH353PostInlineTagging() string { return "unsupported" }
 
 func (p *garageProvider) Capabilities() Capabilities {
 	// Garage v2.x supports Object Lock only when the bucket is created with
@@ -60,7 +61,12 @@ func (p *garageProvider) Capabilities() Capabilities {
 		CapCLIRestic
 }
 
-func (p *garageProvider) CleanupPolicy() CleanupPolicy { return CleanupPolicyDelete }
+func (p *garageProvider) CleanupPolicy() CleanupPolicy   { return CleanupPolicyDelete }
+func (p *garageProvider) IsDisposableLocalFixture() bool { return true }
+
+// RequiresLiteralPostPositiveProof marks the mandatory native-key fixture; it
+// does not assert that other providers support or reject the same key.
+func (p *garageProvider) RequiresLiteralPostPositiveProof() bool { return true }
 
 func (p *garageProvider) BackendConfig(inst Instance) config.BackendConfig {
 	return config.BackendConfig{

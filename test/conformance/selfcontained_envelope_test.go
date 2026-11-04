@@ -150,12 +150,15 @@ func testSelfContained_AES_StandardMetadataRoundTrip(t *testing.T, inst provider
 	if err != nil {
 		t.Fatalf("self-contained metadata backend HEAD: %v", err)
 	}
-	t.Logf("backend metadata: %#v", rawHead.Metadata)
 	if rawHead.ContentType == nil || *rawHead.ContentType != "application/octet-stream" {
 		t.Errorf("backend ciphertext ContentType = %q, want application/octet-stream", aws.ToString(rawHead.ContentType))
 	}
-	if rawHead.Metadata["encryption-content-type"] != "application/json" {
-		t.Errorf("backend encryption-content-type = %q, want application/json", rawHead.Metadata["encryption-content-type"])
+	expanded, err := expandSDKUserMetadata(rawHead.Metadata)
+	if err != nil {
+		t.Fatal("expand backend metadata")
+	}
+	if expanded[crypto.MetaContentType] != "application/json" {
+		t.Error("backend encrypted content type did not match")
 	}
 
 	assertStandardMetadata := func(t *testing.T, resp *http.Response) {
