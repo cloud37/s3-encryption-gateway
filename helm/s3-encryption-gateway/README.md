@@ -145,9 +145,19 @@ config:
 | `config.backend.region` | S3 backend region | `"us-east-1"` |
 | `config.backend.accessKey` | Backend access key (use valueFrom) | `""` |
 | `config.backend.secretKey` | Backend secret key (use valueFrom) | `""` |
+| `config.backend.sessionToken` | Optional independent backend session token; use valueFrom for Secret-backed values | `""` |
 | `config.backend.provider` | Provider hint string (optional) | `""` |
+| `config.backend.metadataProfile` | `auto` or `compact` metadata compaction, restart required | `""` |
+| `config.backend.postInlineTagging` | `supported` or `unsupported` POST inline tagging, restart required | `""` |
 | `config.backend.useSSL` | Selects HTTPS for scheme-less backend endpoints; explicit `http://` or `https://` endpoint schemes take precedence | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
+
+Empty or `auto` metadata profiles preserve provider defaults; `compact` uses
+existing base64url compaction without changing provider limits. Empty or
+`supported` POST tagging preserves legacy behavior; `unsupported` rejects a
+signed POST tagging field before writing and does not alter ordinary PUT.
+Both settings require a restart; invalid values are rejected at startup.
+
 Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it or use `["*"]` for unrestricted access, or use `[]` for deny-all. A bare `*` is broad authority, particularly with `create`, `delete`, or `manage`. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration). Root ListBuckets is allowed for both `ro` and `rw` (with omitted permissions defaulting to `rw`): an absent `buckets` scope returns backend-visible buckets, while an explicit empty `buckets: []` scope returns a successful empty inventory.
 
 #### Credential Migration and Reload
@@ -164,6 +174,85 @@ the previous complete policy snapshot. Helm-provided environment variables are
 process environment, so changing a Secret or Helm value requires a pod restart;
 it is not a live environment reload. Roll out credential changes atomically and
 verify the rendered environment before removing old access.
+
+##### Configured gateway session credentials
+
+Gateway session credentials are optional. For a static credential, omit both
+`sessionToken` and `expiresAt` entirely. A session token requires a GMT
+RFC3339/RFC3339Nano deadline ending in `Z`; valid but already-expired entries
+can be loaded during rotation, but runtime authentication rejects them. Helm
+checks timestamp shape and inline pairing; the runtime remains authoritative for
+calendar-valid timestamps and for values resolved from Secret/ConfigMap refs.
+
+Use a Secret reference for the token and supply the matching deadline as a
+string:
+
+```yaml
+config:
+  auth:
+    credentials:
+      - accessKey:
+          value: "BROWSERSESSION"
+          valueFrom: {}
+        secretKey:
+          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: gateway-session-credentials
+              key: secret-access-key
+        sessionToken:
+          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: gateway-session-credentials
+              key: session-token
+        expiresAt: "2027-01-15T12:00:00Z"
+        buckets: ["attachments"]
+        permissions: rw
+```
+
+`valueFrom` wins when it contains a Secret or ConfigMap reference, even if a
+stale inline `value` is also present. A missing/empty referenced token is not
+replaced by the inline value; runtime validation rejects a session source that
+resolves empty. `value: ""` with no populated `valueFrom` is an explicit token
+clear and renders an empty indexed token variable. Omit `sessionToken` to omit
+that variable. Clear/remove `expiresAt` at the same time when returning to
+static credentials. The optional deadline is a string, not a `configValue`.
+
+The alternative `config.auth.existingCredentialsSecret` mounts one complete
+credentials YAML/JSON file. Its gateway entries are authoritative: the chart
+does not emit any inline/indexed gateway credential environment variables
+(access key, secret key, token, deadline, or policy fields) while that file is
+selected. The file uses native fields such as `session_token_env` or
+`session_token`, plus `expires_at`; see [`config.yaml.example`](../../config.yaml.example).
+This source choice is separate from the backend identity below.
+
+Gateway credential snapshots rotate together: prepare and validate the new
+complete set before retiring the old session. For environment-backed values,
+update the Secret and roll out pods; Kubernetes does not mutate a running
+container's environment. A watched credentials file can use the runtime's
+atomic reload path; an invalid replacement retains the previous active
+snapshot. This configuration selects an already-issued credential; it does not
+request session credentials from an STS service.
+
+##### Independent backend session token
+
+`config.backend.sessionToken` configures only the gateway's S3 backend identity
+and defaults to empty/static credentials. It emits `BACKEND_SESSION_TOKEN` and
+is never copied from a `config.auth.credentials[]` token. It supports Secret or
+ConfigMap `valueFrom` references; an explicit empty value clears the token.
+
+##### SSE-C and browser CORS prerequisites
+
+For SSE-C, protect customer keys in transit: use HTTPS to the gateway, and
+behind a proxy configure trusted proxy CIDRs so forwarded HTTPS is accepted only
+from a trusted immediate peer. Restrict network access so clients cannot bypass
+that trusted proxy path. Customer keys are request-scoped: do not persist or
+cache them, and do not assume the gateway rotates them automatically.
+
+Browser POST uploads require GH-322 gateway-managed bucket CORS (`config.cors.mode.value: gateway`)
+and the shared Valkey policy store. Keep one CORS authority: do not add a native
+backend CORS fallback or a second policy mechanism to enable browser uploads.
 
 #### Encryption Configuration
 

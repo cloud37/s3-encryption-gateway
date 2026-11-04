@@ -15,6 +15,7 @@ S3 Encryption Gateway. It supersedes the four older README files
 - [Regression and extension recipes](#how-to-add-a-new-test)
 - [CI matrix](#ci-matrix)
 - [Coverage policy](#coverage-policy)
+- [GH-353 POST acceptance contract](#gh-353-post-acceptance-contract)
 - [Mutation testing](#mutation-testing)
 - [Troubleshooting](#troubleshooting)
 
@@ -48,7 +49,227 @@ Key rules:
    cleanly when Docker is absent; the skip message names the missing
    fixture.
 4. **Flaky tier 1 is a P0 bug.** Tier 1 is the fastest feedback loop;
-   any flake in tier 1 is prioritised over feature work.
+    any flake in tier 1 is prioritised over feature work.
+
+## GH-353 POST acceptance contract
+
+**Independent GH-353 verification passed on 2026-11-04** for the isolated
+implementation and approved scope; see [the acceptance ledger](issues/GH-353.md#verification-evidence-and-acceptance-limits).
+The accepted local runtime evidence predates integration with newer `main`'s
+GH-380 read policy and Go directive. It is not execution on the combined tree,
+and no combined-main provider/SSE/SDK/browser runtime acceptance is claimed.
+Combined-main integration passed focused GH-353/GH-380 regressions, the full
+19-package Tier 1 race/coverage run, and Helm's 8 positive/10 negative cases;
+all 17 new production files exceed 85% statement coverage. Exact logs and
+the interrupted first-attempt disclosure are in the
+[integration ledger](issues/GH-353.md#combined-main-integration-validation--2026-11-04).
+The GH-353 code and focused helper tests are not the runtime acceptance gate.
+For runtime acceptance of a new combined tree, run the coordinator-owned
+commands below and record real provider/SSE/SDK/browser scenario execution.
+Do not use helper-only `TestGH353` runs or conformance compilation as substitutes.
+If Docker, the isolated trusted-HTTPS/static-KMS MinIO fixture, Valkey/browser
+fixture, or a mandatory scenario is unavailable/skipped, report GH-353 acceptance
+as **BLOCKED**, not green. This feature-specific rule does not rewrite the normal
+repository tier policy that optional Tier 2 providers may skip when Docker is
+unavailable.
+
+SeaweedFS is **unsupported for GH-353 POST** until an upstream fix is available
+and independently verified. Its GH-353 POST, POST SDK/browser and applicable
+literal-rejection proofs are excluded; skipped cases are not passes. This is
+not a general SeaweedFS storage exclusion and other conformance cases remain
+enabled. In the observed trailing-slash encrypted POST case, the backend PUT
+request carried the gateway marker, but the subsequent GET lacked it and
+returned different bytes. The underlying backend branch and persisted data
+were not established; this observation does not prove storage corruption.
+Previous selected SeaweedFS SDK/browser successes do not establish GH-353 support.
+
+RustFS is **unsupported for complete GH-353 POST** pending an upstream fix and
+independent proof. Its POST families and three POST SDK/browser registrations
+are excluded; unrelated cases and capabilities remain selected. This is not a
+claim that all RustFS writes fail. The pinned `rustfs/rustfs:v1.0.0-rc.5`
+fixture showed a native GET `Content-Language` omission. A disposable 1.0.4
+candidate passed language checks but native GET/range omitted `Expires` despite
+matching outbound `Expires` and HEAD; gateway bypass COPY propagated the missing
+value. This does not establish storage corruption or a new gateway bug. The
+candidate was not adopted and source-to-image binding is unverified. A separate
+RustFS native literal-rejection proof previously passed; it remains mandatory
+alongside MinIO, independently of complete POST support. SeaweedFS is excluded
+from this mandatory pair. Skips are not passes.
+
+User-reported focused external runs for each of Backblaze B2 and Wasabi passed
+11/11 required rows, including six real SDK/browser static/session rows, with
+explicit compact metadata profile. Optional tagging passed on Wasabi and skipped
+on B2; ACL/version rows skipped. Native SSE and full conformance were not proved.
+These bounded reports are not final-tree provenance or independent verification,
+and do not establish overall acceptance. The focused runner below is not a
+substitute for the full coordinator-owned acceptance matrix.
+
+### User-run GH-353 external provider feedback
+
+Use dedicated disposable buckets and narrowly scoped S3 API keys with object
+PUT/GET/HEAD/DELETE and prefix LIST permissions. The focused fixture does not
+create or delete buckets. Ensure the buckets have no unrelated data; keys must
+permit the generated `conf/`, `compat/`, and `gh353literal-` names. The native
+optional tagging row additionally requires tagging permissions when selected.
+Bucket-management and versioning permissions are separate, optional full-suite
+requirements; do not grant them merely for this focused runner. The harness
+generates separate gateway credentials; do not reuse your backend credentials
+for gateway auth. Never paste keys or logs containing secrets into chat.
+
+Set credentials privately using your normal secrets mechanism. The following
+shows variable **names**, not values; configure the actual values privately:
+
+```bash
+# B2_ACCESS_KEY_ID, B2_SECRET_ACCESS_KEY, B2_BUCKET_NAME
+# WASABI_ACCESS_KEY_ID, WASABI_SECRET_ACCESS_KEY, WASABI_BUCKET_NAME
+# Optional: B2_ENDPOINT, B2_REGION, WASABI_ENDPOINT, WASABI_REGION
+```
+
+Endpoint and region must match the bucket: defaults are B2
+`https://s3.eu-central-003.backblazeb2.com` / `eu-central-003` and Wasabi
+`https://s3.wasabisys.com` / `us-east-1`. Override both as appropriate.
+Requires Docker with network access for Testcontainers, a Valkey fixture,
+`python:3.14-slim` with `boto3==1.43.111`, `node:24-bookworm-slim` with
+`@aws-sdk/client-s3` and `@aws-sdk/s3-presigned-post` `3.1146.0`, and
+`mcr.microsoft.com/playwright:v1.63.0-noble` Chromium. The browser fixture uses
+`valkey/valkey:9.2-alpine`. SDK dependencies are installed inside containers.
+Allow substantial startup/download time; the focused target has a four-hour
+test timeout, not a runtime guarantee.
+
+From the repository checkout being evaluated, with secrets already set privately:
+
+```bash
+set -o pipefail
+log="/tmp/opencode/GH-353-external-$(date -u +%Y%m%dT%H%M%S)-$$.log"
+make test-conformance-gh353-external 2>&1 | tee "$log" >/dev/null
+```
+
+The default requests both providers. To run only one, set
+`GATEWAY_TEST_GH353_EXTERNAL=backblaze-b2` or `wasabi` in the environment
+before invoking the same command; restore or unset it for both. Empty, unknown,
+duplicate, missing credential, disabled external, filtered runner and incomplete
+mandatory scenarios fail closed. Do not set `GATEWAY_TEST_SKIP_EXTERNAL` or
+`GATEWAY_TEST_SKIP_VALKEY`. Two
+providers are required for the default selection; one for an explicit single
+selection. Per provider the focused gate requires 11 completed named scenarios:
+round trip (including protected metadata, exact 7900-byte overflow and literal
+cases), rejection preservation, session/expiry, responses, literal 201 native
+inventory, and static plus session for each of boto3, AWS JS and browser. Nested
+round-trip and response cases must complete; capability-scoped tagging/ACL/version
+rows are separately reported skips, not passes. Native SSE requires a separate
+verified fixture and is not established by this focused run. A failed or skipped
+required case means no focused pass even if other cases succeeded. Retain the
+exact log, exit status, selection, skips and tree identity for review.
+Versioned reads are not attempted by this focused runner even if a provider
+advertises versioning, because they create a separate disposable bucket.
+
+The focused fixture explicitly configures `backend.metadata_profile: compact`
+without changing the selected backend provider, endpoint or identity. The
+7900-byte and protected-metadata cases still execute unchanged. This setting
+does not by itself establish complete compatibility; review real provider runs.
+
+Focused cleanup deletes only generated B2 keys, never a bucket or prefix-wide
+inventory. Wasabi's `CleanupPolicySkipDelete` leaves all owned objects for the
+user's bucket lifecycle; minimum 90-day storage charges can apply even if
+objects are deleted early. Both providers may charge for requests and transfer.
+The focused target is not the full conformance workload. The separate
+`make test-conformance-external` is unfiltered and may upload at least one
+80 × 5 MiB (400 MiB) encrypted MPU per eligible provider plus other traffic;
+request, transfer and storage charges can be materially larger. It runs every
+registered external provider, not just B2 and Wasabi, and explicitly skips the
+local-only mandatory literal and unsupported-tagging proof parents; their skip is not a pass. It fails
+if no external provider registers, but does not provide the focused runner's
+explicit requested-provider completion guarantee. Inspect all failures and
+skips; neither target establishes overall GH-353 acceptance by itself.
+
+### Mandatory final gate and unique logs
+
+After the last relevant implementation/documentation integration edit, the
+coordinator runs the final matrix rows once on the final integrated tree; a PASS
+remains valid unless a later edit changes the relevant code, fixture, build tag,
+or behavior. Run the full conformance gate only if the uncached Tier 1 gate
+succeeds. The final gate sequence also includes the distinct focused FIPS command
+documented below, chart validation, and final diff/coverage evidence. Use unique
+logs and suppress routine output while preserving exit status:
+
+```bash
+set -euo pipefail
+make test 2>&1 | tee "/tmp/opencode/GH-353-make-test-$(date -u +%Y%m%dT%H%M%S).log" >/dev/null
+# This line is reached only when make test succeeds.
+make test-conformance 2>&1 | tee "/tmp/opencode/GH-353-conformance-$(date -u +%Y%m%dT%H%M%S).log" >/dev/null
+```
+
+Record each exact log path, exit status, final diff identity, providers, and
+mandatory scenario execution/skip counts. Do not run duplicate full-suite,
+coverage, alias, build, vet, HSM, broad FIPS, or Docker commands to pad evidence.
+The routine timing table elsewhere in this guide is not a promised upper bound
+for this acceptance: container startup, KMS, SDK and browser work can exceed
+historical tier timing observations.
+
+### Required GH-353 runtime matrix
+
+The registered scenario names are in
+[`test/conformance/suite_test.go`](../test/conformance/suite_test.go):
+
+| Registration / fixture | Required evidence |
+|---|---|
+| `TestConformance/<provider>/PostObject_RoundTrip`, `PostObject_RejectPreservesExisting`, `PostObject_SessionAndExpiry`, `PostObject_Responses` | At least one real encrypted backend: plaintext readback plus GET/HEAD/range, metadata/ETag, invalid overwrite preservation, session deadline and 204/201/303 response behavior. |
+| `PostObject_TaggingACLVersion` | Execute supported subcases only when existing provider capabilities allow; report each capability skip separately. |
+| `PostObject_SSE` and `GH353_ObjectSSEFixtureVerified` | Mandatory isolated trusted-HTTPS MinIO object-SSE fixture with verified static test KMS key; exercise SSE-S3, SSE-KMS and SSE-C POST→GET/HEAD/range, absent/wrong/correct-key cache proof, and projected backend SSE headers. MinIO may return the exact `arn:aws:kms:` prefix plus the configured non-ARN key ID; only that provider-owned canonical form or exact identity equality is accepted. A different key/ARN is still a failure. Ordinary HTTP MinIO fixture is not this evidence. |
+| `Compat_Boto3PresignedPost` | Real SDK-generated form using pinned `boto3==1.43.111`; default, policy denial, 201 XML, readback and session/missing/wrong token cases when session fixture is required. |
+| `Compat_AWSJSPresignedPost` | Real SDK-generated form using pinned `@aws-sdk/client-s3` and `@aws-sdk/s3-presigned-post` `3.1146.0`; same response/readback/session checks. Runner executes module in install root using package imports. |
+| `Compat_BrowserPost` | Real pinned Playwright `1.63.0` Chromium browser with a separate origin: allowed FormData POST and readable response/ETag, 201 XML, signed-policy denial, allowed and denied custom-header preflights, denied-origin unreadability, session success and wrong/missing-token errors. |
+| Chart helper | `bash scripts/test-gh353-helm.sh` / `TestChart_GH353SessionCredentials`; chart schema/lint/render/secret-ref/clear/negative environment validation after final chart edits. This matrix row is already represented by the tracked script and is not evidence until coordinator execution succeeds. |
+| Runner/fixture pins | Python runner image `python:3.14-slim`; JS runner image `node:24-bookworm-slim`; browser image `mcr.microsoft.com/playwright:v1.63.0-noble`; ordinary MinIO image `chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f`; Valkey image `valkey/valkey:9.2-alpine`. These are current source pins, not a statement that the fixtures have run. The isolated ObjectSSE fixture is separate from ordinary HTTP MinIO and must verify its static test-KMS probe before its scenarios count. |
+
+Conformance compiles and runs under `TestConformance`; the PascalCase names
+above are registered subtests, not standalone `go test -run` test functions.
+Exact full subtest names include the provider component, for example
+`TestConformance/minio/PostObject_RoundTrip`. Do not interpret all-skipped,
+helper-only, fake backend, syntax-only, or command exit-zero-without-mandatory
+execution as acceptance.
+
+### Focused feedback versus acceptance
+
+The following exact focused command is implementation feedback only, not the
+final acceptance gate:
+
+```bash
+go test -count=1 ./internal/api ./internal/s3 ./internal/crypto ./internal/config ./internal/util ./internal/middleware ./cmd/server -run '^(TestGH353.*|TestRouteClassificationParity)$'
+```
+
+The helper test
+`go test -tags=conformance -count=1 ./test/conformance -run '^TestGH353'`
+(including `TestGH353PostSDKRunner_ScriptsAndPins`), browser callback/helper tests,
+`go test -run '^TestGH353' ./test/provider ./test/harness`, extracted JS syntax
+checks, and `go test -tags=conformance -run '^$' ./test/conformance` are not real
+provider/SDK/Chromium execution. No new Go dependencies or host Python/Node
+installations are required for the acceptance runner; it installs pinned tools
+only inside the existing test containers.
+
+### Coverage and focused FIPS
+
+Each new GH-353 production file must reach **at least 85% statement coverage
+individually** from the one final Tier 1 `coverage.out`. Aggregate by covered/
+total statement counts for that file—not an unweighted average of function or
+package percentages—and retain the calculation in the gate report. Use the
+existing generated profile only:
+
+```bash
+go tool cover -func=coverage.out
+```
+
+The plan also requires the following distinct protocol-focused FIPS command
+once after the last crypto-facing edit; it is coordinator-owned and separate
+from the prohibited broad FIPS suite:
+
+```bash
+GOFIPS140=v1.0.0 go test -tags=fips -count=1 ./internal/api -run '^TestGH353(PostPolicy_AWSSignatureVector|PostSpool_ChecksumVectors|PostObject_RoundTripFormatsAndMetadata|SSE_ValidationAndTransport)$'
+```
+
+Optional external providers, tier-3/load campaigns, extended fuzz campaigns,
+HSM, and unrelated broad suites are not substitutes for this named matrix and
+are not added to the required command budget.
 
 ---
 
@@ -334,7 +555,7 @@ Capability selection is **not full compatibility certification**. Eligible tests
 can have additional skips, and a backend capability cannot enable an option
 missing from the gateway's typed SDK mapping. See the current
 [backend/encryption-mode tables](S3_API_IMPLEMENTATION.md#backend-and-encryption-mode-coverage),
-[operation inventory](S3_API_IMPLEMENTATION.md#object-and-multipart-operations), and
+[operation inventory](S3_API_IMPLEMENTATION.md#object-browser-post-and-multipart-operations),
 [option contract](S3_API_IMPLEMENTATION.md#writes-copies-and-multipart-options).
 
 | Constant                   | Meaning                                                           |

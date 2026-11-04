@@ -55,12 +55,23 @@ migration, operations, and contribution guidance.
 > POST Object form uploads are not yet supported ([#353](https://github.com/cloud37/s3-encryption-gateway/issues/353)).
 > Backend CORS alone is insufficient for encrypted paths: preflight is forwarded,
 > but gateway-generated responses lack the required CORS headers. Gateway-managed
-> preflight and response headers are planned in [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322).
+> preflight and response headers were not available in v0.12.3; GH-322 is now
+> implemented on unreleased `main` ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
+
+> **Unreleased update:** GH-322 CORS is available on unreleased `main`. GH-353
+> signed browser POST is available on unreleased `main`. Independent GH-353
+> verification passed on the isolated implementation; combined-main runtime
+> acceptance is not claimed. See the [evidence scope](docs/TESTING.md#gh-353-post-acceptance-contract),
+> [unreleased POST guide](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
+> and [browser deployment instructions](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
 
 **Unreleased main:** GH-322 gateway-managed CORS and GH-356 signed Content-Length
-recovery are now implemented, but neither is in the v0.12.3 image. See the
+recovery are available on `main`; they are not in the v0.12.3 image. GH-353 signed
+browser POST is also available on unreleased `main`, with independently accepted
+isolated-tree provider/SDK/browser evidence, not combined-main runtime acceptance. See the
 [current CORS contract](docs/S3_API_IMPLEMENTATION.md#gateway-managed-cors-gh-322)
-and [signed-length contract](docs/S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356).
+and [signed-length contract](docs/S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356),
+plus the [unreleased POST contract](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353).
 
 ## Who Needs This?
 
@@ -339,6 +350,34 @@ PUT/POST methods, and exposed ETag with a scoped manage credential. Normal
 allow_credentials is false; true is a nonstandard concrete-origin-only opt-in.
 See the single [setup/XML example](docs/DEPLOYMENT.md#gateway-managed-cors-gh-322)
 and [data-loss/fallback recovery procedure](docs/RUNBOOK.md#gateway-cors-valkey-data-loss-and-recovery).
+
+#### Signed browser form uploads (GH-353)
+
+**Unreleased `main` implementation; see the [verification scope](docs/TESTING.md#gh-353-post-acceptance-contract).** `POST
+/bucket` accepts a SigV4 presigned POST policy as `multipart/form-data` and writes
+through the gateway's normal authorization, encryption, metadata and backend
+path. POST policy authentication is SigV4-only (not SigV2). It is a single-file
+bucket-path operation, not multipart upload (MPU):
+query-string operation shapes are not accepted, scalar fields precede exactly
+one `file` part, and `file` must be last. The default file limit is 5 GiB,
+subject to the lower signed policy, configured spool, and buffered-engine limits;
+the MIME envelope has a separate 20 KiB cap. Policy size ranges apply to file
+bytes, not MIME overhead. Upload content is fully spooled and validated before
+the backend write. This is a deliberately bounded subset, not native S3 POST
+policy parity; see the [closed field/condition/error matrix](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353).
+
+See the copyable [boto3 and browser deployment examples](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
+Use gateway credentials to generate the form; the gateway independently uses
+its backend identity. Configured gateway session tokens are static inputs with
+an exclusive deadline, not STS issuance/refresh; SigV2 session credentials are
+not supported. Backend SSE-S3/SSE-KMS/SSE-C adds storage-provider encryption on
+top of gateway encryption; it does not replace it. SSE-C customer keys require
+trusted HTTPS at the gateway and verified HTTPS to the backend, are request
+scoped, and are not cached or automatically rotated. GH-353 depends on the
+single GH-322 CORS policy authority for browser access; do not add another CORS
+mechanism. Complete provider, SDK, and Chromium runtime acceptance remains
+pending; bounded external feedback and provider exclusions are in the [API](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
+and [deployment](docs/DEPLOYMENT.md#signed-browser-post-gh-353) guides.
 
 ### ListObjects Plaintext Size Translation
 
@@ -1164,7 +1203,7 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 ### Planned compatibility work
 
 - **Gateway-managed CORS** — implemented on unreleased main, not v0.12.3; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
-- **Browser POST Object** — SigV4 presigned form policies; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), depends on #322 for browser compatibility
+- **Browser POST Object** — available on unreleased `main`; independent isolated-tree verification passed, not combined-main runtime acceptance; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), uses the single #322 CORS authority for browser compatibility
 
 Neither feature is available in v0.12.3; no release date is committed.
 

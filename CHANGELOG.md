@@ -36,6 +36,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   remains unchanged and does not gain a durability requirement. Runtime API
   updates are not reloaded from configuration files.
 
+- **Signed browser POST Object (GH-353; unreleased `main`):** Add bounded path-style
+  SigV4 `multipart/form-data` form uploads through the gateway's ordinary
+  authentication, bucket authorization, shared encryption/write, metadata, and
+  response-projection paths. Enforce closed field/condition semantics, exact
+  original-policy signing, file-byte size/checksum validation, pre-write 0600
+  plaintext/ciphertext spooling, and 200/201/204/303 response behavior. Backend
+  SSE-S3/KMS/C options add encryption to gateway ciphertext; they do not replace
+  gateway encryption. The v0.12.3 compatibility tables remain unchanged; this
+  entry is unreleased. Independent isolated-tree verification passed; historical
+  provider/SDK/browser evidence is not combined-main runtime or release acceptance.
+  See [POST contract](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
+  and [deployment guide](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
+
+- **Configured session credentials and backend SSE options (GH-353; unreleased
+  `main`):** Add configured gateway session-token/deadline validation to ordinary
+  SigV4 and POST without STS issuance/refresh or SigV2 session support; preserve
+  the independent backend identity. SSE-C requires trusted HTTPS ingress and
+  verified backend HTTPS, uses request-scoped keys, disables SSE-C cache reuse,
+  does not auto-rotate keys, and rejects copy/MPU key inputs. SSE-S3/KMS/C remains
+  provider-dependent. POST stores temporary plaintext and ciphertext in private
+  spool files against a shared quota; operators must budget and protect this
+  temporary plaintext disk. GH-353 uses GH-322's single CORS authority; do not
+  infer GH-322 backup requirements for default passthrough mode. Full runtime
+  acceptance remains pending.
+
 ### Documentation
 
 - **Frontend access-key policy visibility:** Add an explicit deployment-guide
