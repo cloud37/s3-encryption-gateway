@@ -43,7 +43,7 @@ func TestGH353PostSDKRunner_ScriptsAndPins(t *testing.T) {
 			}
 		})
 	}
-	if boto3Version != "1.43.111" || awsJSSDKVersion != "3.1146.0" || awsJSNodeImage != "node:24-bookworm-slim" {
+	if pythonImage != "python:3.15-slim" || boto3Version != "1.43.124" || awsJSSDKVersion != "3.1146.0" || awsJSNodeImage != "node:24-bookworm-slim" {
 		t.Fatal("POST runner package or image pin changed")
 	}
 }

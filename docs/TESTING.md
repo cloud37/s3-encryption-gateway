@@ -129,7 +129,7 @@ Endpoint and region must match the bucket: defaults are B2
 `https://s3.eu-central-003.backblazeb2.com` / `eu-central-003` and Wasabi
 `https://s3.wasabisys.com` / `us-east-1`. Override both as appropriate.
 Requires Docker with network access for Testcontainers, a Valkey fixture,
-`python:3.14-slim` with `boto3==1.43.111`, `node:24-bookworm-slim` with
+`python:3.15-slim` with `boto3==1.43.124`, `node:24-bookworm-slim` with
 `@aws-sdk/client-s3` and `@aws-sdk/s3-presigned-post` `3.1146.0`, and
 `mcr.microsoft.com/playwright:v1.63.0-noble` Chromium. The browser fixture uses
 `valkey/valkey:9.2-alpine`. SDK dependencies are installed inside containers.
@@ -216,11 +216,11 @@ The registered scenario names are in
 | `TestConformance/<provider>/PostObject_RoundTrip`, `PostObject_RejectPreservesExisting`, `PostObject_SessionAndExpiry`, `PostObject_Responses` | At least one real encrypted backend: plaintext readback plus GET/HEAD/range, metadata/ETag, invalid overwrite preservation, session deadline and 204/201/303 response behavior. |
 | `PostObject_TaggingACLVersion` | Execute supported subcases only when existing provider capabilities allow; report each capability skip separately. |
 | `PostObject_SSE` and `GH353_ObjectSSEFixtureVerified` | Mandatory isolated trusted-HTTPS MinIO object-SSE fixture with verified static test KMS key; exercise SSE-S3, SSE-KMS and SSE-C POST→GET/HEAD/range, absent/wrong/correct-key cache proof, and projected backend SSE headers. MinIO may return the exact `arn:aws:kms:` prefix plus the configured non-ARN key ID; only that provider-owned canonical form or exact identity equality is accepted. A different key/ARN is still a failure. Ordinary HTTP MinIO fixture is not this evidence. |
-| `Compat_Boto3PresignedPost` | Real SDK-generated form using pinned `boto3==1.43.111`; default, policy denial, 201 XML, readback and session/missing/wrong token cases when session fixture is required. |
+| `Compat_Boto3PresignedPost` | Real SDK-generated form using pinned `boto3==1.43.124`; default, policy denial, 201 XML, readback and session/missing/wrong token cases when session fixture is required. |
 | `Compat_AWSJSPresignedPost` | Real SDK-generated form using pinned `@aws-sdk/client-s3` and `@aws-sdk/s3-presigned-post` `3.1146.0`; same response/readback/session checks. Runner executes module in install root using package imports. |
 | `Compat_BrowserPost` | Real pinned Playwright `1.63.0` Chromium browser with a separate origin: allowed FormData POST and readable response/ETag, 201 XML, signed-policy denial, allowed and denied custom-header preflights, denied-origin unreadability, session success and wrong/missing-token errors. |
 | Chart helper | `bash scripts/test-gh353-helm.sh` / `TestChart_GH353SessionCredentials`; chart schema/lint/render/secret-ref/clear/negative environment validation after final chart edits. This matrix row is already represented by the tracked script and is not evidence until coordinator execution succeeds. |
-| Runner/fixture pins | Python runner image `python:3.14-slim`; JS runner image `node:24-bookworm-slim`; browser image `mcr.microsoft.com/playwright:v1.63.0-noble`; ordinary MinIO image `chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f`; Valkey image `valkey/valkey:9.2-alpine`. These are current source pins, not a statement that the fixtures have run. The isolated ObjectSSE fixture is separate from ordinary HTTP MinIO and must verify its static test-KMS probe before its scenarios count. |
+| Runner/fixture pins | Python runner image `python:3.15-slim`; JS runner image `node:24-bookworm-slim`; browser image `mcr.microsoft.com/playwright:v1.63.0-noble`; ordinary MinIO image `chainguard/minio@sha256:de89cccd6cb19f505bf85c8a36f099414dc7a372c0e16abd2170ebaada9cc99f`; Valkey image `valkey/valkey:9.2-alpine`. These are current source pins, not a statement that the fixtures have run. The isolated ObjectSSE fixture is separate from ordinary HTTP MinIO and must verify its static test-KMS probe before its scenarios count. |
 
 Conformance compiles and runs under `TestConformance`; the PascalCase names
 above are registered subtests, not standalone `go test -run` test functions.
