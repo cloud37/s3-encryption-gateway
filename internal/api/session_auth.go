@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 	"net/http"
 	"net/url"
@@ -31,7 +32,10 @@ func validateSessionCredentialAt(c Credential, supplied string, now time.Time) e
 		return ErrExpiredToken
 	}
 	want, got := sha256.Sum256([]byte(c.SessionToken)), sha256.Sum256([]byte(supplied))
-	if subtle.ConstantTimeCompare(want[:], got[:])&subtle.ConstantTimeEq(int32(len(c.SessionToken)), int32(len(supplied))) != 1 || supplied == "" {
+	var wantLen, gotLen [8]byte
+	binary.BigEndian.PutUint64(wantLen[:], uint64(len(c.SessionToken)))
+	binary.BigEndian.PutUint64(gotLen[:], uint64(len(supplied)))
+	if subtle.ConstantTimeCompare(want[:], got[:])&subtle.ConstantTimeCompare(wantLen[:], gotLen[:]) != 1 || supplied == "" {
 		return ErrInvalidToken
 	}
 	return nil
