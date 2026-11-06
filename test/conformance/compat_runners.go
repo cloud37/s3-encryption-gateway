@@ -15,7 +15,7 @@ const pythonImage = "python:3.15-slim"
 const s5cmdImage = "peakcom/s5cmd:v2.3.0"
 
 // renovate: datasource=docker depName=rclone/rclone versioning=docker
-const rcloneImage = "rclone/rclone:1.75"
+const rcloneImage = "rclone/rclone:1.76"
 
 // renovate: datasource=docker depName=restic/restic versioning=docker
 const resticImage = "restic/restic:0.19.1"
