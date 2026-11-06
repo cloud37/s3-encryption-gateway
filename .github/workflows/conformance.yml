@@ -84,7 +84,10 @@ jobs:
             fi
           done
           go test -count=1 -tags=conformance -race -v -timeout 30m \
-            -run "TestConformance_NoProviderNameLiterals|TestConformance/${{ matrix.provider }}" \
+            -run '^TestConformance_NoProviderNameLiterals$' \
+            ./test/conformance/...
+          go test -count=1 -tags=conformance -race -v -timeout 30m \
+            -run "^TestConformance$/^${{ matrix.provider }}$" \
             ./test/conformance/...
 
   # ── V1.0-COMPAT-1 — SDK/Tool compatibility matrix (PR / push / nightly) ─────
@@ -115,7 +118,7 @@ jobs:
             fi
           done
           go test -count=1 -tags=conformance -race -v -timeout 30m \
-            -run "TestConformance/${{ matrix.provider }}/Compat_" \
+            -run "^TestConformance$/^${{ matrix.provider }}$/^Compat_" \
             ./test/conformance/...
 
   # ── Tier 2 — external providers (nightly, conditional on secrets) ────────────

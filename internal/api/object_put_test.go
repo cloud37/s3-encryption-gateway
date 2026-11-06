@@ -567,9 +567,8 @@ func TestGH353PostBufferedBoundaryAndSSECEtag(t *testing.T) {
 			if result.ClientETag != result.Backend.ETag {
 				t.Fatalf("result ETag=%q backend=%q", result.ClientETag, result.Backend.ETag)
 			}
-			wantDigest := md5.Sum(body)
-			if got := backend.mockS3Client.metadata["bucket/key"][crypto.MetaOriginalETag]; got != hex.EncodeToString(wantDigest[:]) {
-				t.Fatalf("PUT sealed ETag=%q want engine-computed %q", got, hex.EncodeToString(wantDigest[:]))
+			if got, want := backend.mockS3Client.metadata["bucket/key"][crypto.MetaOriginalETag], expectedOriginalETagForBuild(body); got != want {
+				t.Fatalf("PUT sealed ETag=%q want engine-computed %q", got, want)
 			}
 		}
 	})

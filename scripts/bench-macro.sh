@@ -81,7 +81,7 @@ printf 'bench-macro(%s): running soak harness → %s\n' "$provider" "$ndjson" >&
 env "${skip_env[@]}" "${soak_env[@]}" go test \
   -tags=conformance \
   -timeout 0 -v \
-  -run "TestConformance/$provider/Load_" \
+  -run "^TestConformance$/^$provider$/^Load_" \
   ./test/conformance/... \
   >&2
 
