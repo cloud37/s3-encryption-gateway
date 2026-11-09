@@ -157,7 +157,7 @@ jobs:
 
       - name: Run chart-releaser
         if: steps.version_check.outputs.already_released == 'false'
-        uses: helm/chart-releaser-action@v1.7.0
+        uses: helm/chart-releaser-action@v1.9.0
         with:
           charts_dir: helm
           config: .github/cr.yaml
