@@ -368,13 +368,17 @@ func TestGH353PostPolicy_SignatureScopeTimeAndCoverage(t *testing.T) {
 		}, now, ErrPostPolicyDenied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			u := *base
-			u.fields = make(map[string]string, len(base.fields))
+			u := &postUpload{
+				bucket: base.bucket,
+				key:    base.key,
+				fields: make(map[string]string, len(base.fields)),
+				policy: base.policy,
+			}
 			for k, v := range base.fields {
 				u.fields[k] = v
 			}
-			tc.mutate(&u)
-			if err := validatePostPolicyAt(&u, cred, time.Minute, tc.at); !errors.Is(err, tc.want) {
+			tc.mutate(u)
+			if err := validatePostPolicyAt(u, cred, time.Minute, tc.at); !errors.Is(err, tc.want) {
 				t.Fatalf("got %v want %v", err, tc.want)
 			}
 		})

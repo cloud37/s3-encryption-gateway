@@ -161,10 +161,18 @@ func spoolPostFile(ctx context.Context, upload *postUpload, manager SpoolManager
 }
 
 func spoolPostCiphertext(ctx context.Context, reader io.Reader, manager SpoolManager) (verifiedAWSBody, error) {
-	return spoolPostCiphertextLimit(ctx, reader, manager, 5<<30)
+	return spoolPostCiphertextDeadline(ctx, reader, manager, time.Time{})
 }
 
 func spoolPostCiphertextLimit(ctx context.Context, reader io.Reader, manager SpoolManager, limit int64) (verifiedAWSBody, error) {
+	return spoolPostCiphertextUntil(ctx, reader, manager, limit, time.Time{})
+}
+
+func spoolPostCiphertextDeadline(ctx context.Context, reader io.Reader, manager SpoolManager, deadline time.Time) (verifiedAWSBody, error) {
+	return spoolPostCiphertextUntil(ctx, reader, manager, 5<<30, deadline)
+}
+
+func spoolPostCiphertextUntil(ctx context.Context, reader io.Reader, manager SpoolManager, limit int64, deadline time.Time) (verifiedAWSBody, error) {
 	if ctx == nil || reader == nil || manager == nil {
 		return nil, ErrPostFormMalformed
 	}
@@ -204,6 +212,10 @@ func spoolPostCiphertextLimit(ctx context.Context, reader io.Reader, manager Spo
 			cleanup()
 			return nil, ErrStreamingCanceled
 		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			cleanup()
+			return nil, ErrRequestExpired
+		}
 		remaining := limit - length
 		readBuffer := buffer
 		if remaining < int64(len(readBuffer)) {
@@ -214,6 +226,10 @@ func spoolPostCiphertextLimit(ctx context.Context, reader io.Reader, manager Spo
 			cleanup()
 			return nil, ErrStreamingCanceled
 		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			cleanup()
+			return nil, ErrRequestExpired
+		}
 		if readErr != nil && readErr != io.EOF && (errors.Is(readErr, ErrStreamingCanceled) || errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded)) {
 			cleanup()
 			return nil, ErrStreamingCanceled
@@ -222,6 +238,10 @@ func spoolPostCiphertextLimit(ctx context.Context, reader io.Reader, manager Spo
 			if int64(n) > remaining {
 				cleanup()
 				return nil, ErrPostEntityTooLarge
+			}
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				cleanup()
+				return nil, ErrRequestExpired
 			}
 			if err := reservation.Grow(int64(n)); err != nil {
 				cleanup()
@@ -252,6 +272,10 @@ func spoolPostCiphertextLimit(ctx context.Context, reader io.Reader, manager Spo
 	if err := ctx.Err(); err != nil {
 		cleanup()
 		return nil, ErrStreamingCanceled
+	}
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		cleanup()
+		return nil, ErrRequestExpired
 	}
 	if _, err := streamingSpoolOps.seek(file, 0, io.SeekStart); err != nil {
 		cleanup()

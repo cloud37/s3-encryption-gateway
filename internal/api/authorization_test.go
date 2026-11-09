@@ -312,8 +312,14 @@ func TestGH353PostAuthorization_RequiresAuthenticatedParsedContextAndScopes(t *t
 				r = r.WithContext(context.WithValue(r.Context(), credentialKey, principal))
 			}
 			if tc.upload {
-				u := *upload
-				u.fields = map[string]string{"key": "literal/../test.jpg", "x-amz-credential": "post-principal/20300101/us-east-1/s3/aws4_request"}
+				u := &postUpload{
+					bucket:                 upload.bucket,
+					key:                    upload.key,
+					fields:                 map[string]string{"key": "literal/../test.jpg", "x-amz-credential": "post-principal/20300101/us-east-1/s3/aws4_request"},
+					authenticatedAccessKey: upload.authenticatedAccessKey,
+					file:                   upload.file,
+					fileRead:               upload.fileRead,
+				}
 				if tc.name == "valid prefix rw" {
 					u.bucket = "tenant-a"
 				}
@@ -323,7 +329,7 @@ func TestGH353PostAuthorization_RequiresAuthenticatedParsedContextAndScopes(t *t
 				if tc.name == "bucket bound mismatch" {
 					u.bucket = "tenant-b"
 				}
-				ctx := context.WithValue(r.Context(), postUploadContextKey{}, &u)
+				ctx := context.WithValue(r.Context(), postUploadContextKey{}, u)
 				r = r.WithContext(ctx)
 			}
 			called := false
@@ -403,16 +409,30 @@ func TestGH353PostAuthorization_NamedRouteRequiresParsedContext(t *testing.T) {
 				return cloned
 			}
 			if tc.name == "absent principal" {
-				u := *upload
-				u.fields = cloneFields(upload.fields)
-				req = req.WithContext(context.WithValue(req.Context(), postUploadContextKey{}, &u))
+				u := &postUpload{
+					bucket:                 upload.bucket,
+					key:                    upload.key,
+					fields:                 cloneFields(upload.fields),
+					file:                   upload.file,
+					fileRead:               upload.fileRead,
+					fileCounter:            upload.fileCounter,
+					authenticatedAccessKey: upload.authenticatedAccessKey,
+				}
+				req = req.WithContext(context.WithValue(req.Context(), postUploadContextKey{}, u))
 			} else if tc.context {
-				u := *upload
-				u.fields = cloneFields(upload.fields)
-				ctx := context.WithValue(withCredential(req, principal), postUploadContextKey{}, &u)
+				u := &postUpload{
+					bucket:                 upload.bucket,
+					key:                    upload.key,
+					fields:                 cloneFields(upload.fields),
+					file:                   upload.file,
+					fileRead:               upload.fileRead,
+					fileCounter:            upload.fileCounter,
+					authenticatedAccessKey: upload.authenticatedAccessKey,
+				}
+				ctx := context.WithValue(withCredential(req, principal), postUploadContextKey{}, u)
 				req = req.WithContext(ctx)
 				if tc.mutate != nil {
-					tc.mutate(&u, req)
+					tc.mutate(u, req)
 				}
 			}
 			called = false

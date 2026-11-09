@@ -2175,7 +2175,7 @@ type cancellationGrowSpy struct {
 	SpoolReservation
 	ctx      context.Context
 	deadline time.Time
-	grew     atomic.Int64
+	grew     *atomic.Int64
 }
 
 func (r *cancellationGrowSpy) Grow(n int64) error {
@@ -2197,7 +2197,7 @@ func (m *cancellationSpoolManager) Acquire(ctx context.Context, size, limit int6
 	if err != nil {
 		return nil, err
 	}
-	return &cancellationGrowSpy{SpoolReservation: r, ctx: m.ctx, deadline: m.deadline, grew: m.grew}, nil
+	return &cancellationGrowSpy{SpoolReservation: r, ctx: m.ctx, deadline: m.deadline, grew: &m.grew}, nil
 }
 
 func TestGH353PostObject_CancellationDuringCiphertextReadCleansBothSpools(t *testing.T) {

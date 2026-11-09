@@ -219,7 +219,7 @@ func (h *Handler) putObjectData(ctx context.Context, client s3.Client, in object
 		if manager == nil {
 			manager = DefaultSpoolManager()
 		}
-		ciphertext, spoolErr := spoolPostCiphertext(ctx, encryptedReader, manager)
+		ciphertext, spoolErr := spoolPostCiphertextDeadline(ctx, encryptedReader, manager, in.Deadline)
 		if spoolErr != nil {
 			return objectWriteResult{}, objectWriteFailure(objectWritePreparation, spoolErr)
 		}
