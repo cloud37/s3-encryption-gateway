@@ -28,11 +28,13 @@ This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 ### OCI registry (GHCR)
 
 Signed OCI releases are published at `ghcr.io/cloud37/s3-encryption-gateway-helm`.
+`0.13.0-rc2` is a release candidate for isolated validation only; do not use it
+for production workloads. Use the latest stable chart for production.
 Install a specific chart version with:
 
 ```bash
 helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway-helm \
-  --version 0.12.3
+  --version 0.13.0-rc2
 ```
 
 For strongest artifact pinning, install by the immutable manifest digest:
@@ -145,9 +147,19 @@ config:
 | `config.backend.region` | S3 backend region | `"us-east-1"` |
 | `config.backend.accessKey` | Backend access key (use valueFrom) | `""` |
 | `config.backend.secretKey` | Backend secret key (use valueFrom) | `""` |
+| `config.backend.sessionToken` | Optional independent backend session token; use valueFrom for Secret-backed values | `""` |
 | `config.backend.provider` | Provider hint string (optional) | `""` |
+| `config.backend.metadataProfile` | `auto` or `compact` metadata compaction, restart required | `""` |
+| `config.backend.postInlineTagging` | `supported` or `unsupported` POST inline tagging, restart required | `""` |
 | `config.backend.useSSL` | Selects HTTPS for scheme-less backend endpoints; explicit `http://` or `https://` endpoint schemes take precedence | `"true"` |
 | `config.backend.usePathStyle` | Use path-style bucket addressing | `"false"` |
+
+Empty or `auto` metadata profiles preserve provider defaults; `compact` uses
+existing base64url compaction without changing provider limits. Empty or
+`supported` POST tagging preserves legacy behavior; `unsupported` rejects a
+signed POST tagging field before writing and does not alter ordinary PUT.
+Both settings require a restart; invalid values are rejected at startup.
+
 Gateway credentials are validated at the gateway and backend credentials are never forwarded from clients. Configure `config.auth.credentials[].buckets` with exact names or trailing-prefix scopes such as `tenant-*`; omit it or use `["*"]` for unrestricted access, or use `[]` for deny-all. A bare `*` is broad authority, particularly with `create`, `delete`, or `manage`. `permissions` is `ro` or `rw`, while `bucketPermissions` independently grants `create`, `delete`, and `manage` (bucket configuration administration). Root ListBuckets is allowed for both `ro` and `rw` (with omitted permissions defaulting to `rw`): an absent `buckets` scope returns backend-visible buckets, while an explicit empty `buckets: []` scope returns a successful empty inventory.
 
 #### Credential Migration and Reload
@@ -164,6 +176,85 @@ the previous complete policy snapshot. Helm-provided environment variables are
 process environment, so changing a Secret or Helm value requires a pod restart;
 it is not a live environment reload. Roll out credential changes atomically and
 verify the rendered environment before removing old access.
+
+##### Configured gateway session credentials
+
+Gateway session credentials are optional. For a static credential, omit both
+`sessionToken` and `expiresAt` entirely. A session token requires a GMT
+RFC3339/RFC3339Nano deadline ending in `Z`; valid but already-expired entries
+can be loaded during rotation, but runtime authentication rejects them. Helm
+checks timestamp shape and inline pairing; the runtime remains authoritative for
+calendar-valid timestamps and for values resolved from Secret/ConfigMap refs.
+
+Use a Secret reference for the token and supply the matching deadline as a
+string:
+
+```yaml
+config:
+  auth:
+    credentials:
+      - accessKey:
+          value: "BROWSERSESSION"
+          valueFrom: {}
+        secretKey:
+          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: gateway-session-credentials
+              key: secret-access-key
+        sessionToken:
+          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: gateway-session-credentials
+              key: session-token
+        expiresAt: "2027-01-15T12:00:00Z"
+        buckets: ["attachments"]
+        permissions: rw
+```
+
+`valueFrom` wins when it contains a Secret or ConfigMap reference, even if a
+stale inline `value` is also present. A missing/empty referenced token is not
+replaced by the inline value; runtime validation rejects a session source that
+resolves empty. `value: ""` with no populated `valueFrom` is an explicit token
+clear and renders an empty indexed token variable. Omit `sessionToken` to omit
+that variable. Clear/remove `expiresAt` at the same time when returning to
+static credentials. The optional deadline is a string, not a `configValue`.
+
+The alternative `config.auth.existingCredentialsSecret` mounts one complete
+credentials YAML/JSON file. Its gateway entries are authoritative: the chart
+does not emit any inline/indexed gateway credential environment variables
+(access key, secret key, token, deadline, or policy fields) while that file is
+selected. The file uses native fields such as `session_token_env` or
+`session_token`, plus `expires_at`; see [`config.yaml.example`](../../config.yaml.example).
+This source choice is separate from the backend identity below.
+
+Gateway credential snapshots rotate together: prepare and validate the new
+complete set before retiring the old session. For environment-backed values,
+update the Secret and roll out pods; Kubernetes does not mutate a running
+container's environment. A watched credentials file can use the runtime's
+atomic reload path; an invalid replacement retains the previous active
+snapshot. This configuration selects an already-issued credential; it does not
+request session credentials from an STS service.
+
+##### Independent backend session token
+
+`config.backend.sessionToken` configures only the gateway's S3 backend identity
+and defaults to empty/static credentials. It emits `BACKEND_SESSION_TOKEN` and
+is never copied from a `config.auth.credentials[]` token. It supports Secret or
+ConfigMap `valueFrom` references; an explicit empty value clears the token.
+
+##### SSE-C and browser CORS prerequisites
+
+For SSE-C, protect customer keys in transit: use HTTPS to the gateway, and
+behind a proxy configure trusted proxy CIDRs so forwarded HTTPS is accepted only
+from a trusted immediate peer. Restrict network access so clients cannot bypass
+that trusted proxy path. Customer keys are request-scoped: do not persist or
+cache them, and do not assume the gateway rotates them automatically.
+
+Browser POST uploads require GH-322 gateway-managed bucket CORS (`config.cors.mode.value: gateway`)
+and the shared Valkey policy store. Keep one CORS authority: do not add a native
+backend CORS fallback or a second policy mechanism to enable browser uploads.
 
 #### Encryption Configuration
 
@@ -332,11 +423,11 @@ config:
 - **JSON/HTTP (Development only)**: Set `insecureAllowPlaintextTransport.value: "true"` explicitly. HTTP transmits plaintext DEKs and is rejected by default.
 - **Binary KMIP (Advanced)**: `host:5696` — requires `caCert`, `clientCert`, `clientKey` (mutual TLS)
 
-#### Valkey (Multipart Upload State + ListObjects Size Cache)
+#### Valkey (Multipart Upload State, ListObjects Size Cache, and Optional CORS)
 
 Valkey (or any Redis-protocol-compatible store) is the gateway's shared state
-backend. As of v1.0 a single Valkey instance and one connection pool serve two
-features:
+backend. A single Valkey instance and connection pool serve these optional or
+required features:
 
 1. **Encrypted multipart-upload state** — in-flight `UploadState` blobs
    (`mpu:<id>`, 7-day TTL). Required (fail-closed) when any policy sets
@@ -344,7 +435,13 @@ features:
 2. **ListObjects plaintext-size cache** (V1.0-S3-3) — per-bucket hash
    `plainsize:<bucket>` so `ListObjects[i].Size == HeadObject(key).Content-Length`
    without per-object HEAD calls. **Strongly recommended**; fail-soft to
-   ciphertext sizes if Valkey is unavailable.
+    ciphertext sizes if Valkey is unavailable.
+3. **Gateway-managed bucket CORS** (opt-in with `config.cors.mode: gateway`) —
+   durable, non-expiring `bucketcors:v1:<bucket>` policy records. This mode
+   requires persistence on retained storage, independent backups, and a tested
+   restore. Default `passthrough` does not add a persistence requirement, and
+   not every installation needs Valkey unless it uses encrypted MPU or enables
+   a Valkey-backed feature.
 
 Use the built-in Valkey subchart for development or point at an external cluster for production.
 
@@ -520,7 +617,7 @@ Valkey instance above; no separate deployment. All fields use the
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
-| `image.tag` | Container image tag | `"0.12.3"` |
+| `image.tag` | Container image tag | `"0.13.0-rc2"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override the chart name portion of resource names | `""` |
@@ -912,7 +1009,35 @@ fields are supported: `encrypt_multipart_uploads`, `require_encryption`,
 `disallow_lock_bypass`, and per-bucket `encryption` /
 `rate_limit` overrides.
 
+`require_encryption` also rejects plaintext GET/HEAD and copy sources in matching
+buckets, including objects stored before the policy was enabled. Native SSE is
+not gateway encryption. [Migrate plaintext first](../../docs/DEPLOYMENT.md#strict-read-migration-gh-380).
+
 #### Production (external Valkey, TLS)
+
+Gateway-managed CORS is opt-in with `config.cors.mode.value: gateway`; the default is
+`passthrough`. Gateway mode stores runtime API-managed bucket rules in shared,
+non-expiring Valkey. Configure persistence on retained storage, maintain an
+independent backup, and exercise restore before enabling it. The development
+subchart is not proof of production durability. Roll all replicas to the mode
+together and use the same external Valkey. Empty-but-healthy Valkey can pass
+readiness after rules are lost; `GET ?cors` then returns 404 and preflight
+denies with 403 unless explicit fallback applies. Fallback can broaden browser
+visibility and must be reviewed during recovery. `PUT/DELETE ?cors` changes are
+not reloaded from chart/config files. If backend bucket deletion succeeds but
+Valkey policy cleanup fails, retry cleanup and resolve the stale key before
+reusing that bucket name.
+
+> **Credentials warning:** `config.cors.allowCredentials` is a nonstandard,
+> deployment-level opt-in. When enabled, the gateway echoes only a syntactically
+> validated concrete request Origin for a matching rule; stored/fallback `*`
+> patterns are never reflected as `Access-Control-Allow-Origin: *` with
+> credentials. Review this browser exposure before enabling it.
+
+When `config.cors.mode.valueFrom` is present, it takes precedence over the
+direct `value`, matching the environment renderer. Helm cannot resolve that
+referenced value during rendering, so it conservatively requires Valkey even
+when a direct `value: passthrough` is also present.
 
 Disable the subchart and point at your shared Valkey cluster. The `policies`
 list works identically:
@@ -922,6 +1047,23 @@ valkey:
   enabled: false
 
 config:
+  cors:
+    mode:
+      value: gateway
+      valueFrom: {}
+    allowCredentials:
+      value: "false"
+    fallback:
+      allowedOrigins:
+        value: ["https://console.example.com"]
+      allowedMethods:
+        value: [GET, HEAD, PUT, POST, DELETE]
+      allowedHeaders:
+        value: ["content-type", "x-amz-*"]
+      exposeHeaders:
+        value: [ETag]
+      maxAgeSeconds:
+        value: "3600"
   multipartState:
     valkey:
       addr:
@@ -1212,7 +1354,7 @@ helm install gw-blue . \
 
 # Green side (new version):
 helm install gw-green . \
-  --set image.tag=0.12.3 \
+  --set image.tag=0.13.0-rc2 \
   --values examples/values-green.yaml \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
 
@@ -1307,7 +1449,7 @@ changes.
 
 5. **TLS**: Enable TLS on the gateway listener (`config.tls.enabled`) and use cert-manager for automatic certificate rotation.
 
-6. **FIPS**: Use `image.tag: 0.12.3-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
+6. **FIPS**: Use `image.tag: 0.13.0-rc2-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
 
 ## Troubleshooting
 
