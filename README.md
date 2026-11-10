@@ -55,23 +55,23 @@ migration, operations, and contribution guidance.
 > POST Object form uploads are not yet supported ([#353](https://github.com/cloud37/s3-encryption-gateway/issues/353)).
 > Backend CORS alone is insufficient for encrypted paths: preflight is forwarded,
 > but gateway-generated responses lack the required CORS headers. Gateway-managed
-> preflight and response headers were not available in v0.12.3; GH-322 is now
-> implemented on unreleased `main` ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
+> preflight and response headers were not available in v0.12.3; they are included
+> in the 0.13.0-rc1 candidate ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
 
-> **Unreleased update:** GH-322 CORS is available on unreleased `main`. GH-353
-> signed browser POST is available on unreleased `main`. Independent GH-353
-> verification passed on the isolated implementation; combined-main runtime
-> acceptance is not claimed. See the [evidence scope](docs/TESTING.md#gh-353-post-acceptance-contract),
+> **0.13.0-rc1 validation:** GH-322 CORS, GH-353 signed browser POST, and GH-356
+> signed Content-Length recovery are included in this release candidate for
+> feature-requester/operator testing. Browser/provider acceptance must be
+> performed against the intended client and provider; do not treat the candidate
+> as production-ready. See the [evidence scope](docs/TESTING.md#gh-353-post-acceptance-contract),
 > [unreleased POST guide](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
 > and [browser deployment instructions](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
 
-**Unreleased main:** GH-322 gateway-managed CORS and GH-356 signed Content-Length
-recovery are available on `main`; they are not in the v0.12.3 image. GH-353 signed
-browser POST is also available on unreleased `main`, with independently accepted
-isolated-tree provider/SDK/browser evidence, not combined-main runtime acceptance. See the
+**0.13.0-rc1 candidate:** GH-322 gateway-managed CORS, GH-353 signed browser
+POST, and GH-356 signed Content-Length recovery are included for validation; the
+candidate is not a stable release. See the
 [current CORS contract](docs/S3_API_IMPLEMENTATION.md#gateway-managed-cors-gh-322)
 and [signed-length contract](docs/S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356),
-plus the [unreleased POST contract](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353).
+plus the [POST contract](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353).
 
 ## Who Needs This?
 
@@ -342,7 +342,7 @@ When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to 
 
 #### Browser uploads with gateway-managed CORS
 
-**Unreleased main (GH-322):** Opt-in `cors.mode: gateway` owns preflight and actual
+**0.13.0-rc1 candidate (GH-322):** Opt-in `cors.mode: gateway` owns preflight and actual
 response headers; default passthrough is unchanged. Shared Valkey becomes durable
 policy: retained-storage persistence and independently tested backup/restore are
 required, and API edits are not recreated from config. Configure explicit origins,
@@ -353,7 +353,7 @@ and [data-loss/fallback recovery procedure](docs/RUNBOOK.md#gateway-cors-valkey-
 
 #### Signed browser form uploads (GH-353)
 
-**Unreleased `main` implementation; see the [verification scope](docs/TESTING.md#gh-353-post-acceptance-contract).** `POST
+**0.13.0-rc1 candidate; see the [verification scope](docs/TESTING.md#gh-353-post-acceptance-contract).** `POST
 /bucket` accepts a SigV4 presigned POST policy as `multipart/form-data` and writes
 through the gateway's normal authorization, encryption, metadata and backend
 path. POST policy authentication is SigV4-only (not SigV2). It is a single-file
@@ -897,7 +897,7 @@ go build -o bin/s3-encryption-gateway ./cmd/server
 
 ## Configuration
 
-On **unreleased main**, gateway-managed CORS is opt-in; use one shared Valkey for every replica and
+In **0.13.0-rc1**, gateway-managed CORS is opt-in; use one shared Valkey for every replica and
 roll replicas to gateway mode together. Its keys are durable policy, not
 disposable per-upload state. Persistence on retained storage plus an independent
 tested backup/restore is required before enabling the mode. Empty-store recovery
@@ -1200,12 +1200,13 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 
 ## Roadmap
 
-### Planned compatibility work
+### Release-candidate validation
 
-- **Gateway-managed CORS** — implemented on unreleased main, not v0.12.3; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
-- **Browser POST Object** — available on unreleased `main`; independent isolated-tree verification passed, not combined-main runtime acceptance; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), uses the single #322 CORS authority for browser compatibility
+- **Gateway-managed CORS** — included in `0.13.0-rc1` for opt-in validation; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
+- **Browser POST Object** — included in `0.13.0-rc1` for feature-requester/provider validation; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), uses the single #322 CORS authority for browser compatibility
 
-Neither feature is available in v0.12.3; no release date is committed.
+Neither feature is in stable v0.12.3. The release candidate is not a stable
+release; browser/provider acceptance remains part of candidate validation.
 
 ### Future
 

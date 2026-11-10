@@ -1,24 +1,23 @@
 # Roadmap
 
-**Reviewed October 6, 2026; released compatibility baseline: v0.12.3.**
+**Reviewed for `0.13.0-rc1` on November 9, 2026; latest stable release: v0.12.3.**
 
 For current behavior, use [S3 compatibility](S3_API_IMPLEMENTATION.md) and the
 [changelog](../CHANGELOG.md). An issue, proposal, or implementation branch is not
 evidence that a capability has shipped. No delivery dates are committed below.
 
-## Accepted, Unreleased Work
+## Release-Candidate Validation
 
 | Work | Tracking | Current release limitation |
 |---|---|---|
-| Gateway-managed CORS | [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322) | Implemented on main; absent from v0.12.3, whose passthrough does not provide complete encrypted-response CORS |
-| Presigned POST Object form uploads | [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353) | Separate from multipart upload; browser support depends on gateway-managed CORS |
-| Signed zero Content-Length through reverse proxies | [#356](https://github.com/cloud37/s3-encryption-gateway/issues/356) | Implemented on main; fix is not in v0.12.3 |
+| Gateway-managed CORS | [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322) | Included in `0.13.0-rc1` for opt-in validation; absent from stable v0.12.3 |
+| Presigned POST Object form uploads | [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353) | Included in `0.13.0-rc1` for feature-requester/provider validation; browser support depends on gateway-managed CORS |
+| Signed zero Content-Length through reverse proxies | [#356](https://github.com/cloud37/s3-encryption-gateway/issues/356) | Included in `0.13.0-rc1`; absent from stable v0.12.3 |
 
-Follow the linked issues for current implementation/release status. Documented
-limitations without an accepted issue are not implicit roadmap commitments.
-Merged-but-unreleased behavior is explicitly documented in the
-[S3 reference](S3_API_IMPLEMENTATION.md#gateway-managed-cors-gh-322); code on main
-is not a substitute for checking your installed release.
+The `0.13.0-rc1` candidate is for validation, not production. Follow the linked
+issues for current acceptance status and the [S3 reference](S3_API_IMPLEMENTATION.md)
+for the stable v0.12.3 compatibility baseline and candidate scope. An issue,
+proposal, or implementation branch is not evidence of stable-release support.
 
 ## Longer-Term Directions
 

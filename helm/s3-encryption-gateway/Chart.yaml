@@ -16,31 +16,31 @@ type: application
 annotations:
   artifacthub.io/category: security
   artifacthub.io/license: MIT
-  artifacthub.io/prerelease: "false"
+  artifacthub.io/prerelease: "true"
   artifacthub.io/signKey: |
     fingerprint: keyless
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.3
+      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc1
       whitelisted: true
     - name: s3-encryption-gateway-fips
-      image: docker.io/cloud37io/s3-encryption-gateway:0.12.3-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc1-fips
       whitelisted: true
   artifacthub.io/changes: |
+    - kind: added
+      description: Add opt-in gateway-managed bucket CORS with durable shared Valkey policy storage (GH-322)
+    - kind: added
+      description: Add bounded signed browser POST uploads with shared encryption/write handling, configured session credentials, and backend SSE options (GH-353)
     - kind: fixed
-      description: Preserve backend S3 errors during encrypted object-read preflight without false decrypt or tamper alerts (GH-344)
+      description: Recover missing signed zero Content-Length for SigV4 requests behind compatible reverse proxies (GH-356)
     - kind: fixed
-      description: Honor signed presigned URL lifetimes independently of the header-auth clock-skew window and validate bounded expiry values (GH-345)
-    - kind: fixed
-      description: Decode CopyObject and UploadPartCopy source identities exactly once and encode backend-native copy headers (GH-346)
+      description: Enforce require_encryption on plaintext GET, HEAD, CopyObject, and UploadPartCopy sources (GH-380)
     - kind: changed
-      description: Update OpenTelemetry, OpenBao, backoff, Moby API, generated Google API modules, and compatibility client and KMS images
-    - kind: changed
-      description: Expand signed-handler, wire, fuzz, and four-provider regressions and document deployment guidance and corrected Garage versioning capabilities
+      description: Consolidate reader guides and publish expanded release-scoped S3 compatibility and authorization documentation (GH-357)
   artifacthub.io/containsSecurityUpdates: "false"
-version: 0.12.3
-appVersion: "0.12.3"
+version: 0.13.0-rc1
+appVersion: "0.13.0-rc1"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;

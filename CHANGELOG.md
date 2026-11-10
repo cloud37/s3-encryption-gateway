@@ -4,92 +4,95 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## v1.0 – Unreleased
+## [Unreleased]
 
-### Fixed
+## [0.13.0-rc1] — 2026-11-10
 
-- **Strict source reads (GH-380):** Existing `require_encryption: true` policies
-  now reject plaintext GET, HEAD, CopyObject and UploadPartCopy sources, including
-  ranges and versions. Migrate plaintext before enabling the policy; already
-  enabled policies also change behavior. See [deployment guidance](docs/DEPLOYMENT.md#strict-read-migration-gh-380).
+### ⚠️ Release Candidate: Validate Before Production Use ⚠️
 
-- **Signed Content-Length behind reverse proxies (GH-356):** SigV4 requests
-  whose `SignedHeaders` includes `content-length` can authenticate when a Go-based
-  frontend proxy omits `Content-Length: 0` on a bodiless request such as DELETE.
-  Recover missing canonical values from the request's known nonnegative length,
-  preserve explicit headers, and never infer an unknown/chunked length. Header
-  and presigned authentication share the fix; incorrect signatures still return
-  403 `SignatureDoesNotMatch` before backend access. Includes independently
-  signed Tier 1 validator/middleware and real-proxy route regressions, plus
-  provider-neutral Tier 2 encrypted-object deletion cases confirmed red before
-  the fix and green afterward on all four local providers. No credential,
-  encryption-policy, or object-format migration is required. See the
-  [frontend proxy guidance](docs/DEPLOYMENT.md#signed-zero-content-length-gh-356).
+This release candidate is for feature-requester and operator validation in
+isolated, non-production environments. In particular, exercise gateway-managed
+CORS and signed browser POST against the intended browser/client and S3 provider
+before enabling them in production. This preparation does not claim full live
+browser/provider acceptance of GH-353. Gateway-managed CORS is opt-in; passthrough
+remains the default. Existing 0.12 coordinated-upgrade requirements still apply.
 
 ### Added
 
 - **Gateway-managed bucket CORS (GH-322, opt-in):** `cors.mode: gateway` stores
   bucket XML in shared, non-expiring Valkey and applies policy to preflight and
-  actual gateway responses. This is an operational breaking change only when
-  opting in: persistent Valkey on retained storage and an independently
-  maintained, tested backup/restore are prerequisites. Default passthrough
-  remains unchanged and does not gain a durability requirement. Runtime API
-  updates are not reloaded from configuration files.
+  actual gateway responses. Persistent Valkey and independently maintained,
+  tested backup/restore are prerequisites when opting in. Default passthrough
+  remains unchanged and does not gain a CORS durability requirement; runtime
+  API updates are not reloaded from configuration files.
 
-- **Signed browser POST Object (GH-353; unreleased `main`):** Add bounded path-style
-  SigV4 `multipart/form-data` form uploads through the gateway's ordinary
-  authentication, bucket authorization, shared encryption/write, metadata, and
-  response-projection paths. Enforce closed field/condition semantics, exact
-  original-policy signing, file-byte size/checksum validation, pre-write 0600
-  plaintext/ciphertext spooling, and 200/201/204/303 response behavior. Backend
-  SSE-S3/KMS/C options add encryption to gateway ciphertext; they do not replace
-  gateway encryption. The v0.12.3 compatibility tables remain unchanged; this
-  entry is unreleased. Independent isolated-tree verification passed; historical
-  provider/SDK/browser evidence is not combined-main runtime or release acceptance.
-  See [POST contract](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
-  and [deployment guide](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
+- **Signed browser POST Object (GH-353):** Add bounded path-style SigV4
+  `multipart/form-data` form uploads through normal authentication, bucket
+  authorization, shared encryption/write, metadata, and response-projection
+  paths. Enforce closed field/condition semantics, original-policy signing,
+  file-byte size/checksum validation, pre-write private plaintext/ciphertext
+  spooling, and 200/201/204/303 response behavior. Backend SSE-S3/KMS/C options
+  encrypt gateway ciphertext; they do not replace gateway encryption.
 
-- **Configured session credentials and backend SSE options (GH-353; unreleased
-  `main`):** Add configured gateway session-token/deadline validation to ordinary
-  SigV4 and POST without STS issuance/refresh or SigV2 session support; preserve
-  the independent backend identity. SSE-C requires trusted HTTPS ingress and
+- **Configured session credentials and backend SSE options (GH-353):** Add
+  configured gateway session-token/deadline validation to ordinary SigV4 and
+  POST without STS issuance/refresh or SigV2 session support; preserve the
+  independent backend identity. SSE-C requires trusted HTTPS ingress and
   verified backend HTTPS, uses request-scoped keys, disables SSE-C cache reuse,
-  does not auto-rotate keys, and rejects copy/MPU key inputs. SSE-S3/KMS/C remains
-  provider-dependent. POST stores temporary plaintext and ciphertext in private
-  spool files against a shared quota; operators must budget and protect this
-  temporary plaintext disk. GH-353 uses GH-322's single CORS authority; do not
-  infer GH-322 backup requirements for default passthrough mode. Full runtime
-  acceptance remains pending.
+  does not auto-rotate keys, and rejects copy/MPU key inputs. POST temporary
+  plaintext and ciphertext use private spool files against a shared quota.
+  Validate backend-specific SSE behavior and SSE-C denial/cache behavior with
+  the target provider before production use; support remains provider-dependent.
+
+### Fixed
+
+- **Signed Content-Length behind reverse proxies (GH-356):** SigV4 requests
+  whose `SignedHeaders` includes `content-length` can authenticate when a Go
+  frontend proxy omits `Content-Length: 0` on a bodiless request such as DELETE.
+  Recover missing canonical values from known nonnegative request length,
+  preserve explicit headers, and never infer an unknown/chunked length. Incorrect
+  signatures still return 403 `SignatureDoesNotMatch` before backend access.
+
+- **Require encrypted source reads (GH-380):** Existing `require_encryption:
+  true` policies reject plaintext GET, HEAD, CopyObject, and UploadPartCopy
+  sources, including ranges and versions. Migrate plaintext before enabling the
+  policy; already-enabled policies also change behavior. See
+  [deployment guidance](docs/DEPLOYMENT.md#strict-read-migration-gh-380).
+
+### Changed
+
+- **Reader-oriented documentation consolidation (GH-357):** Consolidate
+  superseded topic guides into reader-oriented owners, rebuild task navigation,
+  and correct stale configuration, migration, FIPS, and operational guidance.
+- **S3 compatibility and authorization documentation (GH-357):** Publish a
+  release-scoped compatibility overview and inventory pinned SDK operations,
+  aliases, browser extensions, options, provider evidence, and known limitations.
+  Clarify frontend credential policy visibility and distinguish route support
+  from provider workflow certification.
+- **Build, CI, and conformance maintenance:** Repair conformance and FIPS gates,
+  resolve the session-token security-scan finding, update signed POST runner
+  pins, satisfy Go vet for POST tests, and avoid locking boto3 to a specific
+  version in conformance setup.
+
+### Dependencies
+
+- Require Go 1.27.3. Update the AWS SDK for Go v2 family (core v1.47.8,
+  config v1.33.17, credentials v1.20.17, and S3 v1.114.9), Smithy Go v1.28.9,
+  MinIO Go v7.4.1, Redis Go v9.23.0, Prometheus client
+  v1.25.0, OpenTelemetry v1.47.0, `golang.org/x/crypto` v0.58.0,
+  `golang.org/x/sys` v0.50.0, and Testcontainers Go v0.45.0, alongside their
+  compatible transitive modules.
+- Refresh compatibility/test tooling, including AWS CLI v2.39.7, boto3
+  v1.43.127, Garage v2.5.0, SeaweedFS v4.53, OpenBao v2.7.2, Cosmian KMS
+  v5.29.0, Rclone v1.76, Helm v4.3.1, and release/signing actions.
 
 ### Documentation
 
-- **Frontend access-key policy visibility:** Add an explicit deployment-guide
-  section for credential scope/defaults, independent object and bucket grants,
-  scoped role examples, update/revocation behavior, model limits, and env/Helm
-  configuration. Link it directly from the README and task index and distinguish
-  frontend authorization from encryption policy and backend IAM. No new guide
-  files or runtime authorization changes.
-
-- **Reader-oriented documentation consolidation:** Reduce top-level guides from
-  33 to 18 by merging 15 superseded topic files into existing owners. Centralize
-  S3 operation/option/SDK evidence, backend/policy setup, key rotation, metadata/FIPS,
-  admin/recovery procedures, coverage, and scaling. Rebuild the task index and
-  contents navigation, correct stale state-key/FIPS/migration examples, preserve
-  historical records and benchmark evidence, and repair live references without
-  adding redirect stubs or changing runtime settings.
-
-- **Application compatibility overview (GH-357):** Add a v0.12.3-scoped
-  supported / not supported / planned feature matrix linked from the README,
-  with backend dependencies, multipart limits, listing caveats, browser POST/CORS
-  tracking, and released-versus-unreleased reverse-proxy fixes. Reconcile the
-  API guide and SDK test-coverage notes, and label earlier roadmap milestones
-  as historical rather than current delivery commitments.
-- **Complete S3 documentation (GH-357 follow-up):** Inventory all 112 pinned SDK
-  operations, legacy action aliases, and browser extensions; add option-level
-  addressing, conditional-request, checksum, listing/part-pagination, write-field,
-  and recovery caveats. Document backend/SDK/encryption-mode test selection,
-  correct unsupported inline-lock/virtual-host claims, and distinguish route
-  support from provider workflow certification. No runtime behavior changes.
+- Document gateway-managed CORS configuration, durability, rollout, and
+  recovery; signed POST policy, browser, SSE, and deployment contracts; strict
+  encrypted-source read migration; reverse-proxy signed-length behavior; and
+  release validation boundaries. Provider/SDK/browser validation limitations
+  are called out rather than presented as blanket certification.
 
 ## [0.12.3] — 2026-10-02
 

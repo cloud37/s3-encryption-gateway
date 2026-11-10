@@ -53,11 +53,38 @@ Key rules:
 
 ## GH-353 POST acceptance contract
 
+### Release-candidate validation — 2026-11-09
+
+On the `0.13.0-rc1` preparation tree, the complete local gates passed:
+`make test`, `make test-fips`, `make test-conformance-local`,
+`make test-comprehensive` (including a second Tier 1/local-conformance run),
+`make coverage-gate` (84.6% aggregate, above the 80% gate), and
+`make security-scan` (govulncheck reported no reachable vulnerabilities; gosec
+reported zero issues). The local conformance run exercised GH-322 gateway CORS
+and GH-353 POST/browser flows on MinIO and Garage; MinIO POST SSE-S3, SSE-KMS,
+and SSE-C passed. Existing provider capability exclusions/skips remain in force:
+complete POST is unsupported/skipped on RustFS and SeaweedFS, and Garage POST
+SSE plus optional ACL/versioning cases were skipped.
+
+External Backblaze B2/Wasabi GH-353 acceptance was not run because this
+environment has no `B2_ACCESS_KEY_ID` credentials; the focused target correctly
+failed closed before execution. This is not a failed product test, but feature
+requesters still need to run the documented external-provider/browser matrix
+against their intended environment. This candidate validation does not claim
+all-provider acceptance or production readiness. Logs: `/tmp/opencode/rc1-test-fips.log`,
+`/tmp/opencode/rc1-test-conformance-local.log`,
+`/tmp/opencode/rc1-test-conformance-gh353-external.log`; other long-run output
+was retained by the OpenCode shell runner for this session.
+
+`make test-comprehensive` passed at final source HEAD; documentation-only
+clarification edits and candidate metadata updates were applied afterward.
+
 **Independent GH-353 verification passed on 2026-11-04** for the isolated
 implementation and approved scope; see [the acceptance ledger](issues/GH-353.md#verification-evidence-and-acceptance-limits).
 The accepted local runtime evidence predates integration with newer `main`'s
-GH-380 read policy and Go directive. It is not execution on the combined tree,
-and no combined-main provider/SSE/SDK/browser runtime acceptance is claimed.
+GH-380 read policy and Go directive. At that time it was not execution on the
+combined tree; subsequent combined-tree runtime evidence is recorded in
+[the 0.13.0-rc1 validation section](#release-candidate-validation--2026-11-09).
 Combined-main integration passed focused GH-353/GH-380 regressions, the full
 19-package Tier 1 race/coverage run, and Helm's 8 positive/10 negative cases;
 all 17 new production files exceed 85% statement coverage. Exact logs and
