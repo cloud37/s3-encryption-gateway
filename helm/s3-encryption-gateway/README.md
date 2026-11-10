@@ -28,13 +28,13 @@ This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 ### OCI registry (GHCR)
 
 Signed OCI releases are published at `ghcr.io/cloud37/s3-encryption-gateway-helm`.
-`0.13.0-rc1` is a release candidate for isolated validation only; do not use it
+`0.13.0-rc2` is a release candidate for isolated validation only; do not use it
 for production workloads. Use the latest stable chart for production.
 Install a specific chart version with:
 
 ```bash
 helm install my-gateway oci://ghcr.io/cloud37/s3-encryption-gateway-helm \
-  --version 0.13.0-rc1
+  --version 0.13.0-rc2
 ```
 
 For strongest artifact pinning, install by the immutable manifest digest:
@@ -617,7 +617,7 @@ Valkey instance above; no separate deployment. All fields use the
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `image.repository` | Container image repository | `cloud37io/s3-encryption-gateway` |
-| `image.tag` | Container image tag | `"0.13.0-rc1"` |
+| `image.tag` | Container image tag | `"0.13.0-rc2"` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override the chart name portion of resource names | `""` |
@@ -1354,7 +1354,7 @@ helm install gw-blue . \
 
 # Green side (new version):
 helm install gw-green . \
-  --set image.tag=0.13.0-rc1 \
+  --set image.tag=0.13.0-rc2 \
   --values examples/values-green.yaml \
   --set config.multipartState.valkey.addr.value=valkey-shared.mpu-state.svc.cluster.local:6379
 
@@ -1449,7 +1449,7 @@ changes.
 
 5. **TLS**: Enable TLS on the gateway listener (`config.tls.enabled`) and use cert-manager for automatic certificate rotation.
 
-6. **FIPS**: Use `image.tag: 0.13.0-rc1-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
+6. **FIPS**: Use `image.tag: 0.13.0-rc2-fips` and the `values.fips.yaml` overlay for FIPS-140-compliant deployments (AES-256-GCM only; ChaCha20-Poly1305 excluded).
 
 ## Troubleshooting
 

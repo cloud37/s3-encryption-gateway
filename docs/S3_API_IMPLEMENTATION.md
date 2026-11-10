@@ -11,10 +11,10 @@ existing destination path encrypts it. The existing destination-only
 UploadPartCopy plaintext mismatch still returns 500 when the destination MPU
 is not encrypted.
 
-**Latest stable baseline: v0.12.3. Candidate review: November 9, 2026.**
+**Latest stable baseline: v0.12.3. Candidate review: November 10, 2026.**
 
 The inventory and released-behavior tables describe stable v0.12.3. The
-`0.13.0-rc1` candidate includes gateway-managed CORS (GH-322), signed
+`0.13.0-rc2` candidate includes gateway-managed CORS (GH-322), signed
 Content-Length recovery (GH-356), and signed browser POST (GH-353). Independent
 GH-353 isolated-tree verification passed; it is not combined-main runtime
 acceptance. Candidate contracts are identified separately below; none is
@@ -36,9 +36,9 @@ feature parity. Start with the summary below before migrating an application.
 - [Unsupported SDK operations](#unsupported-sdk-operations)
 - [Legacy names and browser extensions](#legacy-names-and-browser-extensions)
 - [Addressing and authentication](#addressing-and-authentication)
-- [0.13.0-rc1 gateway-managed CORS](#gateway-managed-cors-gh-322)
-- [0.13.0-rc1 browser POST](#browser-post-object-gh-353)
-- [0.13.0-rc1 signed Content-Length recovery](#sigv4-signed-content-length-gh-356)
+- [0.13.0-rc2 gateway-managed CORS](#gateway-managed-cors-gh-322)
+- [0.13.0-rc2 browser POST](#browser-post-object-gh-353)
+- [0.13.0-rc2 signed Content-Length recovery](#sigv4-signed-content-length-gh-356)
 - [Object reads and responses](#object-reads-and-responses)
 - [Listings and pagination](#listings-and-pagination)
 - [Writes, copies, and multipart options](#writes-copies-and-multipart-options)
@@ -51,7 +51,7 @@ feature parity. Start with the summary below before migrating an application.
 
 **Supported** means an implemented subset with the notes below, not every AWS
 option or every client workflow. **Planned** is accepted work not included in
-the candidate. **0.13.0-rc1 candidate** identifies code not present in stable
+the candidate. **0.13.0-rc2 candidate** identifies code not present in stable
 v0.12.3; candidate inclusion is not a blanket runtime acceptance or
 production-readiness claim.
 **Not supported** explicitly marks absent behavior. Backend
@@ -67,16 +67,16 @@ configuration passthrough cannot implement a missing provider feature.
 | ListParts | Supported | First backend page only; ignores pagination and emits IsTruncated=false. Not complete large-upload part inventory. |
 | SigV4 header/presigned GET/PUT | Supported | Gateway credentials. Signed expiry honored in v0.12.3 ([#345](https://github.com/cloud37/s3-encryption-gateway/issues/345)); 1–604800 seconds. |
 | SigV2 | Supported | Deprecated, disabled by default; explicit `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true` temporary migration opt-in. |
-| POST Object form policies | 0.13.0-rc1 candidate (GH-353) | Bounded SigV4 bucket-path `multipart/form-data` subset; independent isolated-tree verification passed, combined-main provider/browser runtime acceptance remains pending. Separate from MPU; see [contract](#browser-post-object-gh-353). Not available in stable v0.12.3. |
-| Gateway-managed browser CORS | 0.13.0-rc1 candidate (GH-322, opt-in) | Not in stable v0.12.3. See [mode-dependent contract](#gateway-managed-cors-gh-322). Passthrough remains the default and does not guarantee gateway-generated response headers. |
+| POST Object form policies | 0.13.0-rc2 candidate (GH-353) | Bounded SigV4 bucket-path `multipart/form-data` subset; independent isolated-tree verification passed, combined-main provider/browser runtime acceptance remains pending. Separate from MPU; see [contract](#browser-post-object-gh-353). Not available in stable v0.12.3. |
+| Gateway-managed browser CORS | 0.13.0-rc2 candidate (GH-322, opt-in) | Not in stable v0.12.3. See [mode-dependent contract](#gateway-managed-cors-gh-322). Passthrough remains the default and does not guarantee gateway-generated response headers. |
 | Bucket configuration / ACL / tagging / lifecycle | Supported | Registered backend-dependent subsets. Independent manage grant for bucket config mutation; object tagging does not imply bucket tagging. |
 | Create/DeleteBucket | Supported | Explicit create/delete grants; create also requires ALLOW_BUCKET_CREATION=true. |
 | Version-specific reads/deletes/copy sources | Supported | Backend versioning required; no ListObjectVersions or exhaustive historical MPU recovery guarantee. |
 | Explicit Object Lock / retention / hold APIs | Supported | Provider setup required. Inline PUT/initiation lock fields are not persisted; verify retention via explicit APIs/backend defaults. Bypass refused. |
-| Reverse proxies | Supported | Preserve signed Host/path/query/headers. Outbound filtering fixed in v0.12.2 ([#338](https://github.com/cloud37/s3-encryption-gateway/issues/338)); signed zero Content-Length recovery is included in 0.13.0-rc1 ([#356](https://github.com/cloud37/s3-encryption-gateway/issues/356)), not stable v0.12.3. |
+| Reverse proxies | Supported | Preserve signed Host/path/query/headers. Outbound filtering fixed in v0.12.2 ([#338](https://github.com/cloud37/s3-encryption-gateway/issues/338)); signed zero Content-Length recovery is included in 0.13.0-rc2 ([#356](https://github.com/cloud37/s3-encryption-gateway/issues/356)), not stable v0.12.3. |
 | Inbound virtual-host addressing / STS / S3 Express | Not supported | Use path-style gateway URLs; DNS/backend addressing flags do not add inbound host routing. |
 | Typed conditional object requests | Not supported | If-Match/If-None-Match and related conditions not enforced; not an atomic write-if-absent boundary. |
-| Per-upload backend SSE/storage-class fields | 0.13.0-rc1 candidate (GH-353) for typed PUT/POST options | Not in stable v0.12.3; POST field/provider limits are in [the GH-353 contract](#browser-post-object-gh-353). This does not imply copy/MPU mappings. |
+| Per-upload backend SSE/storage-class fields | 0.13.0-rc2 candidate (GH-353) for typed PUT/POST options | Not in stable v0.12.3; POST field/provider limits are in [the GH-353 contract](#browser-post-object-gh-353). This does not imply copy/MPU mappings. |
 | GetObjectAttributes / plaintext checksum retrieval | Not supported | Upload integrity verification is not durable checksum-mode retrieval. |
 | SelectObjectContent / WriteGetObjectResponse | Not supported | SQL on gateway ciphertext/Object Lambda integration not implemented; explicit Select returns 501. |
 
@@ -142,7 +142,7 @@ backend metadata or configuration rather than decrypting their XML bodies.
 | `ListObjects` | GET B | Supported | R | Typed backend ListObjectsV2 adapted to listing XML; v1 marker supported, other field/size/ETag caveats apply. [Listing evidence](#evidence-index). |
 | `ListObjectsV2` | GET B `?list-type=2` | Supported | R | Shared typed listing handler; continuation-token supported, `start-after`, `fetch-owner`, and `encoding-type` ignored. XML is a subset. [Listing evidence](#evidence-index). |
 | `ListParts` | GET O `?uploadId=...` | Supported | R | Typed first backend page; `max-parts`/`part-number-marker` ignored and `IsTruncated=false` emitted. State can translate part sizes. [MPU evidence](#evidence-index). |
-| `PutObject` | PUT O | Supported | W | Typed encrypted/bypass body; standard/user metadata, tags, ACL fields. Conditions, inline Object Lock persistence, and durable checksum projection are not implemented by this adapter. [Object evidence](#evidence-index). Backend SSE/storage advanced write options are included in the 0.13.0-rc1 candidate under GH-353, not stable v0.12.3. |
+| `PutObject` | PUT O | Supported | W | Typed encrypted/bypass body; standard/user metadata, tags, ACL fields. Conditions, inline Object Lock persistence, and durable checksum projection are not implemented by this adapter. [Object evidence](#evidence-index). Backend SSE/storage advanced write options are included in the 0.13.0-rc2 candidate under GH-353, not stable v0.12.3. |
 | `PutObjectAcl` | PUT O `?acl`, optional `versionId` | Supported | W | Proxy; backend object ACL support required. [Configuration evidence](#evidence-index). |
 | `PutObjectLegalHold` | PUT O `?legal-hold`, optional `versionId` | Supported | W | Typed validated ON/OFF XML, 100 KiB parser limit. [Lock evidence](#evidence-index). |
 | `PutObjectLockConfiguration` | PUT B `?object-lock` | Supported | M | Typed validated bucket lock XML, 100 KiB parser limit. Backend must support Object Lock. [Lock evidence](#evidence-index). |
@@ -274,12 +274,12 @@ modern Configuration API. Consult backend-specific compatibility for old clients
 | `PutBucketLifecycle` | PUT B `?lifecycle` | Supported | M | Same proxy route as PutBucketLifecycleConfiguration; backend must accept the legacy document. |
 | `GetBucketNotification` | GET B `?notification` | Supported | R | Same proxy route as GetBucketNotificationConfiguration; legacy schema not independently verified. |
 | `PutBucketNotification` | PUT B `?notification` | Supported | M | Same proxy route as PutBucketNotificationConfiguration; backend must accept the legacy document. |
-| POST Object (presigned HTML form) | POST B, `multipart/form-data` | 0.13.0-rc1 candidate (GH-353) | W | Bounded SigV4 subset; see [field, policy, response, and SSE contract](#browser-post-object-gh-353). Combined-main provider/browser runtime acceptance remains pending. Browser CORS uses the single [GH-322 authority](#gateway-managed-cors-gh-322); not available in stable v0.12.3. |
-| CORS preflight OPTIONS | OPTIONS B or O | Supported | Credential-free qualifying preflight, otherwise R | Narrow authentication exception. Default passthrough remains supported; opt-in gateway CORS is included in 0.13.0-rc1 and owns browser policy when selected. |
+| POST Object (presigned HTML form) | POST B, `multipart/form-data` | 0.13.0-rc2 candidate (GH-353) | W | Bounded SigV4 subset; see [field, policy, response, and SSE contract](#browser-post-object-gh-353). Combined-main provider/browser runtime acceptance remains pending. Browser CORS uses the single [GH-322 authority](#gateway-managed-cors-gh-322); not available in stable v0.12.3. |
+| CORS preflight OPTIONS | OPTIONS B or O | Supported | Credential-free qualifying preflight, otherwise R | Narrow authentication exception. Default passthrough remains supported; opt-in gateway CORS is included in 0.13.0-rc2 and owns browser policy when selected. |
 
 ## Browser POST Object (GH-353)
 
-**0.13.0-rc1 candidate implementation.** Independent isolated-tree verification
+**0.13.0-rc2 candidate implementation.** Independent isolated-tree verification
 passed; combined-main provider/browser runtime acceptance remains pending. See
 [the evidence scope](TESTING.md#gh-353-post-acceptance-contract).
 Bounded user-reported external SDK and browser evidence is described below; it
@@ -417,9 +417,9 @@ and add tracking links only when a real issue exists.
 | SigV4 header | Gateway access key/secret, default 5-minute clock skew; operation fields and signed-body integrity are separate contracts. |
 | SigV4 presigned GET/PUT | Sign gateway endpoint with gateway credentials; expiry single integer 1–604800 seconds. Permission changes still apply. |
 | SigV2 | Disabled by default; explicit deprecated migration opt-in. |
-| STS/session credentials | No token issuance/refresh. GH-353 in the 0.13.0-rc1 candidate adds configured gateway token/deadline validation on SigV4 and POST; SigV2 session credentials remain unsupported. Not available in stable v0.12.3. |
+| STS/session credentials | No token issuance/refresh. GH-353 in the 0.13.0-rc2 candidate adds configured gateway token/deadline validation on SigV4 and POST; SigV2 session credentials remain unsupported. Not available in stable v0.12.3. |
 | Anonymous/website reads | Backend public policy does not bypass gateway auth. System probes/qualifying credential-free OPTIONS are narrow exceptions. |
-| Browser forms/CORS | Signed POST in 0.13.0-rc1 depends on the single optional gateway CORS authority from GH-322 for gateway-generated browser responses. Independent isolated-tree verification passed, not combined-main runtime acceptance; ordinary presigned PUT does not imply browser POST parity. |
+| Browser forms/CORS | Signed POST in 0.13.0-rc2 depends on the single optional gateway CORS authority from GH-322 for gateway-generated browser responses. Independent isolated-tree verification passed, not combined-main runtime acceptance; ordinary presigned PUT does not imply browser POST parity. |
 
 ### SigV4 Request Time and Presigned Expiration
 
@@ -440,7 +440,7 @@ access; altering expiry without re-signing fails HMAC verification.
 
 ### SigV4 Signed Content-Length (GH-356)
 
-**0.13.0-rc1 candidate:** If the client signs `content-length`, use its explicit header
+**0.13.0-rc2 candidate:** If the client signs `content-length`, use its explicit header
 value; when absent, recover the decimal `Request.ContentLength` only if known and
 nonnegative. This applies to header and presigned auth, analogous to missing Host
 recovery. A proxy can omit signed `Content-Length: 0` on DELETE while the gateway
@@ -456,7 +456,7 @@ SigV2 is unchanged. v0.12.3 does not contain this fix. See
 
 ## Gateway-managed CORS (GH-322)
 
-**0.13.0-rc1 candidate:** `cors.mode: passthrough` remains the default, forwarding backend
+**0.13.0-rc2 candidate:** `cors.mode: passthrough` remains the default, forwarding backend
 behavior. Opt-in `gateway` mode owns bucket XML, preflight, and headers on encrypted,
 gateway-generated, proxied, and error responses. Shared Valkey is durable policy
 without TTL; enable retained-storage persistence and independently tested backup/
@@ -571,12 +571,12 @@ audit prior escaped-key copies/moves using [migration](MIGRATION.md).
 
 | Option | Released behavior |
 |---|---|
-| `PostObject` route vs MPU | GH-353 in the 0.13.0-rc1 candidate is only bucket-path `POST /{bucket}` with no query string (including no forced empty query) and `multipart/form-data`; CreateMultipartUpload remains object-path `POST /{bucket}/{key}?uploads`. It does not add SSE-C key support to CopyObject, UploadPartCopy, or MPU. |
+| `PostObject` route vs MPU | GH-353 in the 0.13.0-rc2 candidate is only bucket-path `POST /{bucket}` with no query string (including no forced empty query) and `multipart/form-data`; CreateMultipartUpload remains object-path `POST /{bucket}/{key}?uploads`. It does not add SSE-C key support to CopyObject, UploadPartCopy, or MPU. |
 | Standard/user metadata | Shared six-field parser/persistence; reserved names rejected, backend filters apply. Initiation freezes destination fields. |
 | PUT/DELETE/completion conditions | Typed If-Match/If-None-Match and newer delete conditions absent; not an atomic compare-and-swap boundary. |
 | PUT ACL/grants | Parsed/mapped; provider permissions required. Copy re-encrypt does not set request ACL; use object ACL afterward. |
 | PUT tags | Validated/mapped inline; XML subresources proxy provider validation. Initiation tags not forwarded; set after completion. |
-| Backend SSE/storage class | GH-353 in the 0.13.0-rc1 candidate supports the documented SSE/storage subset for typed POST/PUT advanced writes; not available in stable v0.12.3 and not a general parts/copy mapping. See [POST SSE contract](#backend-sse-and-sse-c-reads). |
+| Backend SSE/storage class | GH-353 in the 0.13.0-rc2 candidate supports the documented SSE/storage subset for typed POST/PUT advanced writes; not available in stable v0.12.3 and not a general parts/copy mapping. See [POST SSE contract](#backend-sse-and-sse-c-reads). |
 | Owner/requester-pays/MFA | Proxy permitted x-amz fields preserved; typed methods do not generally map them. No full requester-pays/MFA-delete contract. |
 | Content-MD5/checksum headers | Not a general inbound validation/persistence contract. Adapter computes outgoing MD5 for seekable bytes, possibly ciphertext. Signed-body modes below verify inbound integrity. |
 | Copy identity/version/range | Decode source once; source version and plaintext part range supported. Location-bound ciphertext must not be backend-relocated. |
@@ -600,7 +600,7 @@ hop-by-hop fields are excluded. Proxy responses keep end-to-end fields except
 hop-by-hop nominations; redirects are returned, not followed. This is **not** the
 typed object adapter's option mapping. See [proxy deployment](DEPLOYMENT.md#frontend-header-preservation).
 
-The 0.13.0-rc1 gateway-CORS middleware strips upstream Access-Control-* policy
+The 0.13.0-rc2 gateway-CORS middleware strips upstream Access-Control-* policy
 headers and applies the matched local decision before status/body commit on every
 S3 response, including ListBuckets/locally generated paths. Passthrough preserves
 end-to-end backend CORS fields. Both retain fixed/Connection-nominated hop-by-hop
@@ -618,7 +618,7 @@ SHA-1, SHA-256. Unknown/ambiguous modes fail closed; no stored-checksum retrieva
 | Limit | Default / behavior |
 |---|---|
 | UploadPart | 64 MiB `SERVER_MAX_PART_BUFFER`, plaintext/encrypted; reject before write |
-| Verified spools | 5 GiB request / 10 GiB aggregate process budget; request 413 EntityTooLarge, aggregate 503 SlowDown; operation caps also apply. GH-353 POST in the 0.13.0-rc1 candidate stores both plaintext and ciphertext spools against the shared aggregate quota. |
+| Verified spools | 5 GiB request / 10 GiB aggregate process budget; request 413 EntityTooLarge, aggregate 503 SlowDown; operation caps also apply. GH-353 POST in the 0.13.0-rc2 candidate stores both plaintext and ciphertext spools against the shared aggregate quota. |
 | Legacy encrypted copy | 256 MiB configurable source cap; full decrypt; general copy may buffer ciphertext |
 | CreateBucket XML | 64 KiB |
 | Config PUT/DELETE | 1 MiB body-limited proxy; Object Lock parser 100 KiB |

@@ -5,7 +5,7 @@ and the admin HTTP reference. Runtime setup: [deployment](DEPLOYMENT.md); key
 provider/rotation: [key management](KMS_COMPATIBILITY.md); dashboards/profiling:
 [observability](OBSERVABILITY.md); upgrades: [migration](MIGRATION.md).
 
-Gateway-managed CORS recovery below applies to the **0.13.0-rc1 candidate
+Gateway-managed CORS recovery below applies to the **0.13.0-rc2 candidate
 (GH-322)**; stable v0.12.3 does not include that mode.
 
 ## Contents
@@ -270,7 +270,7 @@ new ones; do not assume the old encrypted MPU can resume from backend parts alon
 
 ### Gateway CORS Valkey data loss and recovery
 
-**0.13.0-rc1 candidate (GH-322):** Before enabling gateway mode, confirm retained-storage
+**0.13.0-rc2 candidate (GH-322):** Before enabling gateway mode, confirm retained-storage
 persistence, an independent backup, and an exercised restore. A startup persistence
 warning/check does not establish backup health. CORS rules are durable Valkey policy
 without TTL, not disposable upload state, and are not recreated by config reload.

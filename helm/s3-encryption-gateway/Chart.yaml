@@ -22,10 +22,10 @@ annotations:
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc1
+      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc2
       whitelisted: true
     - name: s3-encryption-gateway-fips
-      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc1-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc2-fips
       whitelisted: true
   artifacthub.io/changes: |
     - kind: added
@@ -38,9 +38,11 @@ annotations:
       description: Enforce require_encryption on plaintext GET, HEAD, CopyObject, and UploadPartCopy sources (GH-380)
     - kind: changed
       description: Consolidate reader guides and publish expanded release-scoped S3 compatibility and authorization documentation (GH-357)
-  artifacthub.io/containsSecurityUpdates: "false"
-version: 0.13.0-rc1
-appVersion: "0.13.0-rc1"
+    - kind: security
+      description: Update go-jose to v4.1.6 and golang.org/x/net to v0.62.0 to fix HIGH Trivy findings (CVE-2026-116587, CVE-2026-78661)
+  artifacthub.io/containsSecurityUpdates: "true"
+version: 0.13.0-rc2
+appVersion: "0.13.0-rc2"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;

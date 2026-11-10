@@ -56,9 +56,9 @@ migration, operations, and contribution guidance.
 > Backend CORS alone is insufficient for encrypted paths: preflight is forwarded,
 > but gateway-generated responses lack the required CORS headers. Gateway-managed
 > preflight and response headers were not available in v0.12.3; they are included
-> in the 0.13.0-rc1 candidate ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
+> in the 0.13.0-rc2 candidate ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
 
-> **0.13.0-rc1 validation:** GH-322 CORS, GH-353 signed browser POST, and GH-356
+> **0.13.0-rc2 validation:** GH-322 CORS, GH-353 signed browser POST, and GH-356
 > signed Content-Length recovery are included in this release candidate for
 > feature-requester/operator testing. Browser/provider acceptance must be
 > performed against the intended client and provider; do not treat the candidate
@@ -66,7 +66,7 @@ migration, operations, and contribution guidance.
 > [unreleased POST guide](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
 > and [browser deployment instructions](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
 
-**0.13.0-rc1 candidate:** GH-322 gateway-managed CORS, GH-353 signed browser
+**0.13.0-rc2 candidate:** GH-322 gateway-managed CORS, GH-353 signed browser
 POST, and GH-356 signed Content-Length recovery are included for validation; the
 candidate is not a stable release. See the
 [current CORS contract](docs/S3_API_IMPLEMENTATION.md#gateway-managed-cors-gh-322)
@@ -342,7 +342,7 @@ When `valkey.enabled=true`, the deployment template auto-wires `VALKEY_ADDR` to 
 
 #### Browser uploads with gateway-managed CORS
 
-**0.13.0-rc1 candidate (GH-322):** Opt-in `cors.mode: gateway` owns preflight and actual
+**0.13.0-rc2 candidate (GH-322):** Opt-in `cors.mode: gateway` owns preflight and actual
 response headers; default passthrough is unchanged. Shared Valkey becomes durable
 policy: retained-storage persistence and independently tested backup/restore are
 required, and API edits are not recreated from config. Configure explicit origins,
@@ -353,7 +353,7 @@ and [data-loss/fallback recovery procedure](docs/RUNBOOK.md#gateway-cors-valkey-
 
 #### Signed browser form uploads (GH-353)
 
-**0.13.0-rc1 candidate; see the [verification scope](docs/TESTING.md#gh-353-post-acceptance-contract).** `POST
+**0.13.0-rc2 candidate; see the [verification scope](docs/TESTING.md#gh-353-post-acceptance-contract).** `POST
 /bucket` accepts a SigV4 presigned POST policy as `multipart/form-data` and writes
 through the gateway's normal authorization, encryption, metadata and backend
 path. POST policy authentication is SigV4-only (not SigV2). It is a single-file
@@ -897,7 +897,7 @@ go build -o bin/s3-encryption-gateway ./cmd/server
 
 ## Configuration
 
-In **0.13.0-rc1**, gateway-managed CORS is opt-in; use one shared Valkey for every replica and
+In **0.13.0-rc2**, gateway-managed CORS is opt-in; use one shared Valkey for every replica and
 roll replicas to gateway mode together. Its keys are durable policy, not
 disposable per-upload state. Persistence on retained storage plus an independent
 tested backup/restore is required before enabling the mode. Empty-store recovery
@@ -1202,8 +1202,8 @@ Using a backend not listed here? [Open an issue](https://github.com/cloud37/s3-e
 
 ### Release-candidate validation
 
-- **Gateway-managed CORS** — included in `0.13.0-rc1` for opt-in validation; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
-- **Browser POST Object** — included in `0.13.0-rc1` for feature-requester/provider validation; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), uses the single #322 CORS authority for browser compatibility
+- **Gateway-managed CORS** — included in `0.13.0-rc2` for opt-in validation; [#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)
+- **Browser POST Object** — included in `0.13.0-rc2` for feature-requester/provider validation; [#353](https://github.com/cloud37/s3-encryption-gateway/issues/353), uses the single #322 CORS authority for browser compatibility
 
 Neither feature is in stable v0.12.3. The release candidate is not a stable
 release; browser/provider acceptance remains part of candidate validation.

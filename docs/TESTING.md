@@ -53,6 +53,17 @@ Key rules:
 
 ## GH-353 POST acceptance contract
 
+### RC2 dependency remediation — 2026-11-10
+
+The RC1 release-image scan failed on two HIGH findings. RC2 updates
+`github.com/go-jose/go-jose/v4` to v4.1.6 and `golang.org/x/net` to v0.62.0.
+The RC2 standard image was rebuilt locally and scanned with Trivy 0.76.2; the
+image and both embedded Go binaries reported zero vulnerabilities. `make test`
+and `make test-fips` also passed after the dependency updates. The complete
+`make test-conformance-local` run passed on RC2, including MinIO signed browser
+POST compatibility scenarios. This local scan is a remediation check, not a
+substitute for the release workflow's scan on the final published image.
+
 ### Release-candidate validation — 2026-11-09
 
 On the `0.13.0-rc1` preparation tree, the complete local gates passed:

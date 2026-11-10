@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.0-rc2] — 2026-11-10
+
+### ⚠️ Release Candidate: Validate Before Production Use ⚠️
+
+This candidate supersedes `0.13.0-rc1` and carries the same GH-322/GH-353/GH-356/
+GH-357/GH-380 feature and documentation scope for feature-requester and operator
+validation in isolated, non-production environments. It also updates vulnerable
+Go dependencies identified by the RC1 release-image scan. Do not use either
+candidate for production workloads; external provider/browser acceptance remains
+an explicit validation requirement.
+
+### Fixed
+
+- **Release-image vulnerability scan:** Update `github.com/go-jose/go-jose/v4`
+  to v4.1.6 and `golang.org/x/net` to v0.62.0, fixing the HIGH-severity
+  CVE-2026-116587 and CVE-2026-78661 findings that caused the RC1 Trivy gate to
+  fail. These are transitive modules brought in by OpenBao's API client.
+
+### Release candidate scope
+
+- Includes gateway-managed bucket CORS (GH-322), signed browser POST and
+  configured session/backend SSE options (GH-353), signed zero Content-Length
+  recovery (GH-356), documentation/compatibility updates (GH-357), and strict
+  encrypted-source reads (GH-380), with the RC1 candidate's Go, AWS SDK,
+  tooling, and conformance updates. See the [RC1 change details](#0130-rc1--2026-11-10).
+- Requester/browser/provider validation remains required. RC1 local test results
+  do not substitute for testing this rebuilt RC2 artifact.
+
 ## [0.13.0-rc1] — 2026-11-10
 
 ### ⚠️ Release Candidate: Validate Before Production Use ⚠️
