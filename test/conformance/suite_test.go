@@ -89,6 +89,7 @@ func TestConformance(t *testing.T) {
 				{"ListObjects", 0, testListObjects},
 				{"ListObjectsV1_Pagination", 0, testListObjectsV1_Pagination},
 				{"ListObjectsV2_Pagination", 0, testListObjectsV2_Pagination},
+				{"GH410_EncryptedMPUPagination", provider.CapEncryptedMPU, testGH410_EncryptedMPUPagination},
 				{"ListObjectsV1_SizeAccuracy", 0, testListObjectsV1_SizeAccuracy},
 				{"ListObjectsV2_SizeAccuracy", 0, testListObjectsV2_SizeAccuracy},
 				{"ListObjectsV1_SizeAccuracy_WarmCache", provider.CapSizeTranslation, testListObjectsV1_SizeAccuracy_WarmCache},

@@ -1404,21 +1404,40 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	// through ListObjects makes mirror/sync clients treat them as user data and
 	// delete them when the source does not contain the companion objects.
 	listResult.Objects = filterMPUManifestObjects(listResult.Objects)
-	for listResult.IsTruncated && len(listResult.Objects) < int(maxKeys) && listResult.NextContinuationToken != "" {
+	seenTokens := make(map[string]struct{})
+	for listResult.IsTruncated && maxKeys > 0 {
+		token := listResult.NextContinuationToken
+		if token == "" {
+			h.logger.WithField("bucket", bucket).Error("Truncated backend listing has no continuation token")
+			h.writeObjectError(w, r, "ListObjects", TranslateError(errors.New("missing backend continuation token"), bucket, ""), start)
+			return
+		}
+		if _, seen := seenTokens[token]; seen || token == opts.ContinuationToken {
+			h.logger.WithField("bucket", bucket).Error("Backend listing repeated a continuation token")
+			h.writeObjectError(w, r, "ListObjects", TranslateError(errors.New("repeated backend continuation token"), bucket, ""), start)
+			return
+		}
+		seenTokens[token] = struct{}{}
+		remaining := int(maxKeys) - len(listResult.Objects) - len(listResult.CommonPrefixes)
+		if remaining <= 0 {
+			break
+		}
 		nextOpts := opts
-		nextOpts.ContinuationToken = listResult.NextContinuationToken
+		nextOpts.ContinuationToken = token
 		nextOpts.StartAfter = ""
+		nextOpts.MaxKeys = int32(remaining) // #nosec G115 -- remaining is bounded by the positive int32 maxKeys
 		nextPage, pageErr := s3Client.ListObjects(ctx, bucket, prefix, nextOpts)
 		if pageErr != nil {
-			break
+			h.logger.WithError(pageErr).WithField("bucket", bucket).Error("Failed to refill object listing")
+			h.writeObjectError(w, r, "ListObjects", TranslateError(pageErr, bucket, ""), start)
+			return
+		}
+		if len(nextPage.Objects)+len(nextPage.CommonPrefixes) > remaining {
+			h.logger.WithField("bucket", bucket).Error("Backend listing exceeded the requested page limit")
+			h.writeObjectError(w, r, "ListObjects", TranslateError(errors.New("backend page exceeds requested limit"), bucket, ""), start)
+			return
 		}
 		listResult.Objects = append(listResult.Objects, filterMPUManifestObjects(nextPage.Objects)...)
-		if len(listResult.Objects) >= int(maxKeys) {
-			listResult.Objects = listResult.Objects[:int(maxKeys)]
-			listResult.IsTruncated = true
-			listResult.NextContinuationToken = nextPage.NextContinuationToken
-			break
-		}
 		listResult.CommonPrefixes = append(listResult.CommonPrefixes, nextPage.CommonPrefixes...)
 		listResult.NextContinuationToken = nextPage.NextContinuationToken
 		listResult.IsTruncated = nextPage.IsTruncated
@@ -1429,10 +1448,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	// Skipping the entire translation pipeline also avoids unnecessary Valkey
 	// traffic for buckets matched by disable_encryption policies.
 	if h.policyManager != nil && h.policyManager.BucketDisablesEncryption(bucket) {
-		nextMarker := ""
-		if listResult.IsTruncated && len(listResult.Objects) > 0 {
-			nextMarker = listResult.Objects[len(listResult.Objects)-1].Key
-		}
+		nextMarker := listObjectsNextMarker(listResult)
 		xmlResponse := generateListObjectsXML(bucket, prefix, delimiter, listResult.Objects, listResult.CommonPrefixes, listResult.NextContinuationToken, nextMarker, listResult.IsTruncated, int(maxKeys))
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusOK)
@@ -1542,10 +1558,7 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	// Compute NextMarker for S3 API v1 clients.  When the response is
 	// truncated, v1 clients need a key name to send as the next marker.
 	// (v2 clients use the opaque NextContinuationToken instead.)
-	nextMarker := ""
-	if listResult.IsTruncated && len(listResult.Objects) > 0 {
-		nextMarker = listResult.Objects[len(listResult.Objects)-1].Key
-	}
+	nextMarker := listObjectsNextMarker(listResult)
 
 	// Generate proper S3 ListBucketResult XML response
 	xmlResponse := generateListObjectsXML(bucket, prefix, delimiter, listResult.Objects, listResult.CommonPrefixes, listResult.NextContinuationToken, nextMarker, listResult.IsTruncated, int(maxKeys))
@@ -1556,6 +1569,26 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request) {
 
 	h.metrics.RecordS3Operation(r.Context(), "ListObjects", bucket, time.Since(start))
 	h.metrics.RecordHTTPRequest(r.Context(), "GET", r.URL.Path, http.StatusOK, time.Since(start), int64(len(xmlResponse)))
+}
+
+// listObjectsNextMarker advances v1 clients past the last visible entry,
+// including common prefixes, without exposing hidden manifest keys.
+func listObjectsNextMarker(result s3.ListResult) string {
+	if !result.IsTruncated {
+		return ""
+	}
+	marker := ""
+	for _, object := range result.Objects {
+		if object.Key > marker {
+			marker = object.Key
+		}
+	}
+	for _, prefix := range result.CommonPrefixes {
+		if prefix > marker {
+			marker = prefix
+		}
+	}
+	return marker
 }
 
 // filterMPUManifestObjects removes gateway-owned MPU manifest objects from
