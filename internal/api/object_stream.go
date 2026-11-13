@@ -196,8 +196,10 @@ func (h *Handler) planObjectRead(ctx context.Context, client s3.Client, bucket, 
 		plan.Mode = objectReadBufferedRange
 		return plan, nil
 	}
-	missingOriginalSize := rawMetadataValue(rawMetadata, crypto.MetaOriginalSize) == "" || rawMetadataValue(rawMetadata, crypto.MetaChunkCount) == ""
-	if missingOriginalSize || view.Expanded[crypto.MetaManifest] == "" || strings.TrimSpace(*rangeHeader) == "bytes=0-" || !size.Exact {
+	// V2's authenticated terminal supplies an exact size even when single PUT
+	// metadata omits the original size and chunk count. Keep the legacy v1
+	// fallback above for objects without those compatibility hints.
+	if view.Expanded[crypto.MetaManifest] == "" || strings.TrimSpace(*rangeHeader) == "bytes=0-" || !size.Exact {
 		plan.BackendRange = nil
 		plan.Mode = objectReadBufferedRange
 		return plan, nil
@@ -212,6 +214,7 @@ func (h *Handler) planObjectRead(ctx context.Context, client s3.Client, bucket, 
 		encryptedEnd, err = clampEncryptedRangeEnd(encryptedStart, encryptedEnd, rawMetadata["Content-Length"])
 	}
 	if err != nil {
+		plan.BackendRange = nil
 		plan.Mode = objectReadBufferedRange
 		return plan, nil
 	}
@@ -339,7 +342,17 @@ func (h *Handler) decryptPlannedObject(ctx context.Context, engine crypto.Encryp
 		return reader, metadata, nil
 	}
 	if plan.usesOptimizedRange() {
-		return optimizedDecryptor.DecryptRangeOptimized(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, reader, metadata, plan.RangeStart, plan.RangeEnd)
+		// A ranged GET reports the length of the returned slice, not of the
+		// stored ciphertext. Range decryption needs the full length used during
+		// planning and, for v2, authenticated by the terminal preflight.
+		decryptMetadata := make(map[string]string, len(metadata))
+		for k, v := range metadata {
+			decryptMetadata[k] = v
+		}
+		if plan.View != nil && plan.View.Raw["Content-Length"] != "" {
+			decryptMetadata["Content-Length"] = plan.View.Raw["Content-Length"]
+		}
+		return optimizedDecryptor.DecryptRangeOptimized(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, reader, decryptMetadata, plan.RangeStart, plan.RangeEnd)
 	}
 	return engine.Decrypt(ctx, crypto.ObjectContext{Bucket: bucket, Key: key}, reader, metadata)
 }
@@ -807,9 +820,21 @@ func (h *Handler) servePlannedGetObject(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer func() { _ = reader.Close() }()
-	if _, err := h.loadReadableObjectView(bucket, key, versionID, metadata); err != nil {
+	getView, err := h.loadReadableObjectView(bucket, key, versionID, metadata)
+	if err != nil {
 		h.writeObjectDecryptError(w, r, "GetObject", bucket, key, err, start)
 		return
+	}
+	// Do not apply the authenticated terminal of one v2 object to data fetched
+	// from a different generation between the HEAD/preflight and data GET.
+	if objectRead.usesOptimizedRange() && objectRead.Class.Format == crypto.FormatChunkedV2 {
+		head := objectRead.View.Expanded
+		get := getView.Expanded
+		if getView.Class.Format != crypto.FormatChunkedV2 || head[crypto.MetaObjectBindingID] != get[crypto.MetaObjectBindingID] ||
+			(head["ETag"] != "" && get["ETag"] != "" && head["ETag"] != get["ETag"]) {
+			h.writeObjectDecryptError(w, r, "GetObject", bucket, key, errors.New("chunked object changed after terminal preflight"), start)
+			return
+		}
 	}
 
 	// Authenticate the v2 terminal before any success headers or plaintext are

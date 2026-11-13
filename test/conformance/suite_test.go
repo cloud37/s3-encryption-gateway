@@ -110,6 +110,7 @@ func TestConformance(t *testing.T) {
 				{"CopySource_VersionedPart", provider.CapVersioning | provider.CapMultipartCopy, testCopySourceVersionedPart},
 				{"RangedRead", 0, testRangedRead},
 				{"RangedRead_CrossChunk", 0, testRangedRead_CrossChunk},
+				{"GH409_ChunkedSinglePutRanges", 0, testGH409_ChunkedSinglePutRanges},
 				{"Passthrough_RangedRead", 0, testPassthroughRangedRead},
 
 				// Encryption round-trips (chunked + legacy AEAD).
