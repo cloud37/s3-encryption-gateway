@@ -5,11 +5,13 @@ package conformance
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
 	internalS3 "github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
@@ -45,6 +47,43 @@ func gh410BackendPaginationTrace(ctx context.Context, backend internalS3.Client,
 }
 
 func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
+	if inst.ProviderName != "seaweedfs" {
+		runGH410EncryptedMPUPagination(t, inst)
+		return
+	}
+	t.Run("unversioned", func(t *testing.T) {
+		// A separate disposable server avoids inherited bucket versioning and
+		// shared-server collection allocation effects. Provider.Start owns cleanup.
+		var fixture provider.Instance
+		for _, p := range provider.All() {
+			if p.Name() == "seaweedfs" {
+				fixture = p.Start(t.Context(), t)
+				break
+			}
+		}
+		if fixture.Endpoint == "" {
+			t.Fatal("fresh SeaweedFS fixture unavailable")
+		}
+		client := newS3CompatClient(t, fixture)
+		state, err := client.GetBucketVersioning(t.Context(), &awss3.GetBucketVersioningInput{Bucket: aws.String(fixture.Bucket)})
+		if err != nil || state == nil || state.Status != "" {
+			t.Fatalf("GH-410 fixture must never have enabled versioning: state=%v err=%v", state, err)
+		}
+		runGH410EncryptedMPUPagination(t, fixture)
+	})
+	t.Run("versioned", func(t *testing.T) {
+		if os.Getenv("GATEWAY_TEST_SEAWEEDFS_VERSIONED_PAGINATION") != "1" {
+			t.Skip("SeaweedFS versioned pagination is unsupported: native .versions traversal silently omits keys; set GATEWAY_TEST_SEAWEEDFS_VERSIONED_PAGINATION=1 to verify an upstream fix (docs/S3_API_IMPLEMENTATION.md#seaweedfs-versioned-listing-limitation)")
+		}
+		client := newS3CompatClient(t, inst)
+		if _, err := client.PutBucketVersioning(t.Context(), &awss3.PutBucketVersioningInput{Bucket: aws.String(inst.Bucket), VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled}}); err != nil {
+			t.Fatalf("enable versioning for upstream regression: %v", err)
+		}
+		runGH410EncryptedMPUPagination(t, inst)
+	})
+}
+
+func runGH410EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 	t.Helper()
 	ctx := context.Background()
 	vk := provider.StartValkey(ctx, t)

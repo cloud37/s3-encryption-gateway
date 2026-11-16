@@ -23,14 +23,16 @@ publication until the checks below have been reviewed for the final merged commi
 
 ### RC3-specific accepted limitation (2026-11-16)
 
-For `0.13.0-rc3` only, the maintainer approved proceeding with the understood
-SeaweedFS versioned-listing `GH410_EncryptedMPUPagination` failure, provided the
+For the planned `0.13.0-rc3`, the maintainer approved a narrowly scoped unsupported
+SeaweedFS versioned-listing GH-410 exclusion, provided the
 known limitation and delete-enabled-sync warning are prominent in the changelog,
 compatibility/deployment guides, repository README, and chart README. This is a
-non-production candidate exception, not a general waiver or SeaweedFS certification.
-Keep strict conformance assertions, provider selection, and CI results unchanged.
-Other release gates remain required; any additional failure needs separate review.
-Record the failed run alongside passing gates at the final reviewed commit.
+non-production candidate limitation, not a general waiver or SeaweedFS certification.
+The versioned GH-410 subtest is skipped by default and available through
+`GATEWAY_TEST_SEAWEEDFS_VERSIONED_PAGINATION=1`; skipped is not passed. Preserve
+strict coverage on a fresh unversioned SeaweedFS bucket and all other providers.
+Unrelated SeaweedFS tests and all other release gates remain required.
+Review green required CI and the explicit skip at the final reviewed commit.
 OpenStack Swift verification of the gateway fix remains pending.
 
 The version change prepares publication; pushing it to main/master can trigger

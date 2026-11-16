@@ -121,16 +121,34 @@ returned different bytes. The underlying backend branch and persisted data
 were not established; this observation does not prove storage corruption.
 Previous selected SeaweedFS SDK/browser successes do not establish GH-353 support.
 
-**RC3 pagination exception (2026-11-16):** The maintainer explicitly accepts the
-known SeaweedFS `GH410_EncryptedMPUPagination` failure for the non-production
-`0.13.0-rc3` candidate. This is independent of the GH-353 POST exclusion above.
-GH-410 assertions, capability selection, and CI failure reporting are unchanged;
-the failure is not a pass and other release gates remain mandatory. The shared
-bucket is versioned by the preceding `GH380_VersionedReads` case. Running only
-those two cases reproduces the omissions; a fresh unversioned GH-410-only pass
-is not versioned-listing acceptance. Native backend-only V1/V2 tests reproduced
-the same defect without the gateway. See the
+**Scoped SeaweedFS pagination exclusion (2026-11-16):** The versioned
+`GH410_EncryptedMPUPagination/versioned` subtest is skipped as unsupported by
+default, not passed. This replaces the earlier accepted-red-gate approach and is
+independent of the GH-353 POST exclusion above. The same strict assertions run in
+the `unversioned` subtest on a fresh disposable SeaweedFS instance and bucket
+whose never-enabled versioning state is checked; other providers and unrelated
+SeaweedFS tests remain unchanged. The dedicated instance avoids shared-server
+collection allocation effects observed with a second bucket in the full suite.
+Set `GATEWAY_TEST_SEAWEEDFS_VERSIONED_PAGINATION=1` to run the versioned regression.
+It explicitly enables versioning, so it reproduces without a preceding test.
+For example:
+
+```bash
+GATEWAY_TEST_SEAWEEDFS_VERSIONED_PAGINATION=1 go test -count=1 -race -tags=conformance \
+  -run '^TestConformance$/^seaweedfs$/^GH410_EncryptedMPUPagination$/^versioned$' ./test/conformance
+```
+
+This opt-in is expected to fail on the affected backend; remove the exclusion
+only after an upstream fix passes independent verification. Native backend-only
+V1/V2 tests reproduced the same defect without the gateway. See the
 [provider limitation](S3_API_IMPLEMENTATION.md#seaweedfs-versioned-listing-limitation).
+
+Scoped-exclusion validation: the full local SeaweedFS suite passed with `-race`
+after isolating the unversioned fixture. The versioned opt-in reproduced the
+known missing-key failures without needing a preceding versioning test.
+Isolation-script and changelog-extractor checks passed. A first full run with a
+second bucket on the shared server failed UploadPart with 500; it was not counted
+as passing and the fixture was replaced, not the assertions relaxed.
 
 RC3 local preparation validation (2026-11-16): `go test -race -count=1 ./...`,
 focused `TestGH409|TestGH410` API regressions, changelog extractor regressions,

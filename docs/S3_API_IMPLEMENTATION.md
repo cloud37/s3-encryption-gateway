@@ -588,8 +588,12 @@ so downgrading to that version is not verified remediation.
 Do not rely on affected listings for delete-enabled sync, backup inventory, or
 completeness-critical migration. This is a documented limitation, **not a runtime
 feature gate**: neither provider configuration nor RC3 blocks affected requests.
-SeaweedFS's strict GH-410 conformance assertions remain enabled and failing;
-the RC3 exception does not certify versioned pagination or waive other failures.
+SeaweedFS's versioned GH-410 subtest is explicitly skipped as unsupported by
+default, not passed. Strict GH-410 assertions still run on a fresh verified
+unversioned SeaweedFS bucket and on other applicable providers. Set
+`GATEWAY_TEST_SEAWEEDFS_VERSIONED_PAGINATION=1` to run the versioned regression;
+re-enable required coverage only after an upstream fix is independently verified.
+This scoped exclusion does not waive unrelated tests or certify versioned pagination.
 
 ## Writes, Copies, and Multipart Options
 
