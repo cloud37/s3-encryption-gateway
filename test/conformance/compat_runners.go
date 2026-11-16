@@ -6,7 +6,7 @@ import (
 )
 
 // renovate: datasource=docker depName=amazon/aws-cli versioning=docker
-const awsCLIImage = "amazon/aws-cli:2.39.7"
+const awsCLIImage = "amazon/aws-cli:2.40.3"
 
 // renovate: datasource=docker depName=python versioning=docker
 const pythonImage = "python:3.15-slim"
@@ -21,7 +21,7 @@ const rcloneImage = "rclone/rclone:1.76"
 const resticImage = "restic/restic:0.19.1"
 
 // renovate: datasource=pypi depName=boto3 versioning=pep440
-const boto3Version = "1.43.127"
+const boto3Version = "1.44.3"
 
 // renovate: datasource=pypi depName=minio versioning=pep440
 const minioPyVersion = "7.2.20"
