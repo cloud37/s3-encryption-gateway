@@ -30,6 +30,11 @@ This chart is available at: **https://cloud37.github.io/s3-encryption-gateway**
 Signed OCI releases are published at `ghcr.io/cloud37/s3-encryption-gateway-helm`.
 `0.13.0-rc2` is a release candidate for isolated validation only; do not use it
 for production workloads. Use the latest stable chart for production.
+**Known SeaweedFS limitation:** Listings of objects with version histories can
+silently omit keys (confirmed with SeaweedFS 4.52–4.54). Do not use affected
+listings for delete-enabled sync or completeness-critical migrations. Planned RC3 fixes
+the separate GH-410 gateway pagination defect, not this upstream behavior; no
+runtime feature gate prevents affected requests.
 Install a specific chart version with:
 
 ```bash

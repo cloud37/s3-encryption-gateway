@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### ⚠️ Release Candidate: Validate Before Production Use ⚠️
+
+These unreleased changes are intended for `0.13.0-rc3`, pending CI review and a
+separate release-version upgrade. That candidate will supersede `0.13.0-rc2`
+for isolated, non-production validation.
+It retains the RC2 feature scope and security dependency fixes. OpenStack Swift
+verification of GH-410 and requester/browser/provider acceptance remain pending.
+**SeaweedFS versioned listings have a known silent-key-omission defect; this
+candidate does not fix or certify that backend behavior.**
+
+### Fixed
+
+- **Filtered listing pagination (GH-410):** Refill ListObjects pages using only
+  the remaining capacity after filtering gateway-owned MPU manifests. Preserve
+  backend continuation state without discarding visible objects or producing a
+  truncated page with an empty token. Count common prefixes toward page capacity
+  and reject missing/repeated refill tokens and oversized refill responses.
+- **Single-PUT chunked range reads (GH-409):** Optimize encrypted range reads to
+  avoid unnecessary full-object downloads while preserving verification.
+
+### Dependencies
+
+- Update Go to 1.27.4, AWS SDK Go v2 (core v1.48.0, config v1.33.18,
+  credentials v1.21.0, S3 v1.114.10), `golang.org/x/crypto` to v0.59.0,
+  and Moby API to v1.57.0. Refresh AWS CLI to v2.40.3, boto3 to v1.44.3,
+  Helm to v4.3.2, the Valkey subchart to the 1.0.x series, and SeaweedFS to v4.54.
+
+### Known limitations and validation
+
+- **SeaweedFS versioned listings:** Native ListObjects V1/V2 can silently omit
+  existing objects across page boundaries. Confirmed with SeaweedFS 4.52–4.54
+  using ordinary backend PUTs without the gateway, encryption, or MPU. This also
+  affects ordinary keys such as `a` alongside `a.bak`; it is not manifest-specific.
+  Increasing page size to 1000 does not guarantee completeness. Suspending
+  versioning does not repair listings of existing version histories.
+- **Safety:** Do not use affected SeaweedFS listings for delete-enabled sync,
+  backup inventory, or completeness-critical migrations. The warning is not a
+  runtime feature gate; affected requests remain possible. See the
+  [compatibility limitation](docs/S3_API_IMPLEMENTATION.md#seaweedfs-versioned-listing-limitation).
+- **Explicit RC3 exception:** The understood SeaweedFS
+  `GH410_EncryptedMPUPagination` conformance failure is accepted for this
+  non-production candidate, not reported as a pass. Strict assertions, provider
+  selection, and CI failure reporting remain unchanged. Other release gates
+  remain required; the exception does not apply to unrelated failures.
+- The GH-410 gateway fix and the upstream SeaweedFS defect are separate. Swift
+  has not been tested locally; compare complete key sets at page sizes 100 and
+  1000 against the backend before accepting the fix in the reported environment.
+
 ## [0.13.0-rc2] — 2026-11-10
 
 ### ⚠️ Release Candidate: Validate Before Production Use ⚠️

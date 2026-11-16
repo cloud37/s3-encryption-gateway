@@ -11,14 +11,21 @@ existing destination path encrypts it. The existing destination-only
 UploadPartCopy plaintext mismatch still returns 500 when the destination MPU
 is not encrypted.
 
-**Latest stable baseline: v0.12.3. Candidate review: November 10, 2026.**
+**Latest stable baseline: v0.12.3. Candidate review: November 16, 2026.**
 
 The inventory and released-behavior tables describe stable v0.12.3. The
-`0.13.0-rc2` candidate includes gateway-managed CORS (GH-322), signed
-Content-Length recovery (GH-356), and signed browser POST (GH-353). Independent
+The planned, unreleased `0.13.0-rc3` candidate retains the RC2 feature scope, including gateway-managed
+CORS (GH-322), signed Content-Length recovery (GH-356), and signed browser POST
+(GH-353), and adds the GH-410 filtered-listing and GH-409 range-read fixes. Independent
 GH-353 isolated-tree verification passed; it is not combined-main runtime
 acceptance. Candidate contracts are identified separately below; none is
 available in the v0.12.3 image.
+
+**RC3 known limitation:** SeaweedFS listings of objects with version histories
+can silently omit keys. This upstream defect is separate from the GH-410 gateway
+fix; no runtime feature gate prevents affected requests. Do not use affected
+listings for delete-enabled sync or completeness-critical migration. See the
+[precise scope and validation exception](#seaweedfs-versioned-listing-limitation).
 
 This guide owns application compatibility, request/response options, SDK/backend
 evidence, and the explicit disposition for **all 112 operations in the pinned
@@ -63,7 +70,7 @@ configuration passthrough cannot implement a missing provider feature.
 | Range GET | Supported | Single plaintext range; optimized chunk/MPU paths and full-decrypt legacy fallback. No multiple-range or HEAD Range parity. |
 | CopyObject / UploadPartCopy | Supported | Source read and destination write scope; mediated encrypted copy. Encoded-source identity fixed in v0.12.3 ([#346](https://github.com/cloud37/s3-encryption-gateway/issues/346)). |
 | Encrypted multipart upload | Supported | Configured Valkey/key manager; 64 MiB default UploadPart cap. Immutable first-content claims; changed part replacement returns 409 OperationAborted. |
-| ListObjects v1/v2 | Supported | Basic listing/token pagination; plaintext-size cache advisory, listing ETags backend-defined. Some pagination/response fields ignored—see below. |
+| ListObjects v1/v2 | Supported subset | RC3 fixes GH-410 gateway refill/token loss; SeaweedFS versioned listings remain unsafe for completeness-critical use. Plaintext-size cache advisory, ETags backend-defined; see [limitations](#listings-and-pagination). |
 | ListParts | Supported | First backend page only; ignores pagination and emits IsTruncated=false. Not complete large-upload part inventory. |
 | SigV4 header/presigned GET/PUT | Supported | Gateway credentials. Signed expiry honored in v0.12.3 ([#345](https://github.com/cloud37/s3-encryption-gateway/issues/345)); 1–604800 seconds. |
 | SigV2 | Supported | Deprecated, disabled by default; explicit `AUTH_ALLOW_LEGACY_SIGNATURE_V2=true` temporary migration opt-in. |
@@ -538,6 +545,12 @@ is not a new full-provider pass report.
 
 ## Listings and Pagination
 
+**Unreleased main, planned for 0.13.0-rc3 (GH-410):** The gateway refills filtered pages using only the
+remaining object/common-prefix capacity and preserves the backend continuation
+state. It does not trim visible entries and advance past them. This fixes the
+gateway defect reported on OpenStack Swift; live Swift verification remains
+pending. The stable v0.12.3 and RC1/RC2 builds do not contain this fix.
+
 | Option | Released behavior |
 |---|---|
 | ListObjects v1/v2 | Shared backend ListObjectsV2 adapter; prefix/delimiter/positive max-keys/continuation-token mapped. |
@@ -554,6 +567,29 @@ is not a new full-provider pass report.
 | ListBuckets | New prefix/region/max-buckets/token queries rejected; success XML only Owner and Name/CreationDate, incomplete pagination/region output. |
 | Analytics/inventory list | Shared first-page GET proxy without id; continuation-token rejected, not independently verified pagination. |
 | ListObjectVersions | Not implemented; version-specific access is not version inventory. |
+
+### SeaweedFS versioned-listing limitation
+
+**Known upstream defect, explicitly accepted for RC3 only:** Native SeaweedFS
+ListObjects V1/V2 can silently omit keys across page boundaries when objects have
+version histories. Confirmed with 4.52–4.54 using normal backend PUTs, without
+the gateway, encryption, or multipart uploads. For example, versioned keys `a`,
+`a.bak`, and `b` lose `a` at page size 1 because physical `.versions` directories
+are traversed in a different order from logical object keys. The GH-410 gateway
+fix cannot recover objects the backend never returns.
+
+The defect is not limited to manifests or small page sizes: a native V2 walk of
+1003 versioned keys at page size 1000 omitted one key. Suspending versioning does
+not repair existing histories. New keys written only after suspension passed the
+tested fixtures; this is bounded evidence, not a general workaround guarantee.
+SeaweedFS 4.48 returned all three fixture keys but in incorrect logical order,
+so downgrading to that version is not verified remediation.
+
+Do not rely on affected listings for delete-enabled sync, backup inventory, or
+completeness-critical migration. This is a documented limitation, **not a runtime
+feature gate**: neither provider configuration nor RC3 blocks affected requests.
+SeaweedFS's strict GH-410 conformance assertions remain enabled and failing;
+the RC3 exception does not certify versioned pagination or waive other failures.
 
 ## Writes, Copies, and Multipart Options
 

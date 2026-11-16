@@ -435,6 +435,17 @@ new bypass miswrites but does not repair old ones; use
 
 ## Reverse Proxies and Backend Load Balancers
 
+### SeaweedFS versioned-listing warning (RC3)
+
+The planned, unreleased `0.13.0-rc3` candidate fixes the GH-410 gateway pagination defect but does
+not fix native SeaweedFS versioned-listing omissions (confirmed with 4.52–4.54).
+Affected listings can return success while silently missing existing keys.
+Do not use them for delete-enabled sync, backup inventory, or completeness-critical
+migration. Larger pages and suspension of existing version histories are not
+verified repairs. There is no runtime feature gate blocking affected requests;
+review the [compatibility limitation](S3_API_IMPLEMENTATION.md#seaweedfs-versioned-listing-limitation)
+before selecting SeaweedFS for candidate validation.
+
 ### Signed browser POST (GH-353)
 
 **0.13.0-rc2 candidate; see the [verification scope](TESTING.md#gh-353-post-acceptance-contract).** Use path-style

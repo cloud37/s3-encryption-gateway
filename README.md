@@ -45,6 +45,14 @@ The S3 Encryption Gateway is a transparent HTTP proxy that sits between your app
 
 ## S3 Compatibility and Limitations
 
+> **Planned 0.13.0-rc3 (unreleased):** Includes the GH-410 filtered-listing pagination fix and GH-409
+> chunked range-read optimization, retaining the RC2 feature scope. For isolated
+> non-production validation only; OpenStack Swift verification remains pending.
+> **Known SeaweedFS limitation:** Listings of objects with version histories can
+> silently omit keys. Do not use affected listings for delete-enabled sync or
+> completeness-critical migration. RC3 does not fix the upstream defect or block
+> affected requests. See the [scope and warning](docs/S3_API_IMPLEMENTATION.md#seaweedfs-versioned-listing-limitation).
+
 See the single [S3 compatibility reference](docs/S3_API_IMPLEMENTATION.md):
 [what works / what's planned](docs/S3_API_IMPLEMENTATION.md#application-compatibility-matrix),
 every pinned SDK operation, request-option limitations, and SDK/backend evidence.

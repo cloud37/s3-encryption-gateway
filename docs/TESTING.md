@@ -121,6 +121,30 @@ returned different bytes. The underlying backend branch and persisted data
 were not established; this observation does not prove storage corruption.
 Previous selected SeaweedFS SDK/browser successes do not establish GH-353 support.
 
+**RC3 pagination exception (2026-11-16):** The maintainer explicitly accepts the
+known SeaweedFS `GH410_EncryptedMPUPagination` failure for the non-production
+`0.13.0-rc3` candidate. This is independent of the GH-353 POST exclusion above.
+GH-410 assertions, capability selection, and CI failure reporting are unchanged;
+the failure is not a pass and other release gates remain mandatory. The shared
+bucket is versioned by the preceding `GH380_VersionedReads` case. Running only
+those two cases reproduces the omissions; a fresh unversioned GH-410-only pass
+is not versioned-listing acceptance. Native backend-only V1/V2 tests reproduced
+the same defect without the gateway. See the
+[provider limitation](S3_API_IMPLEMENTATION.md#seaweedfs-versioned-listing-limitation).
+
+RC3 local preparation validation (2026-11-16): `go test -race -count=1 ./...`,
+focused `TestGH409|TestGH410` API regressions, changelog extractor regressions,
+RC3 section extraction, chart version/image/annotation consistency, and Helm
+base/prod/dev/FIPS/CI-overlay lint plus base rendering passed. Helm used a
+temporary chart copy with dependencies rebuilt from the committed lock. The
+existing CI run [43850441322](https://github.com/cloud37/s3-encryption-gateway/actions/runs/43850441322)
+at `0a3889df6bdccf6fd1a14c1f76e127eea968264a` passed MinIO/Garage/RustFS
+conformance, all four compatibility smokes, unit tests and the coverage gate;
+SeaweedFS conformance failed and the summary was skipped. These are historical
+source results, not validation of a published RC3 artifact. Final release-image
+scan, SBOM/signing and provider results at the final merged release commit still
+need review; local metadata preparation does not complete those gates.
+
 RustFS is **unsupported for complete GH-353 POST** pending an upstream fix and
 independent proof. Its POST families and three POST SDK/browser registrations
 are excluded; unrelated cases and capabilities remain selected. This is not a

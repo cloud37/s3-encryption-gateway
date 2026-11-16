@@ -21,6 +21,25 @@ publication until the checks below have been reviewed for the final merged commi
 
 ## Pre-Release Checklist
 
+### RC3-specific accepted limitation (2026-11-16)
+
+For `0.13.0-rc3` only, the maintainer approved proceeding with the understood
+SeaweedFS versioned-listing `GH410_EncryptedMPUPagination` failure, provided the
+known limitation and delete-enabled-sync warning are prominent in the changelog,
+compatibility/deployment guides, repository README, and chart README. This is a
+non-production candidate exception, not a general waiver or SeaweedFS certification.
+Keep strict conformance assertions, provider selection, and CI results unchanged.
+Other release gates remain required; any additional failure needs separate review.
+Record the failed run alongside passing gates at the final reviewed commit.
+OpenStack Swift verification of the gateway fix remains pending.
+
+The version change prepares publication; pushing it to main/master can trigger
+the Helm publication workflow. Local preparation alone is not a published release
+or evidence that image scans, SBOM generation, and signatures have passed.
+The current pre-release validation commit deliberately retains RC2 chart,
+appVersion, and image tags. Review its CI before applying the separate RC3
+version/image/Artifact Hub upgrade and creating the RC3 changelog heading.
+
 ### 1. Update Artifact Hub Annotations
 
 The `artifacthub.io/changes` annotation in

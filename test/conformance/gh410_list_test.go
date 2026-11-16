@@ -11,11 +11,39 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cloud37/s3-encryption-gateway/internal/crypto"
+	internalS3 "github.com/cloud37/s3-encryption-gateway/internal/s3"
 	"github.com/cloud37/s3-encryption-gateway/test/harness"
 	"github.com/cloud37/s3-encryption-gateway/test/provider"
 )
 
 // Exercise actual encrypted MPU manifests and the AWS SDK's v2 paginator.
+func gh410BackendPaginationTrace(ctx context.Context, backend internalS3.Client, bucket, prefix string, keys []string) string {
+	var trace []string
+	token := ""
+	for pageNumber := 1; pageNumber <= 20; pageNumber++ {
+		page, err := backend.ListObjects(ctx, bucket, prefix, internalS3.ListOptions{ContinuationToken: token, MaxKeys: 1})
+		if err != nil {
+			trace = append(trace, fmt.Sprintf("page %d error=%v", pageNumber, err))
+			break
+		}
+		pageKeys := make([]string, 0, len(page.Objects))
+		for _, object := range page.Objects {
+			pageKeys = append(pageKeys, object.Key)
+		}
+		trace = append(trace, fmt.Sprintf("page %d keys=%v truncated=%v token=%q", pageNumber, pageKeys, page.IsTruncated, page.NextContinuationToken))
+		if !page.IsTruncated || page.NextContinuationToken == "" || page.NextContinuationToken == token {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+	for _, key := range keys {
+		if _, err := backend.HeadObject(ctx, bucket, key, nil); err != nil {
+			trace = append(trace, fmt.Sprintf("HEAD %q error=%v", key, err))
+		}
+	}
+	return fmt.Sprint(trace)
+}
+
 func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 	t.Helper()
 	ctx := context.Background()
@@ -43,6 +71,7 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 		t.Run(fmt.Sprintf("max-keys-%d", maxKeys), func(t *testing.T) {
 			paginator := awss3.NewListObjectsV2Paginator(client, &awss3.ListObjectsV2Input{Bucket: aws.String(inst.Bucket), Prefix: aws.String(prefix), MaxKeys: aws.Int32(maxKeys)})
 			seen := make(map[string]bool)
+			var pageTrace []string
 			pages := 0
 			for paginator.HasMorePages() {
 				pages++
@@ -53,6 +82,7 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 				if err != nil {
 					t.Fatalf("page %d: %v", pages, err)
 				}
+				var pageKeys []string
 				if aws.ToBool(page.IsTruncated) && aws.ToString(page.NextContinuationToken) == "" {
 					t.Fatalf("page %d is truncated without a continuation token", pages)
 				}
@@ -62,7 +92,9 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 						t.Fatalf("unexpected or duplicate key %q", key)
 					}
 					seen[key] = true
+					pageKeys = append(pageKeys, key)
 				}
+				pageTrace = append(pageTrace, fmt.Sprintf("%d keys=%v truncated=%v token=%q", pages, pageKeys, aws.ToBool(page.IsTruncated), aws.ToString(page.NextContinuationToken)))
 			}
 			if len(seen) != len(want) {
 				var missing []string
@@ -72,12 +104,13 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 					}
 				}
 				sort.Strings(missing)
-				t.Fatalf("missing keys: %v", missing)
+				t.Fatalf("missing keys: %v; pages: %v; backend pages: %s", missing, pageTrace, gh410BackendPaginationTrace(ctx, backend, inst.Bucket, prefix, sortedGH410Keys(want)))
 			}
 		})
 		t.Run(fmt.Sprintf("v1-max-keys-%d", maxKeys), func(t *testing.T) {
 			var marker *string
 			seen := make(map[string]bool)
+			var pageTrace []string
 			for pages := 0; ; pages++ {
 				if pages > 20 {
 					t.Fatal("v1 pagination did not terminate")
@@ -86,13 +119,16 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 				if err != nil {
 					t.Fatalf("v1 page %d: %v", pages, err)
 				}
+				var pageKeys []string
 				for _, obj := range page.Contents {
 					key := aws.ToString(obj.Key)
 					if !want[key] || seen[key] {
 						t.Fatalf("unexpected or duplicate v1 key %q", key)
 					}
 					seen[key] = true
+					pageKeys = append(pageKeys, key)
 				}
+				pageTrace = append(pageTrace, fmt.Sprintf("%d keys=%v truncated=%v marker=%q", pages, pageKeys, aws.ToBool(page.IsTruncated), aws.ToString(page.NextMarker)))
 				if !aws.ToBool(page.IsTruncated) {
 					break
 				}
@@ -102,7 +138,7 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 				marker = page.NextMarker
 			}
 			if len(seen) != len(want) {
-				t.Fatalf("incomplete v1 listing: got %d of %d keys", len(seen), len(want))
+				t.Fatalf("incomplete v1 listing: got %d of %d keys; pages: %v; backend pages: %s", len(seen), len(want), pageTrace, gh410BackendPaginationTrace(ctx, backend, inst.Bucket, prefix, sortedGH410Keys(want)))
 			}
 		})
 	}
@@ -155,4 +191,13 @@ func testGH410_EncryptedMPUPagination(t *testing.T, inst provider.Instance) {
 			t.Fatalf("incomplete delimiter listing: objects=%v prefixes=%v", seenObjects, seenPrefixes)
 		}
 	})
+}
+
+func sortedGH410Keys(want map[string]bool) []string {
+	keys := make([]string, 0, len(want))
+	for key := range want {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
