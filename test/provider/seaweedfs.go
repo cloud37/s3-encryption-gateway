@@ -50,7 +50,7 @@ func init() {
 type seaweedfsProvider struct{}
 
 // renovate: datasource=docker depName=chrislusf/seaweedfs versioning=docker
-const seaweedfsImage = "chrislusf/seaweedfs:4.53"
+const seaweedfsImage = "chrislusf/seaweedfs:4.54"
 
 func (p *seaweedfsProvider) Name() string { return "seaweedfs" }
 
