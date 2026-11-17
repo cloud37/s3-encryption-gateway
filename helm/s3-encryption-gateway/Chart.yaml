@@ -22,12 +22,18 @@ annotations:
     url: https://github.com/cloud37/s3-encryption-gateway
   artifacthub.io/images: |
     - name: s3-encryption-gateway
-      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc2
+      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc3
       whitelisted: true
     - name: s3-encryption-gateway-fips
-      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc2-fips
+      image: docker.io/cloud37io/s3-encryption-gateway:0.13.0-rc3-fips
       whitelisted: true
   artifacthub.io/changes: |
+    - kind: fixed
+      description: Preserve filtered ListObjects pagination and continuation state (GH-410)
+    - kind: fixed
+      description: Optimize single-PUT chunked range reads while preserving verification (GH-409)
+    - kind: changed
+      description: Document unsafe SeaweedFS versioned listings and exclude only the known upstream regression while retaining strict unversioned coverage
     - kind: added
       description: Add opt-in gateway-managed bucket CORS with durable shared Valkey policy storage (GH-322)
     - kind: added
@@ -41,8 +47,8 @@ annotations:
     - kind: security
       description: Update go-jose to v4.1.6 and golang.org/x/net to v0.62.0 to fix HIGH Trivy findings (CVE-2026-116587, CVE-2026-78661)
   artifacthub.io/containsSecurityUpdates: "true"
-version: 0.13.0-rc2
-appVersion: "0.13.0-rc2"
+version: 0.13.0-rc3
+appVersion: "0.13.0-rc3"
 dependencies:
   # Valkey subchart for encrypted multipart upload state (V0.6-SEC-3 / ADR-0009).
   # Enabled when `encryptMultipartUploads` is set on any bucket policy;

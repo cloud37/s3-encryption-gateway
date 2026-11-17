@@ -6,11 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.0-rc3] — 2026-11-17
+
 ### ⚠️ Release Candidate: Validate Before Production Use ⚠️
 
-These unreleased changes are intended for `0.13.0-rc3`, pending CI review and a
-separate release-version upgrade. That candidate will supersede `0.13.0-rc2`
-for isolated, non-production validation.
+This `0.13.0-rc3` candidate supersedes `0.13.0-rc2` for isolated,
+non-production validation.
 It retains the RC2 feature scope and security dependency fixes. OpenStack Swift
 verification of GH-410 and requester/browser/provider acceptance remain pending.
 **SeaweedFS versioned listings have a known silent-key-omission defect; this

@@ -437,7 +437,7 @@ new bypass miswrites but does not repair old ones; use
 
 ### SeaweedFS versioned-listing warning (RC3)
 
-The planned, unreleased `0.13.0-rc3` candidate fixes the GH-410 gateway pagination defect but does
+The `0.13.0-rc3` candidate fixes the GH-410 gateway pagination defect but does
 not fix native SeaweedFS versioned-listing omissions (confirmed with 4.52–4.54).
 Affected listings can return success while silently missing existing keys.
 Do not use them for delete-enabled sync, backup inventory, or completeness-critical

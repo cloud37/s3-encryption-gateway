@@ -23,7 +23,7 @@ publication until the checks below have been reviewed for the final merged commi
 
 ### RC3-specific accepted limitation (2026-11-16)
 
-For the planned `0.13.0-rc3`, the maintainer approved a narrowly scoped unsupported
+For `0.13.0-rc3`, the maintainer approved a narrowly scoped unsupported
 SeaweedFS versioned-listing GH-410 exclusion, provided the
 known limitation and delete-enabled-sync warning are prominent in the changelog,
 compatibility/deployment guides, repository README, and chart README. This is a
@@ -38,9 +38,13 @@ OpenStack Swift verification of the gateway fix remains pending.
 The version change prepares publication; pushing it to main/master can trigger
 the Helm publication workflow. Local preparation alone is not a published release
 or evidence that image scans, SBOM generation, and signatures have passed.
-The current pre-release validation commit deliberately retains RC2 chart,
-appVersion, and image tags. Review its CI before applying the separate RC3
-version/image/Artifact Hub upgrade and creating the RC3 changelog heading.
+The pre-release validation commit `e332519` retained RC2 chart/app/image versions.
+Its four local-provider conformance jobs passed, but the FIPS race unit step
+failed `TestRateLimiter_AllowTiming` (90.47µs P99 vs 90µs bound); downstream
+coverage/compatibility jobs were skipped. The maintainer subsequently requested
+the RC3 version upgrade and push. This records the outstanding result, not a
+claim of all-green release validation. Review publication scans/SBOM/signing
+and any subsequent CI before treating the candidate as validated.
 
 ### 1. Update Artifact Hub Annotations
 

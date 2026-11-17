@@ -14,7 +14,7 @@ is not encrypted.
 **Latest stable baseline: v0.12.3. Candidate review: November 16, 2026.**
 
 The inventory and released-behavior tables describe stable v0.12.3. The
-The planned, unreleased `0.13.0-rc3` candidate retains the RC2 feature scope, including gateway-managed
+The `0.13.0-rc3` candidate retains the RC2 feature scope, including gateway-managed
 CORS (GH-322), signed Content-Length recovery (GH-356), and signed browser POST
 (GH-353), and adds the GH-410 filtered-listing and GH-409 range-read fixes. Independent
 GH-353 isolated-tree verification passed; it is not combined-main runtime
@@ -545,7 +545,7 @@ is not a new full-provider pass report.
 
 ## Listings and Pagination
 
-**Unreleased main, planned for 0.13.0-rc3 (GH-410):** The gateway refills filtered pages using only the
+**0.13.0-rc3 (GH-410):** The gateway refills filtered pages using only the
 remaining object/common-prefix capacity and preserves the backend continuation
 state. It does not trim visible entries and advance past them. This fixes the
 gateway defect reported on OpenStack Swift; live Swift verification remains
