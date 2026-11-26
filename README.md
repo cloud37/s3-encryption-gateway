@@ -1,10 +1,5 @@
 # S3 Encryption Gateway
 
-**Unreleased — GH-380:** `require_encryption: true` now denies plaintext reads
-and copy sources, including objects already present in protected buckets. Migrate
-before enabling it; see [migration guidance](docs/DEPLOYMENT.md#strict-read-migration-gh-380)
-and the [encryption design](docs/ENCRYPTION_DESIGN.md#strict-object-reads-gh-380).
-
 ![GitHub Release](https://img.shields.io/github/v/release/cloud37/s3-encryption-gateway)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/s3-encryption-gateway)](https://artifacthub.io/packages/helm/s3-encryption-gateway/s3-encryption-gateway)
@@ -45,9 +40,12 @@ The S3 Encryption Gateway is a transparent HTTP proxy that sits between your app
 
 ## S3 Compatibility and Limitations
 
-> **0.13.0-rc3 candidate:** Includes the GH-410 filtered-listing pagination fix and GH-409
-> chunked range-read optimization, retaining the RC2 feature scope. For isolated
-> non-production validation only; OpenStack Swift verification remains pending.
+> **0.13.0-rc3 candidate:** Includes the GH-410 filtered-listing pagination fix,
+> GH-409 chunked range-read optimization, gateway-managed CORS (GH-322), signed
+> browser POST (GH-353), signed Content-Length recovery (GH-356), and strict
+> encrypted-source reads (GH-380). For isolated non-production validation only;
+> requester/browser/provider acceptance and OpenStack Swift verification remain pending.
+>
 > **Known SeaweedFS limitation:** Listings of objects with version histories can
 > silently omit keys. Do not use affected listings for delete-enabled sync or
 > completeness-critical migration. RC3 does not fix the upstream defect or block
@@ -64,22 +62,20 @@ migration, operations, and contribution guidance.
 > Backend CORS alone is insufficient for encrypted paths: preflight is forwarded,
 > but gateway-generated responses lack the required CORS headers. Gateway-managed
 > preflight and response headers were not available in v0.12.3; they are included
-> in the 0.13.0-rc2 candidate ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
+> in the 0.13.0-rc3 candidate ([#322](https://github.com/cloud37/s3-encryption-gateway/issues/322)).
 
-> **0.13.0-rc2 validation:** GH-322 CORS, GH-353 signed browser POST, and GH-356
-> signed Content-Length recovery are included in this release candidate for
-> feature-requester/operator testing. Browser/provider acceptance must be
-> performed against the intended client and provider; do not treat the candidate
-> as production-ready. See the [evidence scope](docs/TESTING.md#gh-353-post-acceptance-contract),
-> [unreleased POST guide](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353)
-> and [browser deployment instructions](docs/DEPLOYMENT.md#signed-browser-post-gh-353).
-
-**0.13.0-rc2 candidate:** GH-322 gateway-managed CORS, GH-353 signed browser
-POST, and GH-356 signed Content-Length recovery are included for validation; the
-candidate is not a stable release. See the
+**Candidate validation:** Test against the intended browser/client and provider.
+See the [evidence scope](docs/TESTING.md#gh-353-post-acceptance-contract),
+[browser deployment instructions](docs/DEPLOYMENT.md#signed-browser-post-gh-353),
 [current CORS contract](docs/S3_API_IMPLEMENTATION.md#gateway-managed-cors-gh-322)
 and [signed-length contract](docs/S3_API_IMPLEMENTATION.md#sigv4-signed-content-length-gh-356),
 plus the [POST contract](docs/S3_API_IMPLEMENTATION.md#browser-post-object-gh-353).
+
+> **Strict-read migration (GH-380, included in 0.13.0-rc3):**
+> `require_encryption: true` denies plaintext reads and copy sources, including
+> objects already present in protected buckets. Migrate before enabling it; see
+> [migration guidance](docs/DEPLOYMENT.md#strict-read-migration-gh-380) and the
+> [encryption design](docs/ENCRYPTION_DESIGN.md#strict-object-reads-gh-380).
 
 ## Who Needs This?
 
