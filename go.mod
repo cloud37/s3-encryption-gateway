@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.21
 	github.com/aws/aws-sdk-go-v2/credentials v1.21.3
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.116.0
-	github.com/aws/smithy-go v1.28.9
+	github.com/aws/smithy-go v1.28.11
 	github.com/cenkalti/backoff/v7 v7.0.3
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-gremlins/gremlins v0.6.0
