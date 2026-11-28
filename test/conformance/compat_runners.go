@@ -21,7 +21,7 @@ const rcloneImage = "rclone/rclone:1.76"
 const resticImage = "restic/restic:0.20.0"
 
 // renovate: datasource=pypi depName=boto3 versioning=pep440
-const boto3Version = "1.44.7"
+const boto3Version = "1.44.13"
 
 // renovate: datasource=pypi depName=minio versioning=pep440
 const minioPyVersion = "7.2.20"
